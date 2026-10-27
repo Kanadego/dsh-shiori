@@ -10,3 +10,16 @@ phase*/
 collab/
 dist/
 assets/
+
+# 内部过程文档（不入库）
+/DESIGN.md
+/HANDOFF.md
+/INTEGRATION-*.md
+/P4-KICKOFF-*.md
+/P5-KICKOFF-*.md
+/REPORT.md
+/RESULT.json
+/REVIEW-*.md
+/TEST-REPORT-*.md
+/_说明.md
+/docs/HANDOFF-TO-AMBER.md
