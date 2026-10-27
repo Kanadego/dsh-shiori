@@ -4,3 +4,9 @@ _backup_*
 .DS_Store
 Thumbs.db
 ~$*
+
+# 开发过程产物（不入库）
+phase*/
+collab/
+dist/
+assets/

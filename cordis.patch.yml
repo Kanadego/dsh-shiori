@@ -1,0 +1,8 @@
+# dsh-shiori — bundle patch layer
+#
+# Declares the plugin as a Cordis loader entry, making the package a standard
+# profile bundle: `dsh plugin --profile <p> add <local-tgz-or-spec>` installs
+# and mounts it without manual cordis.patch.yml edits.
+- insert:
+    - id: shiori
+      name: 'dsh-shiori'
