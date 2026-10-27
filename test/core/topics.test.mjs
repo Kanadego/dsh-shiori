@@ -43,14 +43,14 @@ test("topics from a third scope are invisible", () => {
     activeScopeId: "amber",
     topics: [
       makeTopic({ key: "shared", scopeId: "global", summary: "全局版本" }),
-      makeTopic({ key: "shared", scopeId: "amber", summary: "琥珀版本" }),
+      makeTopic({ key: "shared", scopeId: "amber", summary: "示例版本" }),
       makeTopic({ key: "shared", scopeId: "other-card", summary: "别的卡的版本" }),
       makeTopic({ key: "private-other", scopeId: "other-card" }),
     ],
   });
   assert.equal(result.length, 1);
   assert.equal(result[0].key, "shared");
-  assert.equal(result[0].summary, "琥珀版本");
+  assert.equal(result[0].summary, "示例版本");
 });
 
 test("global topics without an active override stay visible", () => {
@@ -70,7 +70,7 @@ test("activeScopeId 'global' yields a global-only view", () => {
     activeScopeId: "global",
     topics: [
       makeTopic({ key: "shared", scopeId: "global", summary: "全局版本" }),
-      makeTopic({ key: "shared", scopeId: "amber", summary: "琥珀版本" }),
+      makeTopic({ key: "shared", scopeId: "amber", summary: "示例版本" }),
     ],
   });
   assert.equal(result.length, 1);

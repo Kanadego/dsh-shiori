@@ -1,5 +1,5 @@
 // 真实 A 模块集成回归（R8/R9 要求：不能仅用宽松 stub 声称接口等价）。
-// 只读引用琥珀认可的 A 提交包 a2-b99d1031（渲染器/预算/配置/key 校验），
+// 只读引用示例认可的 A 提交包 a2-b99d1031（渲染器/预算/配置/key 校验），
 // 不修改旧封包；若该路径不存在，本文件会显式失败以暴露集成链断裂。
 //
 // 夹具全部为自建临时目录合成内容；不读写真实记忆，不联网。
@@ -9,9 +9,10 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const A_ENTRY = 'D:/AIagent/shiori/collab/submissions/A/a2-b99d1031-b081-4e52-8572-1d590c5d4021/files/src/core/index.mjs';
+const A_ENTRY = process.env.SHIORI_FROZEN_A_ENTRY
+  ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../fixtures/frozen/A/a2-b99d1031-b081-4e52-8572-1d590c5d4021/files/src/core/index.mjs');
 const A = await import(pathToFileURL(A_ENTRY).href);
 
 import { createFileStore } from '../../src/storage/index.mjs';

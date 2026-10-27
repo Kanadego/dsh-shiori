@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { register } from "node:module";
@@ -17,7 +17,9 @@ import { register } from "node:module";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKQ = join(HERE, "..", "..");
 const TMP_ROOT = mkdtempSync(join(tmpdir(), "shiori-q-client-"));
-const HOST_MODULES = "C:/Users/crash/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules";
+const NPM_GLOBAL = process.env.DSH_NPM_GLOBAL
+  ?? join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "npm", "node_modules");
+const HOST_MODULES = process.env.DSH_HOST_MODULES ?? join(NPM_GLOBAL, "@deepseek-ai", "dsh", "node_modules");
 
 test.after(() => {
   rmSync(TMP_ROOT, { recursive: true, force: true });
@@ -1039,8 +1041,8 @@ test("会话列表：过滤子代理/归档会话，标题取 projections.values
       blank: false,
       parentSessionId: "session-6abb73e6-32f9-480b-b2af-06620775843d",
       origin: "subagent",
-      cwd: "D:\\AI",
-      projections: { kind: "cached", asOfSeq: 594, values: { title: "你是 Shiori 项目（D:/AIagent/shiori" } },
+      cwd: "D:\\work",
+      projections: { kind: "cached", asOfSeq: 594, values: { title: "示例子代理会话标题" } },
     },
     // 只有 origin 的子代理会话也必须过滤
     { sessionId: "session-origin-only", origin: "subagent" },

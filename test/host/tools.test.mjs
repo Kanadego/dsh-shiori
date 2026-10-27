@@ -131,10 +131,10 @@ test("memory_append 无 topic：追加到磁盘 core 正文，日期标题格式
 
 test("soul_update：persona 委托（后续集成 service 实现独立 CAS 持久化，此处以 stub 验证）", async () => {
   const { host, service, bridge } = await activeBridge();
-  const receipt = await host.tools.get("soul_update").execute({ content: "# 琥珀 修订版" });
+  const receipt = await host.tools.get("soul_update").execute({ content: "# 示例 修订版" });
   assert.equal(receipt.changes[0].kind, "persona");
   const persona = await service.readPersona();
-  assert.equal(persona.text, "# 琥珀 修订版");
+  assert.equal(persona.text, "# 示例 修订版");
   // 超上限拒绝（config.persona.maxChars）
   const tightConfig = { ...ACTIVE_CONFIG, persona: { maxChars: 10 } };
   const host2 = createFakeHost();

@@ -12,7 +12,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC_DIR = path.resolve(HERE, '../../src');
-const FROZEN_STORE = path.resolve(HERE, '../../phase3/collab/submissions/G/a2-226d3f0e-77ea-4a4c-b097-ad6483ebc806/files/src/sparks/store.mjs');
+const FROZEN_STORE = process.env.SHIORI_FROZEN_G_STORE
+  ?? path.resolve(HERE, '../fixtures/frozen/G/a2-226d3f0e-77ea-4a4c-b097-ad6483ebc806/files/src/sparks/store.mjs');
 
 const sha = (buf) => createHash('sha256').update(buf).digest('hex');
 const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
@@ -70,7 +71,7 @@ async function seedCard(sparkStore, id, overrides = {}) {
     id,
     title: overrides.title ?? `卡-${id}`,
     summary: overrides.summary ?? `${id} 的摘要`,
-    content: overrides.content ?? `${id} 的正文：木偶人于 2026-10 记录的原句 <orig-${id}/>`,
+    content: overrides.content ?? `${id} 的正文：使用者于 2026-10 记录的原句 <orig-${id}/>`,
     triggers: overrides.triggers ?? [`t-${id}`],
     entities: overrides.entities ?? ['共同实体'],
     links: overrides.links ?? [],
@@ -201,7 +202,7 @@ describe('P3-L executor factory', () => {
       code('INVALID_INPUT'),
     );
     await assert.rejects(
-      createOrganizerExecutor({ root: 'D:/AIagent/shiori', scopeId: 'amber' }),
+      createOrganizerExecutor({ root: 'D:/work/ws', scopeId: 'amber' }),
       code('INVALID_INPUT'),
     );
   });

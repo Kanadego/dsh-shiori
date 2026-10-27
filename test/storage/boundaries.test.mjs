@@ -1,4 +1,4 @@
-// R1–R9 边界回归（对应琥珀 attempt1 独立验收的 9 项阻塞，等价用例指向新实现）。
+// R1–R9 边界回归（对应示例 attempt1 独立验收的 9 项阻塞，等价用例指向新实现）。
 // 全部使用自建临时目录合成夹具；不读写真实记忆，不联网。
 
 import { describe, it } from 'node:test';
@@ -320,7 +320,7 @@ function deferred() {
 const LOCKFILE_URL = new URL('../../src/storage/lockfile.mjs', import.meta.url).href;
 
 describe('J1 · 合法 JSON 的坏 shape journal（不得静默遗漏）', () => {
-  it('琥珀原样用例：无 operationId 的 committing journal → staging 保留 + 写入阻塞 + 人工移除后恢复', async (t) => {
+  it('示例原样用例：无 operationId 的 committing journal → staging 保留 + 写入阻塞 + 人工移除后恢复', async (t) => {
     const root = await makeTmpRoot(t);
     await putCore(root, 'amber', 'seed\n');
     const store = await createFileStore(opts({ root }));
@@ -388,7 +388,7 @@ describe('K2 · 同 PID 活锁不可接管（发布/登记生命周期）', () =
     const b = await import(`${LOCKFILE_URL}?k2-b`);
 
     // 门控：挂起 A 的第一次 readdir 返回（拿到真实快照后、交还 A 前暂停），
-    // 复刻琥珀 K2 的"目录快照已读出但尚未生效"窗口
+    // 复刻示例 K2 的"目录快照已读出但尚未生效"窗口
     const parked = deferred(); const releaseSnap = deferred();
     let gated = false;
     const originalReaddir = fsp.readdir;

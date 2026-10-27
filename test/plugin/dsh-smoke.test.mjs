@@ -22,13 +22,15 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
 
 const WORKQ = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const DSH_BIN = "C:/Users/crash/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/lib/bin.js";
+const NPM_GLOBAL = process.env.DSH_NPM_GLOBAL
+  ?? join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "npm", "node_modules");
+const DSH_BIN = process.env.DSH_BIN ?? join(NPM_GLOBAL, "@deepseek-ai", "dsh", "lib", "bin.js");
 const BOOT_SOAK_MS = 30_000;
 const BOOT_MARKER_POLL_MS = 250;
 

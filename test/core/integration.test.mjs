@@ -37,16 +37,16 @@ test("public entry exports exactly the six contract members", () => {
 test("full pipeline: scopes -> visible topics -> render -> budget", () => {
   const topics = [
     makeTopic({ key: "onion", scopeId: "global", summary: "全局洋葱" }),
-    makeTopic({ key: "onion", scopeId: "amber", summary: "琥珀洋葱" }),
+    makeTopic({ key: "onion", scopeId: "amber", summary: "示例洋葱" }),
     makeTopic({ key: "private", scopeId: "other-card", summary: "第三卡不可见" }),
     makeTopic({ key: "shared", scopeId: "global", summary: "共享条目" }),
   ];
   const visible = selectVisibleTopics({ activeScopeId: "amber", topics });
   assert.deepEqual(visible.map((t) => t.key), ["onion", "shared"]);
-  assert.equal(visible[0].summary, "琥珀洋葱");
+  assert.equal(visible[0].summary, "示例洋葱");
 
   const rendered = renderL1({ coreText: "## 铁律\n正文", topics: visible });
-  assert.ok(rendered.text.includes("- onion [amber] — 琥珀洋葱"));
+  assert.ok(rendered.text.includes("- onion [amber] — 示例洋葱"));
   assert.ok(rendered.text.includes("- shared [global] — 共享条目"));
   assert.ok(!rendered.text.includes("第三卡"));
 

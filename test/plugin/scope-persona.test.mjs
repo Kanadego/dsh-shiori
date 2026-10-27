@@ -127,7 +127,7 @@ async function tempDir() {
   return mkdtemp(path.join(tmpdir(), "shiori-p5-persona-"));
 }
 
-const CARD = "# 琥珀\n你是琥珀。";
+const CARD = "# 示例\n你是示例。";
 
 test("persona adapter：commit 建卡 / CAS 冲突 / 同 operationId 重放首结果", async (t) => {
   const dir = await tempDir();

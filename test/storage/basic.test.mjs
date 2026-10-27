@@ -96,7 +96,7 @@ describe('listTopics 可见性与去重', () => {
 
     await storeA.commit({
       operationId: 'op-a-1', expectedGeneration: 0,
-      changes: [{ kind: 'topic', key: 'shared-key', expectedRevision: null, topic: topicObject({ title: '琥珀版', summary: '琥珀私有', body: 'amber-secret' }) }],
+      changes: [{ kind: 'topic', key: 'shared-key', expectedRevision: null, topic: topicObject({ title: '示例版', summary: '示例私有', body: 'amber-secret' }) }],
     });
     // generation 是 per-root 的提交代号：storeS 需按当前代做 CAS
     const gen = (await storeS.snapshot()).generation;

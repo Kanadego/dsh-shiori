@@ -194,7 +194,7 @@ describe('P4-N 已集成窄存储（temp stage 生产位置）', () => {
       await fsp.cp(path.join(WORK, name), path.join(stage, name), { recursive: true });
     }
     await fsp.copyFile(path.join(WORK, 'package.json'), path.join(stage, 'package.json'));
-    const fixture = 'phase3/collab/submissions/G/a2-226d3f0e-77ea-4a4c-b097-ad6483ebc806/files/src/sparks/store.mjs';
+    const fixture = 'test/fixtures/frozen/G/a2-226d3f0e-77ea-4a4c-b097-ad6483ebc806/files/src/sparks/store.mjs';
     await fsp.mkdir(path.dirname(path.join(stage, fixture)), { recursive: true });
     await fsp.copyFile(path.join(WORK, fixture), path.join(stage, fixture));
     ({ openSparkStore } = await import(pathToFileURL(path.join(stage, 'src', 'sparks', 'store.mjs')).href));

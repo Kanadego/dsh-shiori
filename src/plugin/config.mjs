@@ -391,7 +391,7 @@ function comparableRoot(value) {
 // equal / nested（任一包含另一）/ disjoint。
 // 嵌套判定要求被包含方的 canonical 形状再加一个分隔符是包含方的前缀：
 // "d:" + sep = "d:\" 是 "d:\ai" 的前缀 ⇒ 盘根包含其下任意目录；
-// "d:\ai" + sep = "d:\ai\" 不是 "d:\aiagent" 的前缀 ⇒ 同名前缀目录不相交。
+// "d:\work" + sep = "d:\work\" 不是 "d:\workshop" 的前缀 ⇒ 同名前缀目录不相交。
 function textualRootRelation(a, b) {
   const left = comparableRoot(a);
   const right = comparableRoot(b);

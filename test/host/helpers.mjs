@@ -20,8 +20,8 @@ export function createFakeService(initial = {}) {
   let topicGen = 0;
 
   const persona = {
-    name: initial.personaName ?? "琥珀",
-    text: initial.personaText ?? "# 琥珀\n你是琥珀。",
+    name: initial.personaName ?? "示例",
+    text: initial.personaText ?? "# 示例\n你是示例。",
   };
   persona.revision = rev(persona.text, ++personaGen);
 

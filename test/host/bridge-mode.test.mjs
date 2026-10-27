@@ -167,7 +167,7 @@ test("R3：class 实例 service（原型方法+私有字段）经桥包装后 re
     constructor() { this.personaText = "# 类服务人设"; }
     async readPersona() {
       // 依赖 this（方法内访问实例字段）：包装层若改变 receiver 会直接失败
-      return { name: "琥珀", text: this.personaText, revision: `r-${this.#mutateCalls}` };
+      return { name: "示例", text: this.personaText, revision: `r-${this.#mutateCalls}` };
     }
     async readCoreView() { return { text: "类服务核心。", revision: "rc1", scopeId: "amber" }; }
     async readCore() { return { text: "类服务核心。", revision: "rc1", scopeId: "amber" }; }

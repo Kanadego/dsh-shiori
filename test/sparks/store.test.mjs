@@ -51,7 +51,7 @@ function cardInput(overrides = {}) {
     id: overrides.id ?? 'meme-onion',
     title: overrides.title ?? '洋葱梗',
     summary: overrides.summary ?? '问眼里常含泪水，原来刚切过洋葱。',
-    content: overrides.content ?? '2026-10-16 木偶人问为什么眼里常含泪水，琥珀接了艾青的诗，结果他说刚切完洋葱。',
+    content: overrides.content ?? '2026-10-16 使用者问为什么眼里常含泪水，示例接了艾青的诗，结果他说刚切完洋葱。',
     triggers: overrides.triggers ?? ['洋葱', '切洋葱'],
     entities: overrides.entities ?? ['做饭'],
     links: overrides.links ?? [],
