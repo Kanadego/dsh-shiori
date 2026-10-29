@@ -122,7 +122,10 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
       const s = await store.snapshot();
       // Index is only derived here and in B's full candidate budget; never persisted.
       const rendered = renderL1({ coreText: s.core.text, topics: s.topics }).text;
+      // body = 磁盘上的 core 正文（不含派生索引）。面板编辑必须写回 body，
+      // 否则会把渲染出来的索引一起固化进 core（core_write 不剥离索引）。
       return { text: rendered,
+        body: s.core.text,
         revision: tokenFor('core', s.core, s.generation, timestamp(), hash(rendered)), scopeId: s.core.scopeId };
     });
   }

@@ -236,15 +236,19 @@ test("预算经 validateConfig 全关系校验", () => {
 });
 
 test("Q 生产安全上限：超上限拒绝，恰在上限允许", () => {
-  assert.equal(BUDGET_CEILINGS.persona.maxChars, 12000);
+  assert.equal(BUDGET_CEILINGS.persona.maxChars, 60000);
   assert.deepEqual(BUDGET_CEILINGS.spark, { maxChars: 600, inlineMaxChars: 100, maxCards: 5, seedCount: 3, linkCount: 2 });
 
   const atCeiling = normalizePluginConfig({
-    budgets: { persona: { maxChars: 12000 }, spark: { maxChars: 600, inlineMaxChars: 100, maxCards: 5, seedCount: 3, linkCount: 2 } },
+    budgets: { persona: { maxChars: 60000 }, spark: { maxChars: 600, inlineMaxChars: 100, maxCards: 5, seedCount: 3, linkCount: 2 } },
   });
-  assert.equal(atCeiling.budgets.persona.maxChars, 12000);
+  assert.equal(atCeiling.budgets.persona.maxChars, 60000);
 
-  rejects(() => normalizePluginConfig({ budgets: { persona: { maxChars: 12001 } } }), "persona over ceiling");
+  // 回归：旧上限 12000 曾把长人设卡用户挡在门外，抬到 60000 后 12000 必须照常通过。
+  const legacy = normalizePluginConfig({ budgets: { persona: { maxChars: 12000 } } });
+  assert.equal(legacy.budgets.persona.maxChars, 12000, "旧上限值仍被接受");
+
+  rejects(() => normalizePluginConfig({ budgets: { persona: { maxChars: 60001 } } }), "persona over ceiling");
   rejects(() => normalizePluginConfig({ budgets: { spark: { maxChars: 601 } } }), "spark maxChars over");
   rejects(() => normalizePluginConfig({ budgets: { spark: { inlineMaxChars: 101 } } }), "spark inline over");
   rejects(() => normalizePluginConfig({ budgets: { spark: { maxCards: 6 } } }), "spark maxCards over");
@@ -429,7 +433,7 @@ test("volatile：budgets 引用对象被解包后照常通过权威校验", () =
 });
 
 test("volatile：解包不绕过校验（非法预算仍然拒绝）", () => {
-  rejects(() => normalizePluginConfig({ budgets: volatileRef({ persona: { maxChars: 12001 } }) }), "volatile over ceiling");
+  rejects(() => normalizePluginConfig({ budgets: volatileRef({ persona: { maxChars: 60001 } }) }), "volatile over ceiling");
   rejects(() => normalizePluginConfig({ budgets: volatileRef({ core: { softRatio: 0.95, hardRatio: 0.9 } }) }), "volatile soft >= hard");
 });
 

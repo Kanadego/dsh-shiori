@@ -104,7 +104,10 @@ test('two readers racing fallback topic writes get one winner', async t => {
 test('core view renders index but core mutations persist body only', async t => {
   const { root, service, store } = await fixture(t); await seedTopic(store);
   await service.mutate(core('new-core', 'body', null));
-  assert.match((await service.readCoreView()).text, /Topic memory index/);
+  const rendered = await service.readCoreView();
+  assert.match(rendered.text, /Topic memory index/);
+  // body 是磁盘正文（面板编辑与回写只能用它）；text 才是带派生索引的渲染视图。
+  assert.equal(rendered.body, 'body');
   const disk = await service.readCore(); assert.equal(disk.text, 'body');
   await service.mutate(core('append-core', disk.text + '\nappend', disk.revision));
   assert.equal(await fs.readFile(path.join(root, 'scopes/amber/core.md'), 'utf8'), 'body\nappend');

@@ -461,6 +461,47 @@ window.__ModuleLoader__.load({
             return null;
           }
         },
+        // 工作区列表（读宿主 workspaces 快照）：会话下拉按工作区分组用。
+        // 服务缺失 / 快照异常返回 null，面板退化成平铺会话下拉（与旧行为一致）。
+        listWorkspaces: function () {
+          try {
+            var workspaces = ctx && typeof ctx.get === "function" ? ctx.get("workspaces") : undefined;
+            var snapshot = null;
+            if (workspaces && workspaces.list && typeof workspaces.list.getSnapshot === "function") {
+              snapshot = workspaces.list.getSnapshot();
+            } else if (workspaces && typeof workspaces.getSnapshot === "function") {
+              snapshot = workspaces.getSnapshot();
+            }
+            if (!snapshot || !Array.isArray(snapshot.items)) return null;
+            var out = [];
+            for (var i = 0; i < snapshot.items.length; i++) {
+              var item = snapshot.items[i];
+              if (!item || typeof item !== "object") continue;
+              var workspaceId = String(item.workspaceId !== undefined && item.workspaceId !== null
+                ? item.workspaceId
+                : (item.id !== undefined && item.id !== null ? item.id : ""));
+              if (workspaceId === "") continue;
+              var sessionIds = [];
+              if (Array.isArray(item.sessionIds)) {
+                for (var j = 0; j < item.sessionIds.length; j++) {
+                  if (item.sessionIds[j] !== undefined && item.sessionIds[j] !== null) sessionIds.push(String(item.sessionIds[j]));
+                }
+              }
+              var title = typeof item.title === "string" && item.title.trim() !== ""
+                ? item.title
+                : (typeof item.path === "string" && item.path !== "" ? item.path : workspaceId);
+              out.push({
+                workspaceId: workspaceId,
+                title: title,
+                path: typeof item.path === "string" ? item.path : "",
+                sessionIds: sessionIds
+              });
+            }
+            return out;
+          } catch (error) {
+            return null;
+          }
+        },
         configScope: function () {
           try { return ctx.configForms.get("shiori"); } catch (error) { return undefined; }
         }
@@ -558,6 +599,52 @@ window.__ModuleLoader__.load({
       return false;
     }
 
+    // 状态页是给人看的，不是给调试看的：先给中文摘要（模式 / 作用域 / 占用 / 能力），
+    // 原始字段（mode / scope / diagnostics / 完整 DTO）一律收进折叠区，需要时再展开。
+    var STATUS_MODE_LABELS = { active: "运行中", inactive: "未启用", disabled: "已停用", error: "异常" };
+    var STATUS_CAPABILITY_LABELS = {
+      l2: "Spark 二级记忆",
+      organize: "候选整理",
+      forgetting: "遗忘归档",
+      tools: "记忆工具",
+      sections: "分区写入"
+    };
+
+    function statusModeText(mode) {
+      if (mode === undefined || mode === null || mode === "") return "未知";
+      return STATUS_MODE_LABELS[mode] || String(mode);
+    }
+
+    function statusScopeText(scope) {
+      if (scope === undefined || scope === null || scope === "") return "";
+      if (typeof scope === "object") return String(scope.scopeId ?? scope.persona ?? scope.id ?? stableStringify(scope));
+      return String(scope);
+    }
+
+    function statusCapabilityText(value) {
+      if (value === true) return "已开启";
+      if (value === false) return "已关闭";
+      if (value === undefined || value === null) return "—";
+      if (typeof value === "object") return stableStringify(value);
+      return String(value);
+    }
+
+    function occupancyText(used, limit) {
+      var usedNum = typeof used === "number" && Number.isFinite(used) ? used : null;
+      var limitNum = typeof limit === "number" && Number.isFinite(limit) && limit > 0 ? limit : null;
+      if (usedNum === null) return "—";
+      if (limitNum === null) return usedNum + " 字符";
+      var pct = Math.round((usedNum / limitNum) * 1000) / 10;
+      return usedNum + " / " + limitNum + " 字符（" + pct + "%）";
+    }
+
+    function statusRow(label, value, hint) {
+      return h("div", { className: "dshi_row" },
+        h("span", { className: "dshi_hint", style: { minWidth: 132 } }, label),
+        h("span", null, value),
+        hint ? h("span", { className: "dshi_hint" }, hint) : null);
+    }
+
     function StatusTab(props) {
       var state = useState(null);
       var status = state[0];
@@ -572,33 +659,60 @@ window.__ModuleLoader__.load({
         } catch (e) { setStatus(null); if (!reportSessionUnavailable(e, props, setError)) setError(e); }
       };
       useEffect(function () { load(); }, [props.sessionId]);
+      var occupancy = (status && status.occupancy) || {};
+      var capabilities = status && status.capabilities && typeof status.capabilities === "object" ? status.capabilities : null;
+      var startedFlag = status && status.diagnostics && typeof status.diagnostics === "object" && !Array.isArray(status.diagnostics)
+        ? status.diagnostics.started : undefined;
       return h("div", { className: "dshi_card" },
         h("div", { className: "dshi_row" },
-          h("span", { className: "dshi_cardTitle" }, "状态 Status"),
+          h("span", { className: "dshi_cardTitle" }, "运行状态"),
           h("button", { className: "dshi_btn", onClick: load }, "刷新")),
         ErrorBox(error),
         status === null && !error ? h("div", { className: "dshi_loading" }, "加载中…") : null,
         status ? h(fragment, null,
-          h("div", { className: "dshi_row" },
-            h("span", { className: "dshi_badge" + (status.mode === "active" ? "" : "Dim") }, "mode: " + String(status.mode)),
-            status.scope ? h("span", { className: "dshi_badgeDim dshi_badge" }, "scope: " + String(typeof status.scope === "object" ? status.scope.scopeId ?? stableStringify(status.scope) : status.scope)) : null,
-            diagnosticsNeedsConfiguration(status)
-              ? h("span", { className: "dshi_badge dshi_badgeWarn" }, "needs-configuration")
-              : null),
-          Array.isArray(status.diagnostics) && status.diagnostics.length > 0
-            ? h("div", { className: "dshi_items" }, status.diagnostics.filter(function (item) { return item !== undefined; }).map(function (item, index) {
-                return h("div", { key: index, className: "dshi_item dshi_mono" }, typeof item === "string" ? item : safeDtoText(item));
-              }))
+          diagnosticsNeedsConfiguration(status)
+            // 徽标文案中文化，但仍原样带出 code 字面量（排查/测试按它定位）。
+            ? h("span", { className: "dshi_badge dshi_badgeWarn" },
+                "需要先完成配置，记忆才能工作（",
+                "needs-configuration",
+                "）")
             : null,
-          // 真实 DTO：diagnostics 是对象（ownerId / generation / started，P 后续新增
-          // codec/transport 等）——未知键照常渲染，undefined 值忽略，序列化异常降级。
-          !Array.isArray(status.diagnostics) && status.diagnostics && typeof status.diagnostics === "object"
-            ? h("div", { className: "dshi_items" }, Object.keys(status.diagnostics).filter(function (key) {
-                return status.diagnostics[key] !== undefined;
-              }).map(function (key) {
-                return h("div", { key: key, className: "dshi_item dshi_mono" }, key + ": " + safeDtoText(status.diagnostics[key]));
-              }))
-            : null,
+          h("div", { className: "dshi_items" },
+            statusRow("运行模式", statusModeText(status.mode),
+              status.mode === "active" ? "记忆正在参与对话" : "记忆当前不注入上下文"),
+            statusRow("记忆作用域", statusScopeText(status.scope) || "未指定", "记忆数据属于哪个人设"),
+            statusRow("服务启动", startedFlag === true ? "已就绪" : (startedFlag === false ? "未就绪" : "未知"),
+              startedFlag === true ? "" : "重启 DSH 或刷新可重新探测"),
+            statusRow("人设卡占用（L0）", occupancyText(occupancy.l0Chars, occupancy.l0Budget), "人设卡正文已用 / 上限"),
+            statusRow("记忆核心占用（L1）", occupancyText(occupancy.l1Chars, occupancy.l1HardCap), "记忆核心正文已用 / 硬上限")),
+          capabilities ? h("div", { className: "dshi_card" },
+            h("div", { className: "dshi_cardTitle" }, "已启用的能力"),
+            h("div", { className: "dshi_row" }, Object.keys(capabilities).map(function (key) {
+              var on = capabilities[key] === true;
+              return h("span", {
+                key: key,
+                className: "dshi_badge" + (on ? "" : " dshi_badgeDim")
+              }, (STATUS_CAPABILITY_LABELS[key] || key) + "：" + statusCapabilityText(capabilities[key]));
+            }))) : null,
+          h("details", null,
+            h("summary", { className: "dshi_hint" }, "技术细节（原始字段，一般不用看）"),
+            h("div", { className: "dshi_items" },
+              h("div", { className: "dshi_item dshi_mono" }, "mode: " + String(status.mode)),
+              h("div", { className: "dshi_item dshi_mono" }, "scope: " + String(statusScopeText(status.scope) || "—")),
+              Array.isArray(status.diagnostics) && status.diagnostics.length > 0
+                ? h("div", { className: "dshi_items" }, status.diagnostics.filter(function (item) { return item !== undefined; }).map(function (item, index) {
+                    return h("div", { key: index, className: "dshi_item dshi_mono" }, typeof item === "string" ? item : safeDtoText(item));
+                  }))
+                : null,
+              // 真实 DTO：diagnostics 是对象（ownerId / generation / started，P 后续新增
+              // codec/transport 等）——未知键照常渲染，undefined 值忽略，序列化异常降级。
+              !Array.isArray(status.diagnostics) && status.diagnostics && typeof status.diagnostics === "object"
+                ? h("div", { className: "dshi_items" }, Object.keys(status.diagnostics).filter(function (key) {
+                    return status.diagnostics[key] !== undefined;
+                  }).map(function (key) {
+                    return h("div", { key: key, className: "dshi_item dshi_mono" }, key + ": " + safeDtoText(status.diagnostics[key]));
+                  }))
+                : null)),
           h("details", null,
             h("summary", { className: "dshi_hint" }, "完整 DTO（服务端原样返回）"),
             h("pre", { className: "dshi_pre" }, stableStringify(status))))
@@ -612,6 +726,23 @@ window.__ModuleLoader__.load({
       var errorState = useState(null);
       var error = errorState[0];
       var setError = errorState[1];
+      // R7 追加：L0/L1 手动编辑。新 state 一律追加在既有 state 之后，
+      // 保持 test/plugin/client.test.mjs 预置的 states 下标不变。
+      var editingState = useState(null);   // null | "l0" | "l1"
+      var editing = editingState[0];
+      var setEditing = editingState[1];
+      var draftState = useState("");
+      var draft = draftState[0];
+      var setDraft = draftState[1];
+      var busyState = useState(false);
+      var busy = busyState[0];
+      var setBusy = busyState[1];
+      var okState = useState(null);
+      var okText = okState[0];
+      var setOk = okState[1];
+      var saveErrorState = useState(null);
+      var saveError = saveErrorState[0];
+      var setSaveError = saveErrorState[1];
       var load = async function () {
         setError(null);
         try {
@@ -622,21 +753,88 @@ window.__ModuleLoader__.load({
       var l0 = view && (view.l0 || view.persona);
       var l1 = view && (view.l1 || view.core);
       var budgets = (view && view.budgets) || props.budgets || {};
+
+      var beginEdit = function (kind) {
+        var layer = kind === "l0" ? l0 : l1;
+        if (!layer) return;
+        setEditing(kind);
+        // L1 的 text 是服务端渲染视图（core 正文 + 派生主题索引），整段写回会把索引
+        // 固化进 core；编辑初值必须用 body（磁盘正文）。L0 没有派生部分，照旧用 text。
+        setDraft(kind === "l1" && typeof layer.body === "string"
+          ? layer.body
+          : String(layer.text ?? layer.content ?? ""));
+        setOk(null);
+        setSaveError(null);
+      };
+      var cancelEdit = function () { setEditing(null); setDraft(""); setSaveError(null); };
+      // 保存复用 executeTool（与面板其它写操作同一条链路）：L0 走 soul_update，
+      // L1 走 core_write 并带上服务端返回的 revision 做 CAS——revision 过期会报错，
+      // 不静默覆盖别人的修改。
+      var save = async function () {
+        if (!editing) return;
+        var kind = editing;
+        setBusy(true);
+        setSaveError(null);
+        setOk(null);
+        try {
+          if (kind === "l0") {
+            await props.dsh.call("executeTool", props.sessionId, { name: "soul_update", args: { content: draft } });
+          } else {
+            var args = { content: draft };
+            if (l1 && l1.revision !== undefined) args.expectedRevision = l1.revision;
+            await props.dsh.call("executeTool", props.sessionId, { name: "core_write", args: args });
+          }
+          setEditing(null);
+          setDraft("");
+          setOk(kind === "l0" ? "人设卡已保存（下一轮对话即生效）" : "记忆核心已保存");
+          await load();
+        } catch (e) {
+          setSaveError(e);
+        } finally {
+          setBusy(false);
+        }
+      };
+      var renderLayer = function (kind, title, layer, hint) {
+        if (!layer) return null;
+        var isEditing = editing === kind;
+        var revisionText = layer.revision === undefined || layer.revision === null ? "" : "rev " + String(layer.revision);
+        return h("div", { className: "dshi_card" },
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_cardTitle" }, title),
+            revisionText ? h("span", { className: "dshi_badgeDim dshi_badge" }, revisionText) : null,
+            layer.stale === true ? h("span", { className: "dshi_badge dshi_badgeWarn" }, "磁盘已被外部修改") : null,
+            h("span", { style: { flex: 1 } }),
+            isEditing
+              ? h(fragment, null,
+                h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy, onClick: save }, busy ? "保存中…" : "保存"),
+                h("button", { className: "dshi_btn", disabled: busy, onClick: cancelEdit }, "取消"))
+              : h("button", { className: "dshi_btn", onClick: function () { beginEdit(kind); } }, "编辑")),
+          hint ? h("div", { className: "dshi_hint" }, hint) : null,
+          isEditing
+            ? h("textarea", {
+                className: "dshi_textarea",
+                value: draft,
+                rows: 18,
+                onChange: function (event) { setDraft(event.target.value); }
+              })
+            : h("pre", { className: "dshi_pre" }, String(layer.text ?? layer.content ?? layer.rendered ?? "")));
+      };
+
       return h("div", null,
         h("div", { className: "dshi_row", style: { marginBottom: 8 } },
-          h("span", { className: "dshi_cardTitle" }, "记忆视图 L0 / L1"),
+          h("span", { className: "dshi_cardTitle" }, "记忆内容 L0 / L1"),
           h("button", { className: "dshi_btn", onClick: load }, "刷新")),
         ErrorBox(error),
+        saveError ? ErrorBox(saveError) : null,
+        okText ? h("div", { className: "dshi_ok" }, okText) : null,
         view ? h(fragment, null,
           h("div", { className: "dshi_grid2" },
-            Bar("L0 persona（UTF-16）", l0 && (l0.chars ?? l0.length ?? (l0.text ? l0.text.length : 0)), (budgets.persona && budgets.persona.maxChars) ?? 12000),
-            Bar("L1 core（UTF-16）", l1 && (l1.chars ?? l1.length ?? (l1.text ? l1.text.length : 0)), (budgets.core && budgets.core.targetChars) ?? 8000)),
-          l0 ? h("div", { className: "dshi_card" },
-            h("div", { className: "dshi_cardTitle" }, "L0 persona 预览", view.revision !== undefined ? h("span", { className: "dshi_badgeDim dshi_badge" }, "rev " + String(view.revision.persona ?? view.revision.l0 ?? view.revision)) : null),
-            h("pre", { className: "dshi_pre" }, String(l0.text ?? l0.content ?? stableStringify(l0)))) : null,
-          l1 ? h("div", { className: "dshi_card" },
-            h("div", { className: "dshi_cardTitle" }, "L1 core 完整预览（含派生目录）"),
-            h("pre", { className: "dshi_pre" }, String(l1.text ?? l1.rendered ?? stableStringify(l1)))) : null,
+            Bar("人设卡 L0（UTF-16）", l0 && (l0.chars ?? l0.length ?? (l0.text ? l0.text.length : 0)), (budgets.persona && budgets.persona.maxChars) ?? 12000),
+            Bar("记忆核心 L1（UTF-16）", l1 && (l1.chars ?? l1.length ?? (l1.text ? l1.text.length : 0)), (budgets.core && budgets.core.targetChars) ?? 8000)),
+          renderLayer("l0", "人设卡（L0 persona）", l0,
+            "每轮对话常驻的身份与规则。编辑后保存立即生效；上限由「预算配置」的人设卡最大字符数决定。"),
+          renderLayer("l1", "记忆核心（L1 core）", l1,
+            "上方预览是完整渲染结果（正文 + 派生主题索引）；点编辑后文本框里只有磁盘正文，主题索引由服务端自动生成，不用手写。保存带 revision 校验，若别处刚改过会提示冲突，刷新后重试。"),
           h("details", null,
             h("summary", { className: "dshi_hint" }, "完整 DTO"),
             h("pre", { className: "dshi_pre" }, stableStringify(view))))
@@ -670,6 +868,18 @@ window.__ModuleLoader__.load({
       return { nodes: nodes, edges: edges };
     }
 
+    // getGraph 的节点 → { id: title }。候选页只拿到 64 位 hex id，
+    // 用这张映射表把「是哪张卡」还原出来（拉不到就退化成短 id）。
+    function titleMapOf(graph) {
+      var normalized = normalizeGraph(graph);
+      var map = {};
+      for (var i = 0; i < normalized.nodes.length; i++) {
+        var node = normalized.nodes[i];
+        map[node.id] = node.title;
+      }
+      return map;
+    }
+
     function GraphTab(props) {
       var state = useState(null);
       var graph = state[0];
@@ -684,6 +894,42 @@ window.__ModuleLoader__.load({
       var view = viewState[0];
       var setView = viewState[1];
       var dragRef = useRef(null);
+      var wrapRef = useRef(null);
+      // 滚轮缩放：以指针位置为锚点，缩放范围与按钮一致（0.3~3）。
+      // React 的 onWheel 在部分宿主里被登记成 passive（preventDefault 无效、滚轮会连带
+      // 滚动整个面板），所以这里挂原生 listener 并显式 passive:false。
+      useEffect(function () {
+        var element = wrapRef.current;
+        if (!element || typeof element.addEventListener !== "function") return undefined;
+        var onWheel = function (event) {
+          if (event && typeof event.preventDefault === "function") event.preventDefault();
+          var delta = Number(event && event.deltaY);
+          if (!Number.isFinite(delta) || delta === 0) return;
+          var factor = delta > 0 ? 1 / 1.12 : 1.12;
+          var rect = typeof element.getBoundingClientRect === "function" ? element.getBoundingClientRect() : null;
+          var clientX = Number(event && event.clientX);
+          var clientY = Number(event && event.clientY);
+          setView(function (prev) {
+            var current = prev && Number.isFinite(prev.k) ? prev : { x: 0, y: 0, k: 1 };
+            var nextK = Math.min(3, Math.max(0.3, current.k * factor));
+            if (nextK === current.k) return current;
+            // 锚点默认取画布中心；拿得到指针位置时换算到 viewBox 坐标（800×380）。
+            var pivot = { x: 400, y: 190 };
+            if (rect && rect.width > 0 && rect.height > 0 && Number.isFinite(clientX) && Number.isFinite(clientY)) {
+              pivot = {
+                x: (clientX - rect.left) * 800 / rect.width,
+                y: (clientY - rect.top) * 380 / rect.height
+              };
+            }
+            var ratio = nextK / current.k;
+            return { x: pivot.x - (pivot.x - current.x) * ratio, y: pivot.y - (pivot.y - current.y) * ratio, k: nextK };
+          });
+        };
+        element.addEventListener("wheel", onWheel, { passive: false });
+        return function () {
+          if (typeof element.removeEventListener === "function") element.removeEventListener("wheel", onWheel);
+        };
+      }, [graph]);
       var load = async function () {
         setError(null);
         try {
@@ -731,11 +977,12 @@ window.__ModuleLoader__.load({
           h("span", null, h("i", { className: "dshi_dot", style: { background: "var(--dsw-alias-state-success-primary,#1a7f37)" } }), "evergreen"),
           h("span", null, h("i", { className: "dshi_dot", style: { background: "var(--dsw-alias-state-business-primary,#3964fe)" } }), "ephemeral"),
           h("span", null, h("i", { className: "dshi_dot", style: { background: "var(--dsw-alias-label-tertiary,#8b93a1)" } }), "非 active"),
-          h("span", { className: "dshi_hint" }, "拖拽平移 / 点击节点查看详情与 CAS 编辑")),
+          h("span", { className: "dshi_hint" }, "滚轮缩放 / 拖拽平移 / 点击节点查看详情与编辑")),
         ErrorBox(error),
         normalized.nodes.length === 0 && !error ? h("div", { className: "dshi_loading" }, graph ? "当前 scope 无 active 卡" : "加载中…") : null,
         normalized.nodes.length > 0 ? h("div", {
           className: "dshi_graphWrap",
+          ref: wrapRef,
           onPointerDown: onPointerDown,
           onPointerMove: onPointerMove,
           onPointerUp: onPointerUp,
@@ -763,7 +1010,7 @@ window.__ModuleLoader__.load({
                   h("text", { className: "dshi_nodeLabel", x: position.x + 18, y: position.y + 4 }, node.title.slice(0, 24)));
               }))))
         : null,
-        selected ? h(NodeDetail, { node: selected, dsh: props.dsh, sessionId: props.sessionId, onClose: function () { setSelected(null); }, onSaved: load }) : null);
+        selected ? h(NodeDetail, { node: selected, nodes: normalized.nodes, edges: normalized.edges, dsh: props.dsh, sessionId: props.sessionId, onClose: function () { setSelected(null); }, onSaved: load }) : null);
     }
 
     var TOOL_TEMPLATES = {
@@ -773,8 +1020,47 @@ window.__ModuleLoader__.load({
       soul_update: { content: "", operationId: "" }
     };
 
+    // 面板是给人用的：工具名和字段名都翻成人话，括号里保留原始名字，方便对照日志与文档。
+    var TOOL_LABELS = {
+      topic_append: "往某个主题里追加内容",
+      memory_rewrite: "整篇重写某个主题",
+      core_write: "重写记忆核心（L1）",
+      soul_update: "重写人设卡（L0）"
+    };
+    var TOOL_FIELD_LABELS = {
+      topic: "主题 key（写进哪个主题）",
+      section: "小节标题",
+      content: "正文内容",
+      expectedRevision: "版本号（留空＝不校验）",
+      operationId: "操作 ID（留空自动生成）"
+    };
+    var VITALITY_LABELS = { evergreen: "长期卡", ephemeral: "短期卡" };
+    var STATE_LABELS = { active: "生效中", archived: "已归档", superseded: "已被替代" };
+
+    // spark_read / spark_update 的 links 形状：[{ target, rel }]，target 是另一张卡的 id。
+    function cardLinksOf(card) {
+      var raw = card && card.links;
+      if (!Array.isArray(raw)) return [];
+      var out = [];
+      for (var i = 0; i < raw.length; i++) {
+        var item = raw[i];
+        if (!item) continue;
+        if (typeof item === "string") { out.push({ target: item, rel: null }); continue; }
+        var target = String(item.target ?? item.id ?? "");
+        if (!target) continue;
+        out.push({ target: target, rel: item.rel === undefined ? null : item.rel });
+      }
+      return out;
+    }
+
+    function shortId(id) {
+      var text = String(id ?? "");
+      return text.length > 12 ? text.slice(0, 8) + "…" : text;
+    }
+
     function NodeDetail(props) {
       var node = props.node;
+      var allNodes = Array.isArray(props.nodes) ? props.nodes : [];
       var toolState = useState("topic_append");
       var tool = toolState[0];
       var setTool = toolState[1];
@@ -790,11 +1076,92 @@ window.__ModuleLoader__.load({
       var busyState = useState(false);
       var busy = busyState[0];
       var setBusy = busyState[1];
+      // R7 追加：关联连线编辑。新 state 一律追加在既有 state 之后。
+      var cardState = useState(null);
+      var card = cardState[0];
+      var setCard = cardState[1];
+      var linkTargetState = useState("");
+      var linkTarget = linkTargetState[0];
+      var setLinkTarget = linkTargetState[1];
+      var linkRelState = useState("");
+      var linkRel = linkRelState[0];
+      var setLinkRel = linkRelState[1];
+      var linksBusyState = useState(false);
+      var linksBusy = linksBusyState[0];
+      var setLinksBusy = linksBusyState[1];
+      var linksErrorState = useState(null);
+      var linksError = linksErrorState[0];
+      var setLinksError = linksErrorState[1];
+      var linksOkState = useState(null);
+      var linksOk = linksOkState[0];
+      var setLinksOk = linksOkState[1];
       useEffect(function () {
         setFields(assign({}, TOOL_TEMPLATES[tool], { topic: node.title, expectedRevision: node.revision !== undefined ? String(node.revision) : "" }));
         setError(null);
         setOk(null);
       }, [tool, node.id]);
+      // 打开卡片就拉一次 spark_read：既拿到完整正文，也拿到现有 links 与最新 revision。
+      // 必须先读再改——spark_update 的 patch.links 是整体替换，盲改会抹掉原有连线。
+      var loadCard = async function () {
+        setLinksBusy(true);
+        setLinksError(null);
+        setLinksOk(null);
+        try {
+          setCard(await props.dsh.call("executeTool", props.sessionId, { name: "spark_read", args: { id: node.id } }));
+        } catch (e) {
+          setCard(null);
+          setLinksError(e);
+        } finally {
+          setLinksBusy(false);
+        }
+      };
+      useEffect(function () { loadCard(); }, [node.id]);
+      var links = cardLinksOf(card);
+      var titleOf = function (id) {
+        for (var i = 0; i < allNodes.length; i++) if (allNodes[i].id === id) return allNodes[i].title;
+        return null;
+      };
+      var addLink = function () {
+        var target = String(linkTarget || "");
+        if (!target) return;
+        var duplicated = false;
+        for (var i = 0; i < links.length; i++) if (links[i].target === target) duplicated = true;
+        if (duplicated) return;
+        var next = links.concat([{ target: target, rel: linkRel ? String(linkRel) : null }]);
+        setCard(function (prev) {
+          var base = prev && typeof prev === "object" ? prev : {};
+          return assign({}, base, { links: next });
+        });
+        setLinkTarget("");
+        setLinkRel("");
+        setLinksOk(null);
+      };
+      var removeLink = function (target) {
+        var next = links.filter(function (link) { return link.target !== target; });
+        setCard(function (prev) {
+          var base = prev && typeof prev === "object" ? prev : {};
+          return assign({}, base, { links: next });
+        });
+        setLinksOk(null);
+      };
+      var saveLinks = async function () {
+        if (!card) return;
+        setLinksBusy(true);
+        setLinksError(null);
+        setLinksOk(null);
+        try {
+          var args = { id: node.id, patch: { links: links } };
+          if (card.revision !== undefined && card.revision !== null) args.expectedRevision = card.revision;
+          await props.dsh.call("executeTool", props.sessionId, { name: "spark_update", args: args });
+          setLinksOk("连线已保存");
+          if (typeof props.onSaved === "function") props.onSaved();
+          await loadCard();
+        } catch (e) {
+          setLinksError(e);
+        } finally {
+          setLinksBusy(false);
+        }
+      };
       var run = async function () {
         setBusy(true);
         setError(null);
@@ -819,23 +1186,67 @@ window.__ModuleLoader__.load({
       };
       return h("div", { className: "dshi_card" },
         h("div", { className: "dshi_itemHead" },
-          h("span", { className: "dshi_cardTitle" }, "节点详情：" + node.title),
-          h("span", { className: "dshi_badge" + (node.vitality === "evergreen" ? "" : "Dim") }, node.vitality),
-          h("span", { className: "dshi_badgeDim dshi_badge" }, node.state),
+          h("span", { className: "dshi_cardTitle" }, "卡片详情：" + node.title),
+          h("span", { className: "dshi_badge" + (node.vitality === "evergreen" ? "" : "Dim") }, VITALITY_LABELS[node.vitality] || node.vitality),
+          h("span", { className: "dshi_badgeDim dshi_badge" }, STATE_LABELS[node.state] || node.state),
           node.revision !== undefined ? h("span", { className: "dshi_mono" }, "rev " + String(node.revision)) : null,
           h("button", { className: "dshi_btn", onClick: props.onClose }, "关闭")),
         h("details", null,
           h("summary", { className: "dshi_hint" }, "原始节点数据"),
           h("pre", { className: "dshi_pre" }, stableStringify(node.raw))),
+
+        // 关联连线：把这张卡和别的卡连起来，图谱上会画出来。
+        h("div", { className: "dshi_card" },
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_cardTitle" }, "关联连线"),
+            h("button", { className: "dshi_btn", disabled: linksBusy, onClick: loadCard }, linksBusy ? "读取中…" : "重新读取"),
+            h("span", { className: "dshi_hint" }, "改完要点「保存连线」才生效；保存走版本校验，别处刚改过会提示冲突")),
+          ErrorBox(linksError),
+          linksOk ? h("div", { className: "dshi_ok" }, linksOk) : null,
+          card === null
+            ? h("div", { className: "dshi_loading" }, linksBusy ? "正在读取这张卡的连线…" : "还没读到这张卡，点「重新读取」")
+            : (links.length === 0
+              ? h("div", { className: "dshi_hint" }, "这张卡还没有连线。")
+              : h("div", { className: "dshi_items" }, links.map(function (link) {
+                  var title = titleOf(link.target);
+                  return h("div", { key: link.target, className: "dshi_item" },
+                    h("div", { className: "dshi_itemHead" },
+                      h("span", null, title || ("（图谱里没有这张卡）")),
+                      link.rel ? h("span", { className: "dshi_badgeDim dshi_badge" }, String(link.rel)) : null,
+                      h("span", { className: "dshi_mono" }, shortId(link.target)),
+                      h("span", { style: { flex: 1 } }),
+                      h("button", { className: "dshi_btn dshi_btnDanger", onClick: function () { removeLink(link.target); } }, "移除")));
+                }))),
+          card === null ? null : h("div", { className: "dshi_row" },
+            h("select", {
+              className: "dshi_select",
+              value: linkTarget,
+              onChange: function (event) { setLinkTarget(event.target.value); }
+            },
+              h("option", { value: "" }, "— 选择要连到的卡 —"),
+              allNodes.filter(function (item) { return item.id !== node.id; }).map(function (item) {
+                return h("option", { key: item.id, value: item.id }, item.title + "（" + shortId(item.id) + "）");
+              })),
+            h("input", {
+              className: "dshi_input",
+              placeholder: "关系名（可空，如 related）",
+              value: linkRel,
+              onChange: function (event) { setLinkRel(event.target.value); }
+            }),
+            h("button", { className: "dshi_btn", disabled: !linkTarget, onClick: addLink }, "添加连线"),
+            h("button", { className: "dshi_btn dshi_btnPrimary", disabled: linksBusy || !card, onClick: saveLinks }, linksBusy ? "保存中…" : "保存连线"))),
+
         h("div", { className: "dshi_row" },
-          h("label", { className: "dshi_label" }, "编辑工具（走 executeTool，服务端 CAS 校验）",
+          h("label", { className: "dshi_label" }, "改写这张卡的内容（走记忆工具，服务端校验版本）",
             h("select", {
               className: "dshi_select",
               value: tool,
               onChange: function (event) { setTool(event.target.value); }
-            }, Object.keys(TOOL_TEMPLATES).map(function (name) { return h("option", { key: name, value: name }, name); })))),
+            }, Object.keys(TOOL_TEMPLATES).map(function (name) {
+              return h("option", { key: name, value: name }, (TOOL_LABELS[name] || name) + "（" + name + "）");
+            })))),
         Object.keys(TOOL_TEMPLATES[tool]).map(function (key) {
-          return h("label", { key: key, className: "dshi_label" }, key,
+          return h("label", { key: key, className: "dshi_label" }, (TOOL_FIELD_LABELS[key] || key) + "（" + key + "）",
             h("textarea", {
               className: "dshi_textarea",
               style: key === "content" ? { minHeight: 140 } : { minHeight: 34 },
@@ -850,7 +1261,7 @@ window.__ModuleLoader__.load({
         ErrorBox(error),
         okText ? h("div", { className: "dshi_ok" }, okText) : null,
         h("div", { className: "dshi_row" },
-          h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy, onClick: run }, busy ? "执行中…" : "执行（executeTool）")));
+          h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy, onClick: run }, busy ? "执行中…" : "执行修改")));
     }
 
     // ── Q-A：cluster 候选「合并进主题」辅助 ──────────────────────────────────
@@ -1066,6 +1477,10 @@ window.__ModuleLoader__.load({
       var newTopicState = useState({ topic: "", title: "", summary: "", busy: false, error: null });
       var newTopic = newTopicState[0];
       var setNewTopic = newTopicState[1];
+      // R7 追加：候选卡片 id → 标题映射（拉不到图谱时保持空对象，行内退化成短 id）。
+      var titlesState = useState({});
+      var titles = titlesState[0];
+      var setTitles = titlesState[1];
 
       var mark = function () {
         return { sessionId: props.sessionId, gen: sessionGuard.gen };
@@ -1111,6 +1526,16 @@ window.__ModuleLoader__.load({
           if (isStale(origin)) return;
           setData(null);
           if (!reportSessionUnavailable(e, props, setError)) setError(e);
+        }
+        // 候选条目里只有 id（digest），没有卡片标题。顺手拉一次图谱建 id→标题映射，
+        // 让每行看得出「是哪张卡」；图谱拉取失败不影响候选本身。
+        try {
+          var graph = await props.dsh.call("getGraph", props.sessionId, {});
+          if (isStale(origin)) return;
+          setTitles(titleMapOf(graph));
+        } catch (e) {
+          if (isStale(origin)) return;
+          setTitles({});
         }
       };
       useEffect(function () { load(); }, [props.sessionId]);
@@ -1466,9 +1891,30 @@ window.__ModuleLoader__.load({
             var rowDisabled = actionsDisabled || businessId === null;
             // 就地展开：只有被点击的那一行才在自身正下方渲染合并卡（同一 dshi_items 容器内）。
             var mergeForThisRow = Boolean(merge) && businessId !== null && String(merge.candidateId) === businessId;
+            // 有了 id→标题映射就把候选翻译成人话：集群说共享词 + 卡数，
+            // 链接说「A ↔ B」，孤立卡直接给源卡标题；都没有时退化成短 id。
+            var sourceIds = candidate && Array.isArray(candidate.sources)
+              ? candidate.sources.map(function (s) { return String(s && s.id); }).filter(Boolean) : [];
+            var sourceTitles = sourceIds.map(function (id) { return titles[id] || shortId(id); });
+            var evidence = candidate && candidate.evidence && typeof candidate.evidence === "object" ? candidate.evidence : {};
+            var candidateKind = candidate && candidate.kind ? String(candidate.kind) : "";
+            var candidateTitle = null;
+            if (candidateKind === "cluster") {
+              var sharedTerm = evidence.sharedTerm || evidence.field;
+              candidateTitle = sharedTerm
+                ? "合并「" + String(sharedTerm) + "」相关的 " + sourceIds.length + " 张卡"
+                : "合并 " + sourceIds.length + " 张卡";
+            } else if (candidateKind === "link" && sourceTitles.length >= 2) {
+              candidateTitle = "连接：" + sourceTitles.join(" ↔ ");
+            } else if (sourceTitles.length === 1) {
+              candidateTitle = sourceTitles[0];
+            } else if (sourceTitles.length > 1) {
+              candidateTitle = sourceTitles.join("、");
+            }
             var row = h("div", { key: key, className: "dshi_item" },
               h("div", { className: "dshi_itemHead" },
-                h("span", { className: "dshi_mono" }, businessId !== null ? businessId : "（缺少 candidate.id）"),
+                h("span", null, candidateTitle || "（未识别的卡片）"),
+                h("span", { className: "dshi_mono" }, businessId !== null ? shortId(businessId) : "（缺少 candidate.id）"),
                 candidate && candidate.kind ? h("span", { className: "dshi_badgeDim dshi_badge" }, candidateKindLabel(candidate.kind)) : null,
                 item.status ? h("span", { className: "dshi_badge" }, candidateStatusLabel(item.status)) : null,
                 h("button", { className: "dshi_btn", disabled: rowDisabled, title: "把候选状态置为 reviewed", onClick: function () { doReview(businessId, "reviewed"); } }, "标记已阅"),
@@ -1578,7 +2024,9 @@ window.__ModuleLoader__.load({
       },
       "persona.maxChars": {
         kind: "integer",
-        max: 12000,
+        // 与服务端 src/plugin/config.mjs BUDGET_CEILINGS.persona.maxChars 保持一致。
+        // 插件是公开分发的，别人的人设卡可能远长于本机默认 12000，上限抬到 60000。
+        max: 60000,
         label: "人设卡最大字符数",
         hint: "人设卡正文的最大长度（UTF-16 字符），超出写入会被拒绝"
       },
@@ -1843,6 +2291,15 @@ window.__ModuleLoader__.load({
       var probeTickState = useState(0);
       var probeTick = probeTickState[0];
       var setProbeTick = probeTickState[1];
+      // 工作区列表：undefined=尚未拉取，null=宿主没有该服务（面板退化为平铺会话下拉），
+      // 数组=可用。追加在末尾，老测试预置的 states[0..6] 下标不变。
+      var workspacesState = useState(undefined);
+      var workspaces = workspacesState[0];
+      var setWorkspaces = workspacesState[1];
+      // 会话下拉的工作区过滤："" = 全部工作区。
+      var workspaceState = useState("");
+      var workspaceId = workspaceState[0];
+      var setWorkspaceId = workspaceState[1];
       // 会话列表拉取的并发守卫（useRef 不占 useState 下标，老测试的 states[0..6] 不变）：
       // 首帧 effect 与「刷新」可能同时触发，只允许一个请求在飞。
       var sessionsRequestRef = useRef({ pending: false });
@@ -1924,6 +2381,12 @@ window.__ModuleLoader__.load({
       //   成功（数组，空数组也算成功）→ 立刻 setSessions；有候选且当前没有选中会话
       //   （或来自「列表失败后手动刷新」）时立刻 probeCandidates，不额外延迟；
       //   三次都失败 → sessions=null，保持旧兜底（手填输入框 + 不可用提示 + 刷新）。
+      // 读宿主工作区快照（同步）：失败/服务缺失一律当 null，面板不渲染工作区下拉。
+      var loadWorkspaces = function () {
+        var items = props.dsh && typeof props.dsh.listWorkspaces === "function" ? props.dsh.listWorkspaces() : null;
+        setWorkspaces(Array.isArray(items) && items.length > 0 ? items : null);
+      };
+
       var loadSessions = function (forceProbe) {
         if (sessionsRequestRef.current && sessionsRequestRef.current.pending) return;
         sessionsRequestRef.current = { pending: true };
@@ -1948,6 +2411,7 @@ window.__ModuleLoader__.load({
       };
 
       useEffect(function () {
+        loadWorkspaces();
         loadSessions(false);
       }, []);
 
@@ -2024,10 +2488,55 @@ window.__ModuleLoader__.load({
               hintLines.join(" "),
               h("button", { className: "dshi_btn", style: { marginLeft: 8 }, onClick: retryProbe }, "刷新"))
           : null;
+      // 工作区 → 会话 反查表：宿主 session 列表不带 workspaceId，用 workspaces 快照的
+      // sessionIds 补上，才能「先选工作区、再选会话」。
+      var workspaceOptions = Array.isArray(workspaces) ? workspaces : [];
+      var workspaceOfSession = {};
+      for (var wi = 0; wi < workspaceOptions.length; wi++) {
+        var wsItem = workspaceOptions[wi];
+        var wsIds = Array.isArray(wsItem.sessionIds) ? wsItem.sessionIds : [];
+        for (var wj = 0; wj < wsIds.length; wj++) workspaceOfSession[String(wsIds[wj])] = wsItem.workspaceId;
+      }
+      // 每个工作区里「当前列表可见」的会话数（会话列表没拿到时不显示计数，避免写 0）。
+      var workspaceSessionCount = {};
+      var haveSessions = Array.isArray(sessions);
+      if (haveSessions) {
+        for (var ci = 0; ci < sessions.length; ci++) {
+          var ownerWs = workspaceOfSession[String(sessions[ci].sessionId)];
+          if (ownerWs !== undefined) workspaceSessionCount[ownerWs] = (workspaceSessionCount[ownerWs] || 0) + 1;
+        }
+      }
+      // 会话下拉的可见项：选了工作区就只列该工作区的会话；当前会话始终保留，
+      // 否则切工作区后选中项会从下拉里消失，看起来像「会话丢了」。
+      var visibleSessions = haveSessions ? sessions : [];
+      if (workspaceId !== "") {
+        var filteredSessions = [];
+        for (var vi = 0; vi < visibleSessions.length; vi++) {
+          var visibleOne = visibleSessions[vi];
+          var visibleId = String(visibleOne.sessionId !== undefined && visibleOne.sessionId !== null ? visibleOne.sessionId : "");
+          if (workspaceOfSession[visibleId] === workspaceId || (sessionId !== "" && visibleId === sessionId)) filteredSessions.push(visibleOne);
+        }
+        visibleSessions = filteredSessions;
+      }
       var budgets = props.budgets;
       return h("div", { className: "dshi_root" },
         h("div", { className: "dshi_title" }, "Shiori 记忆面板",
           h("span", { className: "dshi_titleSub" }, "dsh-shiori · 原生 bundle 面板")),
+        workspaceOptions.length > 0
+          ? h("div", { className: "dshi_row" },
+              h("label", { className: "dshi_label" }, "工作区（先选工作区，再选会话）",
+                h("select", {
+                  className: "dshi_select",
+                  value: workspaceId,
+                  onChange: function (event) { setWorkspaceId(event.target.value); }
+                },
+                  h("option", { value: "" }, "— 全部工作区 —"),
+                  workspaceOptions.map(function (item) {
+                    var count = workspaceSessionCount[item.workspaceId];
+                    var label = count !== undefined ? item.title + "（" + count + " 个会话）" : item.title;
+                    return h("option", { key: item.workspaceId, value: item.workspaceId, title: item.path || item.workspaceId }, label);
+                  }))))
+          : null,
         h("div", { className: "dshi_row" },
           h("label", { className: "dshi_label" }, "会话（宿主解析，owner 授权）",
             sessions === null || sessions === undefined
@@ -2038,7 +2547,7 @@ window.__ModuleLoader__.load({
                   onChange: function (event) { setSessionId(event.target.value); }
                 },
                   h("option", { value: "" }, "— 选择会话 —"),
-                  sessions.map(function (item) {
+                  visibleSessions.map(function (item) {
                     var id = String(item.sessionId ?? item.id ?? "");
                     // 有标题显示标题（超长截断），无标题回退 sessionId；
                     // option 的 title 属性放完整 sessionId，便于悬停排查。
@@ -2057,6 +2566,9 @@ window.__ModuleLoader__.load({
           : null,
         // 会话下拉下方的一行提示：自动跳过的原因 / 跳过数量 / 当前会话被判定不可用。
         sessionHint,
+        workspaceId !== "" && haveSessions && visibleSessions.length === 0
+          ? h("div", { className: "dshi_hint" }, "该工作区下没有可显示的会话，切到「全部工作区」看看。")
+          : null,
         h("div", { className: "dshi_tabs" }, TABS.map(function (entry) {
           return h("button", {
             key: entry.id,

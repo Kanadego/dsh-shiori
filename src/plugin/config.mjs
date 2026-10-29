@@ -195,7 +195,9 @@ function workspaceMapping(entry) {
 
 /** Q 生产配置额外强制安全上限（CONTRACTS §2：可向下调，仍须满足 validateConfig 关系）。 */
 export const BUDGET_CEILINGS = Object.freeze({
-  persona: Object.freeze({ maxChars: 12000 }),
+  // 人设卡上限：插件是公开分发的，别人的人设卡可能远长于本机（12000 曾把
+  // 长卡用户挡在门外）。上限抬到 60000，默认值仍是 DEFAULT_CONFIG 的 12000。
+  persona: Object.freeze({ maxChars: 60000 }),
   spark: Object.freeze({ maxChars: 600, inlineMaxChars: 100, maxCards: 5, seedCount: 3, linkCount: 2 }),
 });
 

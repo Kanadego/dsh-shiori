@@ -222,6 +222,10 @@ export function createManagement(deps) {
         },
         l1: {
           text: view?.text ?? "",
+          // 磁盘正文（不含派生索引）；面板编辑用这一份，回退到 text 会污染 core。
+          // 若宿主注入的 service 没实现 body（旧契约），退回 text 而不是空串——
+          // 空串会让面板的编辑框一片空白、保存即清空 core，比带上索引危险得多。
+          body: typeof view?.body === "string" ? view.body : (view?.text ?? ""),
           revision: view?.revision ?? null,
           chars: (view?.text ?? "").length,
           budget: settings.budgets.core.targetChars,

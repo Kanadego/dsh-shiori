@@ -1431,7 +1431,7 @@ test("预算 tab：非法数字/比率中止整批且不发写入，错误码 ui
     { "core.softRatio": "1.5" },
     { "core.hardRatio": "0" },
     { "core.targetChars": "0" },
-    { "persona.maxChars": "13000" },
+    { "persona.maxChars": "60001" },
   ]) {
     const mounted = mount();
     await submit(mounted, bad);
@@ -1458,7 +1458,7 @@ test("预算 tab：字段标签为「中文解释（原参数名）」并附一�
     "core.hardCapChars": ["L0 硬上限字符数", "core.hardCapChars", "硬上限"],
     "core.softRatio": ["L0 软压缩阈值占比", "core.softRatio", "0 到 1"],
     "core.hardRatio": ["L0 硬压缩阈值占比", "core.hardRatio", "0 到 1"],
-    "persona.maxChars": ["人设卡最大字符数", "persona.maxChars", "上限 12000", "UTF-16"],
+    "persona.maxChars": ["人设卡最大字符数", "persona.maxChars", "上限 60000", "UTF-16"],
     "spark.maxChars": ["Spark 卡片最大字符数", "spark.maxChars", "上限 600", "总长度"],
     "spark.inlineMaxChars": ["Spark 内联注入最大字符数", "spark.inlineMaxChars", "上限 100", "摘要"],
     "spark.maxCards": ["Spark 最多卡片数", "spark.maxCards", "上限 5", "卡片数量"],
@@ -1492,7 +1492,7 @@ test("预算 tab：比率字段 step=any 允许小数，整数/字符段 step=1 
     assert.equal(input.step, "1", path + " 仍只收整数");
     assert.equal(input.min, "0", path + " 仍保留 min");
   }
-  assert.equal(byPath.get("persona.maxChars").max, "12000", "整数段 max 保留");
+  assert.equal(byPath.get("persona.maxChars").max, "60000", "整数段 max 保留（与服务端上限一致）");
   assert.equal(byPath.get("core.softRatio").max, undefined, "无上限的比率段不写 max");
 });
 
@@ -1576,9 +1576,14 @@ function findErrorBoxes(tree) {
   return flattenVNode(tree).filter((n) => n.props && n.props.className === "dshi_error");
 }
 
-// 单独执行一个 tab 组件（面板 7 个 useState 之后开始计数），跑它的挂载 effect。
+// 面板自身占用的 useState 个数（tab / sessionId / manual / sessions / modeStatus /
+// availability / probeTick / workspaces / workspaceId）。面板加 state 时这里要同步 +
+// 下面的用例如有下标断言也要跟着挪。
+const PANEL_STATES = 9;
+
+// 单独执行一个 tab 组件（面板 useState 之后开始计数），跑它的挂载 effect。
 async function runTab(host, vnode) {
-  host.cursor.v = 7;
+  host.cursor.v = PANEL_STATES;
   host.runEffects.v = true;
   vnode.type(vnode.props);
   for (const effect of host.effects.splice(0)) effect();
@@ -1696,7 +1701,8 @@ test("Q 槽健壮性 B：tab 内的 session/writer-held 不进 ErrorBox，改为
   assert.ok(memoryTab, "未 blocked 时记忆 tab 正常挂载");
   await runTab(host, memoryTab);
 
-  assert.equal(host.states[8], null, "会话级错误不写入 tab 的 error 状态（ErrorBox 不渲染）");
+  // MemoryTab 的 state 从 PANEL_STATES 起：view / error。
+  assert.equal(host.states[PANEL_STATES + 1], null, "会话级错误不写入 tab 的 error 状态（ErrorBox 不渲染）");
   assert.equal(host.states[5].blocked, true, "面板层缓存会话级失败");
   assert.equal(host.states[5].error.code, "session/writer-held");
   assert.equal(host.states[5].sessionId, "session-A");
@@ -1709,6 +1715,58 @@ test("Q 槽健壮性 B：tab 内的 session/writer-held 不进 ErrorBox，改为
   assert.ok(text.includes("已跳过 1 个宿主不可用的会话"));
   assert.equal(findErrorBoxes(after).length, 0, "不再出现红色 ErrorBox");
   assert.equal(findComponent(after, "MemoryTab"), undefined, "blocked 后暂停该会话的数据请求");
+  await cleanup();
+});
+
+test("R7：记忆核心编辑初值取磁盘正文 body，而不是含派生索引的渲染视图", async () => {
+  // 服务端 getMemoryView 的 l1.text 是「core 正文 + 派生主题索引」的渲染结果，
+  // core_write 不剥离索引 —— 草稿若取 text，保存后索引会被固化进 core。这里钉住
+  // 客户端必须用 l1.body 作为编辑初值。
+  const services = {
+    "remote.session": { list: async () => ({ ok: true, value: { items: [{ sessionId: "session-A" }] } }) },
+    "remote.shiori": {
+      getStatus: async () => ({ ok: true, value: { mode: "active", configured: true } }),
+      getMemoryView: async () => ({
+        ok: true,
+        value: {
+          scope: "amber",
+          l0: { text: "PERSONA", revision: "r0", chars: 7, budget: 12000, stale: false },
+          l1: {
+            text: "CORE BODY\n\n## 主题记忆索引 / Topic memory index\n- a [amber] — A",
+            body: "CORE BODY",
+            revision: "r1",
+            chars: 60,
+            budget: 10000,
+            hardCap: 14000,
+          },
+        },
+      }),
+    },
+  };
+  const { host, sectionVNode, cleanup } = await mountPanel(services);
+  await bootPanel(host, sectionVNode);
+  assert.equal(host.states[1], "session-A");
+
+  host.states[0] = "memory";
+  host.cursor.v = 0;
+  host.runEffects.v = false;
+  const tree = sectionVNode.type(sectionVNode.props);
+  const memoryTab = findComponent(tree, "MemoryTab");
+  assert.ok(memoryTab, "MemoryTab mounted");
+  await runTab(host, memoryTab);
+
+  host.cursor.v = PANEL_STATES;
+  let painted = memoryTab.type(memoryTab.props);
+  const editButtons = flattenVNode(painted).filter((n) => n.type === "button" && n.children.includes("编辑"));
+  assert.equal(editButtons.length, 2, "L0 and L1 both expose an edit button");
+  assert.ok(collectText(painted).includes("主题记忆索引"), "预览仍展示完整渲染视图（含派生索引）");
+
+  editButtons[1].props.onClick();   // L1
+  host.cursor.v = PANEL_STATES;
+  painted = memoryTab.type(memoryTab.props);
+  const textarea = flattenVNode(painted).find((n) => n.type === "textarea");
+  assert.ok(textarea, "L1 editor opened");
+  assert.equal(textarea.props.value, "CORE BODY", "编辑初值取 body，不含派生索引");
   await cleanup();
 });
 
@@ -1781,8 +1839,8 @@ test("Q 槽健壮性 C：同一会话缓存失败——切 tab 不重复 RPC，�
   assert.ok(retryTab, "缓存清除后 tab 重新挂载");
   await runTab(host, retryTab);
   assert.equal(memoryAttempts, 2, "刷新后可重试同一会话的 RPC");
-  assert.equal(host.states[8], null, "重试成功后无错误");
-  assert.equal(host.states[7].l0, "L0 内容");
+  assert.equal(host.states[PANEL_STATES + 1], null, "重试成功后无错误");
+  assert.equal(host.states[PANEL_STATES].l0, "L0 内容");
   await cleanup();
 });
 

@@ -5,7 +5,7 @@ src/service/index.mjs exports createShioriService({ root, activeScopeId, config,
 ## Read contract
 
 - readCore() returns the disk core body and an opaque service revision: { text, revision, scopeId }. It never returns the rendered index as writeable body.
-- readCoreView() returns { text, revision, scopeId }; text is A.renderL1 over a single B snapshot, including the derived topic index. The revision token binds the rendered projection as well as its source and generation.
+- readCoreView() returns { text, body, revision, scopeId }; text is A.renderL1 over a single B snapshot, including the derived topic index; body is the disk core body without the index (write paths must use body — writing text back would persist the derived index). The revision token binds the rendered projection as well as its source and generation.
 - readTopic(key) returns the visible Topic with body and an opaque service revision. Missing keys keep B's explicit NOT_FOUND behavior; this service does not create topics.
 - listTopics() returns current visible Topics with opaque revisions. search(query) is lexical over visible topic key/title/summary/body and returns key/title/summary/scopeId/score; it is not semantic retrieval.
 - readPersona() delegates to personaAdapter.read(), or returns { name: null, text: null } when no adapter is injected.

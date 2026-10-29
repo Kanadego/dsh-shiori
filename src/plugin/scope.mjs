@@ -170,7 +170,9 @@ export function validateControllerSettings(raw) {
     fail("INVALID_INPUT", `settings.budgets invalid: ${error instanceof Error ? error.message : String(error)}`, {});
   }
   const caps = [
-    ["persona", "maxChars", 12000],
+    // 与 src/plugin/config.mjs BUDGET_CEILINGS.persona.maxChars 保持一致（公开插件，
+    // 长人设卡用户需要更高的上限；默认值仍由 DEFAULT_CONFIG 给 12000）。
+    ["persona", "maxChars", 60000],
     ["spark", "maxChars", 600],
     ["spark", "inlineMaxChars", 100],
     ["spark", "maxCards", 5],

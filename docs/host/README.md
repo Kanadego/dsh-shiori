@@ -113,7 +113,7 @@ getSessionInfo() -> { sessionId, scopeId, capabilities }
 | 方法 | 语义 |
 | --- | --- |
 | `readPersona()` | `{ name, text, revision } \| { name: null, text: null }`；persona 独立 CAS 持久化由**后续集成 service** 实现（P0 依赖缺口，见 REPORT.md） |
-| `readCoreView()` | `{ text, revision, scopeId }`；text = **完整渲染 L1**（core 正文 + 派生索引），由 B 用注入的 A.renderL1 生成 |
+| `readCoreView()` | `{ text, body, revision, scopeId }`；text = **完整渲染 L1**（core 正文 + 派生索引），由 B 用注入的 A.renderL1 生成；body = 磁盘 core 正文（不含索引），面板编辑与任何回写只能用 body |
 | `readCore()` | `{ text, revision, scopeId }`；text = **磁盘 core.md 正文（不含索引）**。核心写路径必需——渲染视图绝不回写。B 的 store.readCore 即此语义 |
 | `readTopic(key)` | Topic（含 `body`、`revision`）；不存在时**显式报错** |
 | `listTopics()` | 当前可见去重 Topic[] |

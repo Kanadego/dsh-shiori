@@ -53,9 +53,9 @@ test("settings：未知键拒绝；active 必须 allowActive；root 必须成对
   assert.equal(ok.dataRoot, "D:/tmp-data");
 });
 
-test("settings：预算超生产安全上限拒绝（persona 12001 / spark 601 / seed 4）", () => {
+test("settings：预算超生产安全上限拒绝（persona 60001 / spark 601 / seed 4）", () => {
   assert.throws(
-    () => validateControllerSettings({ ...baseSettings, budgets: { persona: { maxChars: 12001 } } }),
+    () => validateControllerSettings({ ...baseSettings, budgets: { persona: { maxChars: 60001 } } }),
     (e) => e.code === "INVALID_INPUT" && /cap/.test(e.message),
   );
   assert.throws(
