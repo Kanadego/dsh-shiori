@@ -516,7 +516,7 @@ window.__ModuleLoader__.load({
 
     // ── 会话级不可用（宿主写句柄锁 / 子代理路由 / 会话不存在 / 无权解析） ─────
     // owner 实机（DSH 0.2.1-rc.2）：12 个会话抽样里 11 个 getStatus 返回
-    // session/writer-held，五个 tab 就各刷一行红字。会话本身打不开不是各 tab 的
+    // session/writer-held，每个数据 tab 就各刷一行红字。会话本身打不开不是各 tab 的
     // 业务错误，统一收敛为「自动跳过 + 面板级提示」；其他错误码照旧进对应 tab
     // 的 ErrorBox（绝不吞、绝不伪装成功）。
     var SESSION_UNAVAILABLE_CODES = {
@@ -797,11 +797,13 @@ window.__ModuleLoader__.load({
       var renderLayer = function (kind, title, layer, hint) {
         if (!layer) return null;
         var isEditing = editing === kind;
-        var revisionText = layer.revision === undefined || layer.revision === null ? "" : "rev " + String(layer.revision);
+        // revision 是 shiori-r1.<base64>.<sha256> 的长 token，直接铺在标题行会顶出屏幕：
+        // 只显示前缀，完整值放 title 属性，需要时悬停看。
+        var revisionText = layer.revision === undefined || layer.revision === null ? "" : "rev " + shortRev(layer.revision);
         return h("div", { className: "dshi_card" },
           h("div", { className: "dshi_row" },
             h("span", { className: "dshi_cardTitle" }, title),
-            revisionText ? h("span", { className: "dshi_badgeDim dshi_badge" }, revisionText) : null,
+            revisionText ? h("span", { className: "dshi_badgeDim dshi_badge", title: "完整版本号：" + String(layer.revision) }, revisionText) : null,
             layer.stale === true ? h("span", { className: "dshi_badge dshi_badgeWarn" }, "磁盘已被外部修改") : null,
             h("span", { style: { flex: 1 } }),
             isEditing
@@ -1013,27 +1015,6 @@ window.__ModuleLoader__.load({
         selected ? h(NodeDetail, { node: selected, nodes: normalized.nodes, edges: normalized.edges, dsh: props.dsh, sessionId: props.sessionId, onClose: function () { setSelected(null); }, onSaved: load }) : null);
     }
 
-    var TOOL_TEMPLATES = {
-      topic_append: { topic: "", section: "", content: "" },
-      memory_rewrite: { content: "", topic: "", expectedRevision: "", operationId: "" },
-      core_write: { content: "", expectedRevision: "", operationId: "" },
-      soul_update: { content: "", operationId: "" }
-    };
-
-    // 面板是给人用的：工具名和字段名都翻成人话，括号里保留原始名字，方便对照日志与文档。
-    var TOOL_LABELS = {
-      topic_append: "往某个主题里追加内容",
-      memory_rewrite: "整篇重写某个主题",
-      core_write: "重写记忆核心（L1）",
-      soul_update: "重写人设卡（L0）"
-    };
-    var TOOL_FIELD_LABELS = {
-      topic: "主题 key（写进哪个主题）",
-      section: "小节标题",
-      content: "正文内容",
-      expectedRevision: "版本号（留空＝不校验）",
-      operationId: "操作 ID（留空自动生成）"
-    };
     var VITALITY_LABELS = { evergreen: "长期卡", ephemeral: "短期卡" };
     var STATE_LABELS = { active: "生效中", archived: "已归档", superseded: "已被替代" };
 
@@ -1058,24 +1039,73 @@ window.__ModuleLoader__.load({
       return text.length > 12 ? text.slice(0, 8) + "…" : text;
     }
 
+    // revision token（shiori-r1.<base64>.<sha256>）动辄一百多字符；标题行只显示前缀，
+    // 完整值放 title 属性。数字型 revision（如 spark 的 rev 1）原样返回。
+    function shortRev(rev) {
+      if (rev === undefined || rev === null) return "";
+      var text = String(rev);
+      return text.length > 16 ? text.slice(0, 12) + "…" : text;
+    }
+
+    // spark 卡片表单：triggers / entities 在工具里是字符串数组，面板里按「一行一条」编辑。
+    function splitLines(text) {
+      if (typeof text !== "string" || text === "") return [];
+      var out = [];
+      var rows = text.split(/\r?\n/);
+      for (var i = 0; i < rows.length; i++) {
+        var item = rows[i].trim();
+        if (item !== "") out.push(item);
+      }
+      return out;
+    }
+
+    function formFromCard(card) {
+      var source = card && typeof card === "object" ? card : {};
+      return {
+        title: typeof source.title === "string" ? source.title : "",
+        summary: typeof source.summary === "string" ? source.summary : "",
+        content: typeof source.content === "string" ? source.content : "",
+        triggers: Array.isArray(source.triggers) ? source.triggers.join("\n") : "",
+        entities: Array.isArray(source.entities) ? source.entities.join("\n") : "",
+        vitality: typeof source.vitality === "string" && source.vitality ? source.vitality : "ephemeral"
+      };
+    }
+
+    // 只把真正改过的字段放进 patch：未改动的字段不提交，避免把 null 摘要写成空串、或误触发其他校验。
+    function cardFormPatch(card, form) {
+      var source = card && typeof card === "object" ? card : {};
+      var patch = {};
+      var title = String(form.title || "").trim();
+      if (title !== String(source.title ?? "")) patch.title = title;
+      var summary = String(form.summary || "");
+      if (summary !== String(source.summary ?? "")) patch.summary = summary;
+      var content = String(form.content || "");
+      if (content !== String(source.content ?? "")) patch.content = content;
+      var triggers = splitLines(form.triggers);
+      if (stableStringify(triggers) !== stableStringify(Array.isArray(source.triggers) ? source.triggers : [])) patch.triggers = triggers;
+      var entities = splitLines(form.entities);
+      if (stableStringify(entities) !== stableStringify(Array.isArray(source.entities) ? source.entities : [])) patch.entities = entities;
+      var vitality = String(form.vitality || "");
+      if (vitality !== String(source.vitality ?? "")) patch.vitality = vitality;
+      return patch;
+    }
+
     function NodeDetail(props) {
       var node = props.node;
       var allNodes = Array.isArray(props.nodes) ? props.nodes : [];
-      var toolState = useState("topic_append");
-      var tool = toolState[0];
-      var setTool = toolState[1];
-      var fieldsState = useState(assign({}, TOOL_TEMPLATES.topic_append, { topic: node.title }));
-      var fields = fieldsState[0];
-      var setFields = fieldsState[1];
-      var errorState = useState(null);
-      var error = errorState[0];
-      var setError = errorState[1];
-      var okState = useState(null);
-      var okText = okState[0];
-      var setOk = okState[1];
-      var busyState = useState(false);
-      var busy = busyState[0];
-      var setBusy = busyState[1];
+      // 卡片正文编辑（spark_update）：表单里全是字符串，保存时再按行拆成 triggers / entities 数组。
+      var formState = useState(null);
+      var form = formState[0];
+      var setForm = formState[1];
+      var formBusyState = useState(false);
+      var formBusy = formBusyState[0];
+      var setFormBusy = formBusyState[1];
+      var formErrorState = useState(null);
+      var formError = formErrorState[0];
+      var setFormError = formErrorState[1];
+      var formOkState = useState(null);
+      var formOk = formOkState[0];
+      var setFormOk = formOkState[1];
       // R7 追加：关联连线编辑。新 state 一律追加在既有 state 之后。
       var cardState = useState(null);
       var card = cardState[0];
@@ -1095,19 +1125,23 @@ window.__ModuleLoader__.load({
       var linksOkState = useState(null);
       var linksOk = linksOkState[0];
       var setLinksOk = linksOkState[1];
-      useEffect(function () {
-        setFields(assign({}, TOOL_TEMPLATES[tool], { topic: node.title, expectedRevision: node.revision !== undefined ? String(node.revision) : "" }));
-        setError(null);
-        setOk(null);
-      }, [tool, node.id]);
+      // 读取那一刻的连线快照：本地加了又删、或者手滑删错时，用它一键还原（不影响服务端已保存的值）。
+      var pristineState = useState(null);
+      var pristineLinks = pristineState[0];
+      var setPristineLinks = pristineState[1];
       // 打开卡片就拉一次 spark_read：既拿到完整正文，也拿到现有 links 与最新 revision。
       // 必须先读再改——spark_update 的 patch.links 是整体替换，盲改会抹掉原有连线。
       var loadCard = async function () {
         setLinksBusy(true);
         setLinksError(null);
         setLinksOk(null);
+        setFormError(null);
+        setFormOk(null);
         try {
-          setCard(await props.dsh.call("executeTool", props.sessionId, { name: "spark_read", args: { id: node.id } }));
+          var fresh = await props.dsh.call("executeTool", props.sessionId, { name: "spark_read", args: { id: node.id } });
+          setCard(fresh);
+          setPristineLinks(cardLinksOf(fresh));
+          setForm(formFromCard(fresh));
         } catch (e) {
           setCard(null);
           setLinksError(e);
@@ -1162,26 +1196,46 @@ window.__ModuleLoader__.load({
           setLinksBusy(false);
         }
       };
-      var run = async function () {
-        setBusy(true);
-        setError(null);
-        setOk(null);
+      var linksDirty = card !== null && pristineLinks !== null && stableStringify(links) !== stableStringify(pristineLinks);
+      // 误操作撤回：把本地连线还原成读取时的样子（服务端还没写入，丢掉草稿即可）。
+      var undoLinks = function () {
+        if (pristineLinks === null) return;
+        setCard(function (prev) {
+          var base = prev && typeof prev === "object" ? prev : {};
+          return assign({}, base, { links: pristineLinks.slice() });
+        });
+        setLinksOk(null);
+        setLinksError(null);
+      };
+      var updateField = function (key, value) {
+        setForm(function (prev) {
+          var base = prev && typeof prev === "object" ? prev : formFromCard(card);
+          var next = assign({}, base);
+          next[key] = value;
+          return next;
+        });
+        setFormOk(null);
+      };
+      var saveForm = async function () {
+        if (!card || !form) return;
+        var patch = cardFormPatch(card, form);
+        if (Object.keys(patch).length === 0) { setFormOk("内容没有改动"); return; }
+        if (patch.title !== undefined && patch.title === "") { setFormError(new Error("标题不能为空：清空标题会被服务端拒绝")); return; }
+        if (patch.content !== undefined && patch.content === "") { setFormError(new Error("正文不能为空：清空正文会被服务端拒绝")); return; }
+        setFormBusy(true);
+        setFormError(null);
+        setFormOk(null);
         try {
-          var args = {};
-          var template = TOOL_TEMPLATES[tool];
-          for (var key in template) {
-            if (!Object.prototype.hasOwnProperty.call(template, key)) continue;
-            var value = fields[key];
-            if (value === "" && (key === "expectedRevision" || key === "operationId" || key === "topic")) continue;
-            args[key] = value;
-          }
-          var result = await props.dsh.call("executeTool", props.sessionId, { name: tool, args: args });
-          setOk("执行成功：" + stableStringify(result));
+          var saveArgs = { id: node.id, patch: patch };
+          if (card.revision !== undefined && card.revision !== null) saveArgs.expectedRevision = card.revision;
+          await props.dsh.call("executeTool", props.sessionId, { name: "spark_update", args: saveArgs });
+          setFormOk("卡片已保存");
           if (typeof props.onSaved === "function") props.onSaved();
+          await loadCard();
         } catch (e) {
-          setError(e);
+          setFormError(e);
         } finally {
-          setBusy(false);
+          setFormBusy(false);
         }
       };
       return h("div", { className: "dshi_card" },
@@ -1200,7 +1254,10 @@ window.__ModuleLoader__.load({
           h("div", { className: "dshi_row" },
             h("span", { className: "dshi_cardTitle" }, "关联连线"),
             h("button", { className: "dshi_btn", disabled: linksBusy, onClick: loadCard }, linksBusy ? "读取中…" : "重新读取"),
-            h("span", { className: "dshi_hint" }, "改完要点「保存连线」才生效；保存走版本校验，别处刚改过会提示冲突")),
+            h("button", { className: "dshi_btn", disabled: linksBusy || !linksDirty, onClick: undoLinks }, linksDirty ? "撤销修改" : "没有未保存的改动"),
+            h("span", { style: { flex: 1 } }),
+            h("span", { className: "dshi_hint" }, linksDirty ? "有未保存的改动" : "与服务端一致")),
+          h("div", { className: "dshi_hint" }, "「添加连线」「移除」都只是本地改动，点「保存连线」才写入服务端；删错了点「撤销修改」退回读取时的样子。"),
           ErrorBox(linksError),
           linksOk ? h("div", { className: "dshi_ok" }, linksOk) : null,
           card === null
@@ -1236,32 +1293,37 @@ window.__ModuleLoader__.load({
             h("button", { className: "dshi_btn", disabled: !linkTarget, onClick: addLink }, "添加连线"),
             h("button", { className: "dshi_btn dshi_btnPrimary", disabled: linksBusy || !card, onClick: saveLinks }, linksBusy ? "保存中…" : "保存连线"))),
 
-        h("div", { className: "dshi_row" },
-          h("label", { className: "dshi_label" }, "改写这张卡的内容（走记忆工具，服务端校验版本）",
-            h("select", {
-              className: "dshi_select",
-              value: tool,
-              onChange: function (event) { setTool(event.target.value); }
-            }, Object.keys(TOOL_TEMPLATES).map(function (name) {
-              return h("option", { key: name, value: name }, (TOOL_LABELS[name] || name) + "（" + name + "）");
-            })))),
-        Object.keys(TOOL_TEMPLATES[tool]).map(function (key) {
-          return h("label", { key: key, className: "dshi_label" }, (TOOL_FIELD_LABELS[key] || key) + "（" + key + "）",
-            h("textarea", {
-              className: "dshi_textarea",
-              style: key === "content" ? { minHeight: 140 } : { minHeight: 34 },
-              value: fields[key] ?? "",
-              onChange: function (event) {
-                var next = assign({}, fields);
-                next[key] = event.target.value;
-                setFields(next);
-              }
-            }));
-        }),
-        ErrorBox(error),
-        okText ? h("div", { className: "dshi_ok" }, okText) : null,
-        h("div", { className: "dshi_row" },
-          h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy, onClick: run }, busy ? "执行中…" : "执行修改")));
+        // 卡片内容：只改 spark 卡片本身。人设卡 / 记忆核心在「记忆 L0/L1」页，
+        // 主题在「L3/topic 记忆管理」页——这里不再混进那四个记忆工具。
+        h("div", { className: "dshi_card" },
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_cardTitle" }, "卡片内容"),
+            formOk ? h("span", { className: "dshi_ok" }, formOk) : null,
+            h("span", { style: { flex: 1 } }),
+            h("button", { className: "dshi_btn dshi_btnPrimary", disabled: formBusy || !form || !card, onClick: saveForm }, formBusy ? "保存中…" : "保存卡片")),
+          ErrorBox(formError),
+          form === null
+            ? h("div", { className: "dshi_loading" }, linksBusy ? "正在读取卡片…" : "还没读到卡片，点上方「重新读取」")
+            : h(fragment, null,
+                h("label", { className: "dshi_label" }, "标题",
+                  h("input", { className: "dshi_input", value: form.title, onChange: function (event) { updateField("title", event.target.value); } })),
+                h("label", { className: "dshi_label" }, "摘要（一行，可空）",
+                  h("input", { className: "dshi_input", value: form.summary, onChange: function (event) { updateField("summary", event.target.value); } })),
+                h("label", { className: "dshi_label" }, "正文",
+                  h("textarea", { className: "dshi_textarea", style: { minHeight: 160 }, value: form.content, onChange: function (event) { updateField("content", event.target.value); } })),
+                h("div", { className: "dshi_grid2" },
+                  h("label", { className: "dshi_label" }, "触发词（一行一条）",
+                    h("textarea", { className: "dshi_textarea", style: { minHeight: 70 }, value: form.triggers, onChange: function (event) { updateField("triggers", event.target.value); } })),
+                  h("label", { className: "dshi_label" }, "实体（一行一条）",
+                    h("textarea", { className: "dshi_textarea", style: { minHeight: 70 }, value: form.entities, onChange: function (event) { updateField("entities", event.target.value); } }))),
+                h("label", { className: "dshi_label" }, "重要度",
+                  h("select", { className: "dshi_select", value: form.vitality, onChange: function (event) { updateField("vitality", event.target.value); } },
+                    form.vitality !== "evergreen" && form.vitality !== "ephemeral"
+                      ? h("option", { value: form.vitality }, VITALITY_LABELS[form.vitality] || form.vitality)
+                      : null,
+                    h("option", { value: "evergreen" }, "长期卡（evergreen）"),
+                    h("option", { value: "ephemeral" }, "短期卡（ephemeral）"))),
+                h("div", { className: "dshi_hint" }, "保存走版本校验：别处刚改过这张卡会提示冲突，点「重新读取」再改。人设卡 / 记忆核心在「记忆 L0/L1」页改，主题在「L3/topic 记忆管理」页改。"))));
     }
 
     // ── Q-A：cluster 候选「合并进主题」辅助 ──────────────────────────────────
@@ -1996,6 +2058,178 @@ window.__ModuleLoader__.load({
         : null);
     }
 
+    // ── L3：主题（topic）记忆管理 ────────────────────────────────────────────
+    // memory_list_topics 只回元数据（key/title/summary/chars/revision），正文必须
+    // memory_read(topic) 单独拿——几十个主题一次性全读会拖慢面板，所以列表默认只显示名字，
+    // 点「展开」才读正文。legacy 主题（updated === "legacy-unknown"）服务端拒写，只读展示。
+    function TopicsTab(props) {
+      var listState = useState(null);
+      var topics = listState[0];
+      var setTopics = listState[1];
+      var busyState = useState(false);
+      var busy = busyState[0];
+      var setBusy = busyState[1];
+      var errorState = useState(null);
+      var error = errorState[0];
+      var setError = errorState[1];
+      var openedState = useState("");
+      var opened = openedState[0];
+      var setOpened = openedState[1];
+      var detailState = useState(null);
+      var detail = detailState[0];
+      var setDetail = detailState[1];
+      var detailBusyState = useState(false);
+      var detailBusy = detailBusyState[0];
+      var setDetailBusy = detailBusyState[1];
+      var detailErrorState = useState(null);
+      var detailError = detailErrorState[0];
+      var setDetailError = detailErrorState[1];
+      var editingState = useState(false);
+      var editing = editingState[0];
+      var setEditing = editingState[1];
+      var draftState = useState("");
+      var draft = draftState[0];
+      var setDraft = draftState[1];
+      var saveBusyState = useState(false);
+      var saveBusy = saveBusyState[0];
+      var setSaveBusy = saveBusyState[1];
+      var saveErrorState = useState(null);
+      var saveError = saveErrorState[0];
+      var setSaveError = saveErrorState[1];
+      var saveOkState = useState(null);
+      var saveOk = saveOkState[0];
+      var setSaveOk = saveOkState[1];
+
+      var load = async function () {
+        setBusy(true);
+        setError(null);
+        try {
+          var result = await props.dsh.call("executeTool", props.sessionId, { name: "memory_list_topics", args: {} });
+          setTopics(Array.isArray(result && result.topics) ? result.topics : []);
+        } catch (e) {
+          setTopics(null);
+          setError(e);
+        } finally {
+          setBusy(false);
+        }
+      };
+      useEffect(function () { load(); }, [props.sessionId]);
+
+      var readTopic = async function (key) {
+        setDetailBusy(true);
+        setDetailError(null);
+        try {
+          setDetail(await props.dsh.call("executeTool", props.sessionId, { name: "memory_read", args: { topic: key } }));
+        } catch (e) {
+          setDetail(null);
+          setDetailError(e);
+        } finally {
+          setDetailBusy(false);
+        }
+      };
+      var openTopic = function (key) {
+        if (opened === key) {
+          setOpened("");
+          setDetail(null);
+          setEditing(false);
+          setDraft("");
+          setSaveOk(null);
+          setSaveError(null);
+          return;
+        }
+        setOpened(key);
+        setDetail(null);
+        setDetailError(null);
+        setEditing(false);
+        setDraft("");
+        setSaveOk(null);
+        setSaveError(null);
+        readTopic(key);
+      };
+      var beginEdit = function () {
+        if (!detail) return;
+        setDraft(typeof detail.content === "string" ? detail.content : "");
+        setEditing(true);
+        setSaveOk(null);
+        setSaveError(null);
+      };
+      var cancelEdit = function () { setEditing(false); setDraft(""); setSaveError(null); };
+      var save = async function () {
+        if (!detail) return;
+        var key = detail.topic || opened;
+        setSaveBusy(true);
+        setSaveError(null);
+        setSaveOk(null);
+        try {
+          var args = { topic: key, content: draft };
+          if (detail.revision !== undefined && detail.revision !== null) args.expectedRevision = detail.revision;
+          await props.dsh.call("executeTool", props.sessionId, { name: "memory_rewrite", args: args });
+          setEditing(false);
+          setSaveOk("主题「" + key + "」已保存");
+          await readTopic(key);
+          await load();
+        } catch (e) {
+          setSaveError(e);
+        } finally {
+          setSaveBusy(false);
+        }
+      };
+
+      return h("div", null,
+        h("div", { className: "dshi_row", style: { marginBottom: 8 } },
+          h("span", { className: "dshi_cardTitle" }, "L3 主题记忆（topic）"),
+          h("button", { className: "dshi_btn", disabled: busy, onClick: load }, busy ? "刷新中…" : "刷新"),
+          h("span", { style: { flex: 1 } }),
+          h("span", { className: "dshi_hint" }, topics === null ? "" : "共 " + topics.length + " 个主题")),
+        h("div", { className: "dshi_hint" }, "L3 是跨会话的长期主题记忆，每条按 key 存一个文件。这里列表只显示名字和字数，点「展开」才读正文；编辑是整篇覆盖，保存走版本校验。"),
+        ErrorBox(error),
+        busy && topics === null ? h("div", { className: "dshi_loading" }, "正在读取主题列表…") : null,
+        topics !== null && topics.length === 0 ? h("div", { className: "dshi_hint" }, "这个作用域下还没有主题。") : null,
+        topics !== null ? h("div", { className: "dshi_items" }, topics.map(function (row) {
+          var key = String(row.key);
+          var legacy = isLegacyTopicRow(row);
+          var isOpen = opened === key;
+          return h("div", { key: key, className: "dshi_item" },
+            h("div", { className: "dshi_itemHead" },
+              h("span", { className: "dshi_cardTitle" }, key),
+              row.title ? h("span", { className: "dshi_hint" }, String(row.title)) : null,
+              legacy ? h("span", { className: "dshi_badge dshi_badgeWarn" }, "legacy 只读") : null,
+              h("span", { style: { flex: 1 } }),
+              h("span", { className: "dshi_mono" }, (row.chars ?? 0) + " 字符"),
+              h("button", { className: "dshi_btn", onClick: function () { openTopic(key); } }, isOpen ? "收起" : "展开")),
+            isOpen
+              ? h("div", null,
+                  row.summary ? h("div", { className: "dshi_hint" }, String(row.summary)) : null,
+                  detailBusy ? h("div", { className: "dshi_loading" }, "正在读取正文…") : null,
+                  ErrorBox(detailError),
+                  detail ? h("div", null,
+                    h("div", { className: "dshi_row" },
+                      h("span", { className: "dshi_mono", title: "完整版本号：" + String(detail.revision) }, "rev " + shortRev(detail.revision)),
+                      h("span", { className: "dshi_hint" }, (detail.bytes ?? 0) + " 字节"),
+                      detail.truncated ? h("span", { className: "dshi_badge dshi_badgeWarn" }, "正文过长，已截断") : null,
+                      h("span", { style: { flex: 1 } }),
+                      legacy
+                        ? h("span", { className: "dshi_hint" }, "legacy 主题由旧版写入，服务端拒绝改写")
+                        : (editing
+                          ? h(fragment, null,
+                              h("button", { className: "dshi_btn dshi_btnPrimary", disabled: saveBusy, onClick: save }, saveBusy ? "保存中…" : "保存"),
+                              h("button", { className: "dshi_btn", disabled: saveBusy, onClick: cancelEdit }, "取消"))
+                          : h("button", { className: "dshi_btn", onClick: beginEdit }, "编辑"))),
+                    saveOk ? h("div", { className: "dshi_ok" }, saveOk) : null,
+                    ErrorBox(saveError),
+                    editing
+                      ? h("textarea", {
+                          className: "dshi_textarea",
+                          style: { minHeight: 220 },
+                          value: draft,
+                          onChange: function (event) { setDraft(event.target.value); }
+                        })
+                      : h("pre", { className: "dshi_pre" }, String(detail.content ?? "")))
+                  : null)
+              : null);
+        })) : null);
+    }
+
     // 预算字段语义：比率 ∈ (0,1)；字符/计数类为正整数，且不超过 Q 的生产上限
     // （与 numberField 的 max 及 src/plugin/config.mjs BUDGET_CEILINGS 一致）。
     // 空白输入＝用户没有填写＝不写该字段（保留服务端现值/默认值），绝不按 Number("")=0 落盘。
@@ -2211,6 +2445,7 @@ window.__ModuleLoader__.load({
       { id: "memory", label: "记忆 L0/L1" },
       { id: "graph", label: "图谱" },
       { id: "candidates", label: "候选 / 计划" },
+      { id: "topics", label: "L3/topic 记忆管理" },
       { id: "budgets", label: "预算配置" }
     ];
 
@@ -2594,7 +2829,8 @@ window.__ModuleLoader__.load({
                     ? ModePlaceholder(mode) : null,
                   tab === "memory" && (modeStatus === null || mode === "active") ? h(MemoryTab, { dsh: props.dsh, sessionId: sessionId, budgets: budgets, onSessionUnavailable: noteSessionUnavailable }) : null,
                   tab === "graph" && (modeStatus === null || mode === "active") ? h(GraphTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,
-                  tab === "candidates" && (modeStatus === null || mode === "active") ? h(CandidatesTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null));
+                  tab === "candidates" && (modeStatus === null || mode === "active") ? h(CandidatesTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,
+                  tab === "topics" && (modeStatus === null || mode === "active") ? h(TopicsTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null));
     }
 
     // ── 客户端入口：$mount → 槽位注册，全部 disposer 逆序释放 ────────────────

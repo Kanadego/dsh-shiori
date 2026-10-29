@@ -2972,3 +2972,245 @@ test("第 7 轮：原始 JSON 默认折叠——候选行与计划行都用 deta
   assert.ok(text.includes("候选由「分析整理候选 / 分析遗忘候选」生成"), "candidates hint rendered");
 });
 
+// ── 第 8 轮：面板第二轮反馈 ────────────────────────────────────────────────
+// ① 图谱之后新增 L3 主题页；② revision token 截断；③ 卡片详情只改 spark 卡片、
+// 连线可撤销；④ 主题列表默认只显示名字，展开才读正文。
+
+// 与 mountCandidates 同一套路，但按 tab id 找组件：预置 ShioriSection 的
+// tab / sessionId / modeStatus，渲染一次拿到目标 tab 的组件引用。
+async function mountTabById(mod, host, tabId, tabName) {
+  let renderSlot = null;
+  await mod.apply({
+    remote: { $mount: async () => () => {} },
+    slots: {
+      inject: (name, fn) => fn(),
+      register: (meta, render) => { renderSlot = render; return () => {}; },
+    },
+  });
+  const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
+  host.states.length = 0;
+  host.states.push(tabId, "session-A", "", null, { mode: "active" });
+  host.cursor.v = 0;
+  const sectionTree = sectionVNode.type(sectionVNode.props);
+  const tab = flattenVNode(sectionTree).find((n) => typeof n.type === "function" && n.type.name === tabName);
+  assert.ok(tab, tabName + " reached through real slot render");
+  return (dsh, sessionId, options = {}) => {
+    host.cursor.v = 0;
+    host.runEffects.v = Boolean(options.effects);
+    return tab.type({ dsh, sessionId });
+  };
+}
+
+test("R8：新增「L3/topic 记忆管理」tab，顺序在候选/计划之后、预算配置之前", async () => {
+  const services = {
+    "remote.session": { list: async () => ({ ok: true, value: { items: [{ sessionId: "session-A" }] } }) },
+    "remote.shiori": { getStatus: async () => ({ ok: true, value: { mode: "active", configured: true } }) },
+  };
+  const { host, sectionVNode, cleanup } = await mountPanel(services);
+  const tree = await bootPanel(host, sectionVNode);
+  const labels = flattenVNode(tree)
+    .filter((n) => n.type === "button" && String((n.props && n.props.className) || "").includes("dshi_tab"))
+    .map((n) => [].concat(n.children).join(""));
+  assert.deepEqual(labels, ["状态", "记忆 L0/L1", "图谱", "候选 / 计划", "L3/topic 记忆管理", "预算配置"]);
+  await cleanup();
+});
+
+test("R8：L0/L1 标题行的 revision 只显示前缀，完整 token 收进 title 属性", async () => {
+  const longRev = "shiori-r1.eyJhbWJlciI6InBlcnNvbmEifQ.0123456789abcdef0123456789abcdef0123456789abcdef";
+  const services = {
+    "remote.session": { list: async () => ({ ok: true, value: { items: [{ sessionId: "session-A" }] } }) },
+    "remote.shiori": {
+      getStatus: async () => ({ ok: true, value: { mode: "active", configured: true } }),
+      getMemoryView: async () => ({
+        ok: true,
+        value: {
+          scope: "amber",
+          l0: { text: "PERSONA", revision: longRev, chars: 7, budget: 12000, stale: false },
+          l1: { text: "CORE BODY", body: "CORE BODY", revision: longRev, chars: 9, budget: 10000, hardCap: 14000 },
+        },
+      }),
+    },
+  };
+  const { host, sectionVNode, cleanup } = await mountPanel(services);
+  await bootPanel(host, sectionVNode);
+  host.states[0] = "memory";
+  host.cursor.v = 0;
+  host.runEffects.v = false;
+  const tree = sectionVNode.type(sectionVNode.props);
+  const memoryTab = findComponent(tree, "MemoryTab");
+  assert.ok(memoryTab);
+  await runTab(host, memoryTab);
+
+  host.cursor.v = PANEL_STATES;
+  const painted = memoryTab.type(memoryTab.props);
+  const text = collectText(painted);
+  const badges = flattenVNode(painted).filter((n) => String((n.props && n.props.className) || "").includes("dshi_badge") && String(n.props.title || "").startsWith("完整版本号："));
+  assert.equal(badges.length, 2, "两个 badge 都带完整版本号");
+  for (const badge of badges) {
+    assert.equal(badge.props.title, "完整版本号：" + longRev);
+    const shown = collectText(badge);
+    assert.equal(shown, "rev shiori-r1.ey…", "标题行只显示 12 字符前缀 + 省略号");
+    assert.equal(shown.includes(longRev), false, "标题行不再铺完整 token");
+  }
+  // 完整值仍可从「完整 DTO」折叠区查到（排查用），所以这里只钉标题行本身。
+  assert.ok(text.includes("完整 DTO"), "原始 DTO 仍可展开查看");
+  await cleanup();
+});
+
+test("R8：L3 主题页默认不读正文，展开才 memory_read；legacy 只读；保存带 expectedRevision", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderTopics = await mountTabById(mod, host, "topics", "TopicsTab");
+  const calls = [];
+  const topicRevision = "shiori-r1.c3RkLWJ5LXRvcGlj.abcdef0123456789abcdef0123456789abcdef0123456789";
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (payload && payload.name === "memory_list_topics") {
+        return {
+          topics: [
+            { key: "t-live", title: "活主题", summary: "一行摘要", updated: "2026-10-26T10:00:00.000Z", revision: topicRevision, chars: 12, bytes: 20 },
+            { key: "t-legacy", title: "旧主题", summary: "", updated: "legacy-unknown", revision: topicRevision, chars: 5, bytes: 9 },
+          ],
+        };
+      }
+      if (payload && payload.name === "memory_read") {
+        return { topic: payload.args.topic, exists: true, content: "# " + payload.args.topic + " 正文\n", revision: topicRevision, bytes: 18 };
+      }
+      if (payload && payload.name === "memory_rewrite") return { ok: true };
+      return {};
+    },
+  };
+  const countTool = (name) => calls.filter((c) => c.payload && c.payload.name === name).length;
+
+  host.states.length = 0;
+  let tree = renderTopics(dsh, "session-A", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  host.runEffects.v = false;
+  tree = renderTopics(dsh, "session-A");
+
+  const text = collectText(tree);
+  assert.ok(text.includes("L3 主题记忆（topic）"), "page title");
+  assert.ok(text.includes("t-live") && text.includes("t-legacy"), "两个主题都在列表里");
+  assert.ok(text.includes("legacy 只读"), "legacy 行标注只读");
+  assert.equal(countTool("memory_read"), 0, "列表默认不读正文");
+  assert.equal(countTool("memory_list_topics"), 1, "进页只拉一次列表");
+
+  // 展开 t-live：这时才读正文
+  findButton(tree, "展开").props.onClick();
+  await settle();
+  tree = renderTopics(dsh, "session-A");
+  assert.ok(collectText(tree).includes("# t-live 正文"), "展开后读到正文");
+  assert.equal(countTool("memory_read"), 1, "只有展开的那一个主题发 memory_read");
+  assert.equal(calls.filter((c) => c.payload && c.payload.name === "memory_read")[0].payload.args.topic, "t-live");
+
+  // legacy 展开：给提示，不给编辑按钮
+  findButton(tree, "展开").props.onClick();
+  await settle();
+  tree = renderTopics(dsh, "session-A");
+  assert.ok(collectText(tree).includes("legacy 主题由旧版写入，服务端拒绝改写"), "legacy 行给出只读说明");
+  assert.equal(flattenVNode(tree).filter((n) => n.type === "button" && collectText(n) === "编辑").length, 0, "legacy 行没有编辑按钮");
+
+  // 回到活跃主题编辑保存：memory_rewrite 带 expectedRevision
+  findButton(tree, "展开").props.onClick();
+  await settle();
+  tree = renderTopics(dsh, "session-A");
+  findButton(tree, "编辑").props.onClick();
+  await settle();
+  tree = renderTopics(dsh, "session-A");
+  const textarea = flattenVNode(tree).find((n) => n.type === "textarea");
+  assert.ok(textarea, "编辑框打开");
+  assert.ok(String(textarea.props.value).includes("# t-live 正文"), "编辑初值是当前正文");
+  textarea.props.onChange({ target: { value: "# t-live 新正文\n" } });
+  tree = renderTopics(dsh, "session-A");
+  findButton(tree, "保存").props.onClick();
+  await settle();
+  const rewrite = calls.find((c) => c.payload && c.payload.name === "memory_rewrite");
+  assert.ok(rewrite, "memory_rewrite issued");
+  assert.deepEqual(rewrite.payload.args, { topic: "t-live", content: "# t-live 新正文\n", expectedRevision: topicRevision });
+});
+
+test("R8：卡片详情只编辑 spark 卡片本身——保存只提交改动字段，连线可撤销", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderGraph = await mountTabById(mod, host, "graph", "GraphTab");
+  const calls = [];
+  const card = {
+    id: "spk-1", revision: 3, title: "旧标题", summary: "", content: "旧正文",
+    triggers: ["甲"], entities: [], links: [{ target: "spk-2", rel: "related" }],
+    vitality: "ephemeral", state: "active",
+  };
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (method === "getGraph") {
+        return {
+          nodes: [
+            { id: "spk-1", title: "旧标题", vitality: "ephemeral", state: "active", revision: 3 },
+            { id: "spk-2", title: "另一张卡", vitality: "evergreen", state: "active", revision: 1 },
+          ],
+          edges: [],
+        };
+      }
+      if (payload && payload.name === "spark_read") return Object.assign({}, card);
+      if (payload && payload.name === "spark_update") return { ok: true };
+      return {};
+    },
+  };
+
+  host.states.length = 0;
+  let tree = renderGraph(dsh, "session-A", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  host.runEffects.v = false;
+
+  host.states[2] = { id: "spk-1", title: "旧标题", vitality: "ephemeral", state: "active", revision: 3, raw: { id: "spk-1" } };
+  tree = renderGraph(dsh, "session-A");
+  const detail = findComponent(tree, "NodeDetail");
+  assert.ok(detail, "NodeDetail mounted for the selected node");
+
+  // NodeDetail 的 useState 紧接 GraphTab 的 4 个之后（graph / error / selected / view）
+  host.cursor.v = 4;
+  host.runEffects.v = true;
+  detail.type(detail.props);
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  host.runEffects.v = false;
+  const renderDetail = () => { host.cursor.v = 4; return detail.type(detail.props); };
+
+  let painted = renderDetail();
+  let text = collectText(painted);
+  assert.ok(text.includes("卡片内容"), "卡片内容表单渲染出来");
+  assert.ok(!text.includes("重写人设卡"), "卡片详情里不再有人设卡改写入口");
+  assert.ok(!text.includes("重写记忆核心"), "卡片详情里不再有记忆核心改写入口");
+  assert.ok(!text.includes("往某个主题里追加内容"), "topic_append 已挪到独立页");
+  assert.ok(text.includes("另一张卡"), "已有连线显示目标卡标题");
+
+  // 只改标题：patch 里只有 title，不夹带其它字段
+  const titleInput = flattenVNode(painted).find((n) => n.type === "input" && n.props.value === "旧标题");
+  assert.ok(titleInput, "标题输入框带当前值");
+  titleInput.props.onChange({ target: { value: "新标题" } });
+  painted = renderDetail();
+  findButton(painted, "保存卡片").props.onClick();
+  await settle();
+  const update = calls.find((c) => c.payload && c.payload.name === "spark_update");
+  assert.ok(update, "spark_update issued");
+  assert.deepEqual(update.payload.args, { id: "spk-1", patch: { title: "新标题" }, expectedRevision: 3 });
+
+  // 移除连线 → 标记未保存 → 「撤销修改」还原且不写服务端
+  calls.length = 0;
+  painted = renderDetail();
+  assert.ok(collectText(painted).includes("与服务端一致"), "刚读完时连线与服务端一致");
+  findButton(painted, "移除").props.onClick();
+  painted = renderDetail();
+  assert.ok(collectText(painted).includes("有未保存的改动"), "删掉连线后标记未保存");
+  assert.ok(collectText(painted).includes("这张卡还没有连线。"), "连线行在本地消失");
+  findButton(painted, "撤销修改").props.onClick();
+  painted = renderDetail();
+  assert.ok(collectText(painted).includes("与服务端一致"), "撤销后回到一致状态");
+  assert.equal(collectText(painted).includes("这张卡还没有连线。"), false, "连线恢复");
+  assert.equal(flattenVNode(painted).filter((n) => n.type === "button" && collectText(n) === "移除").length, 1, "连线行回到列表里");
+  assert.equal(calls.length, 0, "撤销只在本地还原，不发请求");
+});
+
