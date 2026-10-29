@@ -1,8 +1,28 @@
 {
   "name": "dsh-shiori",
-  "version": "0.1.0-alpha.1",
-  "private": true,
-  "description": "DeepSeek Harness 的分层记忆插件：L0 人设卡 + L1 core/索引 + L2 Spark 图谱闪回 + L3 topics + 整理/双轨遗忘；默认 shadow 只读影子，active 显式启用；含原生 web 面板（状态/记忆预览/图谱 CAS 编辑/候选审阅执行/预算配置）。",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness 的分层记忆插件：L0 人设卡常驻、L1 记忆核心+派生索引每轮注入、L2 Spark 卡片按触发词浮回、L3 专题按需展开，配套整理/遗忘与原生 web 面板。",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kanadego/dsh-shiori.git"
+  },
+  "homepage": "https://github.com/Kanadego/dsh-shiori",
+  "bugs": {
+    "url": "https://github.com/Kanadego/dsh-shiori/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "memory",
+    "long-term-memory",
+    "persona",
+    "sparks",
+    "system-prompt"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org"
+  },
   "type": "module",
   "icon": "./icon.png",
   "main": "index.mjs",
@@ -40,14 +60,14 @@
     "cordis.patch.yml",
     "docs/plugin/INSTALL.md",
     "docs/plugin/client.md",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "node --test test/core/*.test.mjs test/host/*.test.mjs test/storage/*.test.mjs test/service/*.test.mjs test/integration/*.test.mjs test/runtime/*.test.mjs test/completion/*.test.mjs test/acceptance/*.test.mjs test/sparks/*.test.mjs test/organize/*.test.mjs test/forgetting/*.test.mjs test/plugin/*.test.mjs",
     "test:p5": "node --test test/plugin/*.test.mjs",
     "verify:package": "node scripts/verify-package.mjs",
     "test:integration": "node --test test/service/*.test.mjs test/integration/*.test.mjs",
-    "test:board": "node --test collab/board.test.mjs",
     "test:p1": "node --test test/runtime/*.test.mjs test/completion/*.test.mjs test/acceptance/*.test.mjs",
     "test:p3": "node --test test/organize/*.test.mjs",
     "test:p4": "node --test test/forgetting/*.test.mjs"
@@ -59,14 +79,5 @@
     "@deepseek-ai/schemastery": "^3.18.4",
     "react": "^18.2.0 || ^19.0.0"
   },
-  "keywords": [
-    "dsh",
-    "dsh-plugin",
-    "deepseek-harness",
-    "memory",
-    "persona",
-    "sparks",
-    "system-prompt"
-  ],
-  "license": "UNLICENSED"
+  "license": "CC-BY-NC-SA-4.0"
 }

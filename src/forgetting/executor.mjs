@@ -1,5 +1,5 @@
 // Shiori P4-EXECUTOR-COLD-SEARCH · 可信遗忘执行门面
-// 契约：phase5/collab/CONTRACTS.md §1/§3/§5/§7。
+// 只做输入校验、可信授权与执行转发；衰减算法在 decay.mjs。
 //
 // 职责边界：本模块是宿主注入可信依赖（store / authorize / now / policy）后的
 // 薄执行层，只做输入验证、首个 await 前的独立 clone、逐次可信授权与执行转发。

@@ -165,7 +165,7 @@ function runSuite() {
 
   const packTgz = (pkgDir) => {
     execFileSync("npm pack --silent", { cwd: pkgDir, encoding: "utf8", shell: true, windowsHide: true });
-    return join(pkgDir, "dsh-shiori-0.1.0-alpha.1.tgz");
+    return join(pkgDir, "dsh-shiori-0.1.0.tgz");
   };
 
   const stagePackageCopy = (targetPkg, { overlayP = false, writeStubs = false } = {}) => {
@@ -232,7 +232,7 @@ function runSuite() {
 
   test("single：真实 dsh plugin add——tgz 激活为 bundle，profile 清单追加 dsh-shiori", () => {
     const result = dsh(smoke, "shiori-smoke", ["plugin", "--profile", "shiori-smoke", "add", smoke.tgz]);
-    assert.ok(result.stdout.includes("dsh-shiori 0.1.0-alpha.1"), `pnpm installed the package:\n${result.stdout.slice(-500)}`);
+    assert.ok(result.stdout.includes("dsh-shiori 0.1.0"), `pnpm installed the package:\n${result.stdout.slice(-500)}`);
     const bundles = profileManifest(smoke.profile).dsh.profile.bundles;
     assert.ok(bundles.includes("dsh-shiori"), "dsh.profile.bundles gains dsh-shiori");
     assert.ok(bundles.includes("@deepseek-ai/dsh-base"), "base bundle retained");
@@ -294,7 +294,7 @@ function runSuite() {
   test(`${combinedLabel}：真实 add + dump-config（无 stub 的 P controller/protocol 参与装配）`, () => {
     if (!combinedAvailable) return;
     const result = dsh(combined, "shiori-smoke-p", ["plugin", "--profile", "shiori-smoke-p", "add", combined.tgz]);
-    assert.ok(result.stdout.includes("dsh-shiori 0.1.0-alpha.1"), `combined add output:\n${result.stdout.slice(-500)}`);
+    assert.ok(result.stdout.includes("dsh-shiori 0.1.0"), `combined add output:\n${result.stdout.slice(-500)}`);
     const bundles = profileManifest(combined.profile).dsh.profile.bundles;
     assert.ok(bundles.includes("dsh-shiori"), "combined profile bundles gains dsh-shiori");
     const dump = dsh(combined, "shiori-smoke-p", ["--profile", "shiori-smoke-p", "--dump-config"]);

@@ -24,8 +24,8 @@ export function checkPackageJson(pkg) {
   const expect = (condition, message) => { if (!condition) problems.push(message); };
 
   expect(pkg.name === "dsh-shiori", `name should be dsh-shiori, got ${pkg.name}`);
-  expect(pkg.version === "0.1.0-alpha.1", `version should be 0.1.0-alpha.1, got ${pkg.version}`);
-  expect(pkg.private === true, "private must be true (pre-release candidate; no publish)");
+  expect(pkg.version === "0.1.0", `version should be 0.1.0, got ${pkg.version}`);
+  expect(pkg.private === undefined, "private must be gone (the package is published)");
   expect(pkg.type === "module", "type must be module");
   expect(pkg.main === "index.mjs", "main must be index.mjs");
   expect(pkg.exports?.["."] === "./index.mjs", 'exports["."] must be ./index.mjs');
@@ -41,7 +41,7 @@ export function checkPackageJson(pkg) {
   // client bundle 只 require Web shell 的 ModuleLoader seeds（react/zod），不声明
   // 图依赖——若未来真的加载其他客户端插件包，才在此显式列出。
   expect(pkg.dsh?.client?.inject === undefined, "dsh.client.inject must stay absent (seed require ≠ graph dependency)");
-  expect(pkg.license === "UNLICENSED", "license must be UNLICENSED until decided");
+  expect(pkg.license === "CC-BY-NC-SA-4.0", "license must be CC-BY-NC-SA-4.0 (matches LICENSE)");
   expect(typeof pkg.scripts?.test === "string" && pkg.scripts.test.includes("test/plugin/*.test.mjs"),
     "npm test must explicitly include test/plugin/*.test.mjs");
   expect(pkg.scripts?.["test:p5"]?.includes("test/plugin"), "test:p5 script must exist");

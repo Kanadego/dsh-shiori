@@ -1,6 +1,6 @@
 // Shiori P3-QUEUE-DIFF · K 槽位：可恢复候选队列与审阅 diff 草案
 //
-// 职责边界（phase4/collab/CONTRACTS.md §3）：
+// 职责边界：
 // - createCandidateQueue：内存中的候选队列，可 JSON 快照恢复；本模块不持久化任何用户文件。
 //   入队 / 审核只改变队列自身状态；reviewed 是「已审阅」不是「已批准 / 已执行」，
 //   队列不产生任何业务写入，也不携带 approval / operationId 语义到 Plan。

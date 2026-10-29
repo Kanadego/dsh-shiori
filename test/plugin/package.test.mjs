@@ -67,11 +67,11 @@ function findLatestPSubmission() {
 
 const pSubmission = findLatestPSubmission();
 
-test("package.json：候选名/版本/私有/license 如实标注", () => {
+test("package.json：包名/版本/license 如实标注（公开发布态）", () => {
   assert.equal(pkg.name, "dsh-shiori");
-  assert.equal(pkg.version, "0.1.0-alpha.1");
-  assert.equal(pkg.private, true, "pre-release candidate must stay private (no publish)");
-  assert.equal(pkg.license, "UNLICENSED", "license undecided: honest UNLICENSED, no fabrication");
+  assert.equal(pkg.version, "0.1.0");
+  assert.equal(pkg.private, undefined, "publishing requires the private flag to be gone");
+  assert.equal(pkg.license, "CC-BY-NC-SA-4.0", "license is CC BY-NC-SA 4.0, matching the LICENSE file");
   assert.equal(pkg.type, "module");
 });
 

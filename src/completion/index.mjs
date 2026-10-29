@@ -1,7 +1,7 @@
 /**
  * Shiori P1-COMPLETION · 完成事件持久状态（openCompletionState）。
  *
- * 契约（collab/CONTRACTS.md「E：完成事件与持久接口」）：
+ * 接口约定（完成事件与持久接口）：
  *
  *     export async function openCompletionState({ root, scopeId });
  *     -> { sink: { load(), save(snapshot) }, flush(), close(), diagnostics() }

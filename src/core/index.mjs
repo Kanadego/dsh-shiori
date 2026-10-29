@@ -1,4 +1,4 @@
-// Shiori P0-CORE 公共入口（契约：collab/CONTRACTS.md §A）。
+// Shiori 核心层公共入口。
 // 仅导出契约规定的六个成员；实现细节分布在同目录各模块。
 //
 //   DEFAULT_CONFIG / validateConfig  —— 配置默认值与整体校验

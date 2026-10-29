@@ -30,7 +30,7 @@
 // P3-L 已选择性集成（2026-10-25）：受审执行器内部存储原语
 //
 // 来源为 L a3 不可变提案；主审验证纯插入增量并备份后合入本生产入口。
-// 原提案保存在 phase4/collab/submissions；以下为新增能力：
+// 以下为新增能力：
 //
 //   1. 新增 store.bindOrganizeRound(plan, {operationId})：把规范 organize plan
 //      指纹绑定到 scope DB 的 operations 账（runMutation，不改卡）。
@@ -42,7 +42,7 @@
 //      （非 merged 卡不得携带这两个字段）；SYSTEM_FIELDS 同步扩展，update patch
 //      永远不能写 mergedInto/mergedAt。
 //   5. 新增 organize plan 严格 schema 校验（link / merge-topic），规则与
-//      src/organize/executor.mjs 中的副本一致（CONTRACTS §3/§4）。
+//      src/organize/executor.mjs 中的副本一致。
 //
 // 三个新方法都是「受审执行器的内部存储原语」：不是公开 tool、不独立声称
 // 已认证任何 topic/plan，调用方（executor）负责 authorize 与轮次绑定。
