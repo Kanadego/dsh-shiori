@@ -168,6 +168,25 @@ test("bundle apply：$mount → 槽位注册；失败逆序释放；$mount 失�
   assert.equal(events[events.length - 1], "unmount2", "$mount disposer released when slot registration fails");
 });
 
+test("宿主 ctx 冻结（真机只读上下文）时 apply 仍能挂载，不因 shioriNotify 赋值失败", async () => {
+  // 真机事故：桌面端 / web 宿主交给插件的 ctx 是冻结对象，apply 里给
+  // ctx.shioriNotify 赋值会抛 TypeError，客户端入口永远停在 loading，
+  // 桌面端直接报 "web boot: 1 entry did not activate / dsh-shiori: loading"。
+  const mod = loadClientModule();
+  let registered = null;
+  const ctx = Object.freeze({
+    remote: { $mount: async () => async () => {} },
+    slots: {
+      inject: (slot, factory) => factory(),
+      register: (meta, renderFn) => { registered = { meta, render: renderFn }; return () => {}; },
+    },
+  });
+  const cleanup = await mod.apply(ctx);
+  assert.ok(registered, "slot registration executed on frozen ctx");
+  assert.equal(ctx.shioriNotify, undefined, "frozen ctx 不接受额外字段");
+  await cleanup();
+});
+
 test("bundle 面板：渲染根节点与会话缺省提示（stub react 真执行组件函数）", async () => {
   const mod = loadClientModule();
   let registered = null;

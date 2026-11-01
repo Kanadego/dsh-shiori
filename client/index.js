@@ -3476,9 +3476,14 @@ window.__ModuleLoader__.load({
       // U8 可复用通知入口（需求 b/c 的「通过 ctx 传下去」形态）：后续页面/宿主
       // 可经 ctx.shioriNotify 调 toast 三态与需重启组合提示；dispose 供卸载清理。
       // 只增不改，不覆盖宿主已有字段。
-      if (!ctx.shioriNotify) {
-        ctx.shioriNotify = { toast: shioriToast, restart: notifyRestart, dispose: disposeToastUi };
-      }
+      // 真机宿主（桌面端 / web）的 ctx 可能是冻结的只读对象：直接赋值会抛
+      // TypeError 让 apply 变红。这是可选便利入口，拿不到就跳过；页面内部本来
+      // 就走 props.notifyRestart 的同一条通路。
+      try {
+        if (!ctx.shioriNotify) {
+          ctx.shioriNotify = { toast: shioriToast, restart: notifyRestart, dispose: disposeToastUi };
+        }
+      } catch { /* 只读 ctx：这是可选入口，静默跳过 */ }
       try {
         disposers.push(await ctx.remote.$mount(TYPERT_REMOTE));
       } catch (error) {
