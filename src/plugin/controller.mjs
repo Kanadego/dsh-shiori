@@ -1029,6 +1029,9 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       maxRelated: settings.budgets.spark.linkCount,
       provider: semanticProvider,
       vectorsFor,
+      // 置信度下限走配置（semantic.minSimilarity，默认 0.55）：改配置即可调松紧，
+      // 不需要改代码重新打包。
+      threshold: settings.semantic.minSimilarity,
     });
     const match = recall.match;
     // 语义诊断转存（getStatus.diagnostics.semantic 消费）：embed 成功即视为

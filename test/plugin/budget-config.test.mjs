@@ -197,6 +197,7 @@ test("semantic 段默认值正确（provider=none，零依赖零网络）", () =
   const settings = normalizePluginConfig({});
   assert.deepEqual(settings.semantic, {
     provider: "none",
+    minSimilarity: 0.55,
     local: {
       model: "Xenova/bge-small-zh-v1.5",
       dims: 512,
@@ -224,6 +225,7 @@ test("semantic 段：合法值通过、未知键与非法 provider 拒绝", () =
   const local = normalizePluginConfig({ semantic: { provider: "local", local: { dims: 768 } } });
   assert.deepEqual(local.semantic, {
     provider: "local",
+    minSimilarity: 0.55,
     local: {
       model: "Xenova/bge-small-zh-v1.5",
       dims: 768,
@@ -240,6 +242,11 @@ test("semantic 段：合法值通过、未知键与非法 provider 拒绝", () =
   rejects(() => normalizePluginConfig({ semantic: { local: { unknownKey: 1 } } }), "unknown local key");
   rejects(() => normalizePluginConfig({ semantic: { api: { unknownKey: 1 } } }), "unknown api key");
   rejects(() => normalizePluginConfig({ semantic: { local: { dims: 0.5 } } }), "dims must be natural");
+  // 置信度下限：0 < minSimilarity ≤ 1，越界拒绝（0.8 这种更严的值必须能存）。
+  rejects(() => normalizePluginConfig({ semantic: { minSimilarity: 0 } }), "minSimilarity must be > 0");
+  rejects(() => normalizePluginConfig({ semantic: { minSimilarity: 1.2 } }), "minSimilarity must be ≤ 1");
+  rejects(() => normalizePluginConfig({ semantic: { minSimilarity: "0.6" } }), "minSimilarity must be a number");
+  assert.equal(normalizePluginConfig({ semantic: { minSimilarity: 0.8 } }).semantic.minSimilarity, 0.8);
   rejects(() => normalizePluginConfig({ semantic: { local: { model: "" } } }), "model must be non-empty");
   rejects(() => normalizePluginConfig({ semantic: { api: { endpoint: "" } } }), "endpoint must be string or null");
 });

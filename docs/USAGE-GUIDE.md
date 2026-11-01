@@ -148,13 +148,14 @@ dsh plugin --profile <名称> remove dsh-shiori
 | `local.dtype` | `fp32` | `fp32` / `fp16` / `q8`；体积与速度权衡见下 |
 | `local.cacheDir` | 空串 | 空串＝`<stateRoot>/semantic/models`（由 controller 解析），也可写绝对路径 |
 | `local.mirror` | `https://hf-mirror.com/` | 国内直连 huggingface.co 一般不可达；留空则走官方源 |
+| `minSimilarity` | 0.55 | 语义召回置信度下限（余弦，0.01–1）；越大越严。实测 24 条夹具：0.45 命中 21/24、额外捞进 17 张卡；0.55 → 17/24、多 6 张；0.60 → 16/24、多 4 张；0.65 → 13/24、多 1 张；**0.70 起等价于纯字面（多 0 张）** |
 | `api.endpoint` / `api.keyRef` | null | **本期未实现**（显式 NOT_IMPLEMENTED，不会静默假装可用） |
 
 - **安装要多点一次「允许」**：`@huggingface/transformers` 硬依赖 `onnxruntime-node` / `protobufjs` / `sharp`，三者都带安装脚本。GUI 装插件时会弹「允许运行安装脚本：onnxruntime-node, protobufjs, sharp」，点允许再重试即可；CLI 直接 `dsh plugin add` 会以 `ERR_PNPM_IGNORED_BUILDS` 失败，需先在 profile 的 `pnpm-workspace.yaml` 里写 `allowBuilds`（三个包都 `true`）。
 - **体积与首次下载**：装了依赖后 `node_modules` 约 +379MB（onnxruntime-node 208MB 含五平台二进制，实际只用 win32/x64 那 34MB，sharp 是依赖链强制带上的）。模型不随包发布，**首次 embed 时才下载**：q8 约 23MB、fp32 约 91MB，走 `local.mirror`；冷加载约 150ms，短文本单条 4–5ms。
 - **失败不炸**：模型加载/推理任一环节失败都会抛 `SEMANTIC_UNAVAILABLE`（带中文 message 与底层 cause），召回自动退回纯字面匹配，面板「状态」tab 的「语义召回」卡会显示上次错误；修好后调 `executeTool semantic_rebuild` 重建索引（单飞，运行中再调只返回进度快照）。
 - **索引位置**：`<stateRoot>/semantic/<scopeId>.json`，按卡 revision 增量重建；索引损坏或维度不符时收敛为空索引并如实记录，不阻断面板。
-- **召回口径**：字面命中 ∪ 语义近邻（余弦 ≥ 0.45），语义结果仍要过全部既有闸门（active / 开关 / 预算 / 去重）。离线评测脚本 `scripts/eval-recall.mjs`（不进 npm test）实测：字面 12/24 → 合并 24/24。
+- **召回口径**：字面命中 ∪ 语义近邻（余弦 ≥ `minSimilarity`，默认 0.55），语义结果仍要过全部既有闸门（active / 开关 / 预算 / 去重）。离线评测脚本 `scripts/eval-recall.mjs`（不进 npm test）可复现；调松紧只改 `minSimilarity` 一行再重载，不用改代码。
 
 ### 双端同时开同一个 dataRoot：后启动的一端只读
 

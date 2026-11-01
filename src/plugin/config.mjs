@@ -92,6 +92,10 @@ const personaChoice = () => nullableString().default(null);
 // 短名 "bge-small-zh-v1.5" 不是合法仓库、会 404（spike 实测用的就是 Xenova/ 前缀）。
 const DEFAULT_SEMANTIC = deepFreeze({
   provider: "none",
+  // 语义召回置信度下限（余弦）。F1b 校准值 0.45 偏宽：24 条夹具实测 0.45 命中 21/24
+  // 但额外捞进 17 张卡，0.55 是 17/24 命中 / 仅多 6 张卡的折中；0.70 起等价于纯字面。
+  // 想更严或更松改这里即可（无需改代码），0.01–1 之间的小数。
+  minSimilarity: 0.55,
   local: {
     model: "Xenova/bge-small-zh-v1.5",
     dims: 512,
@@ -194,6 +198,8 @@ export const Config = z.object({
       cacheDir: z.string().default("").description("模型缓存目录；空字符串表示用 <stateRoot>/semantic/models"),
       mirror: z.string().default("https://hf-mirror.com/").description("HuggingFace 镜像地址（国内直连 huggingface.co 一般不可达）"),
     }).default({ model: "Xenova/bge-small-zh-v1.5", dims: 512, dtype: "fp32", cacheDir: "", mirror: "https://hf-mirror.com/" }),
+    minSimilarity: z.number().default(0.55)
+      .description("语义召回置信度下限（余弦相似度，0.01–1）：越大越严。实测 0.45 命中多但噪声大、0.70 起等价纯字面"),
     api: z.object({
       endpoint: nullableString().default(null).description("外部 embedding 接口地址；null=未配置"),
       keyRef: nullableString().default(null).description("密钥引用名（不存明文密钥）；null=未配置"),
@@ -374,7 +380,9 @@ export function normalizeSemantic(value) {
   if (value === undefined) return clone(DEFAULT_SEMANTIC);
   if (!isPlainRecord(value)) fail(`semantic must be a plain object`);
   for (const key of Object.keys(value)) {
-    if (key !== "provider" && key !== "local" && key !== "api") fail(`semantic has unknown property "${key}"`);
+    if (key !== "provider" && key !== "local" && key !== "minSimilarity" && key !== "api") {
+      fail(`semantic has unknown property "${key}"`);
+    }
   }
   const provider = value.provider === undefined ? DEFAULT_SEMANTIC.provider : value.provider;
   if (provider !== "none" && provider !== "local" && provider !== "api") {
@@ -419,6 +427,13 @@ export function normalizeSemantic(value) {
       mirror,
     };
   }
+  const minSimilarity = value.minSimilarity === undefined
+    ? DEFAULT_SEMANTIC.minSimilarity
+    : value.minSimilarity;
+  if (typeof minSimilarity !== "number" || !Number.isFinite(minSimilarity)
+    || minSimilarity <= 0 || minSimilarity > 1) {
+    fail(`semantic.minSimilarity must be a number in (0, 1], got ${String(minSimilarity)}`);
+  }
   let api = clone(DEFAULT_SEMANTIC.api);
   if (value.api !== undefined) {
     if (!isPlainRecord(value.api)) fail(`semantic.api must be a plain object`);
@@ -431,7 +446,7 @@ export function normalizeSemantic(value) {
       keyRef: nullableRef(value.api.keyRef, "semantic.api.keyRef"),
     };
   }
-  return { provider, local, api };
+  return { provider, minSimilarity, local, api };
 }
 
 function normalizeSwitch(value, name) {
