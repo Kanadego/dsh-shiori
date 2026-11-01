@@ -35,29 +35,35 @@ window.__ModuleLoader__.load({
     // 引用 token、不写裸色值。语义色用于水位：safe=安全绿 / warn=警告黄 / danger=危险红；
     // l0/l1/l2/l3-soft 为四层标识淡色；bg-panel 与 bg-card 是两档灰底（面板底/卡片底）；
     // 圆角 / 间距 / 描边 / 字号各档一并收敛。token 本体回退到宿主 --dsw-alias 变量。
-    var CSS = ".dshi_root{--dshi-accent:var(--dsw-alias-state-business-primary,#3964fe);--dshi-safe:var(--dsw-alias-state-success-primary,#1a7f37);--dshi-warn:#b45309;--dshi-danger:var(--dsw-alias-state-error-primary,#f85149);--dshi-l0-soft:#e8f0fe;--dshi-l1-soft:#e6f6ec;--dshi-l2-soft:#fdf1e0;--dshi-l3-soft:#f1e9fd;--dshi-bg-panel:var(--dsw-alias-bg-layer-2,transparent);--dshi-bg-card:var(--dsw-alias-bg-layer-3,#fff);--dshi-text:var(--dsw-alias-label-primary);--dshi-text-dim:var(--dsw-alias-label-tertiary,#8b93a1);--dshi-stroke:1px solid var(--dsw-alias-border-l2,#dce2eb);--dshi-radius:10px;--dshi-radius-sm:8px;--dshi-radius-pill:999px;--dshi-space:12px;--dshi-space-sm:8px;--dshi-space-xs:4px;--dshi-font:13px;--dshi-font-sm:12px;--dshi-font-xs:11px;--dshi-font-title:14px}" +
+    var CSS = ".dshi_root{--dshi-accent:#e5484d;--dshi-safe:var(--dsw-alias-state-success-primary,#1a7f37);--dshi-warn:#b45309;--dshi-danger:var(--dsw-alias-state-error-primary,#f85149);--dshi-accent-a:#e5484d;--dshi-accent-b:#f5b83d;--dshi-gold-ink:#c98a1b;--dshi-l0:#e5484d;--dshi-l1:#d99a1f;--dshi-l2:#2f9e6b;--dshi-l3:#8b5cf6;--dshi-l0-soft:rgba(229,72,77,.16);--dshi-l1-soft:rgba(217,154,31,.18);--dshi-l2-soft:rgba(47,158,107,.16);--dshi-l3-soft:rgba(139,92,246,.16);--dshi-bg-panel:var(--dsw-alias-bg-layer-2,transparent);--dshi-bg-card:var(--dsw-alias-bg-layer-3,#fff);--dshi-text:var(--dsw-alias-label-primary);--dshi-text-dim:var(--dsw-alias-label-tertiary,#8b93a1);--dshi-stroke:1px solid var(--dsw-alias-border-l2,#dce2eb);--dshi-radius:10px;--dshi-radius-sm:8px;--dshi-radius-pill:999px;--dshi-space:12px;--dshi-space-sm:8px;--dshi-space-xs:4px;--dshi-font:13px;--dshi-font-sm:12px;--dshi-font-xs:11px;--dshi-font-title:14px}" +
     ".dshi_root{max-width:860px;display:flex;flex-direction:column;gap:12px;font-size:13px;line-height:1.65;color:var(--dsw-alias-label-primary)}" +
 ".dshi_root *{box-sizing:border-box;min-width:0}" +
 ".dshi_title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600}" +
 ".dshi_titleSub{font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary)}" +
+    // 版式：hero 头（渐变底 + 光斑）、品牌方块、卡片标题前的主题色竖条、渐变主按钮与进度条。
+".dshi_hero{position:relative;overflow:hidden;display:flex;align-items:center;gap:var(--dshi-space);border:var(--dshi-stroke);border-radius:14px;padding:12px 14px;background:linear-gradient(120deg,rgba(229,72,77,.16),rgba(245,184,61,.13) 46%,transparent 82%)}" +
+".dshi_hero::after{content:\"\";position:absolute;right:-40px;top:-70px;width:200px;height:200px;border-radius:50%;background:radial-gradient(circle,rgba(245,184,61,.30),transparent 68%);filter:blur(6px);pointer-events:none}" +
+".dshi_logo{flex:none;width:36px;height:36px;border-radius:12px;display:grid;place-items:center;font-size:16px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--dshi-accent-a),var(--dshi-accent-b));box-shadow:0 6px 16px rgba(229,72,77,.34)}" +
+".dshi_heroText{display:flex;flex-direction:column;gap:2px;min-width:0}" +
 ".dshi_tabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--dsw-alias-border-l2,#dce2eb);padding-bottom:6px}" +
 ".dshi_tab{border:1px solid transparent;background:none;color:var(--dsw-alias-label-secondary);border-radius:8px;padding:4px 12px;font:inherit;font-size:12px;cursor:pointer}" +
 ".dshi_tab:hover:not(:disabled){color:var(--dsw-alias-label-primary)}" +
-".dshi_tabOn{border-color:var(--dsw-alias-state-business-primary,#3964fe);color:var(--dsw-alias-state-business-primary,#3964fe);font-weight:600}" +
+".dshi_tabOn{border-color:transparent;background:linear-gradient(135deg,var(--dshi-accent-a),var(--dshi-accent-b));color:#fff;font-weight:600;box-shadow:0 4px 14px rgba(229,72,77,.30)}" +
 ".dshi_card{border:1px solid var(--dsw-alias-border-l2,#dce2eb);background:var(--dsw-alias-bg-layer-3,#fff);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}" +
 ".dshi_cardTitle{font-size:12px;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}" +
+".dshi_cardTitle::before{content:\"\";flex:none;width:3px;height:14px;border-radius:2px;background:linear-gradient(180deg,var(--dshi-accent-a),var(--dshi-accent-b))}" +
 ".dshi_hint{font-size:11px;color:var(--dsw-alias-label-tertiary)}" +
 ".dshi_row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}" +
 ".dshi_kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12px}" +
 ".dshi_kv dt{color:var(--dsw-alias-label-tertiary);white-space:nowrap}" +
 ".dshi_kv dd{margin:0;font-family:ui-monospace,Consolas,monospace;word-break:break-all}" +
-".dshi_badge{border:1px solid var(--dsw-alias-state-business-primary,#3964fe);color:var(--dsw-alias-state-business-primary,#3964fe);border-radius:999px;padding:0 8px;font-size:10px;white-space:nowrap}" +
+".dshi_badge{border:1px solid var(--dshi-gold-ink,#c98a1b);color:var(--dshi-gold-ink,#c98a1b);border-radius:999px;padding:0 8px;font-size:10px;white-space:nowrap}" +
 ".dshi_badgeWarn{border-color:var(--dsw-alias-state-error-primary,#f85149);color:var(--dsw-alias-state-error-primary,#f85149)}" +
 ".dshi_badgeDim{border-color:var(--dsw-alias-border-l2,#dce2eb);color:var(--dsw-alias-label-tertiary)}" +
 ".dshi_btn{border:1px solid var(--dsw-alias-border-l2,#dce2eb);background:var(--dsw-alias-bg-layer-3,#fff);color:var(--dsw-alias-label-primary);border-radius:8px;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer}" +
-".dshi_btn:hover:not(:disabled){border-color:var(--dsw-alias-state-business-primary,#3964fe)}" +
+".dshi_btn:hover:not(:disabled){border-color:var(--dshi-accent-a,#e5484d)}" +
 ".dshi_btn:disabled{opacity:.5;cursor:default}" +
-".dshi_btnPrimary{border-color:var(--dsw-alias-state-business-primary,#3964fe);background:var(--dsw-alias-state-business-primary,#3964fe);color:#fff}" +
+".dshi_btnPrimary{border-color:transparent;background:linear-gradient(135deg,var(--dshi-accent-a),var(--dshi-accent-b));color:#fff;font-weight:600;box-shadow:0 4px 14px rgba(229,72,77,.28)}" +
 ".dshi_btnDanger{border-color:var(--dsw-alias-state-error-primary,#f85149);color:var(--dsw-alias-state-error-primary,#f85149)}" +
 ".dshi_input,.dshi_select,.dshi_textarea{border:1px solid var(--dsw-alias-border-l2,#dce2eb);background:var(--dsw-alias-bg-layer-3,#fff);font:inherit;font-size:12px;color:var(--dsw-alias-label-primary);border-radius:8px;padding:5px 8px}" +
 ".dshi_textarea{width:100%;min-height:120px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.6;white-space:pre;overflow-wrap:normal;overflow-x:auto}" +
@@ -67,7 +73,7 @@ window.__ModuleLoader__.load({
 ".dshi_loading{font-size:12px;color:var(--dsw-alias-label-tertiary)}" +
 ".dshi_pre{margin:0;font-family:ui-monospace,Consolas,monospace;font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;border:1px solid var(--dsw-alias-border-l2,#dce2eb);border-radius:8px;padding:8px 10px;background:var(--dsw-alias-bg-layer-2,transparent)}" +
 ".dshi_bar{height:8px;border-radius:4px;border:1px solid var(--dsw-alias-border-l2,#dce2eb);overflow:hidden;background:var(--dsw-alias-bg-layer-2,transparent)}" +
-".dshi_barFill{height:100%;background:var(--dsw-alias-state-business-primary,#3964fe)}" +
+".dshi_barFill{height:100%;background:linear-gradient(90deg,var(--dshi-accent-a),var(--dshi-accent-b))}" +
 ".dshi_barFillSafe{background:var(--dshi-safe)}" +
 ".dshi_barFillWarn{background:var(--dshi-warn)}" +
 ".dshi_barFillDanger{background:var(--dshi-danger)}" +
@@ -89,11 +95,12 @@ window.__ModuleLoader__.load({
 ".dshi_confirm{border:1px solid var(--dsw-alias-state-error-primary,#f85149);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}" +
 ".dshi_grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}" +
     // U2 预算页（标杆页）：以下样式只引用 --dshi-* token，不写裸色值。
-".dshi_bgroup{border:var(--dshi-stroke);background:var(--dshi-bg-card);border-radius:var(--dshi-radius);padding:var(--dshi-space);display:flex;flex-direction:column;gap:var(--dshi-space-sm)}" +
-".dshi_layerChip{border-radius:var(--dshi-radius-pill);padding:0 8px;font-size:var(--dshi-font-xs);white-space:nowrap}" +
-".dshi_layerL0{background:var(--dshi-l0-soft)}" +
-".dshi_layerL1{background:var(--dshi-l1-soft)}" +
-".dshi_layerL2{background:var(--dshi-l2-soft)}" +
+".dshi_bgroup{border:var(--dshi-stroke);background:var(--dshi-bg-card);background-image:linear-gradient(180deg,rgba(229,72,77,.07),transparent 42%);border-radius:14px;padding:var(--dshi-space);display:flex;flex-direction:column;gap:var(--dshi-space-sm);box-shadow:0 2px 10px rgba(15,23,42,.05)}" +
+".dshi_layerChip{border-radius:var(--dshi-radius-pill);padding:0 8px;font-size:var(--dshi-font-xs);font-weight:600;white-space:nowrap;border:1px solid transparent}" +
+".dshi_layerL0{background:var(--dshi-l0-soft);color:var(--dshi-l0);border-color:var(--dshi-l0)}" +
+".dshi_layerL1{background:var(--dshi-l1-soft);color:var(--dshi-l1);border-color:var(--dshi-l1)}" +
+".dshi_layerL2{background:var(--dshi-l2-soft);color:var(--dshi-l2);border-color:var(--dshi-l2)}" +
+".dshi_layerL3{background:var(--dshi-l3-soft);color:var(--dshi-l3);border-color:var(--dshi-l3)}" +
 ".dshi_bintro{font-size:var(--dshi-font-xs);color:var(--dshi-text-dim)}" +
 ".dshi_preview{border:var(--dshi-stroke);background:var(--dshi-bg-panel);border-radius:var(--dshi-radius);padding:var(--dshi-space);display:flex;flex-direction:column;gap:var(--dshi-space-sm)}" +
 ".dshi_track{position:relative;height:14px;border-radius:var(--dshi-radius-sm);border:var(--dshi-stroke);background:var(--dshi-bg-card);overflow:hidden}" +
@@ -103,7 +110,11 @@ window.__ModuleLoader__.load({
 ".dshi_sliderRow{display:flex;align-items:center;gap:var(--dshi-space-sm);flex-wrap:wrap;width:100%}" +
 ".dshi_slider{flex:1;min-width:160px;accent-color:var(--dshi-accent)}" +
 ".dshi_sliderNum{width:96px}" +
-".dshi_fieldRow{display:flex;align-items:baseline;gap:var(--dshi-space-sm);flex-wrap:wrap}" +
+".dshi_fieldRow{display:flex;flex-direction:column;gap:var(--dshi-space-xs)}" +
+".dshi_controlRow{display:flex;align-items:center;gap:var(--dshi-space-sm);flex-wrap:wrap}" +
+".dshi_controlRow>.dshi_sliderRow{flex:1;min-width:220px}" +
+".dshi_controlRow>.dshi_btn{flex:none}" +
+".dshi_controlRow>.dshi_input{max-width:200px}" +
 ".dshi_modBadge{border:1px solid var(--dshi-warn);color:var(--dshi-warn);border-radius:var(--dshi-radius-pill);padding:0 8px;font-size:10px;white-space:nowrap}" +
 ".dshi_fieldError{font-size:var(--dshi-font-xs);color:var(--dshi-danger)}" +
 ".dshi_blockError{border:var(--dshi-stroke);border-color:var(--dshi-danger);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm);font-size:var(--dshi-font-sm);color:var(--dshi-danger)}" +
@@ -123,7 +134,7 @@ window.__ModuleLoader__.load({
     // U8 壳层：sticky 壳条（选择器 + tab 栏随滚动固定）、tab 内联 SVG 图标（CSS mask，
     // 不动按钮 DOM 形状）、toast 三态与需重启横幅（挂在 body 上，不在 .dshi_root 内，
     // 故 token 在 .dshi_toasts/.dshi_restartBanner 上单独桥接一份）。
-".dshi_sticky{position:sticky;top:0;z-index:30;display:flex;flex-direction:column;gap:12px;background:var(--dshi-bg-card);border-bottom:var(--dshi-stroke);padding-bottom:var(--dshi-space-sm)}" +
+".dshi_sticky{position:sticky;top:0;z-index:30;display:flex;flex-direction:column;gap:12px;background:var(--dshi-bg-card);border-bottom:var(--dshi-stroke);padding-bottom:var(--dshi-space-sm);box-shadow:0 8px 20px -14px rgba(15,23,42,.45)}" +
 ".dshi_tabIco::before{content:\"\";display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1px;background-color:currentColor;-webkit-mask:var(--dshi-tab-ico) center/contain no-repeat;mask:var(--dshi-tab-ico) center/contain no-repeat}" +
 ".dshi_tabIco-status{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M1 8h3l2-5 4 10 2-5h3%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}" +
 ".dshi_tabIco-memory{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 1l6 3-6 3-6-3z%27/%3E%3Cpath d=%27M2 8l6 3 6-3M2 12l6 3 6-3%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}" +
@@ -174,7 +185,7 @@ window.__ModuleLoader__.load({
       var host = doc.createElement("div");
       host.className = "dshi_toasts";
       doc.body.appendChild(host);
-      toastUi = { host: host, banner: null, bannerText: null, entries: [] };
+      toastUi = { host: host, banner: null, bannerText: null, bannerTimer: null, entries: [] };
       return toastUi;
     }
 
@@ -215,7 +226,22 @@ window.__ModuleLoader__.load({
       return el;
     }
 
-    // 需重启的页内可见强提示：顶部横幅，只保留一条，再次触发时刷新文案；手动关闭。
+    // 需重启的页内强提示：顶部横幅，只保留一条，再次触发时刷新文案并重置计时；
+    // 8 秒后自动收起，也可手动关闭（不常驻——挂太久会被当成关不掉的报错框）。
+    var RESTART_BANNER_TTL = 8000;
+
+    function hideRestartBanner() {
+      var ui = toastUi;
+      if (!ui) return;
+      if (ui.bannerTimer) {
+        clearTimeout(ui.bannerTimer);
+        ui.bannerTimer = null;
+      }
+      if (ui.banner && ui.banner.parentNode) ui.banner.parentNode.removeChild(ui.banner);
+      ui.banner = null;
+      ui.bannerText = null;
+    }
+
     function showRestartBanner(text) {
       var ui = ensureToastUi();
       if (!ui) return null;
@@ -234,15 +260,13 @@ window.__ModuleLoader__.load({
         banner.appendChild(bannerText);
         banner.appendChild(close);
         doc.body.appendChild(banner);
-        close.onclick = function () {
-          if (ui.banner && ui.banner.parentNode) ui.banner.parentNode.removeChild(ui.banner);
-          ui.banner = null;
-          ui.bannerText = null;
-        };
+        close.onclick = function () { hideRestartBanner(); };
         ui.banner = banner;
         ui.bannerText = bannerText;
       }
       ui.bannerText.textContent = String(text === undefined || text === null ? RESTART_HINT : text);
+      if (ui.bannerTimer) clearTimeout(ui.bannerTimer);
+      ui.bannerTimer = setTimeout(function () { hideRestartBanner(); }, RESTART_BANNER_TTL);
       return ui.banner;
     }
 
@@ -258,6 +282,7 @@ window.__ModuleLoader__.load({
       toastUi = null;
       var entries = ui.entries.slice(0);
       for (var i = 0; i < entries.length; i++) removeToastEntry(ui, entries[i]);
+      if (ui.bannerTimer) clearTimeout(ui.bannerTimer);
       if (ui.banner && ui.banner.parentNode) ui.banner.parentNode.removeChild(ui.banner);
       if (ui.host && ui.host.parentNode) ui.host.parentNode.removeChild(ui.host);
       ui.banner = null;
@@ -2875,10 +2900,13 @@ window.__ModuleLoader__.load({
         var current = draft ? draft[parts[0]][parts[1]] : undefined;
         var original = snapshotDraft ? snapshotDraft[parts[0]][parts[1]] : undefined;
         var modified = current !== undefined && current !== original;
+        // 三段式：字段名一行 → 输入框 + 恢复默认同一行 → 提示/错误各占一行。
         return h("div", { className: "dshi_fieldRow", key: path },
           h("label", { className: "dshi_label", title: meta.tech },
             meta.label,
-            h("input", {
+            modified ? h("span", { className: "dshi_modBadge" }, "已修改") : null,
+            h("div", { className: "dshi_controlRow" },
+              h("input", {
               className: "dshi_input",
               type: "number",
               value: current === undefined || typeof current !== "number" ? "" : String(current),
@@ -2892,14 +2920,13 @@ window.__ModuleLoader__.load({
                 var parsed = Number(text);
                 change(path, Number.isFinite(parsed) ? parsed : text);
               }
-            })),
-          modified ? h("span", { className: "dshi_modBadge" }, "已修改") : null,
-          h("button", {
-            className: "dshi_btn", type: "button", title: "恢复出厂默认 " + meta.tech,
-            onClick: function () { resetField(path); }
-          }, "恢复默认"),
-          h("div", { className: "dshi_hint" }, meta.hint),
-          fieldErrors[path] ? h("div", { className: "dshi_fieldError" }, fieldErrors[path]) : null);
+            }),
+            h("button", {
+              className: "dshi_btn", type: "button", title: "恢复出厂默认 " + meta.tech,
+              onClick: function () { resetField(path); }
+            }, "恢复默认")),
+            h("div", { className: "dshi_hint" }, meta.hint),
+            fieldErrors[path] ? h("div", { className: "dshi_fieldError" }, fieldErrors[path]) : null));
       };
       // 水位字段行：滑杆 + 字符数联动显示；软/硬互相钳制（setBudgetDraftValue）。
       var waterField = function (key, label, tech, consequenceHint) {
@@ -2919,11 +2946,13 @@ window.__ModuleLoader__.load({
           ? softMax
           : Math.max(2, (Number.isInteger(cap) ? cap : 0) - 1);
         var min = key === "softChars" ? 1 : (Number.isInteger(other) ? Math.max(other + 1, 2) : 2);
+        // 字段名一行 → 滑杆 + 数值 + 恢复默认同一行 → 后果说明一行。
         return h("div", { className: "dshi_fieldRow", key: path },
           h("label", { className: "dshi_label", title: tech },
             label,
             modified ? h("span", { className: "dshi_modBadge" }, "已修改") : null,
-            h("div", { className: "dshi_sliderRow" },
+            h("div", { className: "dshi_controlRow" },
+              h("div", { className: "dshi_sliderRow" },
               h("input", {
                 className: "dshi_slider", type: "range",
                 min: String(min), max: String(max), step: "1",
@@ -2944,12 +2973,12 @@ window.__ModuleLoader__.load({
                 }
               }),
               h("span", { className: "dshi_hint" }, "字符 / 硬顶 " + (Number.isInteger(cap) ? cap : "—"))),
+              h("button", {
+                className: "dshi_btn", type: "button", title: "恢复出厂默认 " + tech,
+                onClick: function () { resetField(path); }
+              }, "恢复默认")),
             h("div", { className: "dshi_hint" }, consequenceHint),
-            fieldErrors[path] ? h("div", { className: "dshi_fieldError" }, fieldErrors[path]) : null),
-          h("button", {
-            className: "dshi_btn", type: "button", title: "恢复出厂默认 " + tech,
-            onClick: function () { resetField(path); }
-          }, "恢复默认"));
+            fieldErrors[path] ? h("div", { className: "dshi_fieldError" }, fieldErrors[path]) : null));
       };
       var groupCard = function (layer, title, intro, children) {
         return h("div", { className: "dshi_bgroup", key: layer },
@@ -3385,8 +3414,11 @@ window.__ModuleLoader__.load({
       // 空间并有不透明底（--dshi-bg-card）+ 底边线，页面内容从壳条下方滚动，
       // 不会被遮死。
       return h("div", { className: "dshi_root" },
-        h("div", { className: "dshi_title" }, "Shiori 记忆面板",
-          h("span", { className: "dshi_titleSub" }, "dsh-shiori · 原生 bundle 面板")),
+        h("div", { className: "dshi_hero" },
+          h("span", { className: "dshi_logo" }, "栞"),
+          h("div", { className: "dshi_heroText" },
+            h("div", { className: "dshi_title" }, "Shiori 记忆面板"),
+            h("div", { className: "dshi_titleSub" }, "dsh-shiori · 原生 bundle 面板 · 记忆的分层视图"))),
         h("div", { className: "dshi_sticky" },
           workspaceOptions.length > 0
             ? h("div", { className: "dshi_row" },
