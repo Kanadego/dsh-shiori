@@ -366,10 +366,10 @@ export function createDshHostAbstraction(pluginCtx, { trustedScopeId = null, loa
  *     原样转交 createHostBridge（见 CONTRACTS.md「D」），本函数不解释、不缓存、不落盘。
  * @returns {{host, bridge, start: () => Promise, stop: () => object}}
  */
-export async function assembleDshShioriHost(pluginCtx, { service, config, mode = "shadow", trustedScopeId, loadDshTools, probeSink } = {}) {
+export async function assembleDshShioriHost(pluginCtx, { service, config, mode = "shadow", trustedScopeId, loadDshTools, probeSink, dataRoot } = {}) {
   const { createHostBridge } = await import("./index.mjs");
   const host = createDshHostAbstraction(pluginCtx, { trustedScopeId, loadDshTools });
-  const bridge = createHostBridge({ host, service, mode, config, probeSink });
+  const bridge = createHostBridge({ host, service, mode, config, probeSink, dataRoot });
   return {
     host,
     bridge,

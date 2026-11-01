@@ -8,11 +8,11 @@
 
 ## wire（冻结，CONTRACTS §6）
 
-namespace `shiori`，方法集与 P 的 `src/plugin/protocol.mjs` `MANAGEMENT_METHODS` 一致：
+namespace `shiori`，方法集与 P 的 `src/plugin/protocol.mjs` `MANAGEMENT_METHODS` 一致（10 个：原 9 个 + `getTimeline`）：
 
 ```
 getStatus / getMemoryView / getGraph / executeTool / listCandidates /
-analyze / reviewCandidate / previewPlan / executePlan
+analyze / reviewCandidate / previewPlan / executePlan / getTimeline
 ```
 
 每个方法 wire 为 `(sessionId, payload)`：参数名 `session` 命中宿主 session lookup（wire 字段 `sessionId`，服务端解析为真实 Session 对象，未知 session 由 Gateway 拒绝）；`payload` 顶层闭键校验在服务端用 P 的 `validateManagementPayload`；末位 `signal` 为真实调用取消信号。
@@ -24,10 +24,26 @@ analyze / reviewCandidate / previewPlan / executePlan
 - `trustedContext` 固定形状 `{ agent, session, principal, source: "panel-rpc", signal }`：agent 由宿主 `agents` 注册表按 session.id 解析（可能缺省）；无真实调用信号时由服务端创建并随 stop 撤销。
 - management 抛出的 `Error.code` 经 `RemoteError` 原样过线（`RemoteResult` 的 `ok:false/error.code`），客户端如实展示，不伪装成功。
 
+## getTimeline（时间线，F4）
+
+- **入参** `{ offset?, limit? }`，`additionalProperties: false`：`offset` 默认 0、非负整数；`limit` 默认 100、取值 1..500（数据层 `TIMELINE_DEFAULT_LIMIT` / `TIMELINE_MAX_LIMIT`，见 `src/timeline/index.mjs`）。**payload 不带 scope**：时间线恒出本会话 scope，服务端在 `src/plugin/management.mjs` 用 `scopeFromTrustedContext` 重新 pin（与其它方法同一套 trustedContext 授权），payload 里的 scope 字段不被读取、inputSchema 也不收。
+- **返回** `{ scope, items, hasMore, skippedCorrupted, scanLimited }`，五个键全部 required、`additionalProperties: false`。`items[i] = { at, action, source, scope, target, detail }`：`at` 是 ISO 时间串，`source` 为 `"journal"` / `"spark"`，`target = { type: "core" | "topic" | "spark", id, title }`（`title` 可为 null），`detail.operationId` 必有、`detail.dedupedWith` 在去重时出现。
+- **双源合并**：① `<dataRoot>/journal/<operationId>.json` 里 `phase: "committed"` 的事务记录（覆盖 core / topic 写入，一条 change 一条目，action 为 `core.write` / `topic.write`）；② `<dataRoot>/sparks/scopes/<scopeId>/sparks.json` 的 `ops` 账（覆盖存卡 / 改卡 / 归档 / 替代 / 反馈 / 织网 / merge 退休，action 以 `spark.` 开头）。spark 的 `delivery-hit`、`organize-bind` 属非内容写，不上时间线。两源各自按 `at` 倒序，再归并成一条倒序流（时间相等时 journal 优先）。
+- **去重**：同一 `operationId` 在两边都出现时视为同一操作——保留 journal 版本，spark 版本丢弃，并在 journal 条目的 `detail.dedupedWith = ["spark"]` 标注。
+- **分页语义**：先跨整窗口去重、再按 `offset + limit` 切片，`hasMore = 合并后总数 > offset + limit`。去重不只看当前页：重复项不会占掉窗口名额把 `hasMore` 提前压成 `false`（旧实现先把两源并入、再按窗口截断才去重，重复项会占掉名额；现实现已在数据层改成先跨窗口去重再切片）。
+- **`scanLimited`（扫描窗口截断标记，必读）**：journal 长期堆积、无轮转，数据层单次最多读入最新 `TIMELINE_JOURNAL_SCAN_LIMIT = 4000` 个 journal 文件（按 mtime 取最新，见 `src/timeline/index.mjs`）。当目录里 journal 文件数超过这一上限时 `scanLimited: true`——此时 `items` 只来自最新窗口，**`hasMore: false` 只代表「窗口内到底」，更早的历史本次不可达**。调用方必须把「真到底」与「窗口截断」分开：`hasMore: false && scanLimited: true` 不等于时间线完整，不要据此宣称「没有更多」，也不要靠加深分页去「补全」（更深的分页读的还是同一个窗口）。要拿到更早历史，得先扩大扫描上限或减少 journal 堆积。**边界**：窗口按文件 mtime 取最新，若 journal 目录被整体复制 / 备份恢复 / 迁移（mtime 被批量刷新），真正的最新事务可能落选窗口，而 `scanLimited` 只看数量、不会为这种异常置位——被搬动过的目录不适合直接当时间线读。
+- **`skippedCorrupted`**：被跳过的损坏记录数（journal JSON 解析失败 / 形状非法 / phase 未知 / spark 库不可读）。损坏项不炸整个视图；调用方可据该值提示「部分记录损坏，时间线可能缺项」。
+- 与其它数据方法一致：shadow（含 inert）下 `getTimeline` 返回 `UNSUPPORTED`，永不触盘。
+- **本版面板没有时间线页**：wire 已冻结（`client/index.js` 的 RPC 方法清单已收录 `getTimeline`，冻结契约测试按 10 方法断言），但面板六个 tab 里没有「时间线」入口——UI 留到后续版本，别把「方法在清单里」读成「界面上能看见」。
+- **只读宿主的覆盖面（F7 座位判据）**：后启动的宿主持读权——写工具与面板写方法（`analyze` / `reviewCandidate` / `previewPlan` / `executePlan`）都抛 `HOST_LOCKED`；装配期仍会写本端自己的派生账本（L1 投影缓存、水位采样、L2 投递去重账），这批写经文件锁串行化、不碰记忆正文，所以「只读」是「不许改记忆」，不是「零写盘」。
+
 ## 面板功能
 
+> 全面板统一术语以 `docs/GLOSSARY.md`（U0 定稿）为准：中文名主位、层号为辅，
+> tab 栏名称随 U3–U8 各页改版改为目标名。
+
 - **状态**：`getStatus`——标题「运行状态」，先用五行中文摘要讲清楚运行模式 / 作用域 / 服务启动 / 人设卡占用 / 记忆核心占用，再列能力 badge；原始字段（mode / ownerId / diagnostics 等）收进「技术细节（原始字段，一般不用看）」折叠区，完整 DTO 仍可展开核对（第 8 轮起不把参数直接铺在页面上）。
-- **shadow / inert 门控（P shadow 收窄后的 UI 一致性）**：面板选会话后先以 `getStatus` 探测模式。`inert`（未配置根目录）或 `shadow` 时，记忆 / 图谱 / 候选三个数据界面渲染**「未配置」占位**——不挂载数据组件、不发出数据请求，用户不会点进去吃 `UNSUPPORTED` / `NOT_CONFIGURED` 错误；占位文案写明「shadow 只用于装配期探活，不提供数据浏览」。`getStatus` 与「预算配置」（原生 configForms，不经 management RPC）不受影响。`getStatus` 本身不可用时回退旧行为（数据 tab 照常挂载，由各 tab 如实报错）。服务端对 shadow 的 8 个数据方法一律拒绝且永不触盘——UI 门控与服务端两层防御语义一致。
+- **shadow / inert 门控（P shadow 收窄后的 UI 一致性）**：面板选会话后先以 `getStatus` 探测模式。`inert`（未配置根目录）或 `shadow` 时，记忆 / 图谱 / 候选三个数据界面渲染**「未配置」占位**——不挂载数据组件、不发出数据请求，用户不会点进去吃 `UNSUPPORTED` / `NOT_CONFIGURED` 错误；占位文案写明「shadow 只用于装配期探活，不提供数据浏览」。`getStatus` 与「预算配置」（原生 configForms，不经 management RPC）不受影响。`getStatus` 本身不可用时回退旧行为（数据 tab 照常挂载，由各 tab 如实报错）。服务端对 shadow 的 9 个数据方法一律拒绝且永不触盘（8 个经 `requireActiveDataAccess`，`executePlan` 经 `requireActive` 同样拒），只留 `getStatus`——UI 门控与服务端两层防御语义一致。
 - **记忆 L0/L1**：`getMemoryView`——L0 persona 与完整 L1（含派生索引）预览、UTF-16 占用条（对照 budgets）、revision。两层都能**就地编辑**（第 8 轮）：L0 走 `executeTool soul_update {content}`，L1 走 `core_write {content, expectedRevision}`；L1 的编辑初值取 `l1.body`（磁盘正文），不是含派生索引的 `l1.text`——否则保存会把索引固化进 core。revision 是 `shiori-r1.<base64url>.<sha256>` 的长 token，标题行只显示 12 字符前缀 + 省略号，完整值放 `title` 属性与「完整 DTO」折叠区。
 - **图谱**：`getGraph`——SVG 拖拽平移；缩放支持按钮与**鼠标滚轮**（原生 `addEventListener("wheel", {passive:false})`，React 的 onWheel 在宿主里是 passive、preventDefault 无效；以指针为锚点、scale 夹在 0.3~3）。节点按 evergreen / ephemeral / 非 active 异色，边中性；点击节点看详情。详情里的**「卡片内容」只编辑 spark 卡片本身**（标题 / 摘要 / 正文 / 触发词 / 实体 / 重要度，保存走 `spark_update` 且只提交改动字段，带 expectedRevision）；人设卡 / 记忆核心在「记忆 L0/L1」页改，主题在「L3/topic 记忆管理」页改。关联连线同样在详情里增删：改动先留在本地，点「保存连线」才写 `spark_update {links}`（整体替换），删错点「撤销修改」退回读取时的快照，不发请求。不经模型消息返回整图。
 - **L3/topic 记忆管理（第 8 轮新增，位于「候选 / 计划」之后）**：`executeTool memory_list_topics` 拉主题列表，默认只显示 key / title / 字符数，**点「展开」才 `memory_read` 读正文**（不预读全文）；编辑整篇覆盖走 `memory_rewrite {topic, content, expectedRevision}`，保存后重读 detail 与列表。`updated === "legacy-unknown"` 的 legacy 主题标「legacy 只读」，不渲染编辑按钮（服务端拒 `UNSUPPORTED`）。
@@ -43,7 +59,8 @@ analyze / reviewCandidate / previewPlan / executePlan
 - **候选 / 计划脏数据的面板表现（第 4 轮 Q-B，第 5/6 轮扩展）**：过期候选（源卡已 merged / archived）的 preview 报 NOT_FOUND / INVALID_INPUT 时给出具体中文提示（"该候选或计划已过期……请点刷新重新分析"，原 code 保留）；`REVISION_CONFLICT` / `UNSUPPORTED`（如 legacy 主题只读）同样有专属文案。preview 钉定 `{sessionId, queueRevision, plan}`：会话切换（既有 R4 守卫）与**队列 revision 前进**都会使旧 preview 失效，拒绝拿旧 preview 去 execute（`shiori/ui-stale-preview`）。plans 列表区分 open / executed / superseded：executed 行不渲染预览按钮；superseded（被新预览作废，P a4 起投影提供该布尔）行渲染但**禁用**预览按钮并提示「该计划已被新预览作废……请使用最新计划」；预览对应计划若已 executed / superseded，确认执行按钮禁用。
 - **RPC 错误 details 契约（第 6 轮 B-Q3，该文件属本槽已修）**：`src/plugin/client-rpc.mjs` 全部 6 个 `RemoteError` 出口的 `details` **恒为对象**——业务错误优先透传 P protocol `failInvalid` 携带的 details（如 `{ violations }`、`{ planId }`），没有则给 `{ code }`（守卫出口附 `method` / `principalKind`）。此前 details 为 undefined，gateway 原样搬运丢键后，宿主客户端判据 `isRecord(error.details)` 不成立，**任何业务错误都被显示成 `connection: invalid server-response failure`**——第 5 轮的中文错误映射在真机上被这条传输层拒绝遮断，修好后自然生效。回归测试用宿主真实判据（gateway `rpcFailure` 搬运 + JSON 往返 + `parseConnectionResponseFailure`）断言各出口 details 为 record 且 violations 可达。
 - **diagnostics 容错（第 4 轮 Q-C）**：状态 tab 对 P 新增的 codec / transport 等字段按 key: value 照常渲染，未知未来字段容忍，值为 undefined 的键忽略（不显示 undefined、不伪装成 null），序列化异常降级 String()，不崩。
-- **预算配置**：`ctx.configForms.get("shiori")` 原生设置作用域（命名空间能被 settings 服务收录，靠的是 schema 里 volatile 的 `budgets` 字段），整段 budgets 单 revision fence 写入。`budgets` 为 volatile：宿主热提交、不触发插件重载；运行中的 controller 仍持启动时快照，新预算在下次插件重载或宿主重启后生效。留空的输入框不写入（保留服务端现值），非法数字/比率中止整批写入并显示错误。UI 顶部如实提示。`persona.maxChars` 的输入上限为 60000（第 8 轮从 12000 抬高：插件公开分发，别人的人设卡可能远长于本机默认值；默认值仍是 12000，与服务端 `BUDGET_CEILINGS` 同步）。
+- **记忆预算（0.2 U2 重写，标杆页）**：`ctx.configForms.get("shiori")` 原生设置作用域（命名空间能被 settings 服务收录，靠的是 schema 里 volatile 的 `budgets` 字段），整段 budgets 单 revision fence 写入。命名三层分离：界面名主位、技术名进 tooltip 与页尾「技术细节」折叠区、机制说明写成后果描述。顶部**实时水位条**：`当前占用 ─ 软水位 · 硬闸 · 硬顶`，占用取 `getStatus` 返回的真实 `occupancy.l1Chars`（取不到如实显示「占用数据不可用」），填充色随水位分安全绿 / 警告黄 / 危险红。`softRatio` / `hardRatio` 不再直接编辑，改为 `softChars` / `hardChars` 字符数水位滑杆 + 数字联动，软/硬互相钳制（软 ≤ 硬-1 < 硬顶）。按人设卡（L0）/ 记忆核心（L1）/ 闪回卡片（L2）三组分组卡片（层号已按 U0 纠错：core 是 L1 不是 L0）。已修改字段标「已修改」徽章 + 单字段恢复默认；越界校验全部就地中文提示并禁用保存按钮。`targetChars` 不在界面出现（D3）——它不能反过来当用户改不动的硬约束：草稿里的 `clampCoreWater` 随硬顶/软/硬把 `targetChars` 收敛进 `softChars ≤ targetChars < hardChars-1`，保存时按收敛值写回（调小硬顶不会因为一个看不见的字段禁用保存）；越界文案点名界面上看得见的中文字段名，不出现隐藏的技术名。保存时同时清掉旧 ratio 字段避免双源真相。`budgets` 为 volatile：宿主热提交、不触发插件重载；运行中的 controller 仍持启动时快照，新预算在下次插件重载或宿主重启后生效。`persona.maxChars` 输入上限 60000（与服务端 `BUDGET_CEILINGS` 同步）。
+- **设计 token（U1）**：全部样式变量挂在 `.dshi_root` 的 `--dshi-*` 上（主色 accent、语义色 safe/warn/danger、四层标识淡色 l0/l1/l2/l3-soft、两档灰底 bg-panel/bg-card、描边 stroke、圆角 radius、间距 space、字号 font），token 回退到宿主 `--dsw-alias` 变量；预算页样式只引用 token、不写裸色值，其余页面在 U3–U8 改版时对齐。
 - 会话选择优先取宿主 `ctx.remote.session.list`（owner 可见集）；不可用时退回手动输入 session id（如实提示）。
 
 ## 宿主能力缺失时

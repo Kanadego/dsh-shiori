@@ -5,7 +5,10 @@
 //     它只证明「可序列化结构 + 默认值」，不证明路径安全，不替代 normalize；
 //   - normalizePluginConfig：权威规范化。未知键拒绝；缺省 mode=shadow / allowActive=false /
 //     defaultPersona=null / 两个 persona 映射=[] / l2、organize、forgetting.enabled=false /
-//     ownerId='local' / dataRoot=stateRoot=null；预算经 core/validateConfig 全关系校验，
+//     ownerId='local' / dataRoot=stateRoot=null；预算经 core/validateConfig 全关系校验
+//     （0.2 U2 起水位 softChars/hardChars 为权威：老配置只有 ratio 时按
+//     hardCapChars × ratio 四舍五入换算，输出里 ratio 一律由水位回推保持同源），
+//     semantic 段为 F1 方案 C 的接口预留（本期只定契约不实现召回），
 //     忘却 policy 经 forgetting/normalizeForgetPolicy（默认 30/240/0.25）；
 //   - verifyPluginRoots：apply 阶段的真实文件系统校验（真实 link 解析后仍绝对、
 //     互不嵌套），静态 schema dump 不能替代本步。
@@ -81,6 +84,30 @@ function unwrapVolatile(value) {
 const nullableString = () => z.union([z.string(), z.const(null)]);
 const personaChoice = () => nullableString().default(null);
 
+// semantic 段默认值（F1 方案 C 接口预留，字段名冻结）：provider=none 时零依赖、
+// 零网络、行为与 0.1 一致。schema 默认与 normalize 权威默认共用这一份。
+const DEFAULT_SEMANTIC = deepFreeze({
+  provider: "none",
+  local: { model: "bge-small-zh-v1.5", dims: 512 },
+  api: { endpoint: null, keyRef: null },
+});
+
+// 水位默认值：由默认占比 × 默认硬顶四舍五入派生，不写死常数（U2 产出 4）。
+// DEFAULT_CONFIG.core 本身不含水位字段（属 core 契约，不在本批改动范围），
+// 这里在其副本上补齐派生默认值。
+function derivedWaterDefaults() {
+  const core = clone(DEFAULT_CONFIG.core);
+  core.softChars = Math.round(core.hardCapChars * core.softRatio);
+  core.hardChars = Math.round(core.hardCapChars * core.hardRatio);
+  return core;
+}
+
+function defaultBudgets() {
+  const defaults = clone(DEFAULT_CONFIG);
+  defaults.core = derivedWaterDefaults();
+  return defaults;
+}
+
 function budgetObject() {
   return z.object({
     core: z.object({
@@ -88,8 +115,12 @@ function budgetObject() {
       hardCapChars: z.natural().default(DEFAULT_CONFIG.core.hardCapChars),
       softRatio: z.number().default(DEFAULT_CONFIG.core.softRatio),
       hardRatio: z.number().default(DEFAULT_CONFIG.core.hardRatio),
+      softChars: z.natural().default(derivedWaterDefaults().softChars)
+        .description("软水位（字符数）；旧 softRatio × hardCapChars 换算而来，权威值"),
+      hardChars: z.natural().default(derivedWaterDefaults().hardChars)
+        .description("硬水位（字符数）；旧 hardRatio × hardCapChars 换算而来，权威值"),
       cacheLockFallback: z.boolean().default(DEFAULT_CONFIG.core.cacheLockFallback),
-    }).default(clone(DEFAULT_CONFIG.core)),
+    }).default(derivedWaterDefaults()),
     persona: z.object({
       maxChars: z.natural().default(DEFAULT_CONFIG.persona.maxChars),
     }).default(clone(DEFAULT_CONFIG.persona)),
@@ -100,7 +131,20 @@ function budgetObject() {
       seedCount: z.natural().default(DEFAULT_CONFIG.spark.seedCount),
       linkCount: z.natural().default(DEFAULT_CONFIG.spark.linkCount),
     }).default(clone(DEFAULT_CONFIG.spark)),
-  }).default(clone(DEFAULT_CONFIG));
+  }).default(defaultBudgets());
+}
+
+/**
+ * 把插件层 budgets（含 U2 权威水位 softChars/hardChars）裁剪成 core validateConfig
+ * 认识的形状。水位不是 core 契约字段（core/config.mjs 的 section() 拒绝未知键），
+ * 任何把 budgets 喂给 core（createShioriService / organize executor / compat tools）
+ * 的地方都必须先过这里。
+ */
+export function coreBudgetsOf(budgets) {
+  const core = { ...(budgets?.core ?? {}) };
+  delete core.softChars;
+  delete core.hardChars;
+  return { ...budgets, core };
 }
 
 /** 原生 Schemastery Config：宿主 settings UI 与 Cordis 装配使用的静态 schema。 */
@@ -123,6 +167,19 @@ export const Config = z.object({
   // 命名空间（dsh-settings describe()）；标记后值以 cosmokit volatile 引用交给插件，
   // 读取处经 unwrapVolatile 解包。语义＝宿主热提交该字段、不重载插件。
   budgets: budgetObject().volatile().description("L0/L1/L2 预算（宿主热提交，不重载插件；下次插件重载/宿主重启后生效）"),
+  // F1 方案 C 接口预留（字段名冻结，玄砚按此对接）：本期只定契约，不实现召回。
+  semantic: z.object({
+    provider: z.union([z.const("none"), z.const("local"), z.const("api")]).default("none")
+      .description("语义召回提供方：none=关闭（默认，零依赖零网络）；local=本地 embedding；api=外部接口（本期仅预留）"),
+    local: z.object({
+      model: z.string().default("bge-small-zh-v1.5").description("本地 embedding 模型名（开启 local 后才会触发一次性模型下载）"),
+      dims: z.natural().default(512).description("向量维度"),
+    }).default({ model: "bge-small-zh-v1.5", dims: 512 }),
+    api: z.object({
+      endpoint: nullableString().default(null).description("外部 embedding 接口地址；null=未配置"),
+      keyRef: nullableString().default(null).description("密钥引用名（不存明文密钥）；null=未配置"),
+    }).default({ endpoint: null, keyRef: null }),
+  }).default(clone(DEFAULT_SEMANTIC)).description("语义召回接口预留（F1 方案 C）：本期只定契约，不实现召回"),
   l2: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }).description("L2 闪回自动投递开关"),
   organize: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }).description("整理（候选/计划/执行）开关"),
   forgetting: z.object({
@@ -142,6 +199,7 @@ export const Config = z.object({
 const TOP_LEVEL_KEYS = new Set([
   "mode", "allowActive", "dataRoot", "stateRoot", "ownerId", "defaultPersona",
   "sessionPersonas", "workspacePersonas", "budgets", "l2", "organize", "forgetting",
+  "semantic",
 ]);
 
 function requireBoolean(value, name) {
@@ -201,6 +259,14 @@ export const BUDGET_CEILINGS = Object.freeze({
   spark: Object.freeze({ maxChars: 600, inlineMaxChars: 100, maxCards: 5, seedCount: 3, linkCount: 2 }),
 });
 
+// 自然数（0 或正整数）校验，中文报错（U2 产出 4：水位字段越界一律中文提示）。
+function requireNaturalChars(value, name) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    fail(`${name} 必须是自然数（0 或正整数），当前为 ${String(value)}`);
+  }
+  return value;
+}
+
 function normalizeBudgets(value) {
   const source = value === undefined ? clone(DEFAULT_CONFIG) : value;
   if (!isPlainRecord(source)) fail(`budgets must be a plain object`);
@@ -219,8 +285,110 @@ function normalizeBudgets(value) {
     }
   }
   if (ceilings.length > 0) fail(ceilings.join("; "));
-  // 交由既有基线校验：段内未知键、类型、正整数、softRatio<hardRatio、inline<=max、seed+link<=maxCards、水位关系
-  return validateConfig(source);
+
+  // ── U2 水位契约：softChars / hardChars（字符数）为权威，ratio 为派生值 ──────
+  // 老配置兼容读：只有 softRatio / hardRatio 时按 hardCapChars × ratio 四舍五入
+  // 换算成水位，不报错；两者都提供时水位优先（面板保存时会清掉 ratio，避免双源真相）。
+  const coreIn = source.core === undefined ? {} : source.core;
+  if (!isPlainRecord(coreIn)) fail(`budgets.core must be a plain object`);
+  const hardCapChars = coreIn.hardCapChars === undefined
+    ? DEFAULT_CONFIG.core.hardCapChars
+    : coreIn.hardCapChars;
+  // 派生依赖硬顶做乘法，先确认它是正整数（类型错误仍按既有英文口径报，与
+  // validateConfig 一致），避免 NaN 混进水位。
+  if (typeof hardCapChars !== "number" || !Number.isInteger(hardCapChars) || hardCapChars <= 0) {
+    fail(`budgets.core.hardCapChars must be a positive integer, got ${String(hardCapChars)}`);
+  }
+  const deriveWater = (charsKey, ratioKey, defaultRatio) => {
+    if (coreIn[charsKey] !== undefined) {
+      return requireNaturalChars(coreIn[charsKey], `budgets.core.${charsKey}（${charsKey === "softChars" ? "软" : "硬"}水位字符数）`);
+    }
+    const ratio = coreIn[ratioKey] === undefined ? defaultRatio : coreIn[ratioKey];
+    if (typeof ratio !== "number" || !Number.isFinite(ratio)) {
+      fail(`budgets.core.${ratioKey} must be a finite number, got ${String(ratio)}`);
+    }
+    return Math.round(hardCapChars * ratio);
+  };
+  const softChars = deriveWater("softChars", "softRatio", DEFAULT_CONFIG.core.softRatio);
+  const hardChars = deriveWater("hardChars", "hardRatio", DEFAULT_CONFIG.core.hardRatio);
+  // 0 与等值都必须在这里挡住：面板侧 schema 是 z.natural（允许 0），真正拒绝
+  // 发生在 core/validateConfig，那时抛的是英文、且配置已经落盘——重启即告警。
+  if (softChars < 1) {
+    fail(`软水位（${softChars} 字符）至少为 1 字符：0 会被换算成 0 比例，core 直接拒绝加载。`);
+  }
+  if (hardChars < 2) {
+    fail(`硬水位（${hardChars} 字符）至少为 2 字符：它必须严格大于软水位。`);
+  }
+  if (softChars >= hardChars) {
+    fail(`软水位（${softChars} 字符）必须小于硬水位（${hardChars} 字符）：相等会让 core 的 softRatio < hardRatio 校验失败。`);
+  }
+  if (hardChars > hardCapChars) {
+    fail(`硬水位（${hardChars} 字符）不能超过硬顶 hardCapChars（${hardCapChars} 字符）。`);
+  }
+  if (hardChars === hardCapChars) {
+    // 需求写作 hardChars ≤ hardCapChars，但 core/validateConfig 的既有硬约束是
+    // hardAt < hardCapChars（硬闸之上要保留「超限」判定空间，DESIGN §5.1.1），
+    // 该约束不在本批白名单内、无法放开——等于硬顶按越界处理，中文说明原因。
+    fail(`硬水位（${hardChars} 字符）必须小于硬顶 hardCapChars（${hardCapChars} 字符）：硬闸之上需要保留超限判定的空间。`);
+  }
+
+  // validateConfig（core 契约，本批不可改）仍按 ratio 推水位做整体关系校验：
+  // 用水位回推 ratio 喂给它，保证输出里 ratio 与水位同源（运行时 budget.mjs 的
+  // softAt/hardAt 由 ratio 推出，必须与面板水位一致，不得分叉）。
+  // targetChars 区间校验随之变为 softChars ≤ targetChars < hardChars（D3：仅区间校验）。
+  const coreForValidation = { ...clone(DEFAULT_CONFIG.core), ...coreIn };
+  delete coreForValidation.softChars;
+  delete coreForValidation.hardChars;
+  coreForValidation.softRatio = softChars / hardCapChars;
+  coreForValidation.hardRatio = hardChars / hardCapChars;
+  const budgets = validateConfig({ ...source, core: coreForValidation });
+  // 把权威水位并回输出（validateConfig 返回形状不含新字段）。
+  return deepFreeze({
+    core: { ...budgets.core, softChars, hardChars },
+    persona: budgets.persona,
+    spark: budgets.spark,
+  });
+}
+
+// ── semantic 段（F1 方案 C 接口预留）：本期只定契约，provider=none 时不生效 ──
+export function normalizeSemantic(value) {
+  if (value === undefined) return clone(DEFAULT_SEMANTIC);
+  if (!isPlainRecord(value)) fail(`semantic must be a plain object`);
+  for (const key of Object.keys(value)) {
+    if (key !== "provider" && key !== "local" && key !== "api") fail(`semantic has unknown property "${key}"`);
+  }
+  const provider = value.provider === undefined ? DEFAULT_SEMANTIC.provider : value.provider;
+  if (provider !== "none" && provider !== "local" && provider !== "api") {
+    fail(`semantic.provider must be "none", "local" or "api", got ${String(provider)}`);
+  }
+  let local = clone(DEFAULT_SEMANTIC.local);
+  if (value.local !== undefined) {
+    if (!isPlainRecord(value.local)) fail(`semantic.local must be a plain object`);
+    for (const key of Object.keys(value.local)) {
+      if (key !== "model" && key !== "dims") fail(`semantic.local has unknown property "${key}"`);
+    }
+    local = {
+      model: value.local.model === undefined
+        ? DEFAULT_SEMANTIC.local.model
+        : requireNonEmptyString(value.local.model, "semantic.local.model"),
+      dims: value.local.dims === undefined
+        ? DEFAULT_SEMANTIC.local.dims
+        : requireNaturalChars(value.local.dims, "semantic.local.dims"),
+    };
+  }
+  let api = clone(DEFAULT_SEMANTIC.api);
+  if (value.api !== undefined) {
+    if (!isPlainRecord(value.api)) fail(`semantic.api must be a plain object`);
+    for (const key of Object.keys(value.api)) {
+      if (key !== "endpoint" && key !== "keyRef") fail(`semantic.api has unknown property "${key}"`);
+    }
+    const nullableRef = (raw, name) => raw === undefined || raw === null ? null : requireNonEmptyString(raw, name);
+    api = {
+      endpoint: nullableRef(value.api.endpoint, "semantic.api.endpoint"),
+      keyRef: nullableRef(value.api.keyRef, "semantic.api.keyRef"),
+    };
+  }
+  return { provider, local, api };
 }
 
 function normalizeSwitch(value, name) {
@@ -331,6 +499,7 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
   const l2 = normalizeSwitch(raw.l2, "l2");
   const organize = normalizeSwitch(raw.organize, "organize");
   const forgetting = normalizeForgetting(raw.forgetting);
+  const semantic = normalizeSemantic(raw.semantic);
 
   return deepFreeze({
     mode,
@@ -345,6 +514,7 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
     l2: Object.freeze(l2),
     organize: Object.freeze(organize),
     forgetting: Object.freeze(forgetting),
+    semantic: Object.freeze(semantic),
   });
 }
 

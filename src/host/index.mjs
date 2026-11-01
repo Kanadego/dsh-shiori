@@ -1,7 +1,7 @@
 /**
  * Shiori host bridge — 宿主适配桥（P0 主入口）。
  *
- * createHostBridge({host, service, mode="shadow", config})
+ * createHostBridge({host, service, mode="shadow", config, dataRoot})
  *   -> {start(), stop(), onCompletedTool(event), diagnostics(), refresh()}
  *
  * mode：
@@ -10,6 +10,10 @@
  * - "active"：必须同时显式 config.hostBridge.allowActive === true；启动前做唯一写者 /
  *   工具所有者校验（宿主名单或注册冲突检测），冲突即中止并回收全部注册。
  *   不在真实 profile 启用（启用属于部署决策，见 docs/host/README.md）。
+ *
+ * F7 只读（数据根 dataRoot 由调用方显式给出时）：active 启动先占一个座位心跳
+ * （见 seat.mjs）。更早启动的活座位存在时本桥只读：写工具抛 HOST_LOCKED，读工具
+ * 与 L0/L1 注入不受影响。inert/无 dataRoot/shadow 不占座、不起定时器。
  *
  * L0/L1 以 section 函数逐次读取（宿主声明 asyncSectionText 时每次渲染直接读 service；
  * 否则用同步快照，快照在写入提交与完成事件后刷新）。完整宿主 system 的投影永远交宿主。
@@ -25,8 +29,10 @@
  * - start 进行中（starting）拒绝并发 start；stop() 推进代际使 in-flight start 在下一个
  *   检查点自取消，并回收当前全部注册。
  */
+import { isAbsolute } from "node:path";
 import { createCompressProbe } from "./compress-probe.mjs";
 import { INVALID_INPUT, INVALID_STATE, UNSUPPORTED, isCodedError } from "./errors.mjs";
+import { createSeatGuard } from "./seat.mjs";
 import { SECTION_CORE, SECTION_PERSONA, createCompatTools } from "./tools.mjs";
 
 export { SECTION_CORE, SECTION_PERSONA };
@@ -84,10 +90,13 @@ function registrationConflictError(error) {
   return null;
 }
 
-export function createHostBridge({ host, service, mode = "shadow", config, now, probeSink } = {}) {
+export function createHostBridge({ host, service, mode = "shadow", config, now, probeSink, dataRoot } = {}) {
   validateHost(host);
   validateService(service);
   validateMode(mode, config);
+  if (dataRoot !== undefined && (typeof dataRoot !== "string" || dataRoot.length === 0 || !isAbsolute(dataRoot))) {
+    throw INVALID_INPUT("dataRoot must be an absolute path string when provided", { received: typeof dataRoot });
+  }
 
   if (config?.hostBridge?.l2Delivery !== undefined) {
     throw UNSUPPORTED(
@@ -127,6 +136,10 @@ export function createHostBridge({ host, service, mode = "shadow", config, now, 
     eventObservations: [],
     uniqueWriter: mode === "shadow" ? "not-required (shadow)" : "pending",
     restoredFromSink: false,
+    /** F7 座位守卫（active 且给了 dataRoot 才创建；其他情况恒 null）。 */
+    seat: null,
+    /** 工具层守门入口（= seat.guard；不另建）。 */
+    readonlyGuard: null,
   };
 
   function trackDisposer(gen, disposer, kind, name) {
@@ -162,6 +175,19 @@ export function createHostBridge({ host, service, mode = "shadow", config, now, 
       state.started = false;
       snapshotReady = false;
       snapshot = { persona: "", core: "" };
+    }
+  }
+
+  /** 让座（停心跳 + 删座位文件）。只撤这一把座位，不动可能已被新代替换的 state.seat。 */
+  async function releaseSeat(seat) {
+    if (state.seat === seat) {
+      state.seat = null;
+      state.readonlyGuard = null;
+    }
+    try {
+      await seat.stop();
+    } catch (error) {
+      state.eventErrors.push(`seat withdraw failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -315,6 +341,8 @@ export function createHostBridge({ host, service, mode = "shadow", config, now, 
     const myGen = state.generation + 1;
     state.generation = myGen;
     state.starting = true;
+    /** 本代启动占的座位（成功后挂到 state.seat，取消/失败在 finally 让座）。 */
+    let mySeat = null;
 
     try {
       // 恢复重放：有持久化槽时先恢复 epoch 与已见事件（可能异步）。
@@ -346,7 +374,22 @@ export function createHostBridge({ host, service, mode = "shadow", config, now, 
       trackDisposer(myGen, unsubscribe, "subscription", "completed-tools");
 
       if (mode === "active") {
-        const tools = createCompatTools({ service: serviceForTools, getSessionInfo: () => host.getSessionInfo(), config });
+        // F7：先占座再注册工具——更早的活座位存在时，本桥的第一次写就吃 HOST_LOCKED。
+        if (dataRoot !== undefined) {
+          mySeat = await createSeatGuard({ dataRoot });
+          if (myGen !== state.generation) {
+            state.cancelCount += 1;
+            return { mode, cancelled: true, sections: [], tools: [] };
+          }
+          state.seat = mySeat;
+          state.readonlyGuard = mySeat.guard;
+        }
+        const tools = createCompatTools({
+          service: serviceForTools,
+          getSessionInfo: () => host.getSessionInfo(),
+          config,
+          readonlyGuard: mySeat?.guard,
+        });
         const toolNames = tools.map((t) => t.name);
         checkUniqueWriter(toolNames);
 
@@ -402,6 +445,10 @@ export function createHostBridge({ host, service, mode = "shadow", config, now, 
       if (myGen === state.generation) {
         state.starting = false;
       }
+      // 启动没成功（取消 / 失败）而本代占了座：立刻让座，绝不把幽灵座位留给下一个宿主。
+      if (mySeat !== null && !(state.started && state.seat === mySeat)) {
+        await releaseSeat(mySeat);
+      }
     }
   }
 
@@ -410,6 +457,15 @@ export function createHostBridge({ host, service, mode = "shadow", config, now, 
     // 推进代际：in-flight 的 start 在下一个检查点自取消；迟到的注册自撤销。
     state.generation += 1;
     state.starting = false;
+    const seat = state.seat;
+    state.seat = null;
+    state.readonlyGuard = null;
+    if (seat !== null) {
+      // 让座是 IO：stop 契约保持同步，异步完成；失败记诊断（对方宿主靠老化自愈）。
+      void seat.stop().catch((error) => {
+        state.eventErrors.push(`seat withdraw failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
     let disposed = 0;
     while (state.disposers.length > 0) {
       if (state.disposers.pop().fn()) disposed += 1;
@@ -465,6 +521,8 @@ export function createHostBridge({ host, service, mode = "shadow", config, now, 
       sections: [...state.sections],
       tools: [...state.tools],
       uniqueWriter: state.uniqueWriter,
+      /** F7 只读状态（writable/readonly + 座位心跳细节）；未占座恒 null。 */
+      readonly: state.seat?.status() ?? null,
       probe: probe.diagnostics(),
       eventErrors: [...state.eventErrors],
       recentEvents: state.eventObservations.map(({ event, ...rest }) => ({ eventId: event?.eventId, ...rest })),

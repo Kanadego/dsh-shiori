@@ -31,7 +31,12 @@ window.__ModuleLoader__.load({
     var zod = require("zod");
 
     // ── CSS（与随包 client/shiori.css 保持一致；运行时使用本内嵌副本） ──────
-    var CSS = ".dshi_root{max-width:860px;display:flex;flex-direction:column;gap:12px;font-size:13px;line-height:1.65;color:var(--dsw-alias-label-primary)}" +
+    // U1 设计 token：全部挂在 .dshi_root 作用域上（--dshi-*），页面样式只允许
+    // 引用 token、不写裸色值。语义色用于水位：safe=安全绿 / warn=警告黄 / danger=危险红；
+    // l0/l1/l2/l3-soft 为四层标识淡色；bg-panel 与 bg-card 是两档灰底（面板底/卡片底）；
+    // 圆角 / 间距 / 描边 / 字号各档一并收敛。token 本体回退到宿主 --dsw-alias 变量。
+    var CSS = ".dshi_root{--dshi-accent:var(--dsw-alias-state-business-primary,#3964fe);--dshi-safe:var(--dsw-alias-state-success-primary,#1a7f37);--dshi-warn:#b45309;--dshi-danger:var(--dsw-alias-state-error-primary,#f85149);--dshi-l0-soft:#e8f0fe;--dshi-l1-soft:#e6f6ec;--dshi-l2-soft:#fdf1e0;--dshi-l3-soft:#f1e9fd;--dshi-bg-panel:var(--dsw-alias-bg-layer-2,transparent);--dshi-bg-card:var(--dsw-alias-bg-layer-3,#fff);--dshi-text:var(--dsw-alias-label-primary);--dshi-text-dim:var(--dsw-alias-label-tertiary,#8b93a1);--dshi-stroke:1px solid var(--dsw-alias-border-l2,#dce2eb);--dshi-radius:10px;--dshi-radius-sm:8px;--dshi-radius-pill:999px;--dshi-space:12px;--dshi-space-sm:8px;--dshi-space-xs:4px;--dshi-font:13px;--dshi-font-sm:12px;--dshi-font-xs:11px;--dshi-font-title:14px}" +
+    ".dshi_root{max-width:860px;display:flex;flex-direction:column;gap:12px;font-size:13px;line-height:1.65;color:var(--dsw-alias-label-primary)}" +
 ".dshi_root *{box-sizing:border-box;min-width:0}" +
 ".dshi_title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600}" +
 ".dshi_titleSub{font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary)}" +
@@ -80,7 +85,26 @@ window.__ModuleLoader__.load({
 ".dshi_itemHead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}" +
 ".dshi_mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;word-break:break-all}" +
 ".dshi_confirm{border:1px solid var(--dsw-alias-state-error-primary,#f85149);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}" +
-".dshi_grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}";
+".dshi_grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}" +
+    // U2 预算页（标杆页）：以下样式只引用 --dshi-* token，不写裸色值。
+".dshi_bgroup{border:var(--dshi-stroke);background:var(--dshi-bg-card);border-radius:var(--dshi-radius);padding:var(--dshi-space);display:flex;flex-direction:column;gap:var(--dshi-space-sm)}" +
+".dshi_layerChip{border-radius:var(--dshi-radius-pill);padding:0 8px;font-size:var(--dshi-font-xs);white-space:nowrap}" +
+".dshi_layerL0{background:var(--dshi-l0-soft)}" +
+".dshi_layerL1{background:var(--dshi-l1-soft)}" +
+".dshi_layerL2{background:var(--dshi-l2-soft)}" +
+".dshi_bintro{font-size:var(--dshi-font-xs);color:var(--dshi-text-dim)}" +
+".dshi_preview{border:var(--dshi-stroke);background:var(--dshi-bg-panel);border-radius:var(--dshi-radius);padding:var(--dshi-space);display:flex;flex-direction:column;gap:var(--dshi-space-sm)}" +
+".dshi_track{position:relative;height:14px;border-radius:var(--dshi-radius-sm);border:var(--dshi-stroke);background:var(--dshi-bg-card);overflow:hidden}" +
+".dshi_trackFill{position:absolute;top:0;left:0;bottom:0}" +
+".dshi_trackMark{position:absolute;top:0;bottom:0;width:2px}" +
+".dshi_trackLegend{display:flex;gap:var(--dshi-space-sm);flex-wrap:wrap;font-size:var(--dshi-font-xs);color:var(--dshi-text-dim)}" +
+".dshi_sliderRow{display:flex;align-items:center;gap:var(--dshi-space-sm);flex-wrap:wrap;width:100%}" +
+".dshi_slider{flex:1;min-width:160px;accent-color:var(--dshi-accent)}" +
+".dshi_sliderNum{width:96px}" +
+".dshi_fieldRow{display:flex;align-items:baseline;gap:var(--dshi-space-sm);flex-wrap:wrap}" +
+".dshi_modBadge{border:1px solid var(--dshi-warn);color:var(--dshi-warn);border-radius:var(--dshi-radius-pill);padding:0 8px;font-size:10px;white-space:nowrap}" +
+".dshi_fieldError{font-size:var(--dshi-font-xs);color:var(--dshi-danger)}" +
+".dshi_blockError{border:var(--dshi-stroke);border-color:var(--dshi-danger);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm);font-size:var(--dshi-font-sm);color:var(--dshi-danger)}";
     function ensureStyle() {
       try {
         if (document.getElementById("dsh-shiori-style")) return;
@@ -209,7 +233,7 @@ window.__ModuleLoader__.load({
     };
 
     // ── 冻结 wire 定义（namespace shiori；参数 session→wire sessionId + payload） ──
-    var RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"];
+    var RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"];
     function sessionCodec() {
       return {
         mode: "strict",
@@ -2230,100 +2254,240 @@ window.__ModuleLoader__.load({
         })) : null);
     }
 
-    // 预算字段语义：比率 ∈ (0,1)；字符/计数类为正整数，且不超过 Q 的生产上限
-    // （与 numberField 的 max 及 src/plugin/config.mjs BUDGET_CEILINGS 一致）。
-    // 空白输入＝用户没有填写＝不写该字段（保留服务端现值/默认值），绝不按 Number("")=0 落盘。
-    // 可见标签 = 中文解释（原参数名[, 上限 N]）；输入框 data-path 与服务端参数名不变，
-    // 校验规则（比率 ∈ (0,1)、正整数、上限）也不变，只把提示中文化。
-    var BUDGET_FIELD_RULES = {
-      "core.targetChars": {
-        kind: "integer",
-        label: "L0 记忆目标字符数",
-        hint: "单张 L0 记忆卡正文的目标长度，超出后按比例压缩"
-      },
+    // ── U2 预算页重写（标杆页，其他页对齐它的标准） ─────────────────────────
+    // - 命名三层分离：界面名主位；技术名进 tooltip（title）与页尾「技术细节」；
+    //   机制说明一律写成后果描述（例：超过这个长度就不再接受新增内容，只能删减）。
+    // - 占比字段改水位：softRatio / hardRatio 不再直接编辑，改为字符数水位滑杆 +
+    //   联动显示；软水位不得越过硬水位，互相钳制。
+    // - 顶部实时预览条：当前占用 ─ 软水位 · 硬闸 · 硬顶，随任何字段修改实时变化；
+    //   占用取 getStatus 返回的真实 occupancy（l1Chars），不写死示例值。
+    // - 按人设卡（L0）/ 记忆核心（L1）/ 闪回卡片（L2）三组分组卡片，组头一句话介绍。
+    // - 已修改字段标「已修改」徽章 + 单字段恢复默认；越界就地中文提示并禁用保存。
+    // - targetChars 不在界面出现（D3：保留 schema、界面隐藏）；但它必须是
+    //   softChars ≤ targetChars < hardChars 的合法值，所以随三个可调字段一起
+    //   被收敛进区间（clampCoreWater），并在保存时写回——否则把硬顶调小到
+    //   targetChars 以下时，保存会被一个界面上看不见的字段挡住（P1 修复点）。
+    //   保存时把旧 ratio 字段清掉，避免双源真相。
+    // - 层号纠错（U0）：记忆核心是 L1、人设卡是 L0（对齐状态页 686-687 行写法）。
+
+    // 出厂默认值：与 src/core/config.mjs DEFAULT_CONFIG 一致；水位按
+    // hardCapChars × ratio 四舍五入派生（与 src/plugin/config.mjs derivedWaterDefaults
+    // 同一派生式）。浏览器 bundle 无构建步骤、拿不到服务端模块，只能在此落常数，
+    // 改动 DEFAULT_CONFIG 时必须同步这里。
+    var BUDGET_FACTORY_DEFAULTS = {
+      core: { targetChars: 8000, hardCapChars: 10000, softChars: 7500, hardChars: 9000 },
+      persona: { maxChars: 12000 },
+      spark: { maxChars: 600, inlineMaxChars: 100, maxCards: 5, seedCount: 3, linkCount: 2 }
+    };
+
+    // 字段元数据：label=界面名（主位）；tech=技术名（进 tooltip）；hint=后果描述。
+    // 上限与 src/plugin/config.mjs BUDGET_CEILINGS 保持一致。
+    var BUDGET_FIELD_META = {
       "core.hardCapChars": {
         kind: "integer",
-        label: "L0 硬上限字符数",
-        hint: "L0 记忆卡正文的硬上限；软/硬压缩水位由它乘以两个占比得出"
-      },
-      "core.softRatio": {
-        kind: "ratio",
-        label: "L0 软压缩阈值占比",
-        hint: "0 到 1 之间的小数，达到该占比开始软压缩（hardCapChars×softRatio）"
-      },
-      "core.hardRatio": {
-        kind: "ratio",
-        label: "L0 硬压缩阈值占比",
-        hint: "0 到 1 之间的小数，达到该占比开始硬压缩（hardCapChars×hardRatio）"
+        label: "硬顶",
+        tech: "core.hardCapChars",
+        hint: "无论如何不能越过的总长度上限"
       },
       "persona.maxChars": {
         kind: "integer",
-        // 与服务端 src/plugin/config.mjs BUDGET_CEILINGS.persona.maxChars 保持一致。
-        // 插件是公开分发的，别人的人设卡可能远长于本机默认 12000，上限抬到 60000。
+        // 与服务端 BUDGET_CEILINGS.persona.maxChars 保持一致（默认 12000）。
         max: 60000,
         label: "人设卡最大字符数",
-        hint: "人设卡正文的最大长度（UTF-16 字符），超出写入会被拒绝"
+        tech: "persona.maxChars（上限 60000）",
+        hint: "人设卡正文超过这个长度，写入会被拒绝"
       },
       "spark.maxChars": {
         kind: "integer",
         max: 600,
-        label: "Spark 卡片最大字符数",
-        hint: "单次投递的 Spark 附件文本总长度上限"
+        label: "单次投递长度上限",
+        tech: "spark.maxChars（上限 600）",
+        hint: "一轮投递的闪回卡片文本总长超过它就发不出去"
       },
       "spark.inlineMaxChars": {
         kind: "integer",
         max: 100,
-        label: "Spark 内联注入最大字符数",
-        hint: "Spark 直接带正文的门槛，超过则改用摘要 + id"
+        label: "直接带全文的门槛",
+        tech: "spark.inlineMaxChars（上限 100）",
+        hint: "卡片正文短于它就整篇带上，长于它只发摘要 + id"
       },
       "spark.maxCards": {
         kind: "integer",
         max: 5,
-        label: "Spark 最多卡片数",
-        hint: "单次投递最多携带的 Spark 卡片数量"
+        label: "单次最多卡片数",
+        tech: "spark.maxCards（上限 5）",
+        hint: "一轮投递最多带这么多张闪回卡，超过会截断，防止刷屏"
       },
       "spark.seedCount": {
         kind: "integer",
         max: 3,
-        label: "Spark 召回种子数",
-        hint: "投递时最多召回的种子素材条数"
+        label: "召回种子数",
+        tech: "spark.seedCount（上限 3）",
+        hint: "每轮最多召回的种子素材条数"
       },
       "spark.linkCount": {
         kind: "integer",
         max: 2,
-        label: "Spark 关联链接数",
-        hint: "投递时最多附带的 1 跳关联条数"
+        label: "关联链接数",
+        tech: "spark.linkCount（上限 2）",
+        hint: "每轮最多附带的 1 跳关联条数"
       }
     };
 
-    function budgetFieldLabel(path) {
-      var rule = BUDGET_FIELD_RULES[path];
-      var chinese = rule && rule.label ? rule.label : path;
-      var ceiling = rule && rule.max !== undefined ? "，上限 " + rule.max : "";
-      return chinese + "（" + path + ceiling + "）";
-    }
-
-    function invalidBudgetField(path, reason) {
-      var error = new Error(budgetFieldLabel(path) + " " + reason);
-      error.code = "ui/invalid-number";
-      return error;
-    }
-
-    // 校验并转换单个输入：空 → 跳过（不写入）；非法 → 抛 ui/invalid-number 中止整批。
-    function readBudgetInput(path, textValue) {
-      var rawText = String(textValue == null ? "" : textValue).trim();
-      if (rawText === "") return undefined;
-      var rule = BUDGET_FIELD_RULES[path];
-      if (!rule) throw invalidBudgetField(path, "不是可编辑的预算字段");
-      var number = Number(rawText);
-      if (!Number.isFinite(number)) throw invalidBudgetField(path, "不是有效数字");
-      if (rule.kind === "ratio") {
-        if (!(number > 0 && number < 1)) throw invalidBudgetField(path, "必须是 0 与 1 之间的比率");
-      } else {
-        if (!Number.isInteger(number) || number <= 0) throw invalidBudgetField(path, "必须是正整数");
-        if (rule.max !== undefined && number > rule.max) throw invalidBudgetField(path, "超过上限 " + rule.max);
+    // 软/硬/目标三者一致性收敛：硬 < 硬顶、软 ≤ 硬、目标 ∈ [软, 硬-1]。
+    // 界面只有硬顶/软水位/硬水位三个可调字段，而服务端 validateConfig 要求
+    // softAt ≤ targetChars < hardAt < cap——隐藏的 targetChars 必须跟着水位走，
+    // 不能反过来当用户改不动的硬约束。非整数的中间态直接跳过，交给校验报错。
+    function clampCoreWater(core) {
+      var next = assign({}, core);
+      var cap = next.hardCapChars;
+      if (Number.isInteger(cap) && cap > 0) {
+        if (!Number.isInteger(next.hardChars) || next.hardChars > cap - 1) next.hardChars = cap - 1;
+        // 软水位跟随时要留出「严格小于」这一格：钳到相等只会立刻触发
+        // 「软水位必须小于硬水位」，等于把用户按在一个必然被拒的状态上。
+        if (Number.isInteger(next.softChars) && Number.isInteger(next.hardChars)
+          && next.softChars > next.hardChars - 1) next.softChars = Math.max(1, next.hardChars - 1);
       }
-      return number;
+      if (Number.isInteger(next.softChars) && Number.isInteger(next.hardChars) && next.hardChars > next.softChars) {
+        if (!Number.isInteger(next.targetChars) || next.targetChars < next.softChars) next.targetChars = next.softChars;
+        if (next.targetChars > next.hardChars - 1) next.targetChars = next.hardChars - 1;
+      }
+      return next;
+    }
+
+    // 从宿主快照 value.budgets 提取可编辑草稿。老配置只有 ratio 时按
+    // hardCapChars × ratio 四舍五入换算成水位（与服务端 normalizePluginConfig 同式）。
+    function extractBudgetDraft(budgets) {
+      var defaults = BUDGET_FACTORY_DEFAULTS;
+      var core = budgets && budgets.core ? budgets.core : {};
+      var persona = budgets && budgets.persona ? budgets.persona : {};
+      var spark = budgets && budgets.spark ? budgets.spark : {};
+      var cap = typeof core.hardCapChars === "number" ? core.hardCapChars : defaults.core.hardCapChars;
+      var soft = typeof core.softChars === "number"
+        ? core.softChars
+        : (typeof core.softRatio === "number" ? Math.round(cap * core.softRatio) : defaults.core.softChars);
+      var hard = typeof core.hardChars === "number"
+        ? core.hardChars
+        : (typeof core.hardRatio === "number" ? Math.round(cap * core.hardRatio) : defaults.core.hardChars);
+      return {
+        core: clampCoreWater({
+          hardCapChars: cap,
+          softChars: soft,
+          hardChars: hard,
+          // 不渲染、不直接编辑；快照缺该字段时回落工厂默认值，否则区间校验/
+          // 收敛整段被跳过、滑杆能拉出必然被服务端拒绝的组合。
+          targetChars: typeof core.targetChars === "number"
+            ? core.targetChars
+            : (defaults.core && typeof defaults.core.targetChars === "number" ? defaults.core.targetChars : null)
+        }),
+        persona: { maxChars: typeof persona.maxChars === "number" ? persona.maxChars : undefined },
+        spark: {
+          maxChars: typeof spark.maxChars === "number" ? spark.maxChars : undefined,
+          inlineMaxChars: typeof spark.inlineMaxChars === "number" ? spark.inlineMaxChars : undefined,
+          maxCards: typeof spark.maxCards === "number" ? spark.maxCards : undefined,
+          seedCount: typeof spark.seedCount === "number" ? spark.seedCount : undefined,
+          linkCount: typeof spark.linkCount === "number" ? spark.linkCount : undefined
+        }
+      };
+    }
+
+    // 改一个字段后返回新草稿；软/硬水位互相钳制：软 ≤ 硬 < 硬顶。
+    function setBudgetDraftValue(currentDraft, path, fieldValue) {
+      var parts = path.split(".");
+      var next = {
+        core: assign({}, currentDraft.core),
+        persona: assign({}, currentDraft.persona),
+        spark: assign({}, currentDraft.spark)
+      };
+      next[parts[0]][parts[1]] = fieldValue;
+      // 硬顶/软/硬任一变动都把三者（含隐藏的 targetChars）重新收敛到合法区间。
+      next.core = clampCoreWater(next.core);
+      return next;
+    }
+
+    // 越界校验：全部中文文案、按字段就地提示；保存按钮据此禁用。
+    function budgetDraftFieldErrors(draft) {
+      var errors = {};
+      var core = draft.core;
+      if (!Number.isInteger(core.hardCapChars) || core.hardCapChars <= 0) {
+        errors["core.hardCapChars"] = "硬顶必须是正整数。";
+      } else {
+        if (!Number.isInteger(core.softChars) || core.softChars < 1) {
+          errors["core.softChars"] = "软水位至少为 1 字符（填 0 会被换算成 0 比例，加载时直接拒绝）。";
+        }
+        if (!Number.isInteger(core.hardChars) || core.hardChars < 2) {
+          errors["core.hardChars"] = "硬水位至少为 2 字符（必须严格大于软水位）。";
+        }
+        if (errors["core.softChars"] === undefined && errors["core.hardChars"] === undefined) {
+          if (core.softChars >= core.hardChars) {
+            errors["core.softChars"] = "软水位（" + core.softChars + " 字符）必须小于硬水位（" + core.hardChars + " 字符）：相等会导致加载校验失败。";
+          }
+          if (core.hardChars >= core.hardCapChars) {
+            errors["core.hardChars"] = "硬水位（" + core.hardChars + " 字符）必须小于硬顶（" + core.hardCapChars + " 字符）：硬闸之上要保留超限判定的空间。";
+          }
+        }
+      }
+      // 文案一律点名界面上看得见的中文字段名：面板里没有的技术名（如隐藏的
+      // targetChars）不得出现在用户要读的错误里。
+      var labelOf = function (path) {
+        return BUDGET_FIELD_META[path] && BUDGET_FIELD_META[path].label ? BUDGET_FIELD_META[path].label : path;
+      };
+      if (!Number.isInteger(draft.persona.maxChars) || draft.persona.maxChars <= 0) {
+        errors["persona.maxChars"] = labelOf("persona.maxChars") + "必须是正整数。";
+      } else if (draft.persona.maxChars > 60000) {
+        errors["persona.maxChars"] = labelOf("persona.maxChars") + "超过上限 60000。";
+      }
+      var sparkRules = [["maxChars", 600], ["inlineMaxChars", 100], ["maxCards", 5], ["seedCount", 3], ["linkCount", 2]];
+      for (var i = 0; i < sparkRules.length; i++) {
+        var key = sparkRules[i][0];
+        var max = sparkRules[i][1];
+        var v = draft.spark[key];
+        if (!Number.isInteger(v) || v <= 0) errors["spark." + key] = labelOf("spark." + key) + "必须是正整数。";
+        else if (v > max) errors["spark." + key] = labelOf("spark." + key) + "超过上限 " + max + "。";
+      }
+      if (Number.isInteger(draft.spark.inlineMaxChars) && Number.isInteger(draft.spark.maxChars)
+        && draft.spark.inlineMaxChars > draft.spark.maxChars) {
+        errors["spark.inlineMaxChars"] = "直接带全文的门槛不能超过单次投递长度上限。";
+      }
+      if (Number.isInteger(draft.spark.seedCount) && Number.isInteger(draft.spark.linkCount) && Number.isInteger(draft.spark.maxCards)
+        && draft.spark.seedCount + draft.spark.linkCount > draft.spark.maxCards) {
+        errors["spark.seedCount"] = "召回种子数 + 关联链接数（" + (draft.spark.seedCount + draft.spark.linkCount) + "）不能超过单次最多卡片数（" + draft.spark.maxCards + "）。";
+      }
+      return errors;
+    }
+
+    // 顶部实时预览条：当前占用 ─ 软水位 · 硬闸 · 硬顶。占用是真实数据
+    // （getStatus occupancy.l1Chars），水位随草稿实时变化；占用颜色随水位分档
+    // （安全绿 / 警告黄 / 危险红，只用 token）。
+    function budgetPreviewBar(draft, occupancy) {
+      var cap = draft.core.hardCapChars;
+      var soft = draft.core.softChars;
+      var hard = draft.core.hardChars;
+      var used = occupancy && typeof occupancy.chars === "number" ? occupancy.chars : null;
+      var pct = function (v) {
+        return Number.isInteger(cap) && cap > 0 ? Math.max(0, Math.min(100, (v / cap) * 100)) : 0;
+      };
+      var level = used === null || !Number.isInteger(soft) || !Number.isInteger(hard)
+        ? null
+        : (used >= hard ? "danger" : used >= soft ? "warn" : "safe");
+      var fillColor = level === "danger"
+        ? "var(--dshi-danger)"
+        : (level === "warn" ? "var(--dshi-warn)" : "var(--dshi-safe)");
+      return h("div", { className: "dshi_preview" },
+        h("div", { className: "dshi_row" },
+          h("span", { className: "dshi_cardTitle" }, "当前占用"),
+          h("span", { className: "dshi_hint" },
+            used === null
+              ? "占用数据不可用（未取到 getStatus 的 occupancy；切换会话或刷新后重试）"
+              : "记忆核心已用 " + used + " / " + cap + " 字符")),
+        h("div", { className: "dshi_track" },
+          used !== null ? h("div", { className: "dshi_trackFill", style: { width: pct(used) + "%", background: fillColor } }) : null,
+          Number.isInteger(soft) ? h("div", { className: "dshi_trackMark", style: { left: pct(soft) + "%", background: "var(--dshi-warn)" }, title: "软水位 " + soft + " 字符" }) : null,
+          Number.isInteger(hard) ? h("div", { className: "dshi_trackMark", style: { left: pct(hard) + "%", background: "var(--dshi-danger)" }, title: "硬闸 " + hard + " 字符" }) : null),
+        h("div", { className: "dshi_trackLegend" },
+          "软水位 " + soft, "·", "硬闸 " + hard, "·", "硬顶 " + cap,
+          level === "warn" ? "—— 已过软水位：新增内容开始被压缩着写" : null,
+          level === "danger" ? "—— 已过硬闸：只减不增" : null));
     }
 
     function BudgetsTab(props) {
@@ -2337,6 +2501,14 @@ window.__ModuleLoader__.load({
       var okState = useState(null);
       var okText = okState[0];
       var setOk = okState[1];
+      // 编辑草稿：null=尚未改动（展示层直接用快照换算），一旦修改即持有整份草稿。
+      var draftState = useState(null);
+      var draftEdits = draftState[0];
+      var setDraftEdits = draftState[1];
+      // 真实占用（getStatus occupancy.l1Chars）；{chars:null}=不可用，如实显示。
+      var occupancyState = useState(null);
+      var occupancy = occupancyState[0];
+      var setOccupancy = occupancyState[1];
       useEffect(function () {
         try {
           setSnapshot(scope ? scope.getSnapshot() : null);
@@ -2344,50 +2516,155 @@ window.__ModuleLoader__.load({
           setError({ code: "ui/scope", message: "读取设置命名空间失败：" + (e && e.message) });
         }
       }, []);
+      useEffect(function () {
+        var cancelled = false;
+        props.dsh.call("getStatus", props.sessionId, {}).then(function (status) {
+          if (cancelled) return;
+          var occ = status && status.occupancy && typeof status.occupancy === "object" ? status.occupancy : null;
+          setOccupancy({ chars: occ && typeof occ.l1Chars === "number" ? occ.l1Chars : null });
+        }, function () {
+          if (!cancelled) setOccupancy({ chars: null });
+        });
+        return function () { cancelled = true; };
+      }, [props.sessionId]);
       if (!scope) {
         return h("div", { className: "dshi_error" }, "[shiori/ui-unsupported] configForms 服务不可用：无法提供原生预算配置界面（工具模式仍可用）。");
       }
       var value = snapshot && snapshot.status === "ready" ? snapshot.value : null;
-      // 预算是命名空间里的 budgets 段（快照 value 是整份配置）：旧代码读 value[section][key]，
-      // 永远读不到 → 输入框空白 → 保存时 Number("")===0 把预算清零（owner 实机踩到）。
-      var currentBudgets = value && value.budgets ? value.budgets : null;
-      var numberField = function (fieldPath) {
-        var parts = fieldPath.split(".");
-        var rule = BUDGET_FIELD_RULES[fieldPath] || {};
-        var current = currentBudgets && currentBudgets[parts[0]] ? currentBudgets[parts[0]][parts[1]] : undefined;
-        return h("label", { className: "dshi_label" }, budgetFieldLabel(fieldPath),
-          h("input", {
-            className: "dshi_input",
-            type: "number",
-            defaultValue: current === undefined ? "" : String(current),
-            "data-path": fieldPath,
-            min: "0",
-            max: rule.max !== undefined ? String(rule.max) : undefined,
-            // HTML number input 默认 step=1，会把 0.75 判成非法值（浏览器原生校验气泡）。
-            // 比率字段（kind=ratio）允许任意小数，整数/字符/计数段仍只收整数。
-            step: rule.kind === "ratio" ? "any" : "1"
-          }),
-          h("div", { className: "dshi_hint" }, rule.hint || ""));
+      // 展示用草稿：用户改过的字段优先，其余取快照换算值（老配置只有 ratio 时
+      // 按 hardCapChars × ratio 换算成水位）。
+      var snapshotDraft = value ? extractBudgetDraft(value.budgets) : null;
+      var draft = draftEdits
+        ? { core: assign({}, snapshotDraft.core, draftEdits.core), persona: assign({}, snapshotDraft.persona, draftEdits.persona), spark: assign({}, snapshotDraft.spark, draftEdits.spark) }
+        : snapshotDraft;
+      var fieldErrors = draft ? budgetDraftFieldErrors(draft) : {};
+      var errorCount = Object.keys(fieldErrors).length;
+      var change = function (path, fieldValue) {
+        var base = draft || snapshotDraft;
+        if (!base) return;
+        setDraftEdits(setBudgetDraftValue(base, path, fieldValue));
       };
-      var save = async function (form) {
+      var resetField = function (path) {
+        var parts = path.split(".");
+        var factoryDefault = BUDGET_FACTORY_DEFAULTS[parts[0]] ? BUDGET_FACTORY_DEFAULTS[parts[0]][parts[1]] : undefined;
+        change(path, factoryDefault);
+      };
+      // 字段行：界面名主位（技术名进 title tooltip）+ 后果描述 + 已修改徽章 +
+      // 单字段恢复默认 + 就地中文错误。
+      var integerField = function (path) {
+        var meta = BUDGET_FIELD_META[path];
+        var parts = path.split(".");
+        var current = draft ? draft[parts[0]][parts[1]] : undefined;
+        var original = snapshotDraft ? snapshotDraft[parts[0]][parts[1]] : undefined;
+        var modified = current !== undefined && current !== original;
+        return h("div", { className: "dshi_fieldRow", key: path },
+          h("label", { className: "dshi_label", title: meta.tech },
+            meta.label,
+            h("input", {
+              className: "dshi_input",
+              type: "number",
+              value: current === undefined || typeof current !== "number" ? "" : String(current),
+              "data-path": path,
+              min: "0",
+              max: meta.max !== undefined ? String(meta.max) : undefined,
+              step: "1",
+              onChange: function (event) {
+                var text = String(event.target.value == null ? "" : event.target.value).trim();
+                if (text === "") { change(path, undefined); return; }
+                var parsed = Number(text);
+                change(path, Number.isFinite(parsed) ? parsed : text);
+              }
+            })),
+          modified ? h("span", { className: "dshi_modBadge" }, "已修改") : null,
+          h("button", {
+            className: "dshi_btn", type: "button", title: "恢复出厂默认 " + meta.tech,
+            onClick: function () { resetField(path); }
+          }, "恢复默认"),
+          h("div", { className: "dshi_hint" }, meta.hint),
+          fieldErrors[path] ? h("div", { className: "dshi_fieldError" }, fieldErrors[path]) : null);
+      };
+      // 水位字段行：滑杆 + 字符数联动显示；软/硬互相钳制（setBudgetDraftValue）。
+      var waterField = function (key, label, tech, consequenceHint) {
+        var path = "core." + key;
+        var cap = draft ? draft.core.hardCapChars : 0;
+        var current = draft ? draft.core[key] : undefined;
+        var original = snapshotDraft ? snapshotDraft.core[key] : undefined;
+        var modified = current !== undefined && current !== original;
+        var other = key === "softChars" ? draft && draft.core.hardChars : draft && draft.core.softChars;
+        // 滑杆边界与保存校验同口径：软 ∈ [1, 硬-1]，硬 ∈ [软+1, 硬顶-1]。
+        // 隐藏的 targetChars 不再参与定界（它跟着收敛）：否则滑杆会停在一个
+        // 界面上没有任何字段能解释的上限上。
+        var softMax = Number.isInteger(draft && draft.core.hardChars)
+          ? Math.max(1, draft.core.hardChars - 1)
+          : Math.max(1, (cap || 2) - 2);
+        var max = key === "softChars"
+          ? softMax
+          : Math.max(2, (Number.isInteger(cap) ? cap : 0) - 1);
+        var min = key === "softChars" ? 1 : (Number.isInteger(other) ? Math.max(other + 1, 2) : 2);
+        return h("div", { className: "dshi_fieldRow", key: path },
+          h("label", { className: "dshi_label", title: tech },
+            label,
+            modified ? h("span", { className: "dshi_modBadge" }, "已修改") : null,
+            h("div", { className: "dshi_sliderRow" },
+              h("input", {
+                className: "dshi_slider", type: "range",
+                min: String(min), max: String(max), step: "1",
+                value: Number.isInteger(current) ? String(current) : "0",
+                "data-path": path,
+                onChange: function (event) { change(path, Number(event.target.value)); }
+              }),
+              h("input", {
+                className: "dshi_input dshi_sliderNum", type: "number",
+                min: "0", max: String(max), step: "1",
+                value: Number.isInteger(current) ? String(current) : "",
+                "data-path": path + ".num",
+                onChange: function (event) {
+                  var text = String(event.target.value == null ? "" : event.target.value).trim();
+                  if (text === "") { change(path, undefined); return; }
+                  var parsed = Number(text);
+                  change(path, Number.isFinite(parsed) ? parsed : text);
+                }
+              }),
+              h("span", { className: "dshi_hint" }, "字符 / 硬顶 " + (Number.isInteger(cap) ? cap : "—"))),
+            h("div", { className: "dshi_hint" }, consequenceHint),
+            fieldErrors[path] ? h("div", { className: "dshi_fieldError" }, fieldErrors[path]) : null),
+          h("button", {
+            className: "dshi_btn", type: "button", title: "恢复出厂默认 " + tech,
+            onClick: function () { resetField(path); }
+          }, "恢复默认"));
+      };
+      var groupCard = function (layer, title, intro, children) {
+        return h("div", { className: "dshi_bgroup", key: layer },
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_layerChip dshi_layer" + layer }, layer + " " + title),
+            h("span", { className: "dshi_cardTitle" }, title)),
+          h("div", { className: "dshi_bintro" }, intro),
+          h("div", { className: "dshi_items" }, children));
+      };
+      var save = async function () {
         setError(null);
         setOk(null);
+        if (!value || !draft) return;
+        if (errorCount > 0) return; // 越界禁用保存（按钮已 disabled，这里双保险）
         try {
-          var inputs = form.querySelectorAll("[data-path]");
-          var budgetsObject = assign({}, (value && value.budgets) || {});
+          var budgetsObject = assign({}, value.budgets || {});
           ["core", "persona", "spark"].forEach(function (section) {
             budgetsObject[section] = assign({}, budgetsObject[section] || {});
           });
-          for (var i = 0; i < inputs.length; i++) {
-            var path = inputs[i].getAttribute("data-path").split(".");
-            if (path.length !== 2) continue;
-            var fieldPath = path.join(".");
-            // 空输入＝用户没填：跳过，保留服务端现值/默认值（旧代码 Number("")===0
-            // 会把空字段静默写成 0，owner 实机点一次保存即把预算清零）。
-            var number = readBudgetInput(fieldPath, inputs[i].value);
-            if (number === undefined) continue;
-            budgetsObject[path[0]][path[1]] = number;
-          }
+          // 水位为权威（U2 产出 4）：写 softChars/hardChars，清掉旧 ratio 字段，
+          // 避免双源真相。targetChars 不在界面出现，但必须一起写回收敛后的值
+          // （softChars ≤ targetChars < hardChars），否则服务端加载校验会被一个
+          // 用户看不见的字段拦下。
+          budgetsObject.core.hardCapChars = draft.core.hardCapChars;
+          budgetsObject.core.softChars = draft.core.softChars;
+          budgetsObject.core.hardChars = draft.core.hardChars;
+          if (Number.isInteger(draft.core.targetChars)) budgetsObject.core.targetChars = draft.core.targetChars;
+          delete budgetsObject.core.softRatio;
+          delete budgetsObject.core.hardRatio;
+          if (draft.persona.maxChars !== undefined) budgetsObject.persona.maxChars = draft.persona.maxChars;
+          ["maxChars", "inlineMaxChars", "maxCards", "seedCount", "linkCount"].forEach(function (key) {
+            if (draft.spark[key] !== undefined) budgetsObject.spark[key] = draft.spark[key];
+          });
           // 单批一个 revision fence：整段 budgets 写入，避免逐字段各自 fence 被拒。
           var run;
           if (typeof scope.mutate === "function") {
@@ -2399,6 +2676,7 @@ window.__ModuleLoader__.load({
           var applied = true;
           var next = scope.getSnapshot();
           setSnapshot(next);
+          setDraftEdits(null); // 以保存后的快照为新基准
           if (next.status === "ready" && next.value && next.value.budgets) {
             for (var section in budgetsObject) {
               for (var key in budgetsObject[section]) {
@@ -2409,7 +2687,7 @@ window.__ModuleLoader__.load({
             applied = false;
           }
           setOk(applied
-            ? "已保存（宿主 settings 命名空间 shiori；volatile 字段由宿主热提交，不触发插件重载）。新预算将在下次插件重载或宿主重启后生效。"
+            ? "已保存（旧版占比字段已升级为水位；宿主 settings 命名空间 shiori；volatile 字段由宿主热提交，不触发插件重载）。新预算将在下次插件重载或宿主重启后生效。"
             : "写入未确认生效——请重新打开本页核对当前值。");
         } catch (e) {
           setError({ code: (e && e.code) || "ui/save", message: (e && e.message) || String(e) });
@@ -2417,27 +2695,47 @@ window.__ModuleLoader__.load({
       };
       return h("form", {
         className: "dshi_card",
-        onSubmit: function (event) { event.preventDefault(); save(event.target); }
+        onSubmit: function (event) { event.preventDefault(); save(); }
       },
-        h("div", { className: "dshi_cardTitle" }, "预算配置（宿主原生配置；下次插件重载/宿主重启后生效）",
-          snapshot ? h("span", { className: "dshi_badgeDim dshi_badge" }, "rev " + String(snapshot.revision)) : null),
-        h("div", { className: "dshi_hint" }, "经宿主 settings 命名空间 shiori 保存：volatile 字段由宿主热提交，不触发插件重载；新预算在下次插件重载或宿主重启后生效（运行中的 controller 仍用启动时快照）。留空的字段不会写入。"),
-        value ? h("div", { className: "dshi_grid2" },
-          numberField("core.targetChars"),
-          numberField("core.hardCapChars"),
-          numberField("core.softRatio"),
-          numberField("core.hardRatio"),
-          numberField("persona.maxChars"),
-          numberField("spark.maxChars"),
-          numberField("spark.inlineMaxChars"),
-          numberField("spark.maxCards"),
-          numberField("spark.seedCount"),
-          numberField("spark.linkCount"))
-        : h("div", { className: "dshi_loading" }, snapshot && snapshot.status !== "ready" ? "设置命名空间不可用（服务端未注册 shiori 命名空间？）" : "加载中…"),
+        h("div", { className: "dshi_row" },
+          h("span", { className: "dshi_cardTitle" }, "记忆预算"),
+          h("span", { className: "dshi_titleSub" }, "宿主原生配置；下次插件重载 / 宿主重启后生效")),
+        h("div", { className: "dshi_hint" }, "水位决定记忆核心的压缩与闸门：过了软水位开始压缩着写，越过硬闸就只减不增。改动会实时反映在下面的水位条里。"),
+        value && draft ? budgetPreviewBar(draft, occupancy) : null,
+        value && draft ? h("div", { className: "dshi_items" },
+          groupCard("L0", "人设卡", "写给模型的人设与约定，整段注入每次对话。", [
+            integerField("persona.maxChars")
+          ]),
+          groupCard("L1", "记忆核心", "模型长期维护的记忆正文：超过软水位开始压缩，越过硬闸只减不增。", [
+            integerField("core.hardCapChars"),
+            waterField("softChars", "软水位", "core.softChars（旧 core.softRatio，保存时清除）", "超过这个长度就不再原样接受新增内容，开始压缩着写。"),
+            waterField("hardChars", "硬水位（硬闸）", "core.hardChars（旧 core.hardRatio，保存时清除）", "越过这道闸就不再接受新增内容，只能删减。")
+          ]),
+          groupCard("L2", "闪回卡片", "小张的独立记忆卡，按触发词召回后作为附件投递。", [
+            integerField("spark.maxChars"),
+            integerField("spark.inlineMaxChars"),
+            integerField("spark.maxCards"),
+            integerField("spark.seedCount"),
+            integerField("spark.linkCount")
+          ])) : h("div", { className: "dshi_loading" }, snapshot && snapshot.status !== "ready" ? "设置命名空间不可用（服务端未注册 shiori 命名空间？）" : "加载中…"),
+        errorCount > 0 ? h("div", { className: "dshi_blockError" },
+          "有 " + errorCount + " 处越界，已禁用保存：", Object.keys(fieldErrors).map(function (path) {
+            return h("div", { key: path }, fieldErrors[path]);
+          })) : null,
         ErrorBox(error),
         okText ? h("div", { className: "dshi_ok" }, okText) : null,
         h("div", { className: "dshi_row" },
-          h("button", { className: "dshi_btn dshi_btnPrimary", type: "submit", disabled: !value }, "保存预算")));
+          h("button", {
+            className: "dshi_btn dshi_btnPrimary", type: "submit",
+            disabled: !value || !draft || errorCount > 0
+          }, "保存预算")),
+        h("details", null,
+          h("summary", { className: "dshi_hint" }, "技术细节（技术名与原始值，一般不用看）"),
+          h("div", { className: "dshi_hint" },
+            "旧版占比字段（core.softRatio / core.hardRatio）已在界面隐藏，保存时自动清除、按水位生效；记忆目标长度（core.targetChars）不在界面出现，保存时自动收敛到「软水位 ~ 硬水位-1」之间并写回。",
+            snapshot ? " rev " + String(snapshot.revision) : null,
+            "。"),
+          value ? h("pre", { className: "dshi_pre" }, stableStringify(value.budgets)) : null));
     }
 
     var TABS = [
@@ -2821,7 +3119,7 @@ window.__ModuleLoader__.load({
               ? h("div", { className: "dshi_hint" }, "当前会话被宿主标记为不可用，已暂停对该会话的数据请求。换一个会话，或点上方「刷新」强制重试。")
               : h(fragment, null,
                   tab === "status" ? h(StatusTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,
-                  tab === "budgets" ? h(BudgetsTab, { dsh: props.dsh }) : null,
+                  tab === "budgets" ? h(BudgetsTab, { dsh: props.dsh, sessionId: sessionId }) : null,
                   // 数据 tab（记忆/图谱/候选）：模式探测中或非 active 时以占位替代，不发数据请求
                   tab !== "status" && tab !== "budgets" && modeStatus === undefined
                     ? h("div", { className: "dshi_loading" }, "能力探测中…") : null,

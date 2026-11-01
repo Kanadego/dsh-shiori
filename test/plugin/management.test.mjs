@@ -54,10 +54,10 @@ async function setup(t) {
 
 // ── protocol（纯 JSON 层）────────────────────────────────────
 
-test("protocol：9 个方法全覆盖；闭包拒绝未知键；queueRevision/planDigest/operationId 规则", () => {
+test("protocol：10 个方法全覆盖；闭包拒绝未知键；queueRevision/planDigest/operationId 规则", () => {
   assert.deepEqual([...MANAGEMENT_METHOD_NAMES].sort(), [
     "analyze", "executePlan", "executeTool", "getGraph", "getMemoryView",
-    "getStatus", "listCandidates", "previewPlan", "reviewCandidate",
+    "getStatus", "getTimeline", "listCandidates", "previewPlan", "reviewCandidate",
   ].sort());
   for (const name of MANAGEMENT_METHOD_NAMES) {
     assert.ok(MANAGEMENT_METHODS[name].inputSchema);
@@ -792,3 +792,122 @@ test("P-A 残留：executePlan 收敛阶段抛错时 grant 随 finally 撤销（
     (e) => e.code === "REVISION_CONFLICT",
   );
 });
+
+// ── F7：只读宿主的面板写路径（0.2 复审 F-6 收口）────────────────────────
+
+/** 与真实座位守卫同形状的只读桩：locked 时 assertWritable 抛 HOST_LOCKED。 */
+function reviewSeatGuardStub() {
+  const stub = {
+    locked: true,
+    assertWritable() {
+      if (stub.locked !== true) return;
+      const error = new Error("HOST_LOCKED: another Shiori instance holds the write lock");
+      error.code = "HOST_LOCKED";
+      throw error;
+    },
+  };
+  return stub;
+}
+
+async function readonlyHostFixture(t) {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-readonly-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await mkdir(path.join(base, "state"), { recursive: true });
+  await mkdir(path.join(base, "data"), { recursive: true });
+  const state = createStateStore({ stateRoot: path.join(base, "state") });
+  const settings = {
+    mode: "active", allowActive: true,
+    dataRoot: path.join(base, "data"), stateRoot: path.join(base, "state"),
+    ownerId: "local", defaultPersona: "amber",
+    sessionPersonas: [], workspacePersonas: [],
+    budgets: { persona: { maxChars: 12000 }, core: { targetChars: 2000, hardCapChars: 4000 } },
+    l2: { enabled: false }, organize: { enabled: true },
+    forgetting: { enabled: true, policy: normalizeForgetPolicy({}) },
+  };
+  const guard = reviewSeatGuardStub();
+  const { management } = createManagement({
+    settings,
+    dataRoot: settings.dataRoot,
+    state,
+    resourcesFor: async () => ({ sparkStore: { async listActive() { return []; } } }),
+    isStarted: () => true,
+    generation: () => 1,
+    registerGrant: (spec) => {
+      const grant = { ...spec, revoked: false };
+      grant.revoke = () => { grant.revoked = true; };
+      return grant;
+    },
+    executeToolForScope: async () => { throw new Error("not used"); },
+    nowIso: () => new Date().toISOString(),
+    // 取值函数形态：controller 的门面构造早于 start() 里的座位守卫。
+    readonlyGuard: () => guard,
+  });
+  const trusted = { session: { id: "s-readonly" }, source: "panel-rpc" };
+  return { management, guard, trusted };
+}
+
+test("F7：只读宿主上面板写方法一律 HOST_LOCKED（含 executePlan），放行可写后才执行", async (t) => {
+  const { management, guard, trusted } = await readonlyHostFixture(t);
+  const calls = [
+    ["analyze", { kind: "organize", operationId: "op-ro-analyze" }],
+    ["reviewCandidate", {
+      candidateId: "a".repeat(64), decision: "reviewed", expectedQueueRevision: 0, operationId: "op-ro-review",
+    }],
+    ["previewPlan", { kind: "forgetting", planId: "fp-missing" }],
+    ["executePlan", { planId: "fp-missing", planDigest: "d".repeat(64), operationId: "op-ro-exec", confirmed: true }],
+  ];
+  for (const [name, payload] of calls) {
+    await assert.rejects(
+      () => management[name](trusted, payload),
+      (error) => error.code === "HOST_LOCKED" && /another Shiori instance/.test(error.message),
+      `${name} must be rejected on a read-only host`,
+    );
+  }
+
+  // 只读桩的拒绝发生在任何账本写入之前：解锁后同一调用才真正执行。
+  guard.locked = false;
+  const analysis = await management.analyze(trusted, { kind: "organize", operationId: "op-ro-analyze" });
+  assert.equal(analysis.items.length, 0);
+  assert.equal(analysis.analysis.kind, "organize");
+});
+
+test("F7：deps.readonlyGuard 形状非法在第一次写调用时拒绝（不静默放行）", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-readonly-bad-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await mkdir(path.join(base, "state"), { recursive: true });
+  const state = createStateStore({ stateRoot: path.join(base, "state") });
+  const settings = {
+    mode: "active", allowActive: true,
+    dataRoot: path.join(base, "data"), stateRoot: path.join(base, "state"),
+    ownerId: "local", defaultPersona: "amber",
+    sessionPersonas: [], workspacePersonas: [],
+    budgets: { persona: { maxChars: 12000 }, core: { targetChars: 2000, hardCapChars: 4000 } },
+    l2: { enabled: false }, organize: { enabled: true },
+    forgetting: { enabled: true, policy: normalizeForgetPolicy({}) },
+  };
+  const { management } = createManagement({
+    settings, dataRoot: settings.dataRoot, state,
+    resourcesFor: async () => ({ sparkStore: { async listActive() { return []; } } }),
+    isStarted: () => true,
+    generation: () => 1,
+    registerGrant: (spec) => ({ ...spec, revoke() {} }),
+    executeToolForScope: async () => { throw new Error("not used"); },
+    nowIso: () => new Date().toISOString(),
+    readonlyGuard: { nope: 1 },
+  });
+  const trusted = { session: { id: "s-readonly-bad" }, source: "panel-rpc" };
+  await assert.rejects(
+    () => management.analyze(trusted, { kind: "organize", operationId: "op-bad-guard" }),
+    (error) => error.code === "INVALID_INPUT" && /assertWritable/.test(error.message),
+  );
+});
+
+test("getTimeline：payload 缺省时按空对象处理（不抛裸 TypeError）", async (t) => {
+  const { management, trusted } = await readonlyHostFixture(t);
+  const page = await management.getTimeline(trusted);
+  assert.equal(page.scope, "amber");
+  assert.deepEqual(page.items, []);
+  assert.equal(page.hasMore, false);
+  assert.equal(page.scanLimited, false);
+});
+

@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -107,6 +107,15 @@ async function tempRoots() {
   };
 }
 
+async function fileExists(target) {
+  try {
+    await access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const activeSettings = (roots) => ({
   mode: "active",
   allowActive: true,
@@ -188,6 +197,28 @@ test("active start 注册 16 工具 + 2 section + waterfall；工具输出 schem
     assert.ok(Object.keys(schema.properties ?? {}).length > 0, `${name} output schema must not be empty-closed`);
   }
   await controller.stop();
+});
+
+test("F7 座位：active start 占座并上报诊断，stop 后让座", async (t) => {
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  const bindings = fakeBindingsFactory();
+  const controller = await createShioriPluginController(fakeCtx(), activeSettings(roots), { bindings });
+  await controller.start();
+
+  const readonly = controller.diagnostics().readonly;
+  assert.ok(readonly !== null, "active start should report the seat in diagnostics");
+  assert.equal(readonly.writable, true);
+  assert.equal(readonly.readonly, false);
+  assert.equal(readonly.seat.announced, true);
+  assert.equal(readonly.seat.degraded, false);
+  const seatFile = readonly.seat.file;
+  assert.equal(path.dirname(seatFile), path.join(roots.dataRoot, ".shiori-seats"));
+  assert.equal(await fileExists(seatFile), true);
+
+  await controller.stop();
+  assert.equal(controller.diagnostics().readonly, null);
+  assert.equal(await fileExists(seatFile), false);
 });
 
 test("部分 start 失败（第 3 个工具注入失败）→ 零残留：注册全撤销、完成句柄关闭、可重启", async (t) => {

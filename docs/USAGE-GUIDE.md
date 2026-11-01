@@ -88,7 +88,7 @@ dsh plugin --profile <名称> remove dsh-shiori
     forgetting:
       enabled: true
     budgets:
-      core: { targetChars: 10000, hardCapChars: 14000, softRatio: 0.7, hardRatio: 0.9 }
+      core: { targetChars: 10000, hardCapChars: 14000, softChars: 9800, hardChars: 12600 }
 ~~~
 
 ### 顶层参数
@@ -108,26 +108,41 @@ dsh plugin --profile <名称> remove dsh-shiori
 | `organize.enabled` | `false` | 整理（候选 / 计划 / 执行）开关 |
 | `forgetting.enabled` | `false` | 遗忘开关；显式 `includeArchived` 的冷检索不受它限制 |
 | `forgetting.policy` | `30 / 240 / 0.25` | baseHalfLifeDays / maxHalfLifeDays / archiveScore |
+| `semantic` | `none` | 语义召回接口预留（F1 方案 C，字段名冻结）：`provider: none/local/api`、`local.model`（默认 `bge-small-zh-v1.5`）、`local.dims`（默认 512）、`api.endpoint` / `api.keyRef`（默认 `null`）。0.2 本期只定契约不实现召回，`provider: none` 时零依赖、零网络、行为与 0.1 一致 |
 
 **根目录铁律**：两个根都 `null` 且是 shadow ⇒ inert 挂载（只报 `needs-configuration`，不读写任何文件）；一旦给了任一根或开了 active，两个根都必须显式给、绝对、互不嵌套（盘符根单独保护）。
 
-### budgets（十个数字）
+### budgets（水位与投递预算）
+
+0.2 起**水位（字符数）是权威**：`softChars` / `hardChars` 直接写「超过多少字符开始压缩 / 停止增长」。旧版占比字段 `softRatio` / `hardRatio` 仍可读（老配置不报错）：配置里只有 ratio 时按 `hardCapChars × ratio` 四舍五入换算成水位；面板保存时会**清掉 ratio 字段**，避免双源真相。
 
 | 字段 | 默认 | 上限 | 含义 |
 | --- | --- | --- | --- |
-| `core.targetChars` | 8000 | — | L1 软目标，超过后提示压缩 |
-| `core.hardCapChars` | 10000 | — | L1 硬上限，超过改用上次可用投影 |
-| `core.softRatio` | 0.75 | — | softAt = floor(hardCap × softRatio) |
-| `core.hardRatio` | 0.90 | — | hardAt = floor(hardCap × hardRatio) |
+| `core.softChars` | 7500（= round(10000 × 0.75)，随 hardCapChars 变化） | — | **软水位**：超过后新增内容开始被压缩着写 |
+| `core.hardChars` | 9000（= round(10000 × 0.90)） | — | **硬水位（硬闸）**：越过就不再接受新增内容，只能删减 |
+| `core.hardCapChars` | 10000 | — | 硬顶：无论如何不能越过的总长度上限 |
+| `core.targetChars` | 8000 | — | 记忆目标长度：**仅用于区间校验、不参与水位**（D3 定案），面板不显示、不手改；面板保存时自动收敛到 `softChars ≤ targetChars < hardChars` 并写回 |
+| `core.softRatio` / `core.hardRatio` | 0.75 / 0.90 | — | 旧版占比字段，保留只读兼容；normalize 输出里由水位回推（softChars/hardCapChars），不再手工配置 |
 | `core.cacheLockFallback` | false | — | 锁失败时的降级开关 |
-| `persona.maxChars` | 12000 | 60000 | 人设卡正文长度上限（UTF-16 码元） |
+| `persona.maxChars` | 12000 | 60000 | 人设卡（L0）正文长度上限（UTF-16 码元） |
 | `spark.maxChars` | 600 | 600 | 单次投递附件总长度 |
 | `spark.inlineMaxChars` | 100 | 100 | 单卡正文 ≤ 此值内联全文，否则只给摘要 |
 | `spark.maxCards` | 5 | 5 | 单次投递最多卡片（种子 + 关联） |
 | `spark.seedCount` | 3 | 3 | 触发词命中的种子上限 |
 | `spark.linkCount` | 2 | 2 | 一跳关联上限 |
 
-关系必须同时满足：`0 < softRatio < hardRatio < 1`、`softAt ≤ targetChars < hardAt < hardCapChars`、`inlineMaxChars ≤ maxChars`、`seedCount + linkCount ≤ maxCards`。任一不满足直接 INVALID_INPUT，**整份配置不生效**（不做部分提交）。
+关系必须同时满足：`softChars ≤ hardChars < hardCapChars`、`softChars ≤ targetChars < hardChars`（targetChars 只做这条区间校验）、`inlineMaxChars ≤ maxChars`、`seedCount + linkCount ≤ maxCards`。任一不满足直接 INVALID_INPUT，**整份配置不生效**（不做部分提交）；水位字段的越界报错为中文。
+
+面板上只有「硬顶 / 软水位 / 硬水位」三个可调字段，`targetChars` 没有输入框，所以它跟着这三者走：改动任一项时草稿会把 targetChars 一起收敛进 `softChars ≤ targetChars < hardChars-1`，保存时按收敛后的值写回。因此**把硬顶调小不需要先去别处改 targetChars**，保存不会因为一个界面上看不见的字段被禁用。
+
+### 双端同时开同一个 dataRoot：后启动的一端只读
+
+同一个 `dataRoot` 被两个宿主同时打开时（比如两个 profile 配了同一份记忆目录），**先启动的一端持有写权，后启动的一端自动只读**。判据是座位心跳文件（`<dataRoot>/.shiori-seats/`），不需要手动抢锁，也不看哪一端当时在忙。
+
+- 后启动的一端：写工具（`soul_update` / `memory_append` / `memory_rewrite` / `core_write` / `topic_append`）与面板的写操作（组织 / 遗忘分析、候选审阅、计划预览与执行）都返回 `HOST_LOCKED`，报错里带持有者信息；读工具、面板读取、L0/L1 装配与人设卡注入**完全正常**。
+- 「只读」是**不许改记忆**，不是零写盘：装配期仍会写本端自己的派生账本（L1 投影缓存、水位采样、L2 投递去重账）。这批写经文件锁串行化、不碰记忆正文，不会和先启动的一端互相覆盖。
+- 解除：关掉先启动的那一端——正常退出会立刻让座，崩溃 / 断电 / 强杀靠心跳老化，约 6 秒内——后启动的一端自动恢复可写，不需要重启。
+- 只开一端时没有任何影响。座位目录不可写时降级为旧行为（两端都可写），诊断里 `readonly.seat.degraded` 与 `lastError` 会如实标出原因。
 
 ## 3. 面板怎么用
 
@@ -140,7 +155,7 @@ dsh plugin --profile <名称> remove dsh-shiori
 | 图谱 | Spark 卡片节点与边，拖拽平移、滚轮缩放、点开详情；卡片内容与连线都能改 | 卡多时布局会变密；连线改动可「撤销修改」 |
 | 候选 / 计划 | 跑 analyze、候选列表、reviewed / dismissed、preview / 执行、计划列表 | 合并记忆的主战场，见下 |
 | L3 / topic | 专题列表（默认只显示 key / 标题 / 字数），展开读正文、整篇编辑保存 | 旧版写入的专题只读 |
-| 预算 | 十个中文字段（带参数名与上限提示） | 空输入=不改；非法值中止整批；保存后需重启生效 |
+| 预算 | 记忆预算页（0.2 U2 重写）：顶部实时水位条（当前占用 ─ 软水位 · 硬闸 · 硬顶，占用取真实 getStatus 数据），人设卡 / 记忆核心 / 闪回卡片三组卡片，水位用滑杆 + 字符数联动，已改字段标「已修改」徽章、可单字段恢复默认 | 技术名收进 tooltip 与页尾「技术细节」；越界就地中文提示并禁用保存；空输入=不改；保存后需重启生效 |
 
 ### 会话选择（所有 tab 共用）
 
@@ -294,7 +309,8 @@ store.save({ /* … */ }, { operationId: 'batch-001' });
 | `legacy topics remain read-only` | 目标是 legacy 专题 | 新建专题再合并 |
 | 面板 `l0l1Effective` 是 `"unknown"` 或 `false` | 宿主有 complete 预设，本包 L0/L1 被回填覆盖 | 属实诊断：想让人设卡进提示词，就让 persona 由本包管理 |
 | 图标不显示 | 图标过大或格式不支持 | `icon.png` ≤ 256KB，png / jpg / webp / svg |
-| 预算改了没效果 | 数值非法；或只热提交未重启 | 空输入=不改；保存成功会有提示；**重启 / 重载后生效** |
+| 预算改了没效果 | 数值非法；或只热提交未重启 | 水位滑杆直接拖即可；「有 N 处越界」时按就地中文提示改完再保存；保存成功会有提示；**重启 / 重载后生效** |
+| 保存预算报 `软水位…必须小于硬水位` 等中文错误 | 水位越界（软 ≥ 硬、硬 ≥ 硬顶） | 按提示调低软水位或调高硬水位；硬闸之上要保留超限判定空间，硬水位必须小于硬顶。隐藏的 targetChars 会自动跟随，不用手改 |
 | Spark 明明提到却不投递 | L2 关；触发词字面不匹配；已 seen；被实体泛化阈值挡掉 | 查 `l2/<hex>.json` 的 seen 与 hits；触发词加同义说法；压缩后 epoch 会重置冷却 |
 | 工具报 `tool ownership conflict … soul-md` | 与 dsh-soul-md 同装，9 个同名工具冲突 | 停用 soul-md |
 | 插件没反应但没报错 | 看 `completion-lock` 的 pid 是否还活着 | 宿主重启后锁会自愈；`*.residue-*` 残留不影响运行 |

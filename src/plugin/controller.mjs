@@ -29,6 +29,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createShioriService } from "../service/index.mjs";
 import { openSparkStore } from "../sparks/store.mjs";
 import { createCompatTools, createTopicCreateTool } from "../host/tools.mjs";
+import { createSeatGuard } from "../host/seat.mjs";
 import { createSparkTools } from "../sparks/tools.mjs";
 import { createCompressProbe } from "../host/compress-probe.mjs";
 import { mapRawSessionEvent } from "../host/dsh-adapter.mjs";
@@ -38,6 +39,7 @@ import { matchSparks } from "../sparks/match.mjs";
 import { buildSparkAttachment, commitDelivery } from "../sparks/delivery.mjs";
 import { createColdSearch } from "../forgetting/cold-search.mjs";
 import { createPersonaAdapter } from "./persona.mjs";
+import { coreBudgetsOf } from "./config.mjs";
 import { createStateStore } from "./state.mjs";
 import { createDshBindings, detectCompletePromptSections, detectCompleteSectionsForScope } from "./bindings.mjs";
 import { createManagement } from "./management.mjs";
@@ -127,6 +129,10 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     /** 完成状态句柄（compress 探针持久化；单插件级锁，不按会话开）。 */
     completion: null,
     probe: null,
+    /** F7 座位守卫（占座 + 只读判定；active 态 start 时创建；inert/shadow 恒 null）。 */
+    seatGuard: null,
+    /** 工具层守门的合流入口（= seatGuard.guard；只读态抛 HOST_LOCKED）。 */
+    readonlyGuard: null,
     /** 在途异步工作（排空用）。 */
     inFlight: new Set(),
     /** tool/result 归因表（callId → name；direct 模式归因用）。 */
@@ -221,7 +227,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     const service = await createService({
       root: settings.dataRoot,
       activeScopeId: scopeId,
-      config: settings.budgets,
+      config: coreBudgetsOf(settings.budgets),
       personaAdapter,
       now,
     });
@@ -260,16 +266,22 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       ...createCompatTools({
         service: serviceForTools,
         getSessionInfo,
-        config: settings.budgets,
+        config: coreBudgetsOf(settings.budgets),
         now,
+        readonlyGuard: ctrl.readonlyGuard ?? undefined,
       }),
       createTopicCreateTool({
         service: serviceForTools,
         getSessionInfo,
         now,
+        readonlyGuard: ctrl.readonlyGuard ?? undefined,
       }),
     ];
-    const sparkTools = createSparkTools({ scopeId, store: sparkStore }).tools;
+    const sparkTools = createSparkTools({
+      scopeId,
+      store: sparkStore,
+      readonlyGuard: ctrl.readonlyGuard ?? undefined,
+    }).tools;
     const all = [...compatTools, ...sparkTools];
     const toolByName = new Map(all.map((t) => [t.name, t]));
     const resources = {
@@ -535,7 +547,31 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
               + "Repair the core file (net reduction) before the next request.";
           }
         } else if (coreText.length > 0) {
-          await state.projectionStore.saveL1(scope.scopeId, { text: coreText, revision: view?.revision ?? null });
+          // F5 前置：水位采样随投影落盘低频记一条（节流在 state.mjs 内部）。
+          // softChars/hardChars 按显式字段读，尚未升级（ budgets 只有 ratio ）时
+          // 按 hardCapChars × ratio 回退换算；配置 schema 的升级由 config 线负责，
+          // 这里不改 config.mjs。
+          const coreBudget = settings.budgets.core;
+          const waterline = {
+            softChars: Number.isInteger(coreBudget.softChars) && coreBudget.softChars >= 0
+              ? coreBudget.softChars
+              : Math.round(hardCap * coreBudget.softRatio),
+            hardChars: Number.isInteger(coreBudget.hardChars) && coreBudget.hardChars >= 0
+              ? coreBudget.hardChars
+              : Math.round(hardCap * coreBudget.hardRatio),
+            hardCapChars: hardCap,
+          };
+          // 遥测与注入解耦：采样/落盘失败只记诊断，绝不让本轮 SECTION_CORE 整段缺失。
+          try {
+            await state.projectionStore.saveL1(scope.scopeId, {
+              text: coreText,
+              revision: view?.revision ?? null,
+              waterline,
+            });
+          } catch (error) {
+            ctrl.diag.assemblySkips.push(`core-waterline(${scope.scopeId}): ${error instanceof Error ? error.message : String(error)}`);
+            if (ctrl.diag.assemblySkips.length > 50) ctrl.diag.assemblySkips.shift();
+          }
         }
         readable.set(SECTION_CORE, coreText);
       } catch (error) {
@@ -888,6 +924,10 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     // diagnostics 块为 additionalProperties:true，纯增量），真实入口 boot
     // 与面板都能观察到严格 codec 的实际状态。
     typertRpcInfo: () => ({ codec: ctrl.typertRpc.codec, reason: ctrl.typertRpc.reason }),
+    // F7：门面构造早于座位守卫（守卫在 start 里先占座），这里给取值函数。
+    // 只读态下面板写方法（analyze / reviewCandidate / previewPlan /
+    // executePlan）抛 HOST_LOCKED，与写工具同口径。
+    readonlyGuard: () => ctrl.readonlyGuard,
   });
 
   // M4-drain：management 数据方法全部纳入在途排空——stop 等待收场（带上限），
@@ -895,7 +935,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   // 不占在途。
   const DRAINED_MANAGEMENT_METHODS = [
     "getMemoryView", "getGraph", "listCandidates", "analyze",
-    "reviewCandidate", "previewPlan", "executePlan", "executeTool",
+    "reviewCandidate", "previewPlan", "executePlan", "executeTool", "getTimeline",
   ];
   const management = { ...managementFacade };
   for (const name of DRAINED_MANAGEMENT_METHODS) {
@@ -974,6 +1014,14 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       ctrl.completion = await openState({ root: settings.stateRoot, scopeId: `shiori-plugin-${settings.ownerId}` });
       ctrl.probe = createCompressProbe({ now: nowIso, sink: ctrl.completion.sink });
       checkNotStopped("completion-state");
+
+      // F7：座位心跳判据。先启动的宿主持写权，后启动的（更早的活座位存在）
+      // 一律只读。只读判定必须落在工具层——面板置灰挡不住模型。
+      // 座位目录不可写时 fail-open 保持可写（见 host/seat.mjs 顶部取舍说明），
+      // 原因留在 diagnostics.readonly.seat.degraded / lastError。
+      ctrl.seatGuard = await createSeatGuard({ dataRoot: settings.dataRoot });
+      ctrl.readonlyGuard = ctrl.seatGuard.guard;
+      checkNotStopped("readonly-seat");
 
       // B7：全部配置 persona 预校验（fail-fast，可操作错误）。
       await prevalidateConfiguredPersonas();
@@ -1169,6 +1217,23 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       ctrl.completion = null;
     }
     ctrl.probe = null;
+    if (ctrl.readonlyGuard !== null) {
+      try {
+        ctrl.readonlyGuard.stop();
+      } catch (error) {
+        errors.push(`readonly-guard.stop (${phase}): ${error instanceof Error ? error.message : String(error)}`);
+      }
+      ctrl.readonlyGuard = null;
+    }
+    // 让座：删座位文件（删不掉也不报错，其他宿主靠心跳老化自愈）。
+    if (ctrl.seatGuard !== null) {
+      try {
+        await ctrl.seatGuard.stop();
+      } catch (error) {
+        errors.push(`seat.withdraw (${phase}): ${error instanceof Error ? error.message : String(error)}`);
+      }
+      ctrl.seatGuard = null;
+    }
     // 5) P-C：撤严格描述符（withdraw → 下代干净重注册；stop→再启窗口内
     //    gateway 报 definition-unavailable，与「服务不在场」同窗，见 REPORT）。
     if (ctrl.typertRpc?.disposer) {
@@ -1220,6 +1285,8 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       bindings: bindings.diagnostics,
       probe: ctrl.probe?.diagnostics() ?? null,
       completion: ctrl.completion?.diagnostics?.() ?? { status: "not-open" },
+      /** F7 只读状态（writable/readonly + 持有者 + 座位心跳细节）；未启动恒 null。 */
+      readonly: ctrl.seatGuard?.status() ?? null,
       counters: { ...ctrl.diag },
       // B2：启动期 global 探测（三态）+ 本次装配遮蔽计数，L0/L1 有效性不谎报。
       completeShadowed: [...ctrl.completeShadowed],

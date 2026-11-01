@@ -1,6 +1,4 @@
-/* dsh-shiori 客户端面板样式（与 client/index.js 内嵌 CSS 字符串保持一致；
-   本文件是评审/维护副本，随包分发仅作参考，运行时使用 bundle 内嵌副本）。 */
-
+.dshi_root{--dshi-accent:var(--dsw-alias-state-business-primary,#3964fe);--dshi-safe:var(--dsw-alias-state-success-primary,#1a7f37);--dshi-warn:#b45309;--dshi-danger:var(--dsw-alias-state-error-primary,#f85149);--dshi-l0-soft:#e8f0fe;--dshi-l1-soft:#e6f6ec;--dshi-l2-soft:#fdf1e0;--dshi-l3-soft:#f1e9fd;--dshi-bg-panel:var(--dsw-alias-bg-layer-2,transparent);--dshi-bg-card:var(--dsw-alias-bg-layer-3,#fff);--dshi-text:var(--dsw-alias-label-primary);--dshi-text-dim:var(--dsw-alias-label-tertiary,#8b93a1);--dshi-stroke:1px solid var(--dsw-alias-border-l2,#dce2eb);--dshi-radius:10px;--dshi-radius-sm:8px;--dshi-radius-pill:999px;--dshi-space:12px;--dshi-space-sm:8px;--dshi-space-xs:4px;--dshi-font:13px;--dshi-font-sm:12px;--dshi-font-xs:11px;--dshi-font-title:14px}
 .dshi_root{max-width:860px;display:flex;flex-direction:column;gap:12px;font-size:13px;line-height:1.65;color:var(--dsw-alias-label-primary)}
 .dshi_root *{box-sizing:border-box;min-width:0}
 .dshi_title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600}
@@ -51,3 +49,21 @@
 .dshi_mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;word-break:break-all}
 .dshi_confirm{border:1px solid var(--dsw-alias-state-error-primary,#f85149);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
 .dshi_grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
+.dshi_bgroup{border:var(--dshi-stroke);background:var(--dshi-bg-card);border-radius:var(--dshi-radius);padding:var(--dshi-space);display:flex;flex-direction:column;gap:var(--dshi-space-sm)}
+.dshi_layerChip{border-radius:var(--dshi-radius-pill);padding:0 8px;font-size:var(--dshi-font-xs);white-space:nowrap}
+.dshi_layerL0{background:var(--dshi-l0-soft)}
+.dshi_layerL1{background:var(--dshi-l1-soft)}
+.dshi_layerL2{background:var(--dshi-l2-soft)}
+.dshi_bintro{font-size:var(--dshi-font-xs);color:var(--dshi-text-dim)}
+.dshi_preview{border:var(--dshi-stroke);background:var(--dshi-bg-panel);border-radius:var(--dshi-radius);padding:var(--dshi-space);display:flex;flex-direction:column;gap:var(--dshi-space-sm)}
+.dshi_track{position:relative;height:14px;border-radius:var(--dshi-radius-sm);border:var(--dshi-stroke);background:var(--dshi-bg-card);overflow:hidden}
+.dshi_trackFill{position:absolute;top:0;left:0;bottom:0}
+.dshi_trackMark{position:absolute;top:0;bottom:0;width:2px}
+.dshi_trackLegend{display:flex;gap:var(--dshi-space-sm);flex-wrap:wrap;font-size:var(--dshi-font-xs);color:var(--dshi-text-dim)}
+.dshi_sliderRow{display:flex;align-items:center;gap:var(--dshi-space-sm);flex-wrap:wrap;width:100%}
+.dshi_slider{flex:1;min-width:160px;accent-color:var(--dshi-accent)}
+.dshi_sliderNum{width:96px}
+.dshi_fieldRow{display:flex;align-items:baseline;gap:var(--dshi-space-sm);flex-wrap:wrap}
+.dshi_modBadge{border:1px solid var(--dshi-warn);color:var(--dshi-warn);border-radius:var(--dshi-radius-pill);padding:0 8px;font-size:10px;white-space:nowrap}
+.dshi_fieldError{font-size:var(--dshi-font-xs);color:var(--dshi-danger)}
+.dshi_blockError{border:var(--dshi-stroke);border-color:var(--dshi-danger);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm);font-size:var(--dshi-font-sm);color:var(--dshi-danger)}

@@ -324,7 +324,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 export async function createShioriPluginController(ctx, settings) {
   const state = { started: 0, stopped: 0, mode: settings.mode, dataRoot: settings.dataRoot };
-  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"];
+  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"];
   const management = Object.fromEntries(methods.map((method) => [
     method,
     async () => ({ mode: state.mode, method, synthetic: true, started: state.started, stopped: state.stopped }),
@@ -357,6 +357,7 @@ export const MANAGEMENT_METHODS = {
   reviewCandidate: { inputSchema: { type: "object", required: ["candidateId", "decision"] }, outputSchema: { type: "object" } },
   previewPlan: { inputSchema: { type: "object", required: ["kind"] }, outputSchema: { type: "object" } },
   executePlan: { inputSchema: { type: "object", required: ["planId", "planDigest", "operationId", "confirmed"] }, outputSchema: { type: "object" } },
+  getTimeline: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
 };
 const ALLOWED = {
   getStatus: [], getMemoryView: [], getGraph: [], listCandidates: [],
@@ -365,6 +366,7 @@ const ALLOWED = {
   reviewCandidate: ["candidateId", "decision", "expectedQueueRevision", "operationId"],
   previewPlan: ["kind", "candidateId", "proposal", "expectedQueueRevision", "operationId", "planId"],
   executePlan: ["planId", "planDigest", "operationId", "confirmed"],
+  getTimeline: ["offset", "limit"],
 };
 export function validateManagementPayload(name, payload) {
   const fail = (message) => { const e = new Error(message); e.code = "INVALID_INPUT"; throw e; };

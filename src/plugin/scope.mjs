@@ -12,7 +12,8 @@
 // - 单用户本地 profile 是本批安全边界：多用户身份不可信时拒绝，不默认共享。
 
 import path from "node:path";
-import { validateConfig } from "../core/index.mjs";
+import { DEFAULT_CONFIG, validateConfig } from "../core/index.mjs";
+import { normalizeSemantic } from "./config.mjs";
 import { normalizeForgetPolicy } from "../forgetting/decay.mjs";
 import { GLOBAL_SCOPE_ID } from "../core/topics.mjs";
 
@@ -34,7 +35,7 @@ const isPlainRecord = (v) =>
 const SETTINGS_KEYS = [
   "mode", "allowActive", "dataRoot", "stateRoot", "ownerId",
   "defaultPersona", "sessionPersonas", "workspacePersonas",
-  "budgets", "l2", "organize", "forgetting",
+  "budgets", "semantic", "l2", "organize", "forgetting",
 ];
 
 /** 绝对路径校验（不要求目录已存在；越界判定在 validateRoots）。 */
@@ -163,12 +164,36 @@ export function validateControllerSettings(raw) {
   if (!isPlainRecord(budgetsRaw)) {
     fail("INVALID_INPUT", "settings.budgets must be a plain object", {});
   }
+  // U2 水位（softChars/hardChars）是插件层契约字段，core validateConfig 不认识：
+  // 先取出、按「水位 / 硬顶」回推 ratio 喂 core（与 src/plugin/config.mjs 同源推导，
+  // 避免双源真相），校验通过后再把权威水位并回 settings.budgets。
+  const budgetsCoreIn = isPlainRecord(budgetsRaw.core) ? budgetsRaw.core : {};
+  const waterSoft = budgetsCoreIn.softChars;
+  const waterHard = budgetsCoreIn.hardChars;
+  const budgetsForCore = { ...budgetsRaw, core: { ...budgetsCoreIn } };
+  delete budgetsForCore.core.softChars;
+  delete budgetsForCore.core.hardChars;
+  const waterCap = Number.isInteger(budgetsForCore.core.hardCapChars) && budgetsForCore.core.hardCapChars > 0
+    ? budgetsForCore.core.hardCapChars
+    : DEFAULT_CONFIG.core.hardCapChars;
+  if (waterSoft !== undefined && waterHard !== undefined && waterSoft > waterHard) {
+    fail("INVALID_INPUT", `软水位（${waterSoft} 字符）不能大于硬水位（${waterHard} 字符）`, {});
+  }
+  if (waterSoft !== undefined) budgetsForCore.core.softRatio = waterSoft / waterCap;
+  if (waterHard !== undefined) budgetsForCore.core.hardRatio = waterHard / waterCap;
   let budgets;
   try {
-    budgets = validateConfig(budgetsRaw);
+    budgets = validateConfig(budgetsForCore);
   } catch (error) {
     fail("INVALID_INPUT", `settings.budgets invalid: ${error instanceof Error ? error.message : String(error)}`, {});
   }
+  const softChars = waterSoft ?? Math.round(budgets.core.hardCapChars * budgets.core.softRatio);
+  const hardChars = waterHard ?? Math.round(budgets.core.hardCapChars * budgets.core.hardRatio);
+  budgets = Object.freeze({
+    core: Object.freeze({ ...budgets.core, softChars, hardChars }),
+    persona: budgets.persona,
+    spark: budgets.spark,
+  });
   const caps = [
     // 与 src/plugin/config.mjs BUDGET_CEILINGS.persona.maxChars 保持一致（公开插件，
     // 长人设卡用户需要更高的上限；默认值仍由 DEFAULT_CONFIG 给 12000）。
@@ -187,6 +212,15 @@ export function validateControllerSettings(raw) {
     }
   }
 
+  // semantic 段（F1 方案 C 接口预留）：形状与默认值由 Q 侧 normalizeSemantic 单一来源，
+  // P 侧复核后原样透传（本期不消费）。
+  let semantic;
+  try {
+    semantic = normalizeSemantic(raw.semantic);
+  } catch (error) {
+    fail("INVALID_INPUT", `settings.semantic invalid: ${error instanceof Error ? error.message : String(error)}`, {});
+  }
+
   const l2 = validateModuleSwitch(raw.l2, "l2");
   const organize = validateModuleSwitch(raw.organize, "organize");
   const forgetting = validateModuleSwitch(raw.forgetting, "forgetting");
@@ -201,6 +235,7 @@ export function validateControllerSettings(raw) {
     sessionPersonas: Object.freeze(sessionPersonas.map((e) => Object.freeze(e))),
     workspacePersonas: Object.freeze(workspacePersonas.map((e) => Object.freeze(e))),
     budgets,
+    semantic: Object.freeze(semantic),
     l2: Object.freeze(l2),
     organize: Object.freeze(organize),
     forgetting: Object.freeze(forgetting),

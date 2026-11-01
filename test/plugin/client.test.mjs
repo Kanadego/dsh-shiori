@@ -60,16 +60,16 @@ function loadClientModule() {
 // bundle：形状、wire、CSS 一致性、安全约束
 // ---------------------------------------------------------------------------
 
-test("bundle：ModuleLoader 注册、导出 apply/inject、9 端点 wire 冻结", async () => {
+test("bundle：ModuleLoader 注册、导出 apply/inject、10 端点 wire 冻结", async () => {
   const mod = loadClientModule();
   assert.deepEqual(Object.keys(mod).sort(), ["TYPERT_REMOTE", "apply", "ensureLosslessJson", "inject"]);
   assert.deepEqual(mod.inject, ["remote", "slots", "configForms"]);
   assert.equal(mod.TYPERT_REMOTE.package, "dsh-shiori");
 
-  const expected = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"];
+  const expected = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"];
   const endpoints = Object.keys(mod.TYPERT_REMOTE.methods).sort();
   assert.deepEqual(endpoints, [...expected].map((m) => `shiori/${m}`).sort());
-  assert.equal(mod.TYPERT_REMOTE.descriptors.length, 9);
+  assert.equal(mod.TYPERT_REMOTE.descriptors.length, 10);
 
   for (const descriptor of mod.TYPERT_REMOTE.descriptors) {
     assert.equal(descriptor.invocation.kind, "direct");
@@ -203,6 +203,7 @@ export const MANAGEMENT_METHODS = {
   reviewCandidate: { inputSchema: { type: "object", required: ["candidateId", "decision"] }, outputSchema: { type: "object" } },
   previewPlan: { inputSchema: { type: "object", required: ["kind"] }, outputSchema: { type: "object" } },
   executePlan: { inputSchema: { type: "object", required: ["planId", "planDigest", "operationId", "confirmed"] }, outputSchema: { type: "object" } },
+  getTimeline: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
 };
 const ALLOWED = {
   getStatus: [], getMemoryView: [], getGraph: [], listCandidates: [],
@@ -211,6 +212,7 @@ const ALLOWED = {
   reviewCandidate: ["candidateId", "decision", "expectedQueueRevision", "operationId"],
   previewPlan: ["kind", "candidateId", "proposal", "expectedQueueRevision", "operationId", "planId"],
   executePlan: ["planId", "planDigest", "operationId", "confirmed"],
+  getTimeline: ["offset", "limit"],
 };
 export function validateManagementPayload(name, payload) {
   if (!Object.prototype.hasOwnProperty.call(ALLOWED, name)) { const e = new Error("unknown method"); e.code = "INVALID_INPUT"; throw e; }
@@ -227,7 +229,7 @@ export async function createShioriPluginController(ctx, settings) {
   globalThis.__shioriQLastSettings = settings;
   const state = { created: true, started: 0, stopped: 0, settings };
   const management = {};
-  for (const method of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"]) {
+  for (const method of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"]) {
     management[method] = async (trustedContext, payload) => ({ method, trusted: { source: trustedContext.source, principal: trustedContext.principal.kind, sessionId: trustedContext.session && trustedContext.session.id, hasAgent: Boolean(trustedContext.agent), signalLike: Boolean(trustedContext.signal) }, payload });
   }
   return {
@@ -293,7 +295,7 @@ async function callAs(ctx, service, method, { principal = "owner", session = { i
 test("mountShioriRpc：真实 TypertRemoteService 挂载 + Remote 标记 + owner 授权 + trustedContext", async () => {
   const ctx = fakeCtx();
   const management = {};
-  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"]) {
+  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"]) {
     management[m] = async (trusted, payload) => ({ ok: true, method: m, trusted, payload });
   }
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
@@ -302,9 +304,9 @@ test("mountShioriRpc：真实 TypertRemoteService 挂载 + Remote 标记 + owner
 
   // 真实 Remote 标记（Gateway source-mode 发现路径）
   const markers = remoteMethods(service);
-  assert.equal(markers.length, 9);
+  assert.equal(markers.length, 10);
   assert.deepEqual(markers.map((m) => m.exportName ?? m.method).sort(),
-    ["analyze", "executePlan", "executeTool", "getGraph", "getMemoryView", "getStatus", "listCandidates", "previewPlan", "reviewCandidate"].sort());
+    ["analyze", "executePlan", "executeTool", "getGraph", "getMemoryView", "getStatus", "getTimeline", "listCandidates", "previewPlan", "reviewCandidate"].sort());
 
   const out = await callAs(ctx, service, "getStatus");
   assert.equal(out.method, "getStatus");
@@ -321,7 +323,7 @@ test("授权：非 owner / 无 invocation / 非宿主 session 一律拒绝", asy
   const ctx = fakeCtx();
   const noop = async () => ({});
   const management = Object.fromEntries(
-    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"].map((m) => [m, noop]),
+    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"].map((m) => [m, noop]),
   );
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const service = ctx.get("shiori.panel");
@@ -336,7 +338,7 @@ test("code 透传：management 抛 INVALID_INPUT/REVISION_CONFLICT 时 RemoteErr
   const ctx = fakeCtx();
   const boom = (code) => async () => { const e = new Error("biz fail"); e.code = code; throw e; };
   const ok = async () => ({});
-  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"];
+  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"];
   const management = Object.fromEntries(methods.map((m) => [m, m === "reviewCandidate" ? boom("REVISION_CONFLICT") : ok]));
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const service = ctx.get("shiori.panel");
@@ -361,7 +363,7 @@ test("stop：禁新 → 排空在途；幂等；diagnostics 如实", async () =>
   const slow = async () => { await gate; return { slow: true }; };
   const ok = async () => ({});
   const management = Object.fromEntries(
-    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"].map((m) => [m, m === "getGraph" ? slow : ok]),
+    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"].map((m) => [m, m === "getGraph" ? slow : ok]),
   );
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const service = ctx.get("shiori.panel");
@@ -382,14 +384,14 @@ test("stop：禁新 → 排空在途；幂等；diagnostics 如实", async () =>
   assert.equal(diagnostics.namespace, "shiori");
   assert.equal(diagnostics.transport, "typert-gateway");
   assert.equal(diagnostics.ownerOnly, true);
-  assert.equal(diagnostics.methods.length, 9);
+  assert.equal(diagnostics.methods.length, 10);
 });
 
 test("diagnostics：宿主 typert 缺席时声明 UI unsupported（仅工具模式）", async () => {
   const ctx = fakeCtx({ typert: false });
   const ok = async () => ({});
   const management = Object.fromEntries(
-    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"].map((m) => [m, ok]),
+    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"].map((m) => [m, ok]),
   );
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const diagnostics = rpc.diagnostics();
@@ -400,7 +402,7 @@ test("diagnostics：宿主 typert 缺席时声明 UI unsupported（仅工具模�
 
 test("wire 契约校验：P protocol 方法集不一致或 management 缺方法时拒绝挂载", async () => {
   const ok = async () => ({});
-  const full = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"];
+  const full = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"];
   await assert.rejects(
     () => mountShioriRpc(fakeCtx(), { getStatus: ok }, {}),
     /management is missing methods/,
@@ -472,7 +474,7 @@ const { Context: RealCordisContext } = cordisModule;
 function realCordisFixture(managementOverrides = {}) {
   const recorded = { signals: [], payloads: [], sessions: [] };
   const management = {};
-  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"]) {
+  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"]) {
     management[m] = async (trusted, payload) => {
       recorded.signals.push(trusted.signal);
       recorded.payloads.push(payload);
@@ -503,7 +505,7 @@ test("R2 回归：真实 Cordis receiver 下九个方法全部可用，trustedCo
     previewPlan: { kind: "organize" },
     executePlan: { planId: "p1", planDigest: "d1", operationId: "o1", confirmed: true },
   };
-  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"]) {
+  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"]) {
     const out = await callViaCordisReceiver(callContext, m, { payload: samplePayloads[m] ?? {}, signal });
     assert.equal(out.method, m, `method ${m} must pass the real Cordis receiver`);
     assert.equal(out.source, "panel-rpc");
@@ -1338,6 +1340,9 @@ const FULL_BUDGETS = {
   spark: { maxChars: 600, inlineMaxChars: 100, maxCards: 5, seedCount: 3, linkCount: 2 },
 };
 
+// U2 标杆页测试装配：真实 client/index.js + 有状态 react stub（setter 写回
+// host.states，重渲染即可读到新草稿）。BudgetsTab useState 顺序：
+// snapshot / error / ok / draftEdits / occupancy。
 async function mountBudgetsTab() {
   const host = makeStatefulReact();
   const mutations = [];
@@ -1370,145 +1375,217 @@ async function mountBudgetsTab() {
   const tab = flattenVNode(sectionTree).find((n) => typeof n.type === "function" && n.type.name === "BudgetsTab");
   assert.ok(tab, "BudgetsTab reached through real slot render");
 
+  const render = () => {
+    host.cursor.v = 0;
+    return tab.type(tab.props);
+  };
   const mount = () => {
     host.states.length = 0;
     host.cursor.v = 0;
-    // BudgetsTab useState 顺序：snapshot / error / ok
     host.states.push(scope.getSnapshot(), null, null);
-    const tree = tab.type(tab.props);
+    const tree = render();
     const inputs = flattenVNode(tree).filter((n) => n.type === "input" && n.props && n.props["data-path"]);
-    assert.equal(inputs.length, 10, "ten budget inputs rendered");
     const form = flattenVNode(tree).find((n) => n.type === "form");
     assert.ok(form, "form present");
-    return { tree, inputs, form, states: host.states, scope };
+    return { tree, inputs, form };
   };
-
-  const submit = async (mounted, overrides) => {
-    const form = { querySelectorAll: () => mounted.inputs.map((n) => {
-      const path = n.props["data-path"];
-      const value = Object.prototype.hasOwnProperty.call(overrides, path) ? overrides[path] : n.props.defaultValue;
-      return { getAttribute: () => path, value };
-    }) };
-    mounted.form.props.onSubmit({ preventDefault: () => {}, target: form });
+  const inputFor = (tree, path) => flattenVNode(tree).find((n) => n.type === "input" && n.props && n.props["data-path"] === path);
+  const setField = (path, value) => {
+    const input = inputFor(render(), path);
+    assert.ok(input, "input rendered for " + path);
+    input.props.onChange({ target: { value } });
+    return render();
+  };
+  const submitNow = async () => {
+    const form = flattenVNode(render()).find((n) => n.type === "form");
+    form.props.onSubmit({ preventDefault: () => {} });
     await flush(20);
+    return render();
   };
-
-  return { mount, submit, mutations, state, host };
+  const submitButton = (tree) => flattenVNode(tree).find((n) => n.type === "button" && n.props && n.props.type === "submit");
+  return { mount, render, setField, submitNow, submitButton, mutations, scope, state, host };
 }
 
-test("预算 tab：空输入不落 0（保留服务端现值），只写用户填写的字段", async () => {
-  const { mount, submit, mutations } = await mountBudgetsTab();
-  const mounted = mount();
-  // 渲染值来自快照 value.budgets（旧代码读 value[section][key] 永远是空串）
-  const byPath = new Map(mounted.inputs.map((n) => [n.props["data-path"], n.props.defaultValue]));
-  assert.equal(byPath.get("core.targetChars"), "8000");
-  assert.equal(byPath.get("core.softRatio"), "0.75");
-  assert.equal(byPath.get("persona.maxChars"), "12000");
-
-  await submit(mounted, { "core.targetChars": "", "persona.maxChars": "11000" });
-  assert.equal(mutations.length, 1, "one atomic budgets write");
-  assert.deepEqual(mutations[0].ops.map((op) => op.path), [["budgets"]]);
-  assert.equal(mutations[0].ops[0].value.core.targetChars, 8000, "empty input kept server value, not 0");
-  assert.equal(mutations[0].ops[0].value.core.hardCapChars, 10000);
-  assert.equal(mutations[0].ops[0].value.core.softRatio, 0.75);
-  assert.equal(mutations[0].ops[0].value.persona.maxChars, 11000, "filled field written");
-  assert.equal(mutations[0].ops[0].value.spark.maxCards, 5);
-  assert.equal(mutations[0].ops[0].value.core.cacheLockFallback, false);
-  assert.match(String(mounted.states[2]), /已保存/);
-});
-
-test("预算 tab：非法数字/比率中止整批且不发写入，错误码 ui/invalid-number", async () => {
-  const { mount, submit, mutations } = await mountBudgetsTab();
-  const chineseLabelByPath = {
-    "spark.maxChars": "Spark 卡片最大字符数",
-    "core.softRatio": "L0 软压缩阈值占比",
-    "core.hardRatio": "L0 硬压缩阈值占比",
-    "core.targetChars": "L0 记忆目标字符数",
-    "persona.maxChars": "人设卡最大字符数",
-  };
-  for (const bad of [
-    { "spark.maxChars": "abc" },
-    { "core.softRatio": "1.5" },
-    { "core.hardRatio": "0" },
-    { "core.targetChars": "0" },
-    { "persona.maxChars": "60001" },
-  ]) {
-    const mounted = mount();
-    await submit(mounted, bad);
-    const path = Object.keys(bad)[0];
-    assert.equal(mutations.length, 0, "no write for invalid " + path + "=" + bad[path]);
-    const error = mounted.states[1];
-    assert.ok(error && error.code === "ui/invalid-number", "ui/invalid-number for " + path);
-    assert.match(String(error.message), new RegExp(path.replace(".", "\\.")), "error names the raw parameter");
-    assert.ok(String(error.message).includes(chineseLabelByPath[path]),
-      "error also explains the field in Chinese: " + chineseLabelByPath[path]);
-  }
-});
-
-test("预算 tab：字段标签为「中文解释（原参数名）」并附一句中文用途说明", async () => {
+test("预算 tab（U2 标杆页）：三层九字段、界面名主位、技术名进 tooltip、后果描述 + 实时水位条", async () => {
   const { mount } = await mountBudgetsTab();
   const mounted = mount();
-  const labelTextByPath = new Map();
+  // 九个可编辑字段；水位字段各渲染「滑杆 + 数字框」两个 input，故 input 共 11 个。
+  assert.equal(mounted.inputs.length, 11, "11 inputs (9 fields, water fields have slider + number)");
+  assert.equal(mounted.inputs.filter((n) => String(n.props.className) === "dshi_slider").length, 2, "两条水位滑杆");
+
+  const expected = {
+    "persona.maxChars": ["人设卡最大字符数", "persona.maxChars", "写入会被拒绝"],
+    "core.hardCapChars": ["硬顶", "core.hardCapChars", "不能越过的总长度上限"],
+    "core.softChars": ["软水位", "core.softChars", "开始压缩着写"],
+    "core.hardChars": ["硬水位（硬闸）", "core.hardChars", "只能删减"],
+    "spark.maxChars": ["单次投递长度上限", "spark.maxChars", "发不出去"],
+    "spark.inlineMaxChars": ["直接带全文的门槛", "spark.inlineMaxChars", "只发摘要"],
+    "spark.maxCards": ["单次最多卡片数", "spark.maxCards", "防止刷屏"],
+    "spark.seedCount": ["召回种子数", "spark.seedCount", "种子素材条数"],
+    "spark.linkCount": ["关联链接数", "spark.linkCount", "1 跳关联"],
+  };
+  const labelsByPath = new Map();
   for (const label of flattenVNode(mounted.tree).filter((n) => n.type === "label" && n.props && n.props.className === "dshi_label")) {
     const input = flattenVNode(label).find((n) => n.type === "input" && n.props && n.props["data-path"]);
-    if (input) labelTextByPath.set(input.props["data-path"], collectText(label));
+    if (input) labelsByPath.set(input.props["data-path"], label);
   }
-  const expected = {
-    "core.targetChars": ["L0 记忆目标字符数", "core.targetChars", "目标长度"],
-    "core.hardCapChars": ["L0 硬上限字符数", "core.hardCapChars", "硬上限"],
-    "core.softRatio": ["L0 软压缩阈值占比", "core.softRatio", "0 到 1"],
-    "core.hardRatio": ["L0 硬压缩阈值占比", "core.hardRatio", "0 到 1"],
-    "persona.maxChars": ["人设卡最大字符数", "persona.maxChars", "上限 60000", "UTF-16"],
-    "spark.maxChars": ["Spark 卡片最大字符数", "spark.maxChars", "上限 600", "总长度"],
-    "spark.inlineMaxChars": ["Spark 内联注入最大字符数", "spark.inlineMaxChars", "上限 100", "摘要"],
-    "spark.maxCards": ["Spark 最多卡片数", "spark.maxCards", "上限 5", "卡片数量"],
-    "spark.seedCount": ["Spark 召回种子数", "spark.seedCount", "上限 3", "种子素材"],
-    "spark.linkCount": ["Spark 关联链接数", "spark.linkCount", "上限 2", "1 跳关联"],
-  };
-  assert.equal(labelTextByPath.size, 10, "十个预算字段都有自己的标签");
+  assert.equal(labelsByPath.size, 9, "九个字段各有 label");
+  const wholeText = collectText(mounted.tree);
   for (const [path, parts] of Object.entries(expected)) {
-    const text = labelTextByPath.get(path);
-    assert.ok(text, "label for " + path);
-    for (const part of parts) assert.ok(text.includes(part), path + " label/hint includes: " + part);
+    const label = labelsByPath.get(path);
+    assert.ok(label, "label for " + path);
+    const text = collectText(label);
+    assert.ok(text.includes(parts[0]), path + " 界面名主位: " + parts[0] + " — got: " + text);
+    assert.ok(String(label.props.title || "").includes(parts[1]), path + " 技术名进 title tooltip，不在正文里");
+    assert.ok(wholeText.includes(parts[2]), path + " 后果描述出现: " + parts[2]);
   }
+  // D3：targetChars 留在配置里但面板不展示；旧 ratio 字段也不出现。
+  const renderedPaths = new Set(mounted.inputs.map((n) => n.props["data-path"]));
+  assert.ok(!renderedPaths.has("core.targetChars"), "targetChars 不渲染（D3）");
+  assert.ok(!renderedPaths.has("core.softRatio"), "旧 softRatio 不在面板");
+  // 三组分卡（L0 人设卡 / L1 记忆核心 / L2 闪回卡片）
+  const text = collectText(mounted.tree);
+  for (const part of ["人设卡", "记忆核心", "闪回卡片"]) assert.ok(text.includes(part), "group card: " + part);
+  // 实时预览条（本页灵魂）：有占用刻度文案即为渲染成功
+  const preview = flattenVNode(mounted.tree).find((n) => n.props && String(n.props.className).includes("dshi_preview"));
+  assert.ok(preview, "水位预览条渲染");
+  assert.ok(text.includes("软水位") && text.includes("硬闸") && text.includes("硬顶"), "预览条图例");
 });
 
-test("预算 tab：比率字段 step=any 允许小数，整数/字符段 step=1 且保留 min/max（回归）", async () => {
+test("预算 tab：草稿取 value.budgets；旧 softRatio/hardRatio 按硬顶换算成水位显示", async () => {
   const { mount } = await mountBudgetsTab();
   const mounted = mount();
-  const byPath = new Map(mounted.inputs.map((n) => [n.props["data-path"], n.props]));
-  // 回归：HTML number input 默认 step=1 会把 0.75 判成非法（原生校验气泡
-  // 「两个最接近的有效值分别为0和1」），比率字段必须放行任意小数。
-  for (const path of ["core.softRatio", "core.hardRatio"]) {
-    const input = byPath.get(path);
-    assert.equal(input.step, "any", path + " 渲染 step=any，0.75 不再被判非法");
-    assert.equal(input.min, "0", path + " 仍保留 min");
-  }
-  for (const path of [
-    "core.targetChars", "core.hardCapChars", "persona.maxChars", "spark.maxChars",
-    "spark.inlineMaxChars", "spark.maxCards", "spark.seedCount", "spark.linkCount",
-  ]) {
-    const input = byPath.get(path);
-    assert.equal(input.step, "1", path + " 仍只收整数");
-    assert.equal(input.min, "0", path + " 仍保留 min");
-  }
-  assert.equal(byPath.get("persona.maxChars").max, "60000", "整数段 max 保留（与服务端上限一致）");
-  assert.equal(byPath.get("core.softRatio").max, undefined, "无上限的比率段不写 max");
+  const values = new Map(mounted.inputs.map((n) => [n.props["data-path"], n.props.value]));
+  assert.equal(values.get("core.hardCapChars"), "10000");
+  assert.equal(values.get("core.softChars"), "7500", "0.75 × 10000 换算");
+  assert.equal(values.get("core.softChars.num"), "7500");
+  assert.equal(values.get("core.hardChars"), "9000", "0.9 × 10000 换算");
+  assert.equal(values.get("core.hardChars.num"), "9000");
+  assert.equal(values.get("persona.maxChars"), "12000");
+  assert.equal(values.get("spark.maxCards"), "5");
 });
 
-test("预算 tab：文案改名人设卡（只改展示文案，协议字段 persona.maxChars 不变）", async () => {
-  const { mount } = await mountBudgetsTab();
-  const mounted = mount();
-  const label = flattenVNode(mounted.tree).find((n) => n.type === "label"
-    && n.props && n.props.className === "dshi_label"
-    && flattenVNode(n).some((child) => child.type === "input" && child.props && child.props["data-path"] === "persona.maxChars"));
-  assert.ok(label, "persona.maxChars 字段有 label");
-  const text = collectText(label);
-  assert.ok(text.includes("人设卡最大字符数"), "标签显示「人设卡最大字符数」: " + text);
-  assert.ok(text.includes("人设卡正文的最大长度"), "hint 同步改为「人设卡正文的最大长度」");
-  assert.ok(!text.includes("人格卡"), "不再出现旧文案「人格卡」");
-  assert.equal(flattenVNode(label).find((n) => n.type === "input").props["data-path"], "persona.maxChars",
-    "data-path / 协议字段名不变");
+test("预算 tab：空输入就地中文报错并禁用保存，绝不写 0（HEAD 老回归）", async () => {
+  const { mount, setField, submitButton, mutations } = await mountBudgetsTab();
+  mount();
+  const tree = setField("persona.maxChars", "");
+  // 报错文案必须点名界面上看得见的中文字段名（用户不可能去猜技术名）。
+  assert.ok(collectText(tree).includes("人设卡最大字符数必须是正整数"), "空输入按越界处理且点名可见字段名");
+  assert.ok(!collectText(tree).includes("persona.maxChars"), "错误文案不点名技术名");
+  assert.equal(submitButton(tree).props.disabled, true, "越界时保存按钮禁用");
+  assert.equal(mutations.length, 0, "越界不发写入（绝不会把空输入写成 0）");
+
+  // 水位字段的空输入同理：不落 0、不落 null，只报错并禁用保存。
+  mount();
+  const softTree = setField("core.softChars.num", "");
+  assert.ok(collectText(softTree).includes("软水位至少为 1 字符"), "空水位报错");
+  assert.equal(submitButton(softTree).props.disabled, true);
+  assert.equal(mutations.length, 0, "空水位同样不发写入");
+});
+
+test("预算 tab：非法数字就地中文报错并中止整批写入（HEAD 老回归）", async () => {
+  const { mount, setField, submitButton, submitNow, mutations } = await mountBudgetsTab();
+  mount();
+  // 非数字：草稿里保留原文（不是 NaN、不是 0），校验判非法。
+  const tree = setField("spark.maxCards", "五");
+  const text = collectText(tree);
+  assert.ok(text.includes("单次最多卡片数必须是正整数"), "非数字报错点名可见字段名");
+  assert.equal(submitButton(tree).props.disabled, true, "非法数字禁用保存");
+  // 就算绕过 disabled 直接提交，save() 里的 errorCount 双保险也要拦住整批写入。
+  await submitNow();
+  assert.equal(mutations.length, 0, "非法数字不得发出任何 budgets 写入");
+
+  mount();
+  const floatTree = setField("core.hardCapChars", "10000.5");
+  assert.ok(collectText(floatTree).includes("硬顶必须是正整数"), "非整数硬顶报错");
+  assert.equal(submitButton(floatTree).props.disabled, true, "非整数硬顶禁用保存");
+  await submitNow();
+  assert.equal(mutations.length, 0, "整批中止，不写半截");
+});
+
+test("预算 tab：上限与联动校验——中文就地提示，越界即禁用保存", async () => {
+  const { mount, setField, submitButton } = await mountBudgetsTab();
+  mount();
+  let tree = setField("persona.maxChars", "60001");
+  assert.ok(collectText(tree).includes("超过上限 60000"), "persona 上限");
+  assert.equal(submitButton(tree).props.disabled, true);
+
+  mount();
+  tree = setField("spark.maxChars", "700");
+  assert.ok(collectText(tree).includes("超过上限 600"), "spark 上限");
+  assert.equal(submitButton(tree).props.disabled, true);
+
+  mount();
+  tree = setField("core.hardCapChars", "abc");
+  assert.ok(collectText(tree).includes("硬顶必须是正整数"), "非数字硬顶");
+  assert.equal(submitButton(tree).props.disabled, true);
+
+  // 软/硬水位联动钳制：硬顶下调后硬水位 ≤ 硬顶-1、软水位 ≤ 硬水位-1，不留越界态
+  mount();
+  tree = setField("core.hardCapChars", "5000");
+  const values = new Map(flattenVNode(tree).filter((n) => n.type === "input" && n.props && n.props["data-path"]).map((n) => [n.props["data-path"], n.props.value]));
+  assert.equal(values.get("core.hardChars"), "4999", "硬水位钳到硬顶-1");
+  assert.equal(values.get("core.softChars"), "4998", "软水位跟在硬水位下一格（必须严格小于）");
+  assert.equal(submitButton(tree).props.disabled, false, "三个可见字段都合法 → 保存可用（隐藏的 targetChars 不再当硬约束）");
+});
+
+test("预算 tab：把硬顶调到原 targetChars 以下仍可保存，落盘后 targetChars 收敛进合法区间（P1）", async () => {
+  const { mount, setField, submitNow, submitButton, mutations } = await mountBudgetsTab();
+  mount();
+  // 出厂 targetChars=8000；把硬顶压到 5000 → 旧实现让 targetChars 越界并禁用保存，
+  // 而 targetChars 在面板上根本没有对应输入框，用户无从修。
+  let tree = setField("core.hardCapChars", "5000");
+  assert.equal(submitButton(tree).props.disabled, false, "保存必须可用");
+  assert.equal(flattenVNode(tree).find((n) => n.props && String(n.props.className).includes("dshi_blockError")), undefined, "不渲染任何越界横幅");
+  const errorNodes = flattenVNode(tree).filter((n) => n.props && /dshi_fieldError|dshi_blockError/.test(String(n.props.className)));
+  assert.deepEqual(errorNodes.map((n) => collectText(n)), [], "没有任何就地错误/越界横幅");
+  assert.ok(!flattenVNode(tree).some((n) => n.props && String(n.props.className).includes("dshi_preview") && collectText(n).includes("targetChars")), "预览条也不提隐藏字段");
+
+  tree = await submitNow();
+  assert.equal(mutations.length, 1, "一次原子写入");
+  const core = mutations[0].ops[0].value.core;
+  assert.equal(core.hardCapChars, 5000);
+  assert.equal(core.hardChars, 4999);
+  assert.equal(core.softChars, 4998);
+  assert.equal(core.targetChars, 4998, "targetChars 被收敛进 [软水位, 硬水位-1] 并写回");
+  // 落盘值与服务端 validateConfig 的约束对齐：softAt ≤ targetChars < hardAt < cap。
+  assert.ok(core.softChars <= core.targetChars, "软水位 ≤ 目标长度");
+  assert.ok(core.targetChars < core.hardChars, "目标长度 < 硬水位");
+  assert.ok(core.hardChars < core.hardCapChars, "硬水位 < 硬顶");
+  assert.match(collectText(tree), /已保存/);
+});
+
+test("预算 tab：抬高软水位时 targetChars 跟着上移，不会卡住滑杆", async () => {
+  const { mount, setField, submitNow, mutations } = await mountBudgetsTab();
+  mount();
+  // 出厂 soft=7500 / target=8000：把软水位拉到 8500（> target），target 必须跟着走到 8500。
+  setField("core.softChars.num", "8500");
+  await submitNow();
+  assert.equal(mutations.length, 1);
+  const core = mutations[0].ops[0].value.core;
+  assert.equal(core.softChars, 8500);
+  assert.equal(core.targetChars, 8500, "目标长度跟随软水位，不留在下面形成矛盾");
+  assert.ok(core.targetChars < core.hardChars, "仍严格小于硬水位");
+});
+
+test("预算 tab：单批原子写 budgets，水位落盘并清除旧 ratio，targetChars 原样保留", async () => {
+  const { mount, setField, submitNow, mutations } = await mountBudgetsTab();
+  mount();
+  setField("persona.maxChars", "11000");
+  setField("core.hardChars.num", "9500");
+  const tree = await submitNow();
+  assert.equal(mutations.length, 1, "一次原子 budgets 写入");
+  assert.deepEqual(mutations[0].ops.map((op) => op.path), [["budgets"]]);
+  const value = mutations[0].ops[0].value;
+  assert.equal(value.core.hardChars, 9500, "水位字段按用户输入落盘");
+  assert.equal(value.core.softChars, 7500);
+  // 硬水位 9500 后 targetChars 仍在 [7500, 9499] 内 → 保持原值，不被无谓改写。
+  assert.equal(value.core.targetChars, 8000, "未触及区间时 targetChars 保持原值");
+  assert.equal(value.core.softRatio, undefined, "旧 softRatio 保存时清除");
+  assert.equal(value.core.hardRatio, undefined, "旧 hardRatio 保存时清除");
+  assert.equal(value.persona.maxChars, 11000, "改动字段写入");
+  assert.equal(value.spark.maxCards, 5, "未改字段原样");
+  assert.match(collectText(tree), /已保存/);
 });
 
 // ---------------------------------------------------------------------------
@@ -2570,7 +2647,7 @@ function wireRoundTrip(error) {
   return JSON.parse(JSON.stringify(envelope)); // gateway → JSON over the wire
 }
 
-const RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan"];
+const RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"];
 const NOOP_MANAGEMENT = () => Object.fromEntries(RPC_METHODS.map((m) => [m, async () => ({})]));
 const REVIEW_PAYLOAD = { candidateId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", decision: "reviewed", expectedQueueRevision: 5, operationId: "op-1" };
 

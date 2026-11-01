@@ -22,13 +22,16 @@
 //   scopeId/state/links，另带 filteredEdges），当作记录解析会被防御性过滤成
 //   空图（GI 组合评审的阻断性教训）。整图投影供 host 面板直连使用。
 //
-// 本模块除同目录 graph.mjs 外仅 import 纯 JSON 数据文件 plugin/tool-schemas.mjs（P5 输出 schema 唯一权威，无任何业务/宿主依赖）。
+// 本模块除同目录 graph.mjs 外仅 import 纯 JSON 数据文件 plugin/tool-schemas.mjs（P5 输出 schema 唯一权威，无任何业务/宿主依赖），
+// 以及 host/readonly-guard.mjs（F7 只读守门：纯进程内状态机 + coded error，不触碰磁盘业务）。
 
 import { randomUUID } from "node:crypto";
 import { projectGraph, normalizeGraphRecords, graphSummary } from "./graph.mjs";
 // P5：输出 schema 唯一权威（纯 JSON 数据，无循环依赖；spark 工具必须声明
 // 真实成功分支的 output schema，宿主 runner 会按其校验成功输出）。
 import { TOOL_OUTPUT_SCHEMAS, renderToolOutput } from "../plugin/tool-schemas.mjs";
+// F7：第二宿主只读降级——写工具守门（duck-typed 可选依赖）。
+import { assertNotHostLocked, validateReadonlyGuard } from "../host/readonly-guard.mjs";
 
 const ERROR_CODES = new Set([
   "INVALID_INPUT",
@@ -37,6 +40,7 @@ const ERROR_CODES = new Set([
   "NOT_FOUND",
   "LOCK_BUSY",
   "UNSUPPORTED",
+  "HOST_LOCKED",
 ]);
 
 /** 门面自造错误（store 错误不经此函数，直接上抛）。 */
@@ -193,15 +197,20 @@ function receipt(tool, scopeId, operationId, result, extra = {}) {
  * @param {object} deps
  * @param {string} deps.scopeId 可信 scope（宿主工厂注入；payload 无法改变）
  * @param {object} deps.store G 契约 store（save/read/update/forget/feedback/graph/listActive/close）
+ * @param {object} [deps.readonlyGuard] F7 只读守卫（createReadonlyGuard 产物；可选，缺省
+ *   时写行为与 0.1 完全一致）。外部写锁持续持有进入只读态后，写工具（spark_save /
+ *   spark_update / spark_forget / spark_feedback）抛 code="HOST_LOCKED"；
+ *   spark_read / spark_graph 照常。
  * @returns {{scopeId:string, tools:Array, names:string[], list:()=>Array, execute:(name:string,payload:object)=>Promise<object>}}
  */
-export function createSparkTools({ scopeId, store } = {}) {
+export function createSparkTools({ scopeId, store, readonlyGuard } = {}) {
   if (!nonEmptyString(scopeId)) {
     return fail("INVALID_INPUT", "createSparkTools requires a non-empty string scopeId from a trusted source", { scopeId: typeof scopeId });
   }
   if (!isPlainRecord(store)) {
     return fail("INVALID_INPUT", "createSparkTools requires a spark store instance", { store: typeof store });
   }
+  validateReadonlyGuard(readonlyGuard);
   for (const method of ["save", "read", "update", "forget", "feedback", "listActive"]) {
     if (typeof store[method] !== "function") {
       return fail("INVALID_INPUT", `createSparkTools: store is missing required method "${method}()" per CONTRACTS.md §G`, { method });
@@ -215,7 +224,7 @@ export function createSparkTools({ scopeId, store } = {}) {
       inputSchema: {
         content: { type: "string", required: true, description: "The card body (short atomic memory, 50–150 chars recommended)." },
         title: { type: "string", required: true, description: "Short card title." },
-        triggers: { type: "array", required: true, description: "Exact wake phrases (aliases allowed); only these can trigger the card. Empty array = never auto-delivered, still readable." },
+        triggers: { type: "array", required: true, description: "Wake phrases for this card: give 3-5 DISTINCT phrasings — synonyms, aliases and common paraphrases (e.g. the same idea said casually, formally, or in another language), NOT just the exact sentence that prompted the card. Matching is literal (normalized substring / English word boundary): the card only wakes when one of these phrases appears verbatim in the user's words, so each phrase should cover a different way the user might naturally say it. Empty array = never auto-delivered, still readable." },
         summary: { type: "string", description: "Optional pre-stored summary (≤60 chars recommended) used when content exceeds the inline threshold." },
         entities: { type: "array", description: "Optional soft co-occurrence tags (strings)." },
         links: { type: "array", description: "Optional explicit links: { target: sparkId, rel?: string }. Same-scope active targets only." },
@@ -228,6 +237,7 @@ export function createSparkTools({ scopeId, store } = {}) {
       async execute(args) {
         const a = requireObject(args, "spark_save");
         rejectTrustedKeys(a, "spark_save");
+        assertNotHostLocked(readonlyGuard);
         rejectUnknownKeys(a, "spark_save", ["content", "title", "triggers", "summary", "entities", "links", "vitality", "expectedRevision", "operationId"]);
         const content = requireString(a, "spark_save", "content");
         const title = requireString(a, "spark_save", "title");
@@ -306,6 +316,7 @@ export function createSparkTools({ scopeId, store } = {}) {
       async execute(args) {
         const a = requireObject(args, "spark_update");
         rejectTrustedKeys(a, "spark_update");
+        assertNotHostLocked(readonlyGuard);
         rejectUnknownKeys(a, "spark_update", ["id", "patch", "expectedRevision", "operationId"]);
         const id = requireString(a, "spark_update", "id");
         if (!isPlainRecord(a.patch)) {
@@ -348,6 +359,7 @@ export function createSparkTools({ scopeId, store } = {}) {
       async execute(args) {
         const a = requireObject(args, "spark_forget");
         rejectTrustedKeys(a, "spark_forget");
+        assertNotHostLocked(readonlyGuard);
         rejectUnknownKeys(a, "spark_forget", ["id", "mode", "replacementId", "expectedRevision", "operationId"]);
         const id = requireString(a, "spark_forget", "id");
         const mode = a.mode;
@@ -387,6 +399,7 @@ export function createSparkTools({ scopeId, store } = {}) {
       async execute(args) {
         const a = requireObject(args, "spark_feedback");
         rejectTrustedKeys(a, "spark_feedback");
+        assertNotHostLocked(readonlyGuard);
         rejectUnknownKeys(a, "spark_feedback", ["id", "used", "sourceEventId", "operationId"]);
         const id = requireString(a, "spark_feedback", "id");
         if (typeof a.used !== "boolean") {

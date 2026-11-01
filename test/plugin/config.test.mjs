@@ -18,6 +18,19 @@ import { DEFAULT_CONFIG } from "../../src/core/config.mjs";
 const TMP_ROOT = mkdtempSync(join(tmpdir(), "shiori-q-config-"));
 const VOLATILE_WRITE = Symbol.for("cosmokit.volatile.write");
 
+// U2 起插件层预算在 core 契约之上多两个权威水位字段（由默认占比 × 默认硬顶派生，
+// 见 src/plugin/config.mjs derivedWaterDefaults）。core 的 DEFAULT_CONFIG 本身不含
+// 它们——期望值按同一公式推出，不写死常数。
+const PLUGIN_DEFAULT_BUDGETS = {
+  core: {
+    ...DEFAULT_CONFIG.core,
+    softChars: Math.round(DEFAULT_CONFIG.core.hardCapChars * DEFAULT_CONFIG.core.softRatio),
+    hardChars: Math.round(DEFAULT_CONFIG.core.hardCapChars * DEFAULT_CONFIG.core.hardRatio),
+  },
+  persona: DEFAULT_CONFIG.persona,
+  spark: DEFAULT_CONFIG.spark,
+};
+
 test.after(() => {
   rmSync(TMP_ROOT, { recursive: true, force: true });
 });
@@ -48,7 +61,7 @@ test("Config 是原生 Schemastery schema 且可解析缺省输入", () => {
   // （见 src/plugin/config.mjs unwrapVolatile）。这里断言它是该形状且 get() 给出默认预算。
   assert.equal(typeof parsed.budgets.get, "function");
   assert.ok(Object.prototype.hasOwnProperty.call(parsed.budgets, VOLATILE_WRITE));
-  assert.deepEqual(parsed.budgets.get(), DEFAULT_CONFIG);
+  assert.deepEqual(parsed.budgets.get(), PLUGIN_DEFAULT_BUDGETS);
   assert.equal(parsed.l2.enabled, false);
   assert.equal(parsed.organize.enabled, false);
   assert.equal(parsed.forgetting.enabled, false);
@@ -101,7 +114,7 @@ test("缺省配置规范化为 inert shadow 且不修改输入", () => {
   assert.equal(settings.defaultPersona, null);
   assert.deepEqual(settings.sessionPersonas, []);
   assert.deepEqual(settings.workspacePersonas, []);
-  assert.deepEqual(settings.budgets, DEFAULT_CONFIG);
+  assert.deepEqual(settings.budgets, PLUGIN_DEFAULT_BUDGETS);
   assert.equal(settings.l2.enabled, false);
   assert.equal(settings.organize.enabled, false);
   assert.equal(settings.forgetting.enabled, false);

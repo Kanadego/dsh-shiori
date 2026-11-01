@@ -42,6 +42,21 @@ function isPidAlive(pid) {
   }
 }
 
+// F7：锁 payload 的可选 owner 展示信息 {app?, workspace?, instance?}。
+// 写入方鸭子类型清洗：只收非空字符串字段（限长防滥用），其余一律丢弃；
+// 读取方对缺 owner 的旧 payload（v0.1.0 只有 pid/token/acquiredAt）照常解析，
+// 展示层回退到 PID。畸形 owner 绝不参与 pid/token 的有效性判定。
+const OWNER_KEYS = ['app', 'workspace', 'instance'];
+function sanitizeOwner(owner) {
+  if (owner === null || typeof owner !== 'object' || Array.isArray(owner)) return undefined;
+  const out = {};
+  for (const key of OWNER_KEYS) {
+    const value = owner[key];
+    if (typeof value === 'string' && value.length > 0 && value.length <= 200) out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 // Must run under guard. Only ENOENT means absent; malformed/empty/non-file stays occupied.
 async function readHeld(root) {
   const lockPath = path.join(root, LOCK_NAME);
@@ -171,8 +186,13 @@ export async function withLock(rootReal, opts, fn) {
   const token = randomBytes(16).toString('hex');
   let acquired = false, failed = false, primary, result;
   const owner = { root: rootReal, token, active: true };
+  // F7：payload 带可选 owner 展示信息（调用方 opts.owner 传入；缺省时 payload
+  // 与 v0.1.0 完全一致，旧读取方不受影响）。
+  const payload = { pid: process.pid, token, acquiredAt: new Date().toISOString() };
+  const ownerInfo = sanitizeOwner(opts?.owner);
+  if (ownerInfo) payload.owner = ownerInfo;
   try {
-    await acquire(rootReal, { pid: process.pid, token, acquiredAt: new Date().toISOString() }, Date.now() + timeoutMs, retryMs);
+    await acquire(rootReal, payload, Date.now() + timeoutMs, retryMs);
     acquired = true;
     try { result = await als.run(owner, fn); } catch (err) { failed = true; primary = err; }
   } catch (err) { failed = true; primary = err; }
@@ -191,4 +211,42 @@ export async function withLock(rootReal, opts, fn) {
 export function holdsLock(rootReal) {
   const ctx = als.getStore();
   return !!(ctx?.active && ctx.root === rootReal);
+}
+
+// F7 只读探针：读一次锁文件，报告当前持有者。不取 guard、不重试、不获取锁、
+// 绝不抛 LOCK_BUSY，也绝不改任何状态（死主回收是 acquire 的职责，探针不越权）。
+// held 只反映协议 payload 的文件真值：缺失/畸形/非普通文件 → held:false
+// （畸形锁的「占用」判定仍由 withLock 的 acquire 流程负责，两者语义不同）。
+// 必须检查 pid 存活：崩溃残留锁若被当成 held:true，本 host 会滞回翻只读，
+// 而写路径恰好被只读挡住 → acquire 期的死主回收永远轮不到执行，只能手工删锁。
+// 只把 ESRCH 当死主（EPERM 等一律视为活，与 isPidAlive 一致）。
+// 返回 { held, owner }；owner 恒含 pid/acquiredAt，owner.app/workspace/instance
+// 仅在旧 payload 带有合法 owner 字段时出现（鸭子类型，缺失即回退 PID 展示）。
+export async function inspectExternalHolder(rootReal) {
+  const lockPath = path.join(rootReal, LOCK_NAME);
+  let stat;
+  try { stat = await fsp.lstat(lockPath); }
+  catch (err) {
+    if (err.code === 'ENOENT') return { held: false, owner: null };
+    return { held: false, owner: null, error: err.code ?? 'unknown' };
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) return { held: false, owner: null, state: 'unknown' };
+  let raw;
+  try { raw = await fsp.readFile(lockPath, 'utf8'); }
+  catch (err) { return { held: false, owner: null, error: err.code ?? 'unknown' }; }
+  let payload;
+  try { payload = JSON.parse(raw); } catch { return { held: false, owner: null, state: 'unknown' }; }
+  if (!payload || !Number.isInteger(payload.pid) || payload.pid <= 0 || payload.pid > 2147483647
+      || typeof payload.token !== 'string' || payload.token.length === 0) {
+    return { held: false, owner: null, state: 'unknown' };
+  }
+  // 死主残留：held:false + state:'stale'，由 acquire 期回收，探针不删文件。
+  if (!isPidAlive(payload.pid)) return { held: false, owner: null, state: 'stale', stale: true };
+  const owner = {
+    pid: payload.pid,
+    acquiredAt: typeof payload.acquiredAt === 'string' ? payload.acquiredAt : null,
+  };
+  const extra = sanitizeOwner(payload.owner);
+  if (extra) Object.assign(owner, extra);
+  return { held: true, owner };
 }

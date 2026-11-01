@@ -524,6 +524,10 @@ export async function createShioriRuntime(options, dependencies = {}) {
           mode,
           config,
           probeSink: attempt.handle.sink,
+          // F7：active 宿主以 dataRoot 占座位；shadow/inert 不占（桥只在 active 用）。
+          // 注入 service 是「不碰磁盘」的隔离路径（测试/嵌入方自备 service），
+          // 按既有契约保持 dataRoot 零触碰——不建座位目录，也就没有座位判据。
+          dataRoot: attempt.serviceKind === "injected" ? undefined : dataRoot,
         });
         const started = await attempt.bridge.start();
         runtime.current = attempt;

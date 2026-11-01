@@ -20,6 +20,7 @@
 import { randomUUID } from "node:crypto";
 import { INVALID_INPUT, UNSUPPORTED } from "./errors.mjs";
 import { TOOL_OUTPUT_SCHEMAS, renderToolOutput } from "../plugin/tool-schemas.mjs";
+import { assertNotHostLocked, validateReadonlyGuard } from "./readonly-guard.mjs";
 
 /** 宿主 system 的 section 名（与 soul-md 的 soul:persona/soul:memory 不同名，便于唯一写者判定）。 */
 export const SECTION_PERSONA = "shiori:persona";
@@ -113,11 +114,16 @@ function writeReceipt(mutateResult, scopeFallback) {
  * @param {() => {sessionId:string|null, scopeId:string|null}} [deps.getSessionInfo]
  * @param {object} [deps.config] 已校验配置（persona.maxChars 等）
  * @param {() => Date} [deps.now] 时钟注入
+ * @param {object} [deps.readonlyGuard] F7 只读守卫（createReadonlyGuard 产物；可选，
+ *   缺省时写行为与 0.1 完全一致）。外部写锁持续持有进入只读态后，本工厂的写工具
+ *   （soul_update / memory_append / memory_rewrite / core_write / topic_append）
+ *   抛 code="HOST_LOCKED"；读工具与 L0/L1 注入不受影响。
  */
-export function createCompatTools({ service, getSessionInfo, config, now } = {}) {
+export function createCompatTools({ service, getSessionInfo, config, now, readonlyGuard } = {}) {
   if (!service || typeof service.mutate !== "function") {
     throw INVALID_INPUT("service with mutate() is required", {});
   }
+  validateReadonlyGuard(readonlyGuard);
   const personaMaxChars = Number.isInteger(config?.persona?.maxChars) && config.persona.maxChars > 0
     ? config.persona.maxChars
     : FALLBACK_PERSONA_MAX_CHARS;
@@ -175,6 +181,7 @@ export function createCompatTools({ service, getSessionInfo, config, now } = {})
       async execute(args) {
         const a = requireObject(args);
         rejectScope(a);
+        assertNotHostLocked(readonlyGuard);
         const content = requireString(a, "content");
         // DESIGN.md:110：L0 上限按 UTF-16 code units（content.length）计，UTF-8 bytes 仅作诊断。
         if (!content.isWellFormed()) {
@@ -298,6 +305,7 @@ export function createCompatTools({ service, getSessionInfo, config, now } = {})
       async execute(args) {
         const a = requireObject(args);
         rejectScope(a);
+        assertNotHostLocked(readonlyGuard);
         const section = requireString(a, "section");
         const content = requireString(a, "content");
         const topic = resolveTopicArg(optionalString(a, "topic")); // core / core.md / 空 → core 路径
@@ -339,6 +347,7 @@ export function createCompatTools({ service, getSessionInfo, config, now } = {})
       async execute(args) {
         const a = requireObject(args);
         rejectScope(a);
+        assertNotHostLocked(readonlyGuard);
         const content = requireString(a, "content", { allowEmpty: true });
         const topic = resolveTopicArg(optionalString(a, "topic")); // core / core.md / 空 → core 路径
         const operationId = typeof a.operationId === "string" && a.operationId.length > 0 ? a.operationId : randomUUID();
@@ -384,6 +393,7 @@ export function createCompatTools({ service, getSessionInfo, config, now } = {})
       async execute(args) {
         const a = requireObject(args);
         rejectScope(a);
+        assertNotHostLocked(readonlyGuard);
         const content = requireString(a, "content", { allowEmpty: true });
         const section = optionalString(a, "section");
         if (section !== undefined && section.length > 0) {
@@ -428,6 +438,7 @@ export function createCompatTools({ service, getSessionInfo, config, now } = {})
         const topic = topicArg;
         const section = requireString(a, "section");
         const content = requireString(a, "content");
+        assertNotHostLocked(readonlyGuard);
         const current = await service.readTopic(topic);
         const candidate = appendBlock(current.body ?? "", section, content, clock());
         const result = await service.mutate({
@@ -484,11 +495,13 @@ export function createCompatTools({ service, getSessionInfo, config, now } = {})
  * @param {object} deps.service 见 docs/host/README.md 的 service 契约
  * @param {() => {sessionId:string|null, scopeId:string|null}} [deps.getSessionInfo]
  * @param {() => Date} [deps.now] 时钟注入
+ * @param {object} [deps.readonlyGuard] F7 只读守卫（可选；只读态下 topic_create 抛 HOST_LOCKED）
  */
-export function createTopicCreateTool({ service, getSessionInfo, now } = {}) {
+export function createTopicCreateTool({ service, getSessionInfo, now, readonlyGuard } = {}) {
   if (!service || typeof service.mutate !== "function") {
     throw INVALID_INPUT("service with mutate() is required", {});
   }
+  validateReadonlyGuard(readonlyGuard);
   const clock = now ?? (() => new Date());
 
   async function scopeIdOf() {
@@ -513,6 +526,7 @@ export function createTopicCreateTool({ service, getSessionInfo, now } = {}) {
   async execute(args) {
     const a = requireObject(args);
     rejectScope(a);
+    assertNotHostLocked(readonlyGuard);
     const topicArg = requireString(a, "topic");
     if (resolveTopicArg(topicArg) === null) {
       throw INVALID_INPUT(
