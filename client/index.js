@@ -865,6 +865,60 @@ window.__ModuleLoader__.load({
         hint ? h("span", { className: "dshi_hint" }, hint) : null);
     }
 
+    // ── F1b：语义召回只读状态 + 重建向量按钮 ─────────────────────────────
+    // 数据源：getStatus.diagnostics.semantic（wire 的 diagnostics 块是
+    // additionalProperties:true，服务端纯增量注入；客户端不做结构假设——
+    // 任何字段缺失都按「—」渲染，绝不崩）。
+    // 触发通道：executeTool 的保留名 semantic_rebuild（不是宿主工具，服务端
+    // dispatchTool 内部拦截；单飞：重建中再点只返回进度快照）。
+    // 进度：点击后本地起一个轮询循环（getStatus 每 1.5s），直到 rebuild 不在
+    // running；会话切换 / 组件销毁由 sessionId 比对终止，不依赖 unmount 回调。
+    var SEMANTIC_REBUILD_TOOL = "semantic_rebuild";
+    var REBUILD_POLL_MS = 1500;
+    var SEMANTIC_PHASE_LABELS = {
+      idle: "空闲",
+      starting: "启动中…",
+      running: "重建中",
+      done: "已完成",
+      error: "失败",
+      aborted: "已中止（宿主停止）"
+    };
+
+    function semanticProviderText(semantic) {
+      if (!semantic) return "—";
+      if (semantic.provider === "local") return "本地模型（" + String(semantic.model || "?") + "）";
+      if (semantic.provider === "api") return "外部接口（本期未实现）";
+      if (semantic.provider === "none") return "未开启";
+      return String(semantic.provider);
+    }
+
+    function semanticReadyText(semantic) {
+      if (!semantic || !semantic.enabled) return "—";
+      if (semantic.ready === true) return "已就绪";
+      if (semantic.ready === false) return "未就绪（还没有成功生成过向量）";
+      return "未知";
+    }
+
+    function rebuildPhaseText(semantic, localProgress) {
+      var rebuild = (semantic && semantic.rebuild) || {};
+      var running = localProgress ? localProgress.running : rebuild.running;
+      var phase = localProgress ? localProgress.phase : rebuild.phase;
+      var label = SEMANTIC_PHASE_LABELS[phase] || String(phase || "—");
+      if (phase === "running" || phase === "starting") {
+        var total = typeof rebuild.total === "number" ? rebuild.total : (localProgress && localProgress.total);
+        var done = typeof rebuild.done === "number" ? rebuild.done : (localProgress && localProgress.done);
+        if (typeof total === "number" && total > 0) {
+          return label + " " + (typeof done === "number" ? done : 0) + " / " + total + " 张";
+        }
+        return label;
+      }
+      if (phase === "error") {
+        var err = (localProgress && localProgress.error) || rebuild.error || "未知错误";
+        return label + "：" + err;
+      }
+      return label;
+    }
+
     function StatusTab(props) {
       var state = useState(null);
       var status = state[0];
@@ -872,6 +926,11 @@ window.__ModuleLoader__.load({
       var errorState = useState(null);
       var error = errorState[0];
       var setError = errorState[1];
+      // F1b：重建进度本地快照（null = 未在本次点击的轮询周期内；显示回落到
+      // diagnostics.semantic.rebuild）。挂在既有 state 之后，不改变既有下标。
+      var rebuildState = useState(null);
+      var rebuildProgress = rebuildState[0];
+      var setRebuildProgress = rebuildState[1];
       var load = async function () {
         setError(null);
         try {
@@ -879,6 +938,48 @@ window.__ModuleLoader__.load({
         } catch (e) { setStatus(null); if (!reportSessionUnavailable(e, props, setError)) setError(e); }
       };
       useEffect(function () { load(); }, [props.sessionId]);
+      var semantic = status && status.diagnostics && typeof status.diagnostics === "object" && !Array.isArray(status.diagnostics)
+        ? (status.diagnostics.semantic && typeof status.diagnostics.semantic === "object" ? status.diagnostics.semantic : null)
+        : null;
+      var rebuildRunning = rebuildProgress !== null && rebuildProgress.running === true;
+      // 「重建向量」：后台分批补（服务端每批 20 张、批间让出事件循环），进度
+      // 写在 diagnostics.semantic.rebuild，这里轮询读取并原地显示。会话切换
+      // （props.sessionId 变化）即停轮询，不依赖组件卸载回调。
+      var startRebuild = async function () {
+        if (!semantic || !semantic.enabled || rebuildRunning) return;
+        var sid = props.sessionId;
+        setRebuildProgress({ running: true, phase: "starting", done: 0, total: null, error: null });
+        try {
+          await props.dsh.call("executeTool", sid, { name: SEMANTIC_REBUILD_TOOL, args: {} });
+        } catch (e) {
+          // 只读态 / 未开启语义 / 服务端拒绝：中文错误 + 可重试（按钮回到可点）。
+          setRebuildProgress({ running: false, phase: "error", error: (e && e.message) ? String(e.message) : String(e) });
+          return;
+        }
+        for (;;) {
+          if (props.sessionId !== sid) return; // 会话已切换：停止轮询
+          var fresh;
+          try {
+            fresh = await props.dsh.call("getStatus", sid, {});
+          } catch (e) {
+            setRebuildProgress({ running: false, phase: "error", error: (e && e.message) ? "进度查询失败：" + String(e.message) : String(e) });
+            return;
+          }
+          if (fresh && fresh.diagnostics && fresh.diagnostics.semantic) {
+            setStatus(fresh);
+            var rebuild = fresh.diagnostics.semantic.rebuild || {};
+            setRebuildProgress({
+              running: rebuild.running === true,
+              phase: rebuild.phase || "running",
+              done: rebuild.done,
+              total: rebuild.total,
+              error: rebuild.error || null,
+            });
+            if (rebuild.running !== true) return; // done / error / aborted：结束轮询，显示回落到 diagnostics
+          }
+          await new Promise(function (resolve) { setTimeout(resolve, REBUILD_POLL_MS); });
+        }
+      };
       var occupancy = (status && status.occupancy) || {};
       var capabilities = status && status.capabilities && typeof status.capabilities === "object" ? status.capabilities : null;
       var startedFlag = status && status.diagnostics && typeof status.diagnostics === "object" && !Array.isArray(status.diagnostics)
@@ -918,6 +1019,30 @@ window.__ModuleLoader__.load({
                 className: "dshi_badge" + (on ? "" : " dshi_badgeDim")
               }, (STATUS_CAPABILITY_LABELS[key] || key) + "：" + statusCapabilityText(capabilities[key]));
             }))) : null,
+          // F1b：语义召回只读状态 + 重建向量（数据全部来自 diagnostics.semantic；
+          // 旧服务端没有该字段时整块不渲染，不报错）。
+          semantic ? h("div", { className: "dshi_card" },
+            h("div", { className: "dshi_row" },
+              h("span", { className: "dshi_cardTitle" }, "语义召回"),
+              h("span", { className: "dshi_badge" + (semantic.enabled ? "" : " dshi_badgeDim") },
+                semantic.enabled ? "已开启" : "未开启"),
+              semantic.enabled
+                ? h("button", {
+                    className: "dshi_btn",
+                    onClick: startRebuild,
+                    disabled: rebuildRunning
+                  }, rebuildRunning ? "重建中…" : "重建向量")
+                : null),
+            h("div", { className: "dshi_items" },
+              statusRow("提供方", semanticProviderText(semantic), "provider=" + String(semantic.provider != null ? semantic.provider : "—")),
+              statusRow("就绪状态", semanticReadyText(semantic)),
+              statusRow("已建向量数", semantic.vectors === null || semantic.vectors === undefined ? "—" : String(semantic.vectors) + " 张卡片"),
+              statusRow("重建进度", rebuildPhaseText(semantic, rebuildProgress),
+                rebuildProgress !== null && rebuildProgress.phase === "error" ? "可再次点击「重建向量」重试（增量续传，已完成的卡片不会重算）" : null),
+              semantic.lastError
+                ? h("div", { className: "dshi_error" }, "上次召回错误：" + String(semantic.lastError))
+                : null))
+            : null,
           h("details", null,
             h("summary", { className: "dshi_hint" }, "技术细节（原始字段，一般不用看）"),
             h("div", { className: "dshi_items" },

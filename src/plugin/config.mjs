@@ -8,7 +8,8 @@
 //     ownerId='local' / dataRoot=stateRoot=null；预算经 core/validateConfig 全关系校验
 //     （0.2 U2 起水位 softChars/hardChars 为权威：老配置只有 ratio 时按
 //     hardCapChars × ratio 四舍五入换算，输出里 ratio 一律由水位回推保持同源），
-//     semantic 段为 F1 方案 C 的接口预留（本期只定契约不实现召回），
+//     semantic 段为 F1 方案 C 的接口预留（F1b 起 local 接真实本地 embedding：
+//     provider=none 仍零依赖零网络；local 新增 dtype/cacheDir/mirror 三字段），
 //     忘却 policy 经 forgetting/normalizeForgetPolicy（默认 30/240/0.25）；
 //   - verifyPluginRoots：apply 阶段的真实文件系统校验（真实 link 解析后仍绝对、
 //     互不嵌套），静态 schema dump 不能替代本步。
@@ -84,11 +85,20 @@ function unwrapVolatile(value) {
 const nullableString = () => z.union([z.string(), z.const(null)]);
 const personaChoice = () => nullableString().default(null);
 
-// semantic 段默认值（F1 方案 C 接口预留，字段名冻结）：provider=none 时零依赖、
-// 零网络、行为与 0.1 一致。schema 默认与 normalize 权威默认共用这一份。
+// semantic 段默认值（F1 方案 C 接口预留，字段名冻结；F1b 新增 local.dtype /
+// cacheDir / mirror 三字段）：provider=none 时零依赖、零网络、行为与 0.1 一致。
+// schema 默认与 normalize 权威默认共用这一份。
+// model 默认必须是完整仓库 id（org/name）：transformers.js 按 id 从镜像下载，
+// 短名 "bge-small-zh-v1.5" 不是合法仓库、会 404（spike 实测用的就是 Xenova/ 前缀）。
 const DEFAULT_SEMANTIC = deepFreeze({
   provider: "none",
-  local: { model: "bge-small-zh-v1.5", dims: 512 },
+  local: {
+    model: "Xenova/bge-small-zh-v1.5",
+    dims: 512,
+    dtype: "fp32",
+    cacheDir: "",
+    mirror: "https://hf-mirror.com/",
+  },
   api: { endpoint: null, keyRef: null },
 });
 
@@ -177,9 +187,13 @@ export const Config = z.object({
     provider: z.union([z.const("none"), z.const("local"), z.const("api")]).default("none")
       .description("语义召回提供方：none=关闭（默认，零依赖零网络）；local=本地 embedding；api=外部接口（本期仅预留）"),
     local: z.object({
-      model: z.string().default("bge-small-zh-v1.5").description("本地 embedding 模型名（开启 local 后才会触发一次性模型下载）"),
+      model: z.string().default("Xenova/bge-small-zh-v1.5").description("本地 embedding 模型的完整仓库 id（org/name，默认 Xenova/bge-small-zh-v1.5；开启 local 后才会触发一次性模型下载）"),
       dims: z.natural().default(512).description("向量维度"),
-    }).default({ model: "bge-small-zh-v1.5", dims: 512 }),
+      dtype: z.union([z.const("fp32"), z.const("fp16"), z.const("q8")]).default("fp32")
+        .description("ONNX 推理精度：fp32=精度基线（91MB）；fp16=折中；q8=最小最快（23MB，短文本 p95 约 4ms）"),
+      cacheDir: z.string().default("").description("模型缓存目录；空字符串表示用 <stateRoot>/semantic/models"),
+      mirror: z.string().default("https://hf-mirror.com/").description("HuggingFace 镜像地址（国内直连 huggingface.co 一般不可达）"),
+    }).default({ model: "Xenova/bge-small-zh-v1.5", dims: 512, dtype: "fp32", cacheDir: "", mirror: "https://hf-mirror.com/" }),
     api: z.object({
       endpoint: nullableString().default(null).description("外部 embedding 接口地址；null=未配置"),
       keyRef: nullableString().default(null).description("密钥引用名（不存明文密钥）；null=未配置"),
@@ -355,7 +369,7 @@ function normalizeBudgets(value) {
   });
 }
 
-// ── semantic 段（F1 方案 C 接口预留）：本期只定契约，provider=none 时不生效 ──
+// ── semantic 段（F1 方案 C 接口预留 + F1b local 三字段）：provider=none 时不生效 ──
 export function normalizeSemantic(value) {
   if (value === undefined) return clone(DEFAULT_SEMANTIC);
   if (!isPlainRecord(value)) fail(`semantic must be a plain object`);
@@ -369,8 +383,29 @@ export function normalizeSemantic(value) {
   let local = clone(DEFAULT_SEMANTIC.local);
   if (value.local !== undefined) {
     if (!isPlainRecord(value.local)) fail(`semantic.local must be a plain object`);
+    // F1b 白名单：model / dims 之外新增 dtype / cacheDir / mirror 三字段。
     for (const key of Object.keys(value.local)) {
-      if (key !== "model" && key !== "dims") fail(`semantic.local has unknown property "${key}"`);
+      if (key !== "model" && key !== "dims" && key !== "dtype" && key !== "cacheDir" && key !== "mirror") {
+        fail(`semantic.local has unknown property "${key}"`);
+      }
+    }
+    const dtype = value.local.dtype === undefined
+      ? DEFAULT_SEMANTIC.local.dtype
+      : value.local.dtype;
+    if (dtype !== "fp32" && dtype !== "fp16" && dtype !== "q8") {
+      fail(`semantic.local.dtype must be "fp32", "fp16" or "q8", got ${String(dtype)}`);
+    }
+    const cacheDir = value.local.cacheDir === undefined
+      ? DEFAULT_SEMANTIC.local.cacheDir
+      : value.local.cacheDir;
+    if (typeof cacheDir !== "string") {
+      fail(`semantic.local.cacheDir must be a string (empty string = use <stateRoot>/semantic/models), got ${String(cacheDir)}`);
+    }
+    const mirror = value.local.mirror === undefined
+      ? DEFAULT_SEMANTIC.local.mirror
+      : value.local.mirror;
+    if (typeof mirror !== "string" || mirror.length === 0) {
+      fail(`semantic.local.mirror must be a non-empty string, got ${String(mirror)}`);
     }
     local = {
       model: value.local.model === undefined
@@ -379,6 +414,9 @@ export function normalizeSemantic(value) {
       dims: value.local.dims === undefined
         ? DEFAULT_SEMANTIC.local.dims
         : requireNaturalChars(value.local.dims, "semantic.local.dims"),
+      dtype,
+      cacheDir,
+      mirror,
     };
   }
   let api = clone(DEFAULT_SEMANTIC.api);

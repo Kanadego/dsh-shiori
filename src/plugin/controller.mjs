@@ -26,6 +26,7 @@
 
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { join } from "node:path";
 import { createShioriService } from "../service/index.mjs";
 import { openSparkStore } from "../sparks/store.mjs";
 import { createCompatTools, createTopicCreateTool } from "../host/tools.mjs";
@@ -35,9 +36,11 @@ import { createCompressProbe } from "../host/compress-probe.mjs";
 import { mapRawSessionEvent } from "../host/dsh-adapter.mjs";
 import { openCompletionState } from "../completion/index.mjs";
 import { evaluateMutation } from "../core/index.mjs";
-import { matchSparks } from "../sparks/match.mjs";
 import { buildSparkAttachment, commitDelivery } from "../sparks/delivery.mjs";
 import { createColdSearch } from "../forgetting/cold-search.mjs";
+import { createEmbeddingProvider } from "../semantic/index.mjs";
+import { openSemanticVectorStore } from "../semantic/store.mjs";
+import { mergeSemanticRecall } from "../sparks/semantic-recall.mjs";
 import { createPersonaAdapter } from "./persona.mjs";
 import { coreBudgetsOf } from "./config.mjs";
 import { createStateStore } from "./state.mjs";
@@ -71,6 +74,15 @@ const ALL_TOOL_NAMES = Object.freeze([
   "spark_feedback", "spark_graph",
 ]);
 
+// F1b：语义向量重建的保留名。它不是宿主工具——绝不加入 ALL_TOOL_NAMES、绝不
+// 经 defineTool 注册；只经 management.executeTool（wire 的 name 是自由字符串，
+// protocol.mjs 未收缩枚举）在本文件内部分发拦截，供面板「重建向量」按钮调用。
+// dispatchTool 在 ALL_TOOL_NAMES 检查之前识别它（见该函数），宿主工具面保持 16 个不变。
+const SEMANTIC_REBUILD_TOOL = "semantic_rebuild";
+
+// 重建分批大小（F1b 任务书 g 条：每批 20 张，批间 setTimeout 让出事件循环）。
+const SEMANTIC_REBUILD_BATCH = 20;
+
 function fail(code, message, details) {
   const error = new Error(message);
   error.code = code;
@@ -100,6 +112,25 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
 
   const isInert = settings.mode === "shadow" && settings.dataRoot === null && settings.stateRoot === null;
   const nowIso = () => now().toISOString();
+
+  // F1b：语义 provider。provider="local" 时构造是零 IO 的（懒加载契约：
+  // transformers 运行时推迟到首次 embed 才 import，见 semantic/local.mjs）；
+  // "none" → null（行为与 0.1 逐字节一致）；"api" 不在此创建（本期未实现，
+  // createEmbeddingProvider 会抛 NOT_IMPLEMENTED，配置在 normalize 层就该被拦）。
+  // cacheDir 空字符串在此兑现配置承诺（config.mjs 契约）：解析为
+  // <stateRoot>/semantic/models——模型缓存与向量索引同住 stateRoot 派生区，
+  // 绝不落 dataRoot。stateRoot 为 null（inert）时保持空串：local provider 在
+  // inert 下永远不会被使用（pre-step / executeTool 均不可达）。
+  function semanticProviderConfig() {
+    const semantic = settings.semantic;
+    if (semantic.provider !== "local") return semantic;
+    const local = semantic.local;
+    if (local.cacheDir !== "" || settings.stateRoot === null) return semantic;
+    return { ...semantic, local: { ...local, cacheDir: join(settings.stateRoot, "semantic", "models") } };
+  }
+  const semanticProvider = settings.semantic.provider === "local"
+    ? createEmbeddingProvider(semanticProviderConfig())
+    : null;
 
   // 路径校验：active 或配置了任一 root 时必须显式提供两个绝对 root、disjoint、
   // 互不嵌套（含真实 link 解析）。ctx.baseUrl 不是 profileRoot；这里不猜 profileRoot，
@@ -175,6 +206,14 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       l2RecoveredFromSessionLog: 0,
       workingDirectoryLookups: 0,
       startFailures: [],
+    },
+    /** F1b 语义召回运行态（getStatus.diagnostics.semantic 的数据源）：
+     *  ready=provider 至少一次 embed 成功；rebuild 是面板「重建向量」的单飞进度。 */
+    semantic: {
+      ready: false,
+      lastError: null,
+      lastRecallAt: null,
+      rebuild: { running: false, phase: "idle", total: 0, done: 0, error: null },
     },
   };
 
@@ -292,9 +331,32 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       tools: all,
       toolByName,
       l2Recovered: false,
+      /** F1b：语义向量索引（<stateRoot>/semantic/<scopeId>.json）。
+       *  惰性打开：仅在 semantic provider 已启用且召回/重建真需要时创建；
+       *  provider 关闭时恒 null（绝不产生向量文件）。 */
+      vectorStore: null,
     };
     ctrl.scopes.set(scopeId, resources);
     return resources;
+  }
+
+  /**
+   * F1b：取（并惰性打开）scope 的向量索引。semantic 关闭或未配置 stateRoot 时
+   * 返回 null——调用方据此走纯字面路径。打开即从磁盘加载，损坏/model 变更
+   * 都在 store 内部容错（见 semantic/store.mjs），不会抛到召回路径。
+   */
+  async function vectorStoreFor(scopeId) {
+    if (semanticProvider === null || settings.stateRoot === null) return null;
+    const resources = await resourcesFor(scopeId);
+    if (resources.vectorStore === null) {
+      resources.vectorStore = await openSemanticVectorStore({
+        stateRoot: settings.stateRoot,
+        scopeId,
+        model: settings.semantic.local.model,
+        dims: settings.semantic.local.dims,
+      });
+    }
+    return resources.vectorStore;
   }
 
   async function closeAllScopes() {
@@ -304,6 +366,12 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
         resources.sparkStore.close();
       } catch (error) {
         errors.push(`sparkStore.close(${scopeId}): ${error instanceof Error ? error.message : String(error)}`);
+      }
+      // F1b：向量索引没有后台资源，close 只丢内存态（未落盘变更此前已按批落盘）。
+      try {
+        resources.vectorStore?.close();
+      } catch (error) {
+        errors.push(`vectorStore.close(${scopeId}): ${error instanceof Error ? error.message : String(error)}`);
       }
     }
     ctrl.scopes.clear();
@@ -325,13 +393,156 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     return run;
   }
 
-  async function dispatchTool(scope, name, args, exec) {
-    if (!ALL_TOOL_NAMES.includes(name)) {
-      fail("INVALID_INPUT", `unknown shiori tool "${String(name)}"`, {});
+  // ─────────────────────────────────────────────────────────
+  // F1b：语义向量重建（面板「重建向量」按钮的保留名通道）
+  // ─────────────────────────────────────────────────────────
+
+  /** 重建进度快照（返回值与 getStatus.diagnostics.semantic.rebuild 同形状）。 */
+  function rebuildSnapshot() {
+    const rebuild = ctrl.semantic.rebuild;
+    return { running: rebuild.running, phase: rebuild.phase, total: rebuild.total, done: rebuild.done, error: rebuild.error };
+  }
+
+  /** 卡片 embedding 文本：标题/摘要/正文按行拼接（缺段跳过；全空得到空串）。 */
+  function cardEmbedText(card) {
+    return [card.title, card.summary, card.content]
+      .filter((part) => typeof part === "string" && part.length > 0)
+      .join("\n");
+  }
+
+  /**
+   * 后台分批重建：每批 SEMANTIC_REBUILD_BATCH 张，批间 setTimeout 让出事件循环；
+   * 每批原子落盘（中断/失败后进度可恢复，重试走增量续传）。逐批检查
+   * ctrl.banned / started——stop 后立即中止，不再消耗嵌入调用。
+   * 不进 trackInFlight：重建可能长达数十秒，stop 的排空窗口（10s 上限）
+   * 不该被它拖满；中止语义由批间检查保证。
+   */
+  async function runSemanticRebuild(scopeId, records, force) {
+    const rebuild = ctrl.semantic.rebuild;
+    const store = await vectorStoreFor(scopeId);
+    if (store === null) {
+      fail("INVALID_STATE", "向量索引不可用（语义召回未启用或 stateRoot 未配置）", {});
     }
+    if (force === true) store.clear(); // 全量：丢弃现有索引从头算
+    for (let i = 0; i < records.length; i += SEMANTIC_REBUILD_BATCH) {
+      if (ctrl.banned || !ctrl.started) {
+        rebuild.phase = "aborted";
+        return;
+      }
+      for (const card of records.slice(i, i + SEMANTIC_REBUILD_BATCH)) {
+        // 增量（默认）：revision 未变的卡片直接沿用现有向量。
+        if (force !== true) {
+          const have = store.get(card.id);
+          if (have !== null && have.revision === card.revision) {
+            rebuild.done += 1;
+            continue;
+          }
+        }
+        try {
+          const vec = await semanticProvider.embed(cardEmbedText(card));
+          store.upsert(card.id, card.revision, vec);
+          ctrl.semantic.ready = true;
+        } catch (error) {
+          throw new Error(
+            `重建向量失败（${rebuild.done + 1}/${records.length}，卡片「${card.title ?? card.id}」）：`
+            + (error instanceof Error ? error.message : String(error))
+            + "。已完成的部分已按批保存，稍后可直接重试续传。",
+            { cause: error },
+          );
+        }
+        rebuild.done += 1;
+      }
+      await store.save(); // 每批原子落盘：崩溃/中止后重试从断点续传
+      await new Promise((resolve) => setTimeout(resolve, 0)); // 让出事件循环
+    }
+    // 剔除：索引中已不在 active 集的条目（卡片删除/归档后的残留向量）。
+    store.retainOnly(records.map((r) => r.id));
+    await store.save();
+  }
+
+  /**
+   * semantic_rebuild 保留名入口（dispatchTool 在工具表检查之前拦截到此）。
+   * 单飞：已有重建在跑时直接返回当前进度快照，不排队不重跑。
+   * @returns 进度快照 {started, running, phase, total, done, error}。
+   */
+  async function semanticRebuild(scope, args) {
+    // 只读态拒绝：与写工具同口径（assertWritable 抛 HOST_LOCKED）；向量是
+    // 派生数据、落 stateRoot，只读宿主不应触发对 stateRoot 的成批写入。
+    if (ctrl.readonlyGuard !== null) {
+      try {
+        ctrl.readonlyGuard.assertWritable();
+      } catch (error) {
+        fail(error?.code ?? "HOST_LOCKED",
+          "当前宿主处于只读态（写权被其他实例持有），不能重建向量。向量是派生数据，落 stateRoot；等持有写权的实例退出后可重试。",
+          { holder: error?.details ?? error?.message ?? null });
+      }
+    }
+    if (semanticProvider === null) {
+      fail("INVALID_STATE",
+        `语义召回未开启（semantic.provider="${settings.semantic.provider}"），没有可重建的向量索引；`
+        + "请先把 semantic.provider 设为 \"local\" 并重启插件。", {});
+    }
+    if (args !== undefined && args !== null
+      && (typeof args !== "object" || Array.isArray(args))) {
+      fail("INVALID_INPUT", "semantic_rebuild args must be an object or undefined", {});
+    }
+    const force = args?.force;
+    if (force !== undefined && typeof force !== "boolean") {
+      fail("INVALID_INPUT", `semantic_rebuild args.force must be a boolean or undefined, got ${String(force)}`, {});
+    }
+
+    const rebuild = ctrl.semantic.rebuild;
+    // 单飞检查与置位必须同步完成（首个 await 之前），并发第二次调用只会拿到快照。
+    if (rebuild.running) {
+      return { started: false, ...rebuildSnapshot() };
+    }
+    rebuild.running = true;
+    rebuild.phase = "starting";
+    rebuild.error = null;
+    let recordsRef = null;
+    try {
+      // 预取总量（快速只读）后再交后台批处理；此后本函数返回，不阻塞面板 RPC。
+      const resources = await resourcesFor(scope.scopeId);
+      recordsRef = await resources.sparkStore.listActive();
+      rebuild.total = recordsRef.length;
+      rebuild.done = 0;
+      rebuild.phase = "running";
+    } catch (error) {
+      // 预取失败：恢复空闲态并把错误如实上报（面板可重试）。
+      rebuild.running = false;
+      rebuild.phase = "error";
+      rebuild.error = `重建向量启动失败：${error instanceof Error ? error.message : String(error)}`;
+      ctrl.semantic.lastError = rebuild.error;
+      throw error;
+    }
+    const kickoff = runSemanticRebuild(scope.scopeId, recordsRef, force === true)
+      .then(() => {
+        if (rebuild.phase === "running") rebuild.phase = "done";
+      })
+      .catch((error) => {
+        rebuild.phase = "error";
+        rebuild.error = error instanceof Error ? error.message : String(error);
+        ctrl.semantic.lastError = rebuild.error;
+      })
+      .finally(() => {
+        rebuild.running = false;
+      });
+    kickoff.catch(() => {}); // 错误已收进 rebuild.error；detached 不进 stop 排空
+    return { started: true, ...rebuildSnapshot() };
+  }
+
+  async function dispatchTool(scope, name, args, exec) {
     // B4：禁新请求（stop 后）不再执行任何工具。
     if (ctrl.banned || !ctrl.started) {
       fail("INVALID_STATE", "controller is stopped or not started; tool dispatch refused", {});
+    }
+    // F1b：semantic_rebuild 保留名拦截（必须位于 ALL_TOOL_NAMES 检查之前——
+    // 它不是宿主工具，见 SEMANTIC_REBUILD_TOOL 处注释）。
+    if (name === SEMANTIC_REBUILD_TOOL) {
+      return semanticRebuild(scope, args);
+    }
+    if (!ALL_TOOL_NAMES.includes(name)) {
+      fail("INVALID_INPUT", `unknown shiori tool "${String(name)}"`, {});
     }
     rejectIdentityFields(args ?? {}, `tool:${name}`);
     const run = async () => {
@@ -784,7 +995,16 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     const epoch = await state.l2Store.sessionEpoch(scope.scopeId, scope.sessionId);
     const seenKeys = await state.l2Store.seenKeys(scope.scopeId, scope.sessionId, epoch);
     const records = await resources.sparkStore.listActive();
-    const match = matchSparks({
+    // F1b：字面优先 + 向量补位合并召回。semanticProvider 为 null 时
+    // mergeSemanticRecall 内部就是一次原样 matchSparks 调用——行为与 0.1
+    // 逐字节等价，且不触碰向量索引（不产生任何向量文件）。provider 不可用
+    // （embed 抛错）同样在合并层收敛为纯字面，错误进 ctrl.semantic 诊断。
+    let vectorsFor = null;
+    if (semanticProvider !== null) {
+      const store = await vectorStoreFor(scope.scopeId);
+      if (store !== null) vectorsFor = (sparkId) => store.get(sparkId);
+    }
+    const recall = await mergeSemanticRecall({
       scopeId: scope.scopeId,
       userText,
       sparks: records,
@@ -793,7 +1013,21 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       contextEpoch: epoch,
       maxSeeds: settings.budgets.spark.seedCount,
       maxRelated: settings.budgets.spark.linkCount,
+      provider: semanticProvider,
+      vectorsFor,
     });
+    const match = recall.match;
+    // 语义诊断转存（getStatus.diagnostics.semantic 消费）：embed 成功即视为
+    // provider 就绪；失败记 lastError（面板「上次错误」），绝不外溢打断投递。
+    if (recall.semantic.enabled) {
+      ctrl.semantic.lastRecallAt = nowIso();
+      if (recall.semantic.error !== null) {
+        ctrl.semantic.lastError = recall.semantic.error;
+      } else {
+        ctrl.semantic.lastError = null;
+        ctrl.semantic.ready = true;
+      }
+    }
     const delivery = buildSparkAttachment({
       scopeId: scope.scopeId,
       sessionId: scope.sessionId,
@@ -944,6 +1178,48 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       management[name] = (...args) => trackInFlight(method.apply(managementFacade, args));
     }
   }
+
+  // F1b：getStatus.diagnostics.semantic（wire 的 diagnostics 块为
+  // additionalProperties:true，纯增量注入；不改方法数、不改描述符）。
+  // 面板状态页的语义召回只读状态与「重建向量」按钮进度都从这里读。
+  function semanticDiagnostics(scopeId) {
+    const rebuild = ctrl.semantic.rebuild;
+    const diag = {
+      provider: settings.semantic.provider,
+      enabled: semanticProvider !== null,
+      ready: ctrl.semantic.ready,
+      model: settings.semantic.local.model,
+      dims: settings.semantic.local.dims,
+      dtype: settings.semantic.local.dtype,
+      /** 当前 scope 已建向量数；scope 未打开（shadow/inert）时为 null。 */
+      vectors: null,
+      lastError: ctrl.semantic.lastError,
+      lastRecallAt: ctrl.semantic.lastRecallAt,
+      rebuild: { ...rebuild },
+    };
+    if (typeof scopeId === "string" && ctrl.scopes.has(scopeId)) {
+      const store = ctrl.scopes.get(scopeId).vectorStore;
+      diag.vectors = store === null ? 0 : store.size();
+    }
+    return diag;
+  }
+  const baseGetStatus = managementFacade.getStatus;
+  management.getStatus = async function getStatusWithSemantic(trustedContext, payload) {
+    const status = await baseGetStatus.call(managementFacade, trustedContext, payload);
+    // F1b：diagnostics.semantic 注入（wire 的 diagnostics 块 additionalProperties:true，
+    // 纯增量；不改方法数、不改描述符）。semanticDiagnostics 是纯内存投影，正常
+    // 不可能抛；一旦抛（未来字段演化引入缺陷），这里显式把 reason 写进
+    // diagnostics.semantic.error——绝不静默吞掉让语义状态凭空消失、排查无门。
+    try {
+      status.diagnostics = { ...(status.diagnostics ?? {}), semantic: semanticDiagnostics(status.scope) };
+    } catch (error) {
+      status.diagnostics = {
+        ...(status.diagnostics ?? {}),
+        semantic: { error: `语义诊断注入失败: ${error instanceof Error ? error.message : String(error)}` },
+      };
+    }
+    return status;
+  };
 
   // ─────────────────────────────────────────────────────────
   // 生命周期
