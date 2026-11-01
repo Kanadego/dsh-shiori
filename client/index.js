@@ -118,6 +118,13 @@ window.__ModuleLoader__.load({
 ".dshi_modBadge{border:1px solid var(--dshi-warn);color:var(--dshi-warn);border-radius:var(--dshi-radius-pill);padding:0 8px;font-size:10px;white-space:nowrap}" +
 ".dshi_fieldError{font-size:var(--dshi-font-xs);color:var(--dshi-danger)}" +
 ".dshi_blockError{border:var(--dshi-stroke);border-color:var(--dshi-danger);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm);font-size:var(--dshi-font-sm);color:var(--dshi-danger)}" +
+    // F2 闪回命中：消息底部按钮的弹出层。挂在聊天消息条里（.dshi_root 之外），
+    // token 不可用——颜色直接引用宿主 --dsw-alias 变量并带裸值回退。
+".dshi_fbWrap{position:relative;display:inline-flex}" +
+".dshi_fbPop{position:absolute;right:0;bottom:calc(100% + 6px);z-index:60;width:320px;max-height:300px;overflow:auto;border:1px solid var(--dsw-alias-border-l2,#dce2eb);border-radius:10px;background:var(--dsw-alias-bg-layer-3,#fff);color:var(--dsw-alias-label-primary,#1f2937);box-shadow:0 10px 28px rgba(15,23,42,.20);padding:10px 12px;display:flex;flex-direction:column;gap:8px;font-size:12px;line-height:1.6;text-align:left}" +
+".dshi_fbItem{display:flex;flex-direction:column;gap:2px;border-bottom:1px dashed var(--dsw-alias-border-l2,#dce2eb);padding-bottom:6px}" +
+".dshi_fbItem:last-child{border-bottom:none;padding-bottom:0}" +
+".dshi_fbMeta{font-size:10px;color:var(--dsw-alias-label-tertiary,#8b93a1);word-break:break-word}" +
     ".dshi_mdPreview{border:var(--dshi-stroke);background:var(--dshi-bg-panel);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm) var(--dshi-space);max-height:320px;overflow:auto;display:flex;flex-direction:column;gap:var(--dshi-space-xs);font-size:var(--dshi-font-sm)}" +
     ".dshi_mdH1{font-size:var(--dshi-font-title);font-weight:600;margin-top:var(--dshi-space-xs)}" +
     ".dshi_mdH2{font-size:var(--dshi-font);font-weight:600;margin-top:var(--dshi-space-xs)}" +
@@ -142,6 +149,7 @@ window.__ModuleLoader__.load({
 ".dshi_tabIco-candidates{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Crect x=%272%27 y=%272%27 width=%275%27 height=%275%27 rx=%271%27/%3E%3Crect x=%272%27 y=%279%27 width=%275%27 height=%275%27 rx=%271%27/%3E%3Cpath d=%27M9 4h5M9 12h5%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3C/svg%3E')}" +
 ".dshi_tabIco-topics{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M3 1h10v14l-5-4-5 4z%27/%3E%3C/svg%3E')}" +
 ".dshi_tabIco-budgets{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M1 4h14M1 8h14M1 12h14%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3Ccircle cx=%275%27 cy=%274%27 r=%272%27/%3E%3Ccircle cx=%2711%27 cy=%278%27 r=%272%27/%3E%3Ccircle cx=%276%27 cy=%2712%27 r=%272%27/%3E%3C/svg%3E')}" +
+".dshi_tabIco-flashbacks{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 3a5 5 0 1 1-4.9 6%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linecap=%27round%27/%3E%3Cpath d=%27M3 2v3.2h3.2%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3Ccircle cx=%278%27 cy=%278%27 r=%271.4%27/%3E%3C/svg%3E')}" +
 ".dshi_toasts,.dshi_restartBanner{--dshi-safe:var(--dsw-alias-state-success-primary,#1a7f37);--dshi-warn:#b45309;--dshi-danger:var(--dsw-alias-state-error-primary,#f85149);--dshi-radius-sm:8px;--dshi-font-sm:12px;--dshi-font-xs:11px}" +
 ".dshi_toasts{position:fixed;right:16px;bottom:16px;z-index:1000;display:flex;flex-direction:column;gap:8px;max-width:340px}" +
 ".dshi_toast{display:flex;align-items:flex-start;gap:8px;border-radius:var(--dshi-radius-sm);padding:8px 10px;font-size:var(--dshi-font-sm);line-height:1.5;color:#fff}" +
@@ -3095,13 +3103,129 @@ window.__ModuleLoader__.load({
           value ? h("pre", { className: "dshi_pre" }, stableStringify(value.budgets)) : null));
     }
 
+    // ── F2 闪回命中（面板统计页）──────────────────────────────────────────
+    // 数据来源：getStatus（capabilities.l2）+ getGraph（nodes.hitCount/lastHitAt/
+    // createdAt + deliveries + deliveryStats）。三组内容：
+    //   ① 从未命中（hitCount===0 且 lastHitAt===null）：标题 + 存续天数；
+    //   ② 命中 top 榜：hitCount 降序前 10（平局按最近命中时间降序、id 升序）；
+    //   ③ 投递吞吐：总投递张数 / 轮次 / 重复投递率（1 - uniqueCards/totalDelivered）。
+    // 口径（如实标注）：命中次数只代表卡片进入过投递包，不代表被采用；吞吐统计
+    // 来源于 L2 投递账本，只覆盖 L2 开启期间的记录。L2 关闭时整页给引导，不报错。
+    function fbTimeText(iso) {
+      return typeof iso === "string" && iso.length > 0
+        ? iso.replace("T", " ").slice(0, 19)
+        : "—";
+    }
+    function fbDaysText(createdAt) {
+      var parsed = typeof createdAt === "string" ? Date.parse(createdAt) : NaN;
+      if (!Number.isFinite(parsed)) return "存续天数未知";
+      var days = Math.floor((Date.now() - parsed) / 86400000);
+      if (days < 0) days = 0;
+      return "存续 " + days + " 天";
+    }
+    function FlashbacksTab(props) {
+      var dataState = useState(null);
+      var data = dataState[0];
+      var setData = dataState[1];
+      var capsState = useState(null);
+      var caps = capsState[0];
+      var setCaps = capsState[1];
+      var errorState = useState(null);
+      var error = errorState[0];
+      var setError = errorState[1];
+      var load = async function () {
+        setError(null);
+        try {
+          var status = await props.dsh.call("getStatus", props.sessionId, {});
+          setCaps(status && status.capabilities && typeof status.capabilities === "object" ? status.capabilities : null);
+        } catch (e) { setCaps(null); if (!reportSessionUnavailable(e, props, setError)) setError(e); }
+        try {
+          setData(await props.dsh.call("getGraph", props.sessionId, {}));
+        } catch (e) { setData(null); if (!reportSessionUnavailable(e, props, setError)) setError(e); }
+      };
+      useEffect(function () { load(); }, [props.sessionId]);
+      var nodes = data && Array.isArray(data.nodes) ? data.nodes : [];
+      var stats = data && data.deliveryStats && typeof data.deliveryStats === "object" ? data.deliveryStats : null;
+      // ① 从未命中：hitCount===0 且 lastHitAt===null。
+      var neverHit = [];
+      // ② 命中 top 榜：hitCount 降序取前 10。
+      var hitList = [];
+      for (var ni = 0; ni < nodes.length; ni++) {
+        var node = nodes[ni] || {};
+        var hitCount = Number.isInteger(node.hitCount) && node.hitCount >= 0 ? node.hitCount : 0;
+        if (hitCount === 0 && node.lastHitAt == null) neverHit.push(node);
+        else if (hitCount > 0) hitList.push(node);
+      }
+      hitList.sort(function (a, b) {
+        if (b.hitCount !== a.hitCount) return b.hitCount - a.hitCount;
+        var ta = typeof a.lastHitAt === "string" ? a.lastHitAt : "";
+        var tb = typeof b.lastHitAt === "string" ? b.lastHitAt : "";
+        if (tb !== ta) return tb > ta ? 1 : -1;
+        return String(a.id) < String(b.id) ? -1 : 1;
+      });
+      var top10 = hitList.slice(0, 10);
+      var l2Off = caps !== null && caps.l2 !== true;
+      var total = stats && Number.isInteger(stats.totalDelivered) && stats.totalDelivered >= 0 ? stats.totalDelivered : null;
+      var unique = stats && Number.isInteger(stats.uniqueCards) && stats.uniqueCards >= 0 ? stats.uniqueCards : null;
+      var rounds = stats && Number.isInteger(stats.rounds) && stats.rounds >= 0 ? stats.rounds : null;
+      // 重复投递率：同一张卡被重复投进包里的比例（1 - 去重后/总张数）；
+      // 无任何投递记录时不给 0%，如实显示「暂无投递」。
+      var dedupText = total !== null && unique !== null && total > 0
+        ? Math.round((1 - unique / total) * 100) + "%"
+        : "暂无投递";
+      return h("div", { className: "dshi_card" },
+        h("div", { className: "dshi_row" },
+          h("span", { className: "dshi_cardTitle" }, "闪回命中"),
+          h("button", { className: "dshi_btn", onClick: load }, "刷新")),
+        h("div", { className: "dshi_hint" },
+          "命中次数只代表卡片进入过投递包，不代表被采用；投递吞吐统计来自 L2 投递账本，只覆盖 L2 开启期间的记录（L2 关闭期无账可查）。"),
+        ErrorBox(error),
+        data === null && !error ? h("div", { className: "dshi_loading" }, "加载中…") : null,
+        l2Off ? h("div", { className: "dshi_empty" },
+          "L2 闪回投递未开启：本页统计的是闪回卡片的投递与命中情况，需要在配置里开启 L2 并重启后才会产生数据。当前显示的卡片统计不含投递计数。") : null,
+        !l2Off && data !== null ? h(fragment, null,
+          h("div", { className: "dshi_bgroup" },
+            h("div", { className: "dshi_cardTitle" }, "从未命中（" + neverHit.length + " 张）"),
+            neverHit.length > 0 ? h("div", { className: "dshi_items" }, neverHit.map(function (node) {
+              return h("div", { key: node.id, className: "dshi_item" },
+                h("div", { className: "dshi_itemHead" },
+                  h("span", null, typeof node.title === "string" && node.title !== "" ? node.title : String(node.id))),
+                h("span", { className: "dshi_hint" }, fbDaysText(node.createdAt)));
+            })) : h("div", { className: "dshi_empty" },
+              nodes.length === 0
+                ? "当前 scope 还没有 active 卡片：先用 spark_save 保存几张带触发词的卡片，再来看看命中情况。"
+                : "所有卡片都命中过至少一次投递包。")),
+          h("div", { className: "dshi_bgroup" },
+            h("div", { className: "dshi_cardTitle" }, "命中 top 榜" + (hitList.length > 10 ? "（前 10 / 共 " + hitList.length + " 张）" : "")),
+            top10.length > 0 ? h("div", { className: "dshi_items" }, top10.map(function (node) {
+              return h("div", { key: node.id, className: "dshi_item" },
+                h("div", { className: "dshi_itemHead" },
+                  h("span", null, typeof node.title === "string" && node.title !== "" ? node.title : String(node.id)),
+                  h("span", { className: "dshi_badge" }, "进入投递包 " + node.hitCount + " 次")),
+                h("span", { className: "dshi_hint" }, "最近进入投递包：" + fbTimeText(node.lastHitAt)));
+            })) : h("div", { className: "dshi_empty" },
+              "还没有任何卡片进入过投递包：卡片触发词与你的输入匹配后才会随投递包进入对话。")),
+          h("div", { className: "dshi_bgroup" },
+            h("div", { className: "dshi_cardTitle" }, "投递吞吐"),
+            h("div", { className: "dshi_items" },
+              h("div", { className: "dshi_item" },
+                h("div", { className: "dshi_kv" },
+                  h("dt", null, "总投递张数"), h("dd", null, total === null ? "—" : String(total)),
+                  h("dt", null, "投递轮次"), h("dd", null, rounds === null ? "—" : String(rounds)),
+                  h("dt", null, "重复投递率"), h("dd", null, dedupText)))),
+            h("div", { className: "dshi_hint" },
+              "口径：总投递张数按「进入投递包的卡片张数」累计（同一张卡重复进包会重复计）；重复投递率 = 1 − 去重后卡片数 ÷ 总投递张数；轮次 = 已收尾的投递包数。统计范围为 L2 投递账本的全部记录（仅覆盖 L2 开启期间），不是全生命周期口径。"))) : null);
+    }
+
     var TABS = [
       { id: "status", label: "状态" },
       { id: "memory", label: "记忆 L0/L1" },
       { id: "graph", label: "图谱" },
       { id: "candidates", label: "候选 / 计划" },
       { id: "topics", label: "L3/topic 记忆管理" },
-      { id: "budgets", label: "预算配置" }
+      { id: "budgets", label: "预算配置" },
+      // F2 闪回命中：TABS 末尾追加（既有冻结清单测试会变红，改动方式见交付 note）。
+      { id: "flashbacks", label: "闪回命中" }
     ];
 
     // R6 追加：inert / shadow 时数据 tab 一律渲染「未配置」占位——不让用户点进去
@@ -3496,7 +3620,104 @@ window.__ModuleLoader__.load({
                   tab === "memory" && (modeStatus === null || mode === "active") ? h(MemoryTab, { dsh: props.dsh, sessionId: sessionId, budgets: budgets, onSessionUnavailable: noteSessionUnavailable }) : null,
                   tab === "graph" && (modeStatus === null || mode === "active") ? h(GraphTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,
                   tab === "candidates" && (modeStatus === null || mode === "active") ? h(CandidatesTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,
-                  tab === "topics" && (modeStatus === null || mode === "active") ? h(TopicsTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null));
+                  tab === "topics" && (modeStatus === null || mode === "active") ? h(TopicsTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,
+                  tab === "flashbacks" && (modeStatus === null || mode === "active") ? h(FlashbacksTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null));
+    }
+
+    // ── F2 消息底部按钮（conversation.chat.assistant-actions 插槽）──────────
+    // 参考 @deepseek-ai/dsh-client-ui-message-feedback（0.2.1-rc.4）的注册形态：
+    // ctx.slots.inject(name, () => ctx.slots.register({name, id, order, inject}, Component))。
+    // 宿主只给插槽组件传 assistant 消息的 messageId，而闪回附件是独立 context
+    // 消息（其 source 带 deliveryId/sparkIds），从客户端无法建立 messageId →
+    // deliveryId 的精确关联——因此**如实降级**为「本会话最近一次投递（限
+    // 10 分钟内）」，UI 明确标注近似关联，绝不假装精确到具体消息。
+    var DELIVERY_RECENCY_MS = 10 * 60 * 1000;
+    var FLASHBACK_SOURCE_TEXT = { seed: "种子", related: "一跳关联" };
+    // 从 getGraph DTO 里挑「当前会话 + 10 分钟窗口内」最近的一条投递。
+    function latestFlashbackDelivery(graph, sessionId, nowMs) {
+      var deliveries = graph && Array.isArray(graph.deliveries) ? graph.deliveries : [];
+      var best = null;
+      var bestAt = NaN;
+      for (var i = 0; i < deliveries.length; i++) {
+        var entry = deliveries[i];
+        if (!entry || typeof entry !== "object") continue;
+        if (entry.sessionId !== sessionId) continue;
+        var at = typeof entry.at === "string" ? Date.parse(entry.at) : NaN;
+        if (!Number.isFinite(at)) continue;
+        if (nowMs - at > DELIVERY_RECENCY_MS || at - nowMs > DELIVERY_RECENCY_MS) continue;
+        if (best === null || at > bestAt) { best = entry; bestAt = at; }
+      }
+      return best;
+    }
+    function FlashbackActions(props) {
+      var openState = useState(false);
+      var open = openState[0];
+      var setOpen = openState[1];
+      var resultState = useState(undefined); // undefined=未拉取；{delivery, nodes, error}=已拉取
+      var result = resultState[0];
+      var setResult = resultState[1];
+      var busyState = useState(false);
+      var busy = busyState[0];
+      var load = async function () {
+        var dsh = props.dsh;
+        var sessionId = typeof props.shioriSessionId === "string" ? props.shioriSessionId : "";
+        if (!dsh || typeof dsh.call !== "function" || sessionId === "") {
+          setResult({ delivery: null, nodes: [], error: "无法确定当前会话，闪回关联不可用。" });
+          return;
+        }
+        busyState[1](true);
+        try {
+          var graph = await dsh.call("getGraph", sessionId, {});
+          setResult({
+            delivery: latestFlashbackDelivery(graph, sessionId, Date.now()),
+            nodes: graph && Array.isArray(graph.nodes) ? graph.nodes : [],
+            error: null,
+          });
+        } catch (error) {
+          setResult({ delivery: null, nodes: [], error: "闪回数据拉取失败：" + String((error && error.code) || (error && error.message) || error) });
+        } finally {
+          busyState[1](false);
+        }
+      };
+      var toggle = function () {
+        var next = !open;
+        setOpen(next);
+        if (next && result === undefined) load();
+      };
+      var titleOf = function (sparkId) {
+        var nodes = (result && result.nodes) || [];
+        for (var i = 0; i < nodes.length; i++) {
+          if (nodes[i] && nodes[i].id === sparkId) {
+            return typeof nodes[i].title === "string" && nodes[i].title !== "" ? nodes[i].title : sparkId;
+          }
+        }
+        return sparkId;
+      };
+      var delivery = result ? result.delivery : null;
+      var cards = delivery && Array.isArray(delivery.cards) ? delivery.cards : [];
+      return h("div", { className: "dshi_fbWrap" },
+        h("button", { className: "dshi_btn", onClick: toggle }, "闪回命中"),
+        open ? h("div", { className: "dshi_fbPop" },
+          h("div", { className: "dshi_fbMeta" },
+            "最近一次投递（10 分钟内）· 按会话近似关联，无法精确到单条消息"),
+          result === undefined || busy
+            ? h("div", { className: "dshi_fbMeta" }, "加载中…")
+            : result.error
+              ? h("div", { className: "dshi_fbMeta" }, result.error)
+              : delivery === null
+                ? h("div", { className: "dshi_fbMeta" }, "最近 10 分钟内本会话没有投递记录。")
+                : cards.length === 0
+                  ? h("div", { className: "dshi_fbMeta" }, "该次投递没有携带卡片。")
+                  : cards.map(function (card, index) {
+                      var source = card && card.source;
+                      var trigger = card && typeof card.trigger === "string" && card.trigger !== "" ? card.trigger : null;
+                      return h("div", { key: (card && card.sparkId) || String(index), className: "dshi_fbItem" },
+                        h("div", null, card && typeof card.sparkId === "string" ? titleOf(card.sparkId) : "未知卡片"),
+                        h("div", { className: "dshi_fbMeta" },
+                          "命中触发词：" + (trigger ?? "未记录")
+                          + " · 来源：" + (FLASHBACK_SOURCE_TEXT[source] || "未记录")));
+                    }))
+          : null);
     }
 
     // ── 客户端入口：$mount → 槽位注册，全部 disposer 逆序释放 ────────────────
@@ -3524,6 +3745,26 @@ window.__ModuleLoader__.load({
         }
         throw error;
       }
+      // F2 消息底部按钮：assistant-actions 插槽。可选增强——插槽缺席（旧宿主）、
+      // slots 服务形状不符或注册抛错时静默跳过，绝不让 apply 失败；注册成功时
+      // disposer 收进统一清理链。注意注册顺序：先注册消息按钮、后注册面板槽
+      // （bundle.config 必须是最后一次 register 调用——宿主与既有测试的
+      // 「同一插槽上下文里最后一次 register 获胜」语义都以面板插槽收尾）。
+      try {
+        var flashbackDisposer = ctx.slots.inject("conversation.chat.assistant-actions", function () {
+          return ctx.slots.register({
+            name: "conversation.chat.assistant-actions",
+            id: "shiori-flashbacks",
+            order: 20,
+            inject: function (sessionId) {
+              return { shioriSessionId: typeof sessionId === "string" ? sessionId : "" };
+            },
+          }, function (slotProps) {
+            return h(FlashbackActions, assign({ dsh: api }, slotProps || {}));
+          });
+        });
+        if (typeof flashbackDisposer === "function") disposers.push(flashbackDisposer);
+      } catch (flashbackSlotError) { /* 插槽不可用：静默跳过，不影响面板 */ }
       var slotDisposer;
       try {
         slotDisposer = ctx.slots.inject("plugins.bundle.config", function () {
