@@ -1,26 +1,29 @@
-// Shiori F1a · 语义召回 Provider 接口契约（零依赖）。
+// Shiori F1a/F1b · 语义召回 Provider 接口契约。
 //
-// 边界：本模块只定义契约与纯函数，不含任何网络请求与模型加载代码。
-// F1b（本地 embedding，transformers.js + ONNX）以 spike 通过为前提另行接入；
-// 本期 local / api 两种 provider 都显式 NOT_IMPLEMENTED，绝不静默降级。
+// 边界：本模块只定义契约与纯函数。F1b（本地 embedding，transformers.js + ONNX）
+// 已按 spike 通过的方案接入：provider="local" 时返回真实 provider，模型运行时
+// 的加载被推迟到首次 embed()（见 local.mjs 的懒加载说明）——本模块顶层与
+// createEmbeddingProvider 调用路径仍然零模型加载、零网络请求。provider="api"
+// 本期仍未实现（接口预留），显式 NOT_IMPLEMENTED，绝不静默降级。
 //
-// 契约（迭代清单 F1a）：
+// 契约（迭代清单 F1a，F1b 未改一字节）：
 //   createEmbeddingProvider(semanticConfig)
 //     -> null
 //      | { kind: "local" | "api", dims: number, embed(text): Promise<Float32Array> }
 //
 //   semanticConfig 形状由配置线固定（缺段按鸭子类型当 none 处理）：
 //     { provider: "none" | "local" | "api",
-//       local: { model, dims },
+//       local: { model, dims, dtype, cacheDir, mirror },   // 后三项 F1b 新增
 //       api:   { endpoint, keyRef } }
 //
-// 拍板说明（二选一之「抛错」）：provider 为 local / api 时，createEmbeddingProvider
-// 直接抛 code="NOT_IMPLEMENTED" 的 coded error，而不是返回一个 embed() 会抛错的
-// provider 假对象。理由：调用方（召回合并层）只需区分「没开启（null，回退纯字面）」
-// 与「开启但不可用（抛错，须上报配置问题）」两种状态；在创建期抛错让「配置了却不
-// 可用」在启动/装配路径上就暴露，避免等到第一次召回才失败，也不许冒充可用。
-// 上层不得把 NOT_IMPLEMENTED 当作「回退字面」的静默信号吞掉——那是 F1b 接入点，
-// 接入前开启 local/api 就是配置错误。
+// 拍板说明（F1a 原文，local 分支的 NOT_IMPLEMENTED 已被 F1b 取代）：
+// 调用方（召回合并层）只需区分「没开启（null，回退纯字面）」与「开启但不可用
+// （embed 抛 SEMANTIC_UNAVAILABLE，须上报诊断）」两种状态。local 的不可用性
+// 在首次 embed 时才暴露（懒加载契约），召回合并层必须把它当作「回退纯字面 +
+// 记录诊断」处理，不许让单次召回失败外溢——这与 api 的创建期抛错口径不同，
+// 是 F1b 的显式拍板（见任务书 d 条：provider 不可用时行为与纯字面逐字节等价）。
+
+import { createLocalEmbeddingProvider } from "./local.mjs";
 
 // semanticConfig.provider 的合法取值。
 const PROVIDERS = new Set(["none", "local", "api"]);
@@ -58,13 +61,15 @@ function resolveProviderKind(semanticConfig) {
 }
 
 /**
- * 创建 embedding provider（F1a 契约工厂）。
+ * 创建 embedding provider（F1a 契约工厂；F1b 起 local 分支返回真实 provider）。
  *
  * @param {object|undefined|null} semanticConfig 见模块头注释的固定形状
  * @returns {null | {kind:"local"|"api", dims:number, embed(text:string):Promise<Float32Array>}}
  *   provider 为 "none"（或缺省）时返回 null：语义召回关闭，行为与 0.1 完全一致。
- * @throws {Error} code="NOT_IMPLEMENTED"：provider 为 local / api 时——F1b 未接入，
- *   显式失败而非冒充可用（理由见模块头注释）。
+ *   provider 为 "local" 时返回懒加载 provider：构造零 IO，首次 embed 才加载
+ *   transformers 运行时（失败抛 code="SEMANTIC_UNAVAILABLE"，见 local.mjs）。
+ * @throws {Error} code="NOT_IMPLEMENTED"：provider 为 "api" 时——本期不做，
+ *   显式失败而非冒充可用。
  * @throws {Error} code="INVALID_INPUT"：provider 字段是非法字符串；或 local/api 分支
  *   的必填子字段缺失（先校验形状，让配置错误在创建期可诊断）。
  */
@@ -87,11 +92,14 @@ export function createEmbeddingProvider(semanticConfig) {
         dims: local.dims,
       });
     }
-    fail("NOT_IMPLEMENTED",
-      `semantic provider "local" (model: ${local.model}) is not implemented in this release (F1b pending spike); `
-      + "either set semantic.provider to \"none\" or wait for the local embedding rollout", {
-      provider: "local",
+    // F1b：dtype / cacheDir / mirror 为可选透传字段（配置线 normalizeSemantic
+    // 已做白名单校验；这里不重复校验类型，local.mjs 工厂会再校验必填形状）。
+    return createLocalEmbeddingProvider({
       model: local.model,
+      dims: local.dims,
+      dtype: local.dtype,
+      cacheDir: local.cacheDir,
+      mirror: local.mirror,
     });
   }
 
