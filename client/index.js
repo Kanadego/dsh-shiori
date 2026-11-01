@@ -68,7 +68,9 @@ window.__ModuleLoader__.load({
 ".dshi_pre{margin:0;font-family:ui-monospace,Consolas,monospace;font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;border:1px solid var(--dsw-alias-border-l2,#dce2eb);border-radius:8px;padding:8px 10px;background:var(--dsw-alias-bg-layer-2,transparent)}" +
 ".dshi_bar{height:8px;border-radius:4px;border:1px solid var(--dsw-alias-border-l2,#dce2eb);overflow:hidden;background:var(--dsw-alias-bg-layer-2,transparent)}" +
 ".dshi_barFill{height:100%;background:var(--dsw-alias-state-business-primary,#3964fe)}" +
-".dshi_barFillWarn{background:var(--dsw-alias-state-error-primary,#f85149)}" +
+".dshi_barFillSafe{background:var(--dshi-safe)}" +
+".dshi_barFillWarn{background:var(--dshi-warn)}" +
+".dshi_barFillDanger{background:var(--dshi-danger)}" +
 ".dshi_graphWrap{border:1px solid var(--dsw-alias-border-l2,#dce2eb);border-radius:10px;overflow:hidden;position:relative;user-select:none;cursor:grab;background:var(--dsw-alias-bg-layer-2,transparent)}" +
 ".dshi_graphSvg{display:block;width:100%;height:380px;touch-action:none}" +
 ".dshi_graphNode{cursor:pointer}" +
@@ -603,16 +605,37 @@ window.__ModuleLoader__.load({
       return h("div", { className: "dshi_error" }, (error.code ? "[" + error.code + "] " : "") + (error.message || String(error)));
     }
 
-    function Bar(label, used, limit) {
+    // U3 水位三档具名常量：ratio < WATER_WARN_RATIO 正常、达到 WATER_WARN_RATIO 警示、
+    // 达到 WATER_DANGER_RATIO 危险；WATER_FULL_RATIO 仅用于占满截断。颜色不在 JS 写死，
+    // 档位只映射到 CSS token（--dshi-safe / --dshi-warn / --dshi-danger，与预算页预览条同批）。
+    var WATER_WARN_RATIO = 0.7;
+    var WATER_DANGER_RATIO = 0.9;
+    var WATER_FULL_RATIO = 1;
+
+    function Bar(label, used, limit, detail) {
       var usedNum = typeof used === "number" && Number.isFinite(used) ? used : 0;
       var limitNum = typeof limit === "number" && Number.isFinite(limit) && limit > 0 ? limit : 0;
-      var ratio = limitNum > 0 ? Math.min(1, usedNum / limitNum) : 0;
+      var ratio = limitNum > 0 ? Math.min(WATER_FULL_RATIO, usedNum / limitNum) : 0;
+      // 三档判定只此一处，StatusTab 与记忆页共用本函数，不另起第二套颜色逻辑。
+      var tier = ratio >= WATER_DANGER_RATIO ? "danger" : (ratio >= WATER_WARN_RATIO ? "warn" : "safe");
       return h("div", { className: "dshi_card" },
         h("div", { className: "dshi_row" },
           h("span", { className: "dshi_hint" }, label),
           h("span", { className: "dshi_mono" }, usedNum + " / " + (limitNum || "?") + " UTF-16")),
-        h("div", { className: "dshi_bar" },
-          h("div", { className: ratio >= 1 ? "dshi_barFill dshi_barFillWarn" : "dshi_barFill", style: { width: Math.round(ratio * 100) + "%" } })));
+        h("div", {
+          className: "dshi_bar",
+          role: "progressbar",
+          "aria-label": label,
+          "aria-valuemin": 0,
+          "aria-valuemax": limitNum,
+          "aria-valuenow": usedNum,
+          "data-dshi-bar": tier
+        },
+          h("div", {
+            className: "dshi_barFill " + (tier === "safe" ? "dshi_barFillSafe" : tier === "warn" ? "dshi_barFillWarn" : "dshi_barFillDanger"),
+            style: { width: Math.round(ratio * 100) + "%" }
+          })),
+        detail ? h("div", { className: "dshi_hint" }, detail) : null);
     }
 
     // diagnostics 在宿主 DTO 中有两种形态：历史数组（[{code:"needs-configuration"}]）
@@ -720,8 +743,12 @@ window.__ModuleLoader__.load({
             statusRow("记忆作用域", statusScopeText(status.scope) || "未指定", "记忆数据属于哪个人设"),
             statusRow("服务启动", startedFlag === true ? "已就绪" : (startedFlag === false ? "未就绪" : "未知"),
               startedFlag === true ? "" : "重启 DSH 或刷新可重新探测"),
-            statusRow("人设卡占用（L0）", occupancyText(occupancy.l0Chars, occupancy.l0Budget), "人设卡正文已用 / 上限"),
-            statusRow("记忆核心占用（L1）", occupancyText(occupancy.l1Chars, occupancy.l1HardCap), "记忆核心正文已用 / 硬上限")),
+            // U3：L0/L1 占用改为彩色水位条（共用 Bar 三档），occupancyText 的
+            // 「used / limit（百分比）」可读文本保留在 detail 行，不只剩视觉条。
+            Bar("人设卡占用（L0）", occupancy.l0Chars, occupancy.l0Budget,
+              occupancyText(occupancy.l0Chars, occupancy.l0Budget) + " · 人设卡正文已用 / 上限"),
+            Bar("记忆核心占用（L1）", occupancy.l1Chars, occupancy.l1HardCap,
+              occupancyText(occupancy.l1Chars, occupancy.l1HardCap) + " · 记忆核心正文已用 / 硬上限")),
           capabilities ? h("div", { className: "dshi_card" },
             h("div", { className: "dshi_cardTitle" }, "已启用的能力"),
             h("div", { className: "dshi_row" }, Object.keys(capabilities).map(function (key) {
