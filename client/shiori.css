@@ -82,3 +82,25 @@
 .dshi_memEditor{min-height:320px}
 .dshi_empty{font-size:var(--dshi-font-sm);color:var(--dshi-text-dim);border:1px dashed var(--dsw-alias-border-l2,#dce2eb);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm) var(--dshi-space);line-height:1.7}
 .dshi_conflict{font-size:var(--dshi-font-sm);color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}
+/* U8 壳层：sticky 壳条（选择器 + tab 栏随滚动固定）、tab 内联 SVG 图标（CSS mask，
+   不动按钮 DOM 形状）、toast 三态与需重启横幅（挂在 body 上，不在 .dshi_root 内，
+   故 token 在 .dshi_toasts/.dshi_restartBanner 上单独桥接一份）。 */
+.dshi_sticky{position:sticky;top:0;z-index:30;display:flex;flex-direction:column;gap:12px;background:var(--dshi-bg-card);border-bottom:var(--dshi-stroke);padding-bottom:var(--dshi-space-sm)}
+.dshi_tabIco::before{content:"";display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1px;background-color:currentColor;-webkit-mask:var(--dshi-tab-ico) center/contain no-repeat;mask:var(--dshi-tab-ico) center/contain no-repeat}
+.dshi_tabIco-status{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M1 8h3l2-5 4 10 2-5h3%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}
+.dshi_tabIco-memory{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 1l6 3-6 3-6-3z%27/%3E%3Cpath d=%27M2 8l6 3 6-3M2 12l6 3 6-3%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}
+.dshi_tabIco-graph{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%273%27 cy=%273%27 r=%272.2%27/%3E%3Ccircle cx=%2713%27 cy=%273%27 r=%272.2%27/%3E%3Ccircle cx=%278%27 cy=%2713%27 r=%272.2%27/%3E%3Cpath d=%27M3 3h10M3 3l5 10M13 3l-5 10%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3C/svg%3E')}
+.dshi_tabIco-candidates{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Crect x=%272%27 y=%272%27 width=%275%27 height=%275%27 rx=%271%27/%3E%3Crect x=%272%27 y=%279%27 width=%275%27 height=%275%27 rx=%271%27/%3E%3Cpath d=%27M9 4h5M9 12h5%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3C/svg%3E')}
+.dshi_tabIco-topics{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M3 1h10v14l-5-4-5 4z%27/%3E%3C/svg%3E')}
+.dshi_tabIco-budgets{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M1 4h14M1 8h14M1 12h14%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3Ccircle cx=%275%27 cy=%274%27 r=%272%27/%3E%3Ccircle cx=%2711%27 cy=%278%27 r=%272%27/%3E%3Ccircle cx=%276%27 cy=%2712%27 r=%272%27/%3E%3C/svg%3E')}
+.dshi_toasts,.dshi_restartBanner{--dshi-safe:var(--dsw-alias-state-success-primary,#1a7f37);--dshi-warn:#b45309;--dshi-danger:var(--dsw-alias-state-error-primary,#f85149);--dshi-radius-sm:8px;--dshi-font-sm:12px;--dshi-font-xs:11px}
+.dshi_toasts{position:fixed;right:16px;bottom:16px;z-index:1000;display:flex;flex-direction:column;gap:8px;max-width:340px}
+.dshi_toast{display:flex;align-items:flex-start;gap:8px;border-radius:var(--dshi-radius-sm);padding:8px 10px;font-size:var(--dshi-font-sm);line-height:1.5;color:#fff}
+.dshi_toastSuccess{background:var(--dshi-safe)}
+.dshi_toastError{background:var(--dshi-danger)}
+.dshi_toastRestart{background:var(--dshi-warn)}
+.dshi_toastText{flex:1;word-break:break-word}
+.dshi_toastClose{border:none;background:none;color:inherit;font:inherit;font-size:14px;line-height:1;cursor:pointer;padding:0}
+.dshi_restartBanner{position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:1001;display:flex;align-items:center;gap:10px;max-width:640px;background:var(--dshi-warn);color:#fff;border-radius:0 0 var(--dshi-radius-sm) var(--dshi-radius-sm);padding:8px 14px;font-size:var(--dshi-font-sm);line-height:1.5}
+.dshi_restartText{flex:1;word-break:break-word}
+.dshi_restartClose{border:1px solid currentColor;background:none;color:inherit;font:inherit;font-size:var(--dshi-font-xs);border-radius:6px;padding:2px 8px;cursor:pointer}

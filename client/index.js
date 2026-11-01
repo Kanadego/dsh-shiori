@@ -119,7 +119,29 @@ window.__ModuleLoader__.load({
     ".dshi_mdBold{font-weight:600}" +
     ".dshi_memEditor{min-height:320px}" +
     ".dshi_empty{font-size:var(--dshi-font-sm);color:var(--dshi-text-dim);border:1px dashed var(--dsw-alias-border-l2,#dce2eb);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm) var(--dshi-space);line-height:1.7}" +
-    ".dshi_conflict{font-size:var(--dshi-font-sm);color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}";
+    ".dshi_conflict{font-size:var(--dshi-font-sm);color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}" +
+    // U8 壳层：sticky 壳条（选择器 + tab 栏随滚动固定）、tab 内联 SVG 图标（CSS mask，
+    // 不动按钮 DOM 形状）、toast 三态与需重启横幅（挂在 body 上，不在 .dshi_root 内，
+    // 故 token 在 .dshi_toasts/.dshi_restartBanner 上单独桥接一份）。
+".dshi_sticky{position:sticky;top:0;z-index:30;display:flex;flex-direction:column;gap:12px;background:var(--dshi-bg-card);border-bottom:var(--dshi-stroke);padding-bottom:var(--dshi-space-sm)}" +
+".dshi_tabIco::before{content:\"\";display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1px;background-color:currentColor;-webkit-mask:var(--dshi-tab-ico) center/contain no-repeat;mask:var(--dshi-tab-ico) center/contain no-repeat}" +
+".dshi_tabIco-status{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M1 8h3l2-5 4 10 2-5h3%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}" +
+".dshi_tabIco-memory{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 1l6 3-6 3-6-3z%27/%3E%3Cpath d=%27M2 8l6 3 6-3M2 12l6 3 6-3%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}" +
+".dshi_tabIco-graph{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%273%27 cy=%273%27 r=%272.2%27/%3E%3Ccircle cx=%2713%27 cy=%273%27 r=%272.2%27/%3E%3Ccircle cx=%278%27 cy=%2713%27 r=%272.2%27/%3E%3Cpath d=%27M3 3h10M3 3l5 10M13 3l-5 10%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3C/svg%3E')}" +
+".dshi_tabIco-candidates{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Crect x=%272%27 y=%272%27 width=%275%27 height=%275%27 rx=%271%27/%3E%3Crect x=%272%27 y=%279%27 width=%275%27 height=%275%27 rx=%271%27/%3E%3Cpath d=%27M9 4h5M9 12h5%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3C/svg%3E')}" +
+".dshi_tabIco-topics{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M3 1h10v14l-5-4-5 4z%27/%3E%3C/svg%3E')}" +
+".dshi_tabIco-budgets{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M1 4h14M1 8h14M1 12h14%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3Ccircle cx=%275%27 cy=%274%27 r=%272%27/%3E%3Ccircle cx=%2711%27 cy=%278%27 r=%272%27/%3E%3Ccircle cx=%276%27 cy=%2712%27 r=%272%27/%3E%3C/svg%3E')}" +
+".dshi_toasts,.dshi_restartBanner{--dshi-safe:var(--dsw-alias-state-success-primary,#1a7f37);--dshi-warn:#b45309;--dshi-danger:var(--dsw-alias-state-error-primary,#f85149);--dshi-radius-sm:8px;--dshi-font-sm:12px;--dshi-font-xs:11px}" +
+".dshi_toasts{position:fixed;right:16px;bottom:16px;z-index:1000;display:flex;flex-direction:column;gap:8px;max-width:340px}" +
+".dshi_toast{display:flex;align-items:flex-start;gap:8px;border-radius:var(--dshi-radius-sm);padding:8px 10px;font-size:var(--dshi-font-sm);line-height:1.5;color:#fff}" +
+".dshi_toastSuccess{background:var(--dshi-safe)}" +
+".dshi_toastError{background:var(--dshi-danger)}" +
+".dshi_toastRestart{background:var(--dshi-warn)}" +
+".dshi_toastText{flex:1;word-break:break-word}" +
+".dshi_toastClose{border:none;background:none;color:inherit;font:inherit;font-size:14px;line-height:1;cursor:pointer;padding:0}" +
+".dshi_restartBanner{position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:1001;display:flex;align-items:center;gap:10px;max-width:640px;background:var(--dshi-warn);color:#fff;border-radius:0 0 var(--dshi-radius-sm) var(--dshi-radius-sm);padding:8px 14px;font-size:var(--dshi-font-sm);line-height:1.5}" +
+".dshi_restartText{flex:1;word-break:break-word}" +
+".dshi_restartClose{border:1px solid currentColor;background:none;color:inherit;font:inherit;font-size:var(--dshi-font-xs);border-radius:6px;padding:2px 8px;cursor:pointer}";
     function ensureStyle() {
       try {
         if (document.getElementById("dsh-shiori-style")) return;
@@ -128,6 +150,119 @@ window.__ModuleLoader__.load({
         tag.textContent = CSS;
         document.head.appendChild(tag);
       } catch (error) { /* 非 DOM 环境忽略 */ }
+    }
+
+    // ── U8 toast / 需重启横幅（纯 DOM，独立于 React 树） ─────────────────────
+    // 三态语义：success 成功（约 3s 自动消失）/ error 失败（约 6s 或手动关闭）/
+    // restart 需重启（约 6s 或手动关闭）。右下角浮层可叠多条；需重启另有页内横幅
+    // （顶部强提示，手动关闭）。宿主面板滚动容器之外挂 body，不受 .dshi_root 影响。
+    // 非 DOM 环境（测试/SSR）整体静默 no-op，绝不抛错。卸载时 disposeToastUi()
+    // 统一清理全部定时器并摘除节点（不许泄漏），由 apply(ctx) 的 disposer 调用。
+    var TOAST_TTL = { success: 3000, error: 6000, restart: 6000 };
+    var TOAST_KIND_CLASS = { success: "dshi_toastSuccess", error: "dshi_toastError", restart: "dshi_toastRestart" };
+    var RESTART_HINT = "保存成功；新预算将在下次插件重载或宿主重启后生效。";
+    var toastUi = null; // { host, banner, bannerText, entries: [{ el, timer }] }
+
+    function toastDocument() {
+      return typeof document === "undefined" ? null : document;
+    }
+
+    function ensureToastUi() {
+      var doc = toastDocument();
+      if (!doc || typeof doc.createElement !== "function" || !doc.body) return null;
+      if (toastUi) return toastUi;
+      var host = doc.createElement("div");
+      host.className = "dshi_toasts";
+      doc.body.appendChild(host);
+      toastUi = { host: host, banner: null, bannerText: null, entries: [] };
+      return toastUi;
+    }
+
+    function removeToastEntry(ui, entry) {
+      var index = ui.entries.indexOf(entry);
+      if (index >= 0) ui.entries.splice(index, 1);
+      if (entry.timer !== null) {
+        clearTimeout(entry.timer);
+        entry.timer = null;
+      }
+      if (entry.el && entry.el.parentNode) entry.el.parentNode.removeChild(entry.el);
+    }
+
+    // 可复用调用入口：shioriToast(kind, text)，kind = "success" | "error" | "restart"。
+    function shioriToast(kind, text) {
+      var ui = ensureToastUi();
+      if (!ui) return null;
+      var doc = toastDocument();
+      var normalizedKind = TOAST_KIND_CLASS[kind] ? kind : "error";
+      var el = doc.createElement("div");
+      el.className = "dshi_toast " + TOAST_KIND_CLASS[normalizedKind];
+      el.setAttribute("data-kind", normalizedKind);
+      var textEl = doc.createElement("span");
+      textEl.className = "dshi_toastText";
+      textEl.textContent = String(text === undefined || text === null ? "" : text);
+      var close = doc.createElement("button");
+      close.className = "dshi_toastClose";
+      close.type = "button";
+      close.setAttribute("aria-label", "关闭提示");
+      close.textContent = "×";
+      el.appendChild(textEl);
+      el.appendChild(close);
+      ui.host.appendChild(el);
+      var entry = { el: el, timer: null };
+      entry.timer = setTimeout(function () { removeToastEntry(ui, entry); }, TOAST_TTL[normalizedKind]);
+      close.onclick = function () { removeToastEntry(ui, entry); };
+      ui.entries.push(entry);
+      return el;
+    }
+
+    // 需重启的页内可见强提示：顶部横幅，只保留一条，再次触发时刷新文案；手动关闭。
+    function showRestartBanner(text) {
+      var ui = ensureToastUi();
+      if (!ui) return null;
+      var doc = toastDocument();
+      if (!ui.banner) {
+        var banner = doc.createElement("div");
+        banner.className = "dshi_restartBanner";
+        banner.setAttribute("data-role", "restart-banner");
+        var bannerText = doc.createElement("span");
+        bannerText.className = "dshi_restartText";
+        var close = doc.createElement("button");
+        close.className = "dshi_restartClose";
+        close.type = "button";
+        close.setAttribute("aria-label", "关闭需重启提示");
+        close.textContent = "知道了";
+        banner.appendChild(bannerText);
+        banner.appendChild(close);
+        doc.body.appendChild(banner);
+        close.onclick = function () {
+          if (ui.banner && ui.banner.parentNode) ui.banner.parentNode.removeChild(ui.banner);
+          ui.banner = null;
+          ui.bannerText = null;
+        };
+        ui.banner = banner;
+        ui.bannerText = bannerText;
+      }
+      ui.bannerText.textContent = String(text === undefined || text === null ? RESTART_HINT : text);
+      return ui.banner;
+    }
+
+    // 保存/执行成功但需重启才生效时的组合入口：「需重启」toast + 页内横幅。
+    function notifyRestart(text) {
+      shioriToast("restart", text === undefined ? RESTART_HINT : text);
+      showRestartBanner(text === undefined ? RESTART_HINT : text);
+    }
+
+    function disposeToastUi() {
+      if (!toastUi) return;
+      var ui = toastUi;
+      toastUi = null;
+      var entries = ui.entries.slice(0);
+      for (var i = 0; i < entries.length; i++) removeToastEntry(ui, entries[i]);
+      if (ui.banner && ui.banner.parentNode) ui.banner.parentNode.removeChild(ui.banner);
+      if (ui.host && ui.host.parentNode) ui.host.parentNode.removeChild(ui.host);
+      ui.banner = null;
+      ui.bannerText = null;
+      ui.host = null;
     }
 
     // ── vendored createTypertRemoteInfo（与官方生成 client 内联版本一致） ────
@@ -2872,8 +3007,18 @@ window.__ModuleLoader__.load({
           setOk(applied
             ? "已保存（旧版占比字段已升级为水位；宿主 settings 命名空间 shiori；volatile 字段由宿主热提交，不触发插件重载）。新预算将在下次插件重载或宿主重启后生效。"
             : "写入未确认生效——请重新打开本页核对当前值。");
+          // U8 需重启强提示：保存成功 = 写入已确认，但 budgets 由宿主热提交、
+          // 需下次插件重载 / 宿主重启才完全生效 → 「需重启」toast + 页内横幅；
+          // 写入未确认生效只发失败 toast，绝不发需重启提示。
+          if (applied) {
+            if (typeof props.notifyRestart === "function") props.notifyRestart(RESTART_HINT);
+          } else {
+            shioriToast("error", "预算写入未确认生效——请重新打开本页核对当前值。");
+          }
         } catch (e) {
           setError({ code: (e && e.code) || "ui/save", message: (e && e.message) || String(e) });
+          // U8：保存失败只发失败 toast，不发需重启提示。
+          shioriToast("error", "预算保存失败：" + ((e && e.code) ? e.code + " " : "") + ((e && e.message) || String(e)));
         }
       };
       return h("form", {
@@ -3235,40 +3380,55 @@ window.__ModuleLoader__.load({
         visibleSessions = filteredSessions;
       }
       var budgets = props.budgets;
+      // U8 sticky 壳条：工作区/会话选择器与 tab 栏包进一个 position:sticky 容器，
+      // 随宿主面板滚动保持固定；三个提示行留在壳条之后不粘。壳条占据自身布局
+      // 空间并有不透明底（--dshi-bg-card）+ 底边线，页面内容从壳条下方滚动，
+      // 不会被遮死。
       return h("div", { className: "dshi_root" },
         h("div", { className: "dshi_title" }, "Shiori 记忆面板",
           h("span", { className: "dshi_titleSub" }, "dsh-shiori · 原生 bundle 面板")),
-        workspaceOptions.length > 0
-          ? h("div", { className: "dshi_row" },
-              h("label", { className: "dshi_label" }, "工作区（先选工作区，再选会话）",
-                h("select", {
-                  className: "dshi_select",
-                  value: workspaceId,
-                  onChange: function (event) { setWorkspaceId(event.target.value); }
-                },
-                  h("option", { value: "" }, "— 全部工作区 —"),
-                  workspaceOptions.map(function (item) {
-                    var count = workspaceSessionCount[item.workspaceId];
-                    var label = count !== undefined ? item.title + "（" + count + " 个会话）" : item.title;
-                    return h("option", { key: item.workspaceId, value: item.workspaceId, title: item.path || item.workspaceId }, label);
-                  }))))
-          : null,
-        h("div", { className: "dshi_row" },
-          h("label", { className: "dshi_label" }, "会话（宿主解析，owner 授权）",
-            sessions === null || sessions === undefined
-              ? h("input", { className: "dshi_input", placeholder: "session id", value: sessionId || manual, onChange: function (event) { setManual(event.target.value); setSessionId(event.target.value); } })
-              : h("select", {
-                  className: "dshi_select",
-                  value: sessionId,
-                  onChange: function (event) { setSessionId(event.target.value); }
-                },
-                  h("option", { value: "" }, "— 选择会话 —"),
-                  visibleSessions.map(function (item) {
-                    var id = String(item.sessionId ?? item.id ?? "");
-                    // 有标题显示标题（超长截断），无标题回退 sessionId；
-                    // option 的 title 属性放完整 sessionId，便于悬停排查。
-                    return h("option", { key: id, value: id, title: id }, sessionOptionLabel(item));
-                  })))),
+        h("div", { className: "dshi_sticky" },
+          workspaceOptions.length > 0
+            ? h("div", { className: "dshi_row" },
+                h("label", { className: "dshi_label" }, "工作区（先选工作区，再选会话）",
+                  h("select", {
+                    className: "dshi_select",
+                    value: workspaceId,
+                    onChange: function (event) { setWorkspaceId(event.target.value); }
+                  },
+                    h("option", { value: "" }, "— 全部工作区 —"),
+                    workspaceOptions.map(function (item) {
+                      var count = workspaceSessionCount[item.workspaceId];
+                      var label = count !== undefined ? item.title + "（" + count + " 个会话）" : item.title;
+                      return h("option", { key: item.workspaceId, value: item.workspaceId, title: item.path || item.workspaceId }, label);
+                    }))))
+            : null,
+          h("div", { className: "dshi_row" },
+            h("label", { className: "dshi_label" }, "会话（宿主解析，owner 授权）",
+              sessions === null || sessions === undefined
+                ? h("input", { className: "dshi_input", placeholder: "session id", value: sessionId || manual, onChange: function (event) { setManual(event.target.value); setSessionId(event.target.value); } })
+                : h("select", {
+                    className: "dshi_select",
+                    value: sessionId,
+                    onChange: function (event) { setSessionId(event.target.value); }
+                  },
+                    h("option", { value: "" }, "— 选择会话 —"),
+                    visibleSessions.map(function (item) {
+                      var id = String(item.sessionId ?? item.id ?? "");
+                      // 有标题显示标题（超长截断），无标题回退 sessionId；
+                      // option 的 title 属性放完整 sessionId，便于悬停排查。
+                      return h("option", { key: id, value: id, title: id }, sessionOptionLabel(item));
+                    })))),
+          h("div", { className: "dshi_tabs" }, TABS.map(function (entry) {
+            return h("button", {
+              key: entry.id,
+              // U8 tab 图标：CSS mask 内联 SVG（dshi_tabIco-<id>，见 var CSS 尾部），
+              // 纯装饰伪元素、不进按钮子节点——label 文本仍是唯一 children，
+              // 既有标签断言与 DOM 形状零改动。
+              className: "dshi_tab dshi_tabIco dshi_tabIco-" + entry.id + (tab === entry.id ? " dshi_tabOn" : ""),
+              onClick: function () { setTab(entry.id); }
+            }, entry.label);
+          }))),
         // 只有确定失败（null）才提示；undefined=首帧结果未出，不误报「不可用」。
         sessions === null
           ? h("div", { className: "dshi_hint" },
@@ -3285,13 +3445,6 @@ window.__ModuleLoader__.load({
         workspaceId !== "" && haveSessions && visibleSessions.length === 0
           ? h("div", { className: "dshi_hint" }, "该工作区下没有可显示的会话，切到「全部工作区」看看。")
           : null,
-        h("div", { className: "dshi_tabs" }, TABS.map(function (entry) {
-          return h("button", {
-            key: entry.id,
-            className: "dshi_tab" + (tab === entry.id ? " dshi_tabOn" : ""),
-            onClick: function () { setTab(entry.id); }
-          }, entry.label);
-        })),
         sessionProbing
           ? h("div", { className: "dshi_loading" }, "正在探测会话可用性…")
           : sessionId === ""
@@ -3302,7 +3455,7 @@ window.__ModuleLoader__.load({
               ? h("div", { className: "dshi_hint" }, "当前会话被宿主标记为不可用，已暂停对该会话的数据请求。换一个会话，或点上方「刷新」强制重试。")
               : h(fragment, null,
                   tab === "status" ? h(StatusTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,
-                  tab === "budgets" ? h(BudgetsTab, { dsh: props.dsh, sessionId: sessionId }) : null,
+                  tab === "budgets" ? h(BudgetsTab, { dsh: props.dsh, sessionId: sessionId, notifyRestart: notifyRestart }) : null,
                   // 数据 tab（记忆/图谱/候选）：模式探测中或非 active 时以占位替代，不发数据请求
                   tab !== "status" && tab !== "budgets" && modeStatus === undefined
                     ? h("div", { className: "dshi_loading" }, "能力探测中…") : null,
@@ -3320,6 +3473,12 @@ window.__ModuleLoader__.load({
     async function apply(ctx) {
       var disposers = [];
       var api = buildApi(ctx);
+      // U8 可复用通知入口（需求 b/c 的「通过 ctx 传下去」形态）：后续页面/宿主
+      // 可经 ctx.shioriNotify 调 toast 三态与需重启组合提示；dispose 供卸载清理。
+      // 只增不改，不覆盖宿主已有字段。
+      if (!ctx.shioriNotify) {
+        ctx.shioriNotify = { toast: shioriToast, restart: notifyRestart, dispose: disposeToastUi };
+      }
       try {
         disposers.push(await ctx.remote.$mount(TYPERT_REMOTE));
       } catch (error) {
@@ -3348,6 +3507,8 @@ window.__ModuleLoader__.load({
         for (var k = disposers.length - 1; k >= 0; k--) {
           try { await disposers[k](); } catch (cleanupError) { /* 同上 */ }
         }
+        // U8：卸载即清理 toast/横幅的全部定时器与节点（不许泄漏）。
+        disposeToastUi();
       };
     }
 
