@@ -259,6 +259,11 @@ export const MANAGEMENT_METHODS = Object.freeze({
     },
   },
 
+  // F2 闪回命中可见性：nodes 追加 hitCount / lastHitAt / createdAt（可选字段，
+  // 旧客户端忽略即可）；顶层追加 deliveries（最近投递明细，上限 20 条——
+  // 只含投递元数据，绝不含卡片正文 / 摘要）与 deliveryStats（L2 投递账本
+  // 全量口径的吞吐统计：轮次 / 总投递张数 / 去重后卡片数；重复投递率由
+  // 1 - uniqueCards/totalDelivered 计算，账本只覆盖 L2 开启期间）。
   getGraph: {
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     outputSchema: {
@@ -277,6 +282,9 @@ export const MANAGEMENT_METHODS = Object.freeze({
               summary: { oneOf: [{ type: "string" }, { type: "null" }] },
               vitality: { oneOf: [{ type: "string" }, { type: "null" }] },
               revision: { oneOf: [{ type: "integer" }, { type: "null" }] },
+              hitCount: { type: "integer", minimum: 0 },
+              lastHitAt: { oneOf: [{ type: "string" }, { type: "null" }] },
+              createdAt: { oneOf: [{ type: "string" }, { type: "null" }] },
             },
             required: ["id", "vitality"],
           },
@@ -294,8 +302,50 @@ export const MANAGEMENT_METHODS = Object.freeze({
             required: ["source", "target"],
           },
         },
+        deliveries: {
+          type: "array",
+          maxItems: 20,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              deliveryId: nonEmptyString,
+              at: nonEmptyString,
+              sessionId: nonEmptyString,
+              cards: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    sparkId: nonEmptyString,
+                    // 命中触发词：老投递（富化字段落账前）如实给 null。
+                    trigger: { oneOf: [{ type: "string" }, { type: "null" }] },
+                    // 来源：seed=0 跳种子 / related=一跳关联；老投递给 null。
+                    source: { oneOf: [{ enum: ["seed", "related"] }, { type: "null" }] },
+                  },
+                  required: ["sparkId", "trigger", "source"],
+                },
+              },
+            },
+            required: ["deliveryId", "at", "sessionId", "cards"],
+          },
+        },
+        deliveryStats: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            // 投递轮次：committed 终态的投递包数。
+            rounds: { type: "integer", minimum: 0 },
+            // 总投递张数：各投递包 delivered 卡片数之和（同一张卡重复进包会重复计）。
+            totalDelivered: { type: "integer", minimum: 0 },
+            // 去重后卡片数：全周期出现过的不同 sparkId 数。
+            uniqueCards: { type: "integer", minimum: 0 },
+          },
+          required: ["rounds", "totalDelivered", "uniqueCards"],
+        },
       },
-      required: ["scope", "nodes", "edges"],
+      required: ["scope", "nodes", "edges", "deliveries", "deliveryStats"],
     },
   },
 

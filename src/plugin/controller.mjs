@@ -906,7 +906,21 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     if (hitUpdates.length > 0) {
       await resources.sparkStore.recordDeliveryHits(hitUpdates, { operationId: deliveryId });
     }
-    await state.l2Store.recordHits(scopeId, deliveryId, hitUpdates);
+    // F2：l2 hits 账写富化副本（附命中触发词 / 来源）。投递快照落账时带的
+    // hitMeta 在此取回；老投递无 hitMeta → trigger/source 为 null（如实未记录）。
+    // sparkStore.recordDeliveryHits 收到的仍是不带附加字段的原始 hitUpdates。
+    const hitMeta = delivery && typeof delivery.hitMeta === "object" && delivery.hitMeta !== null ? delivery.hitMeta : {};
+    const ledgerHitUpdates = hitUpdates.map((h) => {
+      const meta = typeof h?.sparkId === "string" && hitMeta[h.sparkId] !== null && typeof hitMeta[h.sparkId] === "object"
+        ? hitMeta[h.sparkId]
+        : {};
+      return {
+        ...h,
+        trigger: typeof meta.trigger === "string" ? meta.trigger : null,
+        source: meta.source === "seed" || meta.source === "related" ? meta.source : null,
+      };
+    });
+    await state.l2Store.recordHits(scopeId, deliveryId, ledgerHitUpdates);
     if (seenWrites.length > 0) {
       await state.l2Store.addSeenKeys(scopeId, delivery.sessionId, delivery.contextEpoch, seenWrites.map((w) => w.key));
     }
@@ -1035,6 +1049,24 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       match,
       maxChars: settings.budgets.spark.maxChars,
     });
+    // F2 闪回命中可见性：match 里的命中触发词与来源（种子 / 一跳关联）在
+    // buildSparkAttachment 的 delivered（{id, revision}）中被丢弃，而
+    // delivery.mjs / state.mjs 不在本任务白名单内——这里在投递快照上附加
+    // hitMeta（sparkId → {trigger, source}），随 recordPending 持久进 l2 账本，
+    // finalizeDelivery 写 hits 账时用富化副本。只含元数据，不含卡片正文。
+    // 老投递（无 hitMeta）在面板/按钮上如实显示「未记录」。
+    const hitMeta = {};
+    for (const seed of match?.seeds ?? []) {
+      if (seed && typeof seed.id === "string") {
+        hitMeta[seed.id] = { trigger: typeof seed.trigger === "string" ? seed.trigger : null, source: "seed" };
+      }
+    }
+    for (const related of match?.related ?? []) {
+      if (related && typeof related.id === "string" && !Object.hasOwn(hitMeta, related.id)) {
+        hitMeta[related.id] = { trigger: null, source: "related" };
+      }
+    }
+    delivery.hitMeta = hitMeta;
 
     const markAllScanned = async () => {
       // B6：扫批标记后置于 recordPending/决策之后——「已扫」只记录已定局的消息。

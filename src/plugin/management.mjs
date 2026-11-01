@@ -278,20 +278,93 @@ export function createManagement(deps) {
       const records = await resources.sparkStore.listActive();
       const { projectGraph, normalizeGraphRecords } = await import("../sparks/graph.mjs");
       const projection = projectGraph({ scopeId: scope.scopeId, records: normalizeGraphRecords(records) });
+      // F2 闪回命中可见性：投影节点只带 id/title/summary/vitality/revision，
+      // 投递统计（hitCount/lastHitAt）与存续起点（createdAt）按 id 从卡片记录补回。
+      const hitMeta = new Map();
+      for (const record of records) {
+        if (record === null || typeof record !== "object" || typeof record.id !== "string") continue;
+        hitMeta.set(record.id, {
+          hitCount: Number.isInteger(record.hitCount) && record.hitCount >= 0 ? record.hitCount : 0,
+          lastHitAt: typeof record.lastHitAt === "string" ? record.lastHitAt : null,
+          createdAt: typeof record.createdAt === "string" ? record.createdAt : null,
+        });
+      }
+      // F2：L2 投递账 → 最近投递明细（上限 20 条，只含元数据）+ 全量吞吐统计。
+      // 账本只覆盖 L2 开启期间的记录（L2 关闭期无账可查），该口径由面板如实标注。
+      const deliveries = [];
+      const deliveryStats = { rounds: 0, totalDelivered: 0, uniqueCards: 0 };
+      if (settings.l2.enabled) {
+        const ledger = await state.l2Store.diagnostics(scope.scopeId);
+        const pendings = ledger?.pending ?? {};
+        const acceptedMap = ledger?.accepted ?? {};
+        const committedMap = ledger?.committed ?? {};
+        for (const entry of Object.values(pendings)) {
+          if (entry === null || typeof entry !== "object") continue;
+          // 只列已进入会话的投递（有 accepted receipt 或 committed 终态）；
+          // 崩溃悬挂的 pending 不算投递。
+          const accepted = acceptedMap[entry.deliveryId];
+          if (accepted === undefined && committedMap[entry.deliveryId] === undefined) continue;
+          const snapshot = entry.delivery ?? {};
+          const meta = typeof snapshot.hitMeta === "object" && snapshot.hitMeta !== null ? snapshot.hitMeta : {};
+          const delivered = Array.isArray(snapshot.delivered) ? snapshot.delivered : [];
+          deliveries.push({
+            deliveryId: entry.deliveryId,
+            at: typeof accepted?.acceptedAt === "string"
+              ? accepted.acceptedAt
+              : (typeof committedMap[entry.deliveryId]?.committedAt === "string"
+                ? committedMap[entry.deliveryId].committedAt
+                : (typeof entry.createdAt === "string" ? entry.createdAt : "")),
+            sessionId: typeof entry.session === "string" ? entry.session : "",
+            cards: delivered.map((d) => {
+              const m = typeof d?.id === "string" && meta[d.id] !== null && typeof meta[d.id] === "object" ? meta[d.id] : {};
+              return {
+                sparkId: typeof d?.id === "string" ? d.id : "",
+                trigger: typeof m.trigger === "string" ? m.trigger : null,
+                source: m.source === "seed" || m.source === "related" ? m.source : null,
+              };
+            }).filter((c) => c.sparkId !== ""),
+          });
+        }
+        deliveries.sort((a, b) => (a.at > b.at ? -1 : a.at < b.at ? 1 : (a.deliveryId < b.deliveryId ? -1 : 1)));
+        deliveries.splice(20);
+        // 吞吐统计（全账本口径，不受上面 20 条截断影响）：轮次 = committed 包数；
+        // 总投递张数 = 各包 hitUpdates 长度之和（同卡重复进包重复计）；
+        // 去重后卡片数 = 出现过的不同 sparkId 数。重复投递率由客户端按
+        // 1 - uniqueCards/totalDelivered 计算。
+        const hitsMap = ledger?.hits ?? {};
+        const unique = new Set();
+        for (const updates of Object.values(hitsMap)) {
+          if (!Array.isArray(updates)) continue;
+          deliveryStats.totalDelivered += updates.length;
+          for (const u of updates) {
+            if (u !== null && typeof u === "object" && typeof u.sparkId === "string") unique.add(u.sparkId);
+          }
+        }
+        deliveryStats.uniqueCards = unique.size;
+        deliveryStats.rounds = Object.keys(committedMap).length;
+      }
       return {
         scope: scope.scopeId,
-        nodes: projection.nodes.map((n) => ({
-          id: n.id,
-          title: n.title ?? null,
-          summary: n.summary ?? null,
-          vitality: n.vitality ?? null,
-          revision: n.revision ?? null,
-        })),
+        nodes: projection.nodes.map((n) => {
+          const meta = hitMeta.get(n.id) ?? { hitCount: 0, lastHitAt: null, createdAt: null };
+          return {
+            id: n.id,
+            title: n.title ?? null,
+            summary: n.summary ?? null,
+            vitality: n.vitality ?? null,
+            revision: n.revision ?? null,
+            hitCount: meta.hitCount,
+            lastHitAt: meta.lastHitAt,
+            createdAt: meta.createdAt,
+          };
+        }),
         edges: projection.edges.map((e) => ({
           source: e.source,
           target: e.target,
           rel: e.rel ?? null,
         })),
+        deliveries,
+        deliveryStats,
       };
     },
 
