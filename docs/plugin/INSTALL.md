@@ -18,10 +18,10 @@ dsh plugin --profile <name> add dsh-shiori
 ~~~bash
 # 1. 在包目录产出候选 tgz
 npm pack
-# => dsh-shiori-0.1.0.tgz
+# => dsh-shiori-0.2.0.tgz
 
 # 2. 安装到目标 profile（profile 是名称，不是路径）
-dsh plugin --profile <name> add /absolute/path/to/dsh-shiori-0.1.0.tgz
+dsh plugin --profile <name> add /absolute/path/to/dsh-shiori-0.2.0.tgz
 
 # 3. 验证挂载（compose 会 import 插件并打印组合树；EXIT=0、stderr 无 shiori 报错）
 dsh --profile <name> --dump-config

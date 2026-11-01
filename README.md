@@ -45,8 +45,8 @@ dsh plugin --profile web add dsh-shiori
 ### 从源码安装
 
 ~~~powershell
-npm pack                                              # 得到 dsh-shiori-0.1.0.tgz
-dsh plugin --profile web add <你的项目绝对路径>/dsh-shiori-0.1.0.tgz
+npm pack                                              # 得到 dsh-shiori-0.2.0.tgz
+dsh plugin --profile web add <你的项目绝对路径>/dsh-shiori-0.2.0.tgz
 ~~~
 
 ### 第一次配置
