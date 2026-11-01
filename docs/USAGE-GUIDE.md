@@ -135,6 +135,27 @@ dsh plugin --profile <名称> remove dsh-shiori
 
 面板上只有「硬顶 / 软水位 / 硬水位」三个可调字段，`targetChars` 没有输入框，所以它跟着这三者走：改动任一项时草稿会把 targetChars 一起收敛进 `softChars ≤ targetChars < hardChars-1`，保存时按收敛后的值写回。因此**把硬顶调小不需要先去别处改 targetChars**，保存不会因为一个界面上看不见的字段被禁用。
 
+### semantic（本地语义召回，默认关闭）
+
+默认 `provider: "none"`：不装依赖、不下载模型、行为与 0.1 完全一致（纯字面召回）。
+
+打开方式：把 `- id: shiori` 的 `config.semantic.provider` 改成 `"local"` 并重载插件。
+
+| 字段 | 默认 | 含义 |
+| --- | --- | --- |
+| `local.model` | `Xenova/bge-small-zh-v1.5` | 完整仓库 id（**必须带 `Xenova/` 前缀**，短名会 404）；512 维，MIT 可商用 |
+| `local.dims` | 512 | 向量维度，模型与索引不符时索引作废重建 |
+| `local.dtype` | `fp32` | `fp32` / `fp16` / `q8`；体积与速度权衡见下 |
+| `local.cacheDir` | 空串 | 空串＝`<stateRoot>/semantic/models`（由 controller 解析），也可写绝对路径 |
+| `local.mirror` | `https://hf-mirror.com/` | 国内直连 huggingface.co 一般不可达；留空则走官方源 |
+| `api.endpoint` / `api.keyRef` | null | **本期未实现**（显式 NOT_IMPLEMENTED，不会静默假装可用） |
+
+- **安装要多点一次「允许」**：`@huggingface/transformers` 硬依赖 `onnxruntime-node` / `protobufjs` / `sharp`，三者都带安装脚本。GUI 装插件时会弹「允许运行安装脚本：onnxruntime-node, protobufjs, sharp」，点允许再重试即可；CLI 直接 `dsh plugin add` 会以 `ERR_PNPM_IGNORED_BUILDS` 失败，需先在 profile 的 `pnpm-workspace.yaml` 里写 `allowBuilds`（三个包都 `true`）。
+- **体积与首次下载**：装了依赖后 `node_modules` 约 +379MB（onnxruntime-node 208MB 含五平台二进制，实际只用 win32/x64 那 34MB，sharp 是依赖链强制带上的）。模型不随包发布，**首次 embed 时才下载**：q8 约 23MB、fp32 约 91MB，走 `local.mirror`；冷加载约 150ms，短文本单条 4–5ms。
+- **失败不炸**：模型加载/推理任一环节失败都会抛 `SEMANTIC_UNAVAILABLE`（带中文 message 与底层 cause），召回自动退回纯字面匹配，面板「状态」tab 的「语义召回」卡会显示上次错误；修好后调 `executeTool semantic_rebuild` 重建索引（单飞，运行中再调只返回进度快照）。
+- **索引位置**：`<stateRoot>/semantic/<scopeId>.json`，按卡 revision 增量重建；索引损坏或维度不符时收敛为空索引并如实记录，不阻断面板。
+- **召回口径**：字面命中 ∪ 语义近邻（余弦 ≥ 0.45），语义结果仍要过全部既有闸门（active / 开关 / 预算 / 去重）。离线评测脚本 `scripts/eval-recall.mjs`（不进 npm test）实测：字面 12/24 → 合并 24/24。
+
 ### 双端同时开同一个 dataRoot：后启动的一端只读
 
 同一个 `dataRoot` 被两个宿主同时打开时（比如两个 profile 配了同一份记忆目录），**先启动的一端持有写权，后启动的一端自动只读**。判据是座位心跳文件（`<dataRoot>/.shiori-seats/`），不需要手动抢锁，也不看哪一端当时在忙。
@@ -146,15 +167,17 @@ dsh plugin --profile <名称> remove dsh-shiori
 
 ## 3. 面板怎么用
 
-入口：插件管理器 → `dsh-shiori` 详情页（宿主槽位 `plugins.bundle.config`）。六个 tab：
+入口：插件管理器 → `dsh-shiori` 详情页（宿主槽位 `plugins.bundle.config`）。八个 tab：
 
 | tab | 内容 | 说明 |
 | --- | --- | --- |
-| 状态 | 五行中文摘要（运行模式 / 作用域 / 服务启动 / 人设卡占用 / 记忆核心占用）+ 能力标记；原始字段在「技术细节」折叠区 | 判断「插件是否真的在跑」的第一现场 |
+| 状态 | 五行中文摘要（运行模式 / 作用域 / 服务启动 / 人设卡占用 / 记忆核心占用）+ 能力标记；语义召回诊断卡（模型 / 维度 / 索引条数 / 上次错误）；原始字段在「技术细节」折叠区 | 判断「插件是否真的在跑」的第一现场；只读态的黄条也挂在壳条里 |
+| 最近变更 | 记忆操作时间线（core / topic 写入 + spark 存卡 / 改卡 / 归档 / 替代 / 织网），倒序、每页 100 条，来源徽章标明 core / 主题 / 卡片 | 回答「这阵子谁动了什么」；扫到窗口上限会提示「更早的历史本次不可达」，点条目可跳到对应 tab 定位 |
 | 记忆 L0/L1 | L0 人设卡全文、L1 渲染（core + 索引）、占用字符，两层都可就地编辑 | 预览的是模型真实看到的内容；L1 编辑框里是磁盘正文，保存带 revision 校验 |
 | 图谱 | Spark 卡片节点与边，拖拽平移、滚轮缩放、点开详情；卡片内容与连线都能改 | 卡多时布局会变密；连线改动可「撤销修改」 |
 | 候选 / 计划 | 跑 analyze、候选列表、reviewed / dismissed、preview / 执行、计划列表 | 合并记忆的主战场，见下 |
 | L3 / topic | 专题列表（默认只显示 key / 标题 / 字数），展开读正文、整篇编辑保存 | 旧版写入的专题只读 |
+| 闪回命中 | 从未命中的卡片（含存续天数）、命中 top10、投递吞吐（总投递张数 / 轮次 / 重复投递率） | 回答「这几张卡到底用没用上」；只覆盖 L2 开启期间，命中＝进入投递包、不代表被采用 |
 | 预算 | 记忆预算页（0.2 U2 重写）：顶部实时水位条（当前占用 ─ 软水位 · 硬闸 · 硬顶，占用取真实 getStatus 数据），人设卡 / 记忆核心 / 闪回卡片三组卡片，水位用滑杆 + 字符数联动，已改字段标「已修改」徽章、可单字段恢复默认 | 技术名收进 tooltip 与页尾「技术细节」；越界就地中文提示并禁用保存；空输入=不改；保存后需重启生效 |
 
 ### 会话选择（所有 tab 共用）

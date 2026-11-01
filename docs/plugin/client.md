@@ -34,7 +34,7 @@ analyze / reviewCandidate / previewPlan / executePlan / getTimeline
 - **`scanLimited`（扫描窗口截断标记，必读）**：journal 长期堆积、无轮转，数据层单次最多读入最新 `TIMELINE_JOURNAL_SCAN_LIMIT = 4000` 个 journal 文件（按 mtime 取最新，见 `src/timeline/index.mjs`）。当目录里 journal 文件数超过这一上限时 `scanLimited: true`——此时 `items` 只来自最新窗口，**`hasMore: false` 只代表「窗口内到底」，更早的历史本次不可达**。调用方必须把「真到底」与「窗口截断」分开：`hasMore: false && scanLimited: true` 不等于时间线完整，不要据此宣称「没有更多」，也不要靠加深分页去「补全」（更深的分页读的还是同一个窗口）。要拿到更早历史，得先扩大扫描上限或减少 journal 堆积。**边界**：窗口按文件 mtime 取最新，若 journal 目录被整体复制 / 备份恢复 / 迁移（mtime 被批量刷新），真正的最新事务可能落选窗口，而 `scanLimited` 只看数量、不会为这种异常置位——被搬动过的目录不适合直接当时间线读。
 - **`skippedCorrupted`**：被跳过的损坏记录数（journal JSON 解析失败 / 形状非法 / phase 未知 / spark 库不可读）。损坏项不炸整个视图；调用方可据该值提示「部分记录损坏，时间线可能缺项」。
 - 与其它数据方法一致：shadow（含 inert）下 `getTimeline` 返回 `UNSUPPORTED`，永不触盘。
-- **本版面板没有时间线页**：wire 已冻结（`client/index.js` 的 RPC 方法清单已收录 `getTimeline`，冻结契约测试按 10 方法断言），但面板六个 tab 里没有「时间线」入口——UI 留到后续版本，别把「方法在清单里」读成「界面上能看见」。
+- **面板入口**：面板「最近变更」tab 就是这条时间线的视图（F4 页），分页 100 条、来源徽章、`scanLimited` / `skippedCorrupted` 都有对应提示，点 core / 主题 / 卡片条目可跳到对应 tab 定位（core 条目只跳「记忆 L0/L1」，不定位到具体段落）。
 - **只读宿主的覆盖面（F7 座位判据）**：后启动的宿主持读权——写工具与面板写方法（`analyze` / `reviewCandidate` / `previewPlan` / `executePlan`）都抛 `HOST_LOCKED`；装配期仍会写本端自己的派生账本（L1 投影缓存、水位采样、L2 投递去重账），这批写经文件锁串行化、不碰记忆正文，所以「只读」是「不许改记忆」，不是「零写盘」。
 
 ## 面板功能
@@ -61,7 +61,9 @@ analyze / reviewCandidate / previewPlan / executePlan / getTimeline
 - **diagnostics 容错（第 4 轮 Q-C）**：状态 tab 对 P 新增的 codec / transport 等字段按 key: value 照常渲染，未知未来字段容忍，值为 undefined 的键忽略（不显示 undefined、不伪装成 null），序列化异常降级 String()，不崩。
 - **记忆预算（0.2 U2 重写，标杆页）**：`ctx.configForms.get("shiori")` 原生设置作用域（命名空间能被 settings 服务收录，靠的是 schema 里 volatile 的 `budgets` 字段），整段 budgets 单 revision fence 写入。命名三层分离：界面名主位、技术名进 tooltip 与页尾「技术细节」折叠区、机制说明写成后果描述。顶部**实时水位条**：`当前占用 ─ 软水位 · 硬闸 · 硬顶`，占用取 `getStatus` 返回的真实 `occupancy.l1Chars`（取不到如实显示「占用数据不可用」），填充色随水位分安全绿 / 警告黄 / 危险红。`softRatio` / `hardRatio` 不再直接编辑，改为 `softChars` / `hardChars` 字符数水位滑杆 + 数字联动，软/硬互相钳制（软 ≤ 硬-1 < 硬顶）。按人设卡（L0）/ 记忆核心（L1）/ 闪回卡片（L2）三组分组卡片（层号已按 U0 纠错：core 是 L1 不是 L0）。已修改字段标「已修改」徽章 + 单字段恢复默认；越界校验全部就地中文提示并禁用保存按钮。`targetChars` 不在界面出现（D3）——它不能反过来当用户改不动的硬约束：草稿里的 `clampCoreWater` 随硬顶/软/硬把 `targetChars` 收敛进 `softChars ≤ targetChars < hardChars-1`，保存时按收敛值写回（调小硬顶不会因为一个看不见的字段禁用保存）；越界文案点名界面上看得见的中文字段名，不出现隐藏的技术名。保存时同时清掉旧 ratio 字段避免双源真相。`budgets` 为 volatile：宿主热提交、不触发插件重载；运行中的 controller 仍持启动时快照，新预算在下次插件重载或宿主重启后生效。`persona.maxChars` 输入上限 60000（与服务端 `BUDGET_CEILINGS` 同步）。
 - **设计 token（U1）**：全部样式变量挂在 `.dshi_root` 的 `--dshi-*` 上（主色 accent、语义色 safe/warn/danger、四层标识淡色 l0/l1/l2/l3-soft、两档灰底 bg-panel/bg-card、描边 stroke、圆角 radius、间距 space、字号 font），token 回退到宿主 `--dsw-alias` 变量；预算页样式只引用 token、不写裸色值，其余页面在 U3–U8 改版时对齐。
-- 会话选择优先取宿主 `ctx.remote.session.list`（owner 可见集）；不可用时退回手动输入 session id（如实提示）。
+- **最近变更（F4 页）**：`getTimeline`——倒序时间线，每页 100 条（`TIMELINE_PAGE_SIZE`），来源徽章区分 core / 主题 / 卡片；`scanLimited: true` 时页顶提示「更早的历史本次不可达」，`skippedCorrupted > 0` 提示部分记录损坏；点 topic / spark 条目「定位」跳到对应 tab（`focusTarget` 带 seq 识别重复跳转），core 条目只跳「记忆 L0/L1」不定位段落，目标已删除时如实提示「可能已删除或已归档」。`hasMore: false` 只是窗口内到底，别据此宣称时间线完整。
+- **闪回命中（F2 页）**：`getGraph` 的 `nodes.hitCount/lastHitAt/createdAt` + `deliveries` + `deliveryStats`——三组内容：从未命中（含存续天数）、命中 top10（降序，平局按最近命中时间再按 id）、投递吞吐（总投递张数 / 轮次 / 重复投递率 = 1 − 去重卡片数 ÷ 总投递张数）。口径如实标注：命中＝进入投递包、不代表被采用；统计只覆盖 L2 开启期间。消息底部另有「闪回」按钮走 `conversation.chat.assistant-actions` 槽位，按「本会话最近一次投递（限 10 分钟内）」近似关联并明确标注，不做精确到消息的假装。
+- **会话选择优先取宿主 `ctx.remote.session.list`（owner 可见集）；不可用时退回手动输入 session id（如实提示）。
 
 ## 宿主能力缺失时
 
