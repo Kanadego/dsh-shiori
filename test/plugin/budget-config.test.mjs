@@ -57,6 +57,20 @@ test("Schemastery schema 的缺省 budgets 同样携带派生水位", () => {
   assert.equal(core.hardChars, Math.round(DEFAULT_CONFIG.core.hardCapChars * DEFAULT_CONFIG.core.hardRatio));
 });
 
+test("schema 解析不得给缺省的 softChars/hardChars 注入静态默认值（改了硬顶仍能启动）", () => {
+  // 真机事故：patch 只给 targetChars/hardCapChars/ratio 时，schema 会把按默认硬顶
+  // 10000 算出的 7500/9000 塞进配置，顶替按 14000 该派生的 9800/12600，
+  // 启动即 core.targetChars (10000) must be < derived hardAt (9000)。
+  const raw = { budgets: { core: { targetChars: 10000, hardCapChars: 14000, softRatio: 0.7, hardRatio: 0.9 } } };
+  const parsed = Config(raw);
+  const core = parsed.budgets.get().core;
+  assert.equal("softChars" in core, false);
+  assert.equal("hardChars" in core, false);
+  const settings = normalizePluginConfig({ ...raw, budgets: parsed.budgets });
+  assert.equal(settings.budgets.core.softChars, 9800);
+  assert.equal(settings.budgets.core.hardChars, 12600);
+});
+
 // ── 2) 老配置只有 ratio：换算成水位，不报错 ─────────────────────────────────
 
 test("老配置只有 ratio 时按 hardCapChars × ratio 换算成水位且不报错", () => {

@@ -115,10 +115,15 @@ function budgetObject() {
       hardCapChars: z.natural().default(DEFAULT_CONFIG.core.hardCapChars),
       softRatio: z.number().default(DEFAULT_CONFIG.core.softRatio),
       hardRatio: z.number().default(DEFAULT_CONFIG.core.hardRatio),
-      softChars: z.natural().default(derivedWaterDefaults().softChars)
-        .description("软水位（字符数）；旧 softRatio × hardCapChars 换算而来，权威值"),
-      hardChars: z.natural().default(derivedWaterDefaults().hardChars)
-        .description("硬水位（字符数）；旧 hardRatio × hardCapChars 换算而来，权威值"),
+      // 这两个字段不能给静态默认值：schema 默认一旦落进配置，就会在用户改了
+      // hardCapChars 时顶替「按新硬顶派生」的水位（默认硬顶 10000 算出的
+      // 7500/9000 会盖掉 20000 硬顶该有的 12000/18000），启动时报
+      // core.targetChars must be < derived hardAt 直接起不来。
+      // 缺省交给 normalizeBudgets 按真实 hardCapChars × ratio 派生。
+      softChars: z.natural()
+        .description("软水位（字符数）；缺省按 softRatio × hardCapChars 派生，显式给出则权威"),
+      hardChars: z.natural()
+        .description("硬水位（字符数）；缺省按 hardRatio × hardCapChars 派生，显式给出则权威"),
       cacheLockFallback: z.boolean().default(DEFAULT_CONFIG.core.cacheLockFallback),
     }).default(derivedWaterDefaults()),
     persona: z.object({
