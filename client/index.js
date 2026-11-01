@@ -160,7 +160,14 @@ window.__ModuleLoader__.load({
 ".dshi_toastClose{border:none;background:none;color:inherit;font:inherit;font-size:14px;line-height:1;cursor:pointer;padding:0}" +
 ".dshi_restartBanner{position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:1001;display:flex;align-items:center;gap:10px;max-width:640px;background:var(--dshi-warn);color:#fff;border-radius:0 0 var(--dshi-radius-sm) var(--dshi-radius-sm);padding:8px 14px;font-size:var(--dshi-font-sm);line-height:1.5}" +
 ".dshi_restartText{flex:1;word-break:break-word}" +
-".dshi_restartClose{border:1px solid currentColor;background:none;color:inherit;font:inherit;font-size:var(--dshi-font-xs);border-radius:6px;padding:2px 8px;cursor:pointer}";
+".dshi_restartClose{border:1px solid currentColor;background:none;color:inherit;font:inherit;font-size:var(--dshi-font-xs);border-radius:6px;padding:2px 8px;cursor:pointer}" +
+    // F4「最近变更」tab 图标（时钟；URL 编码口径与既有图标一致，避免裸 http:// 触发
+    // 无外部资源检查）与 F7 只读黄条/置灰提示、时间线扫描截断提示的样式。
+".dshi_tabIco-timeline{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%278%27 cy=%278%27 r=%276.2%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3Cpath d=%27M8 4.6V8l2.4 1.6%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linecap=%27round%27/%3E%3C/svg%3E')}" +
+".dshi_roBanner{border:1px solid var(--dshi-warn);background:rgba(180,83,9,.10);color:var(--dshi-warn);border-radius:8px;padding:8px 12px;font-size:12px;line-height:1.5;word-break:break-word}" +
+".dshi_roHint{font-size:11px;color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:8px;padding:4px 8px;word-break:break-word}" +
+".dshi_tlScan{font-size:11px;color:var(--dshi-warn)}" +
+".dshi_tlDedupe{border-color:var(--dshi-l3);color:var(--dshi-l3)}";
     function ensureStyle() {
       try {
         if (document.getElementById("dsh-shiori-style")) return;
@@ -1102,6 +1109,8 @@ window.__ModuleLoader__.load({
       var saveErrorState = useState(null);
       var saveError = saveErrorState[0];
       var setSaveError = saveErrorState[1];
+      // F7：只读态（另一实例在写）写按钮置灰 + 页内黄字说明原因。
+      var ro = props.readOnly === true;
       var load = async function () {
         setError(null);
         try {
@@ -1279,7 +1288,7 @@ window.__ModuleLoader__.load({
           h("div", { className: "dshi_row" },
             h("span", { className: "dshi_cardTitle" }, title),
             h("span", { style: { flex: 1 } }),
-            h("button", { className: "dshi_btn", onClick: function () { beginEdit(kind); } }, "编辑")),
+            h("button", { className: "dshi_btn", disabled: ro, onClick: function () { beginEdit(kind); } }, "编辑")),
           h("div", { className: "dshi_empty" }, guide));
       };
       var renderLayer = function (kind, title, layer, hint) {
@@ -1298,9 +1307,9 @@ window.__ModuleLoader__.load({
             h("span", { style: { flex: 1 } }),
             isEditing
               ? h(fragment, null,
-                h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy, onClick: save }, busy ? "保存中…" : "保存"),
+                h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy || ro, onClick: save }, busy ? "保存中…" : "保存"),
                 h("button", { className: "dshi_btn", disabled: busy, onClick: cancelEdit }, "取消"))
-              : h("button", { className: "dshi_btn", onClick: function () { beginEdit(kind); } }, "编辑")),
+              : h("button", { className: "dshi_btn", disabled: ro, onClick: function () { beginEdit(kind); } }, "编辑")),
           hint ? h("div", { className: "dshi_hint" }, hint) : null,
           isEditing
             ? h("textarea", {
@@ -1323,6 +1332,7 @@ window.__ModuleLoader__.load({
           h("span", { className: "dshi_cardTitle" }, "记忆内容 L0 / L1"),
           h("button", { className: "dshi_btn", onClick: load }, "刷新")),
         ErrorBox(error),
+        ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
         saveError ? ErrorBox(saveError) : null,
         saveError && saveError.code === "REVISION_CONFLICT"
           ? h("div", { className: "dshi_conflict" },
@@ -1397,6 +1407,9 @@ window.__ModuleLoader__.load({
       var setView = viewState[1];
       var dragRef = useRef(null);
       var wrapRef = useRef(null);
+      // F7：只读态（另一实例在写）写按钮置灰；F4：时间线跳转目标（type 必须是 spark）。
+      var ro = props.readOnly === true;
+      var focusTarget = props.focusTarget && props.focusTarget.type === "spark" ? props.focusTarget : null;
       // 滚轮缩放：以指针位置为锚点，缩放范围与按钮一致（0.3~3）。
       // React 的 onWheel 在部分宿主里被登记成 passive（preventDefault 无效、滚轮会连带
       // 滚动整个面板），所以这里挂原生 listener 并显式 passive:false。
@@ -1449,6 +1462,25 @@ window.__ModuleLoader__.load({
         }
         return positions;
       }, [normalized]);
+      // F4 时间线跳转：目标卡在图里 → 选中节点；不在（已删 / 已归档）→ 降级提示，
+      // 不报错、不发必然失败的 RPC。deps 带 normalized：图谱刷新到货后重跑。
+      // 跳转目标消费一次（consumed 标记，审查 P3①）：同一 seq 只处理一次，用户
+      // 关掉详情后再刷新图谱不会被重新弹开；图谱未到货（graph===null）不消费，
+      // 到货后 deps 重跑再决定。
+      var consumedJumpSeq = useRef(null);
+      useEffect(function () {
+        if (!focusTarget || consumedJumpSeq.current === focusTarget.seq) return;
+        if (graph === null) return;
+        consumedJumpSeq.current = focusTarget.seq;
+        var found = null;
+        for (var i = 0; i < normalized.nodes.length; i++) {
+          if (String(normalized.nodes[i].id) === focusTarget.id) { found = normalized.nodes[i]; break; }
+        }
+        setSelected(found);
+      }, [focusTarget && focusTarget.seq, normalized]);
+      var jumpConsumed = Boolean(focusTarget && consumedJumpSeq.current === focusTarget.seq);
+      var focusMiss = Boolean(focusTarget && !jumpConsumed && graph !== null
+        && !normalized.nodes.some(function (n) { return String(n.id) === focusTarget.id; }));
       var onPointerDown = function (event) {
         dragRef.current = { startX: event.clientX, startY: event.clientY, originX: view.x, originY: view.y, moved: false };
       };
@@ -1481,6 +1513,8 @@ window.__ModuleLoader__.load({
           h("span", null, h("i", { className: "dshi_dot", style: { background: "var(--dsw-alias-label-tertiary,#8b93a1)" } }), "非 active"),
           h("span", { className: "dshi_hint" }, "滚轮缩放 / 拖拽平移 / 点击节点查看详情与编辑")),
         ErrorBox(error),
+        focusMiss ? h("div", { className: "dshi_roHint" }, "时间线跳转：卡片「" + shortId(focusTarget.id) + "」不在当前图谱（可能已删除或已归档）。") : null,
+        ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
         normalized.nodes.length === 0 && !error ? h("div", { className: "dshi_loading" }, graph ? "当前 scope 无 active 卡" : "加载中…") : null,
         normalized.nodes.length > 0 ? h("div", {
           className: "dshi_graphWrap",
@@ -1512,7 +1546,7 @@ window.__ModuleLoader__.load({
                   h("text", { className: "dshi_nodeLabel", x: position.x + 18, y: position.y + 4 }, node.title.slice(0, 24)));
               }))))
         : null,
-        selected ? h(NodeDetail, { node: selected, nodes: normalized.nodes, edges: normalized.edges, dsh: props.dsh, sessionId: props.sessionId, onClose: function () { setSelected(null); }, onSaved: load }) : null);
+        selected ? h(NodeDetail, { node: selected, nodes: normalized.nodes, edges: normalized.edges, dsh: props.dsh, sessionId: props.sessionId, readOnly: ro, onClose: function () { setSelected(null); }, onSaved: load }) : null);
     }
 
     var VITALITY_LABELS = { evergreen: "长期卡", ephemeral: "短期卡" };
@@ -1629,6 +1663,8 @@ window.__ModuleLoader__.load({
       var pristineState = useState(null);
       var pristineLinks = pristineState[0];
       var setPristineLinks = pristineState[1];
+      // F7：只读态（另一实例在写）写按钮置灰（props.readOnly 由 GraphTab 透传）。
+      var ro = props.readOnly === true;
       // 打开卡片就拉一次 spark_read：既拿到完整正文，也拿到现有 links 与最新 revision。
       // 必须先读再改——spark_update 的 patch.links 是整体替换，盲改会抹掉原有连线。
       var loadCard = async function () {
@@ -1745,6 +1781,7 @@ window.__ModuleLoader__.load({
           h("span", { className: "dshi_badgeDim dshi_badge" }, STATE_LABELS[node.state] || node.state),
           node.revision !== undefined ? h("span", { className: "dshi_mono" }, "rev " + String(node.revision)) : null,
           h("button", { className: "dshi_btn", onClick: props.onClose }, "关闭")),
+        ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
         h("details", null,
           h("summary", { className: "dshi_hint" }, "原始节点数据"),
           h("pre", { className: "dshi_pre" }, stableStringify(node.raw))),
@@ -1790,8 +1827,8 @@ window.__ModuleLoader__.load({
               value: linkRel,
               onChange: function (event) { setLinkRel(event.target.value); }
             }),
-            h("button", { className: "dshi_btn", disabled: !linkTarget, onClick: addLink }, "添加连线"),
-            h("button", { className: "dshi_btn dshi_btnPrimary", disabled: linksBusy || !card, onClick: saveLinks }, linksBusy ? "保存中…" : "保存连线"))),
+            h("button", { className: "dshi_btn", disabled: !linkTarget || ro, onClick: addLink }, "添加连线"),
+            h("button", { className: "dshi_btn dshi_btnPrimary", disabled: linksBusy || !card || ro, onClick: saveLinks }, linksBusy ? "保存中…" : "保存连线"))),
 
         // 卡片内容：只改 spark 卡片本身。人设卡 / 记忆核心在「记忆 L0/L1」页，
         // 主题在「L3/topic 记忆管理」页——这里不再混进那四个记忆工具。
@@ -1800,7 +1837,7 @@ window.__ModuleLoader__.load({
             h("span", { className: "dshi_cardTitle" }, "卡片内容"),
             formOk ? h("span", { className: "dshi_ok" }, formOk) : null,
             h("span", { style: { flex: 1 } }),
-            h("button", { className: "dshi_btn dshi_btnPrimary", disabled: formBusy || !form || !card, onClick: saveForm }, formBusy ? "保存中…" : "保存卡片")),
+            h("button", { className: "dshi_btn dshi_btnPrimary", disabled: formBusy || !form || !card || ro, onClick: saveForm }, formBusy ? "保存中…" : "保存卡片")),
           ErrorBox(formError),
           form === null
             ? h("div", { className: "dshi_loading" }, linksBusy ? "正在读取卡片…" : "还没读到卡片，点上方「重新读取」")
@@ -2043,6 +2080,9 @@ window.__ModuleLoader__.load({
       var titlesState = useState({});
       var titles = titlesState[0];
       var setTitles = titlesState[1];
+      // F7：只读态（另一实例在写）——analyze / review / preview / execute 与合并
+      // 流程全部置灰（服务端 assertHostWritable 同口径），页内黄字说明原因。
+      var ro = props.readOnly === true;
 
       var mark = function () {
         return { sessionId: props.sessionId, gen: sessionGuard.gen };
@@ -2228,7 +2268,7 @@ window.__ModuleLoader__.load({
           setMergeForm(null);
         });
       };
-      var actionsDisabled = busy || !loaded;
+      var actionsDisabled = busy || !loaded || ro;
 
       // ── Q-A：cluster 候选「合并进主题」流程 ────────────────────────────────
       // 全部 RPC 经 props.dsh.call（ctx.get('remote.shiori')）；会话级失败沿用
@@ -2398,7 +2438,7 @@ window.__ModuleLoader__.load({
                       // loadTopics 通常已过滤 legacy 行，这里保留防御性提示。
                       h("button", {
                         className: "dshi_btn",
-                        disabled: busy,
+                        disabled: busy || ro,
                         title: isLegacyTopicRow(row) ? "legacy 主题只读，不能作为合并目标" : undefined,
                         onClick: function () { openTopicForMerge(row); }
                       }, "合并到这个主题")));
@@ -2414,7 +2454,7 @@ window.__ModuleLoader__.load({
               h("input", { className: "dshi_input", placeholder: "key（安全文件名，core 保留）", value: newTopic.topic, onChange: function (event) { updateNewTopic({ topic: event.target.value }); } }),
               h("input", { className: "dshi_input", placeholder: "标题", value: newTopic.title, onChange: function (event) { updateNewTopic({ title: event.target.value }); } }),
               h("input", { className: "dshi_input", placeholder: "单行摘要（≤60 字符）", value: newTopic.summary, onChange: function (event) { updateNewTopic({ summary: event.target.value }); } }),
-              h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy || newTopic.busy, onClick: submitNewTopic }, newTopic.busy ? "创建中…" : "创建并选择")),
+              h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy || newTopic.busy || ro, onClick: submitNewTopic }, newTopic.busy ? "创建中…" : "创建并选择")),
             mergeForm ? h("div", null,
               h("div", { className: "dshi_itemHead", style: { marginTop: 6 } },
                 h("span", { className: "dshi_cardTitle" }, "合并表单（目标 " + mergeForm.key + "）"),
@@ -2427,7 +2467,7 @@ window.__ModuleLoader__.load({
               h("label", { className: "dshi_label" }, "合并后正文（after，可编辑；必须保留 before 全文）",
                 h("textarea", { className: "dshi_textarea", value: mergeForm.after, onChange: function (event) { updateMergeForm({ after: event.target.value }); } })),
               h("div", { className: "dshi_row" },
-                h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy, onClick: doMergePreview }, "预览 diff（previewPlan）"))) : null
+                h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy || ro, onClick: doMergePreview }, "预览 diff（previewPlan）"))) : null
           ));
       };
       return h("div", null,
@@ -2438,6 +2478,7 @@ window.__ModuleLoader__.load({
           h("button", { className: "dshi_btn", title: "按衰减分数找出该归档的旧卡（只读分析）", onClick: function () { doAnalyze("forgetting"); }, disabled: actionsDisabled }, "分析遗忘候选"),
           loaded ? h("span", { className: "dshi_badgeDim dshi_badge" }, "queueRevision " + queueRevision) : null),
         ErrorBox(error),
+        ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
         data ? h(fragment, null,
           h("div", { className: "dshi_card" },
           h("div", { className: "dshi_cardTitle" }, "候选（" + items.length + "）"),
@@ -2548,7 +2589,7 @@ window.__ModuleLoader__.load({
           h("div", { className: "dshi_row" },
             h("button", {
               className: "dshi_btn dshi_btnDanger",
-              disabled: busy || (function () {
+              disabled: busy || ro || (function () {
                 var row = plans.find(function (p) { return String(p && p.planId) === String(preview.plan && preview.plan.planId); });
                 return Boolean(row && (row.executed === true || row.superseded === true));
               })(),
@@ -2599,6 +2640,10 @@ window.__ModuleLoader__.load({
       var saveOkState = useState(null);
       var saveOk = saveOkState[0];
       var setSaveOk = saveOkState[1];
+      // F7：只读态（另一实例在写）写按钮置灰。
+      var ro = props.readOnly === true;
+      // F4：时间线跳转目标（面板级 ref 传入；type 必须是 topic）。
+      var focusTarget = props.focusTarget && props.focusTarget.type === "topic" ? props.focusTarget : null;
 
       var load = async function () {
         setBusy(true);
@@ -2614,6 +2659,22 @@ window.__ModuleLoader__.load({
         }
       };
       useEffect(function () { load(); }, [props.sessionId]);
+
+      // F4 时间线跳转：目标主题在列表里 → 自动展开（列表到货后 deps 重跑再展开）；
+      // 不在列表（已删 / 已归档）→ 只降级提示，不报错、不发必然失败的 RPC。
+      // 跳转目标消费一次（consumed 标记，审查 P3①）：同一 seq 只处理一次，用户
+      // 收起主题后再刷新列表不会被重新展开；列表未到货（topics 非数组）不消费。
+      var consumedJumpSeq = useRef(null);
+      useEffect(function () {
+        if (!focusTarget || consumedJumpSeq.current === focusTarget.seq) return;
+        if (!Array.isArray(topics)) return;
+        consumedJumpSeq.current = focusTarget.seq;
+        var found = topics.some(function (row) { return String(row && row.key) === focusTarget.id; });
+        if (found && opened !== focusTarget.id) openTopic(focusTarget.id);
+      }, [focusTarget && focusTarget.seq, topics]);
+      var jumpConsumed = Boolean(focusTarget && consumedJumpSeq.current === focusTarget.seq);
+      var focusMiss = Boolean(focusTarget && !jumpConsumed && Array.isArray(topics)
+        && !topics.some(function (row) { return String(row && row.key) === focusTarget.id; }));
 
       var readTopic = async function (key) {
         setDetailBusy(true);
@@ -2683,6 +2744,8 @@ window.__ModuleLoader__.load({
           h("span", { className: "dshi_hint" }, topics === null ? "" : "共 " + topics.length + " 个主题")),
         h("div", { className: "dshi_hint" }, "L3 是跨会话的长期主题记忆，每条按 key 存一个文件。这里列表只显示名字和字数，点「展开」才读正文；编辑是整篇覆盖，保存走版本校验。"),
         ErrorBox(error),
+        focusMiss ? h("div", { className: "dshi_roHint" }, "时间线跳转：主题「" + focusTarget.id + "」不在当前列表（可能已删除或已归档）。") : null,
+        ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
         busy && topics === null ? h("div", { className: "dshi_loading" }, "正在读取主题列表…") : null,
         topics !== null && topics.length === 0 ? h("div", { className: "dshi_hint" }, "这个作用域下还没有主题。") : null,
         topics !== null ? h("div", { className: "dshi_items" }, topics.map(function (row) {
@@ -2712,9 +2775,9 @@ window.__ModuleLoader__.load({
                         ? h("span", { className: "dshi_hint" }, "legacy 主题由旧版写入，服务端拒绝改写")
                         : (editing
                           ? h(fragment, null,
-                              h("button", { className: "dshi_btn dshi_btnPrimary", disabled: saveBusy, onClick: save }, saveBusy ? "保存中…" : "保存"),
+                              h("button", { className: "dshi_btn dshi_btnPrimary", disabled: saveBusy || ro, onClick: save }, saveBusy ? "保存中…" : "保存"),
                               h("button", { className: "dshi_btn", disabled: saveBusy, onClick: cancelEdit }, "取消"))
-                          : h("button", { className: "dshi_btn", onClick: beginEdit }, "编辑"))),
+                          : h("button", { className: "dshi_btn", disabled: ro, onClick: beginEdit }, "编辑"))),
                     saveOk ? h("div", { className: "dshi_ok" }, saveOk) : null,
                     ErrorBox(saveError),
                     editing
@@ -3342,15 +3405,136 @@ window.__ModuleLoader__.load({
               "口径：总投递张数按「进入投递包的卡片张数」累计（同一张卡重复进包会重复计）；重复投递率 = 1 − 去重后卡片数 ÷ 总投递张数；轮次 = 已收尾的投递包数。统计范围为 L2 投递账本的全部记录（仅覆盖 L2 开启期间），不是全生命周期口径。"))) : null);
     }
 
+    // ── F4：最近变更（getTimeline 时间线）────────────────────────────────
+    // wire 不收 scope 入参：列表恒展示服务端按可信 scope 返回的条目（含 scope
+    // 标签），前端不做跨 scope 过滤——要做得扩 wire，本期不做。
+    // 分页每页 100 条；hasMore=false 时禁用「下一页」。
+    // scanLimited 提示里的 N 用下方 TIMELINE_SCAN_LIMIT：它是服务端
+    // src/timeline/index.mjs TIMELINE_JOURNAL_SCAN_LIMIT（=4000）的手工同步副本
+    //（审查 P3②；wire 不返回该值，前端拿不到真值只能落常数）。数据层一旦调整
+    // 这个常量，必须同步改这里，否则「只扫描了最近 N 个文件」的数字会撒谎。
+    var TIMELINE_PAGE_SIZE = 100;
+    // 同步副本：与 src/timeline/index.mjs 的 TIMELINE_JOURNAL_SCAN_LIMIT（4000）一致。
+    var TIMELINE_SCAN_LIMIT = 4000;
+    var TIMELINE_ACTION_LABELS = {
+      "core.write": "核心写入",
+      "topic.write": "主题写入",
+      "spark.save": "存卡",
+      "spark.update": "改卡",
+      "spark.archive": "卡片归档",
+      "spark.supersede": "卡片替代",
+      "spark.feedback": "使用反馈",
+      "spark.links": "织网连线",
+      "spark.retire": "合并退休"
+    };
+    var TIMELINE_SOURCE_LABELS = { core: "核心", topic: "主题", spark: "卡片" };
+
+    function timelineTimeText(iso) {
+      var ms = Date.parse(String(iso ?? ""));
+      if (!Number.isFinite(ms)) return String(iso ?? "—");
+      var d = new Date(ms);
+      var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+    }
+
+    function timelineTargetText(target) {
+      if (!target || typeof target !== "object") return "—";
+      var title = typeof target.title === "string" && target.title !== "" ? target.title : null;
+      var id = String(target.id ?? "");
+      return title || (id !== "" ? shortId(id) : "—");
+    }
+
+    function TimelineTab(props) {
+      var pageState = useState(null);
+      var page = pageState[0];
+      var setPage = pageState[1];
+      var offsetState = useState(0);
+      var offset = offsetState[0];
+      var setOffset = offsetState[1];
+      var errorState = useState(null);
+      var error = errorState[0];
+      var setError = errorState[1];
+      var busyState = useState(false);
+      var busy = busyState[0];
+      var setBusy = busyState[1];
+      var load = async function (nextOffset) {
+        setBusy(true);
+        setError(null);
+        try {
+          var result = await props.dsh.call("getTimeline", props.sessionId, { offset: nextOffset, limit: TIMELINE_PAGE_SIZE });
+          setPage(result && typeof result === "object" ? result : null);
+        } catch (e) {
+          setPage(null);
+          if (!reportSessionUnavailable(e, props, setError)) setError(e);
+        } finally {
+          setBusy(false);
+        }
+      };
+      useEffect(function () { load(offset); }, [props.sessionId, offset]);
+      var items = page && Array.isArray(page.items) ? page.items : [];
+      var hasMore = Boolean(page && page.hasMore === true);
+      var scanLimited = Boolean(page && page.scanLimited === true);
+      var skipped = page && typeof page.skippedCorrupted === "number" ? page.skippedCorrupted : 0;
+      var pageNumber = Math.floor(offset / TIMELINE_PAGE_SIZE) + 1;
+      return h("div", null,
+        h("div", { className: "dshi_row", style: { marginBottom: 8 } },
+          h("span", { className: "dshi_cardTitle" }, "最近变更"),
+          h("button", { className: "dshi_btn", disabled: busy, onClick: function () { load(offset); } }, busy ? "刷新中…" : "刷新"),
+          h("span", { className: "dshi_hint" }, "每次记忆改动一行：时间、动作、来源与涉及对象，最新的在最上面。")),
+        ErrorBox(error),
+        scanLimited ? h("div", { className: "dshi_tlScan" }, "只扫描了最近 " + TIMELINE_SCAN_LIMIT + " 个文件，更早的变更不可见。") : null,
+        skipped > 0 ? h("div", { className: "dshi_hint" }, "有 " + skipped + " 条损坏记录已跳过，不影响其余历史。") : null,
+        page === null && !error ? h("div", { className: "dshi_loading" }, "加载中…") : null,
+        page !== null && items.length === 0
+          ? h("div", { className: "dshi_empty" },
+              "这个作用域还没有任何变更记录。写一条人设 / 记忆核心、存一张闪回卡，或整理一次候选之后，这里就会按时间列出每一次改动；点上方「刷新」查看最新。")
+          : null,
+        items.length > 0 ? h("div", { className: "dshi_items" }, items.map(function (item, index) {
+          var action = String((item && item.action) ?? "");
+          var target = item && item.target && typeof item.target === "object" ? item.target : null;
+          var type = String((target && target.type) ?? "");
+          var id = String((target && target.id) ?? "");
+          var detail = item && item.detail && typeof item.detail === "object" ? item.detail : null;
+          var deduped = Boolean(detail && Array.isArray(detail.dedupedWith) && detail.dedupedWith.length > 0);
+          // 跳转仅专题 → 专题 tab、卡片 → 图谱 tab（任务边界）；核心写入没有
+          // 对应 tab，不提供定位，提示去「记忆 L0/L1」页看。
+          var jumpable = (type === "topic" || type === "spark") && id !== "" && typeof props.onJump === "function";
+          return h("div", { key: String((item && item.at) ?? "") + "-" + index, className: "dshi_item" },
+            h("div", { className: "dshi_itemHead" },
+              h("span", { className: "dshi_mono" }, timelineTimeText(item && item.at)),
+              h("span", { title: action }, TIMELINE_ACTION_LABELS[action] || action),
+              h("span", { className: "dshi_badgeDim dshi_badge" }, TIMELINE_SOURCE_LABELS[type] || type),
+              h("span", { className: "dshi_hint" }, "scope " + String((item && item.scope) ?? "—")),
+              deduped ? h("span", { className: "dshi_badge dshi_tlDedupe", title: "同一操作在 journal 与 spark 账里各记了一条，已合并为一条展示" }, "已去重") : null,
+              jumpable
+                ? h("button", { className: "dshi_btn", onClick: function () { props.onJump(type, id); } }, "定位")
+                : null),
+            h("div", { className: "dshi_hint" },
+              "涉及对象：" + timelineTargetText(target) + (type === "core" ? "（核心记忆在「记忆 L0/L1」页查看）" : "")));
+        })) : null,
+        items.length > 0 ? h("div", { className: "dshi_row" },
+          h("button", {
+            className: "dshi_btn",
+            disabled: busy || offset === 0,
+            onClick: function () { setOffset(Math.max(0, offset - TIMELINE_PAGE_SIZE)); }
+          }, "上一页"),
+          h("span", { className: "dshi_hint" }, "第 " + pageNumber + " 页（每页 " + TIMELINE_PAGE_SIZE + " 条）"),
+          h("button", {
+            className: "dshi_btn",
+            disabled: busy || !hasMore,
+            onClick: function () { setOffset(offset + TIMELINE_PAGE_SIZE); }
+          }, "下一页")) : null);
+    }
+
     var TABS = [
       { id: "status", label: "状态" },
+      { id: "timeline", label: "最近变更" },
       { id: "memory", label: "记忆 L0/L1" },
       { id: "graph", label: "图谱" },
       { id: "candidates", label: "候选 / 计划" },
       { id: "topics", label: "L3/topic 记忆管理" },
-      { id: "budgets", label: "预算配置" },
-      // F2 闪回命中：TABS 末尾追加（既有冻结清单测试会变红，改动方式见交付 note）。
-      { id: "flashbacks", label: "闪回命中" }
+      { id: "flashbacks", label: "闪回命中" },
+      { id: "budgets", label: "预算配置" }
     ];
 
     // R6 追加：inert / shadow 时数据 tab 一律渲染「未配置」占位——不让用户点进去
@@ -3400,6 +3584,32 @@ window.__ModuleLoader__.load({
         : title;
     }
 
+    // ── F7 只读黄条（数据源：getStatus.diagnostics.readonly = guard.status()）──
+    // 文案不是报错、不用红色；owner 缺字段回退 PID；末尾按拍板写明边界：
+    // 预算等 profile 配置走宿主 configForms，不经过本插件的写锁。
+    function readonlySinceText(holder) {
+      var sinceMs = null;
+      if (holder && Number.isFinite(holder.startedAt)) sinceMs = holder.startedAt;
+      else if (holder && typeof holder.acquiredAt === "string" && Number.isFinite(Date.parse(holder.acquiredAt))) sinceMs = Date.parse(holder.acquiredAt);
+      if (sinceMs === null) return null;
+      var d = new Date(sinceMs);
+      var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      return pad(d.getHours()) + ":" + pad(d.getMinutes());
+    }
+
+    function readonlyBannerText(info) {
+      var holder = info && info.holder && typeof info.holder === "object" ? info.holder : null;
+      var pid = holder && Number.isFinite(holder.pid) ? holder.pid : null;
+      var hhmm = pid === null ? null : readonlySinceText(holder);
+      var head = pid === null
+        ? "另一实例正在写入，当前只读。"
+        : (hhmm === null ? "另一实例正在写入，当前只读（PID " + pid + "）。" : "另一实例正在写入，当前只读（PID " + pid + " 自 " + hhmm + " 起）。");
+      return head + "本插件的写操作已停用；profile 配置修改由宿主管理，不受此限制。";
+    }
+
+    // 各数据页置灰提示（按钮 disabled + 页内一行黄字说明原因）。
+    var READONLY_HINT_TEXT = "另一实例正在写入，当前只读：写操作已停用，恢复后可再次编辑。";
+
     function ShioriSection(props) {
       ensureStyle();
       var tabState = useState("status");
@@ -3442,6 +3652,22 @@ window.__ModuleLoader__.load({
       // 会话列表拉取的并发守卫（useRef 不占 useState 下标，老测试的 states[0..6] 不变）：
       // 首帧 effect 与「刷新」可能同时触发，只允许一个请求在飞。
       var sessionsRequestRef = useRef({ pending: false });
+      // F4 时间线跳转目标（useRef 不占 useState 下标）：{ tab, type, id, seq }。
+      // seq 供目标 tab 的 effect 识别「同一目标再次跳转」。
+      var jumpRef = useRef(null);
+      var jumpFromTimeline = function (type, id) {
+        var kind = String(type ?? "");
+        var targetId = String(id ?? "");
+        if ((kind !== "topic" && kind !== "spark") || targetId === "") return;
+        var prev = jumpRef.current && typeof jumpRef.current === "object" ? jumpRef.current : null;
+        jumpRef.current = {
+          tab: kind === "topic" ? "topics" : "graph",
+          type: kind,
+          id: targetId,
+          seq: ((prev && prev.seq) || 0) + 1
+        };
+        setTab(jumpRef.current.tab);
+      };
 
       var noteAvailability = function (next) { setAvailability(next); };
 
@@ -3614,6 +3840,54 @@ window.__ModuleLoader__.load({
       };
 
       var mode = modeStatus && typeof modeStatus.mode === "string" ? modeStatus.mode : null;
+      // F7 只读态：来自 getStatus.diagnostics.readonly（guard.status()；
+      // inert/shadow/未 start 时为 null）。writable===false 才算只读（黄条判据）。
+      var readonlyInfo = modeStatus && modeStatus.diagnostics && typeof modeStatus.diagnostics === "object" && !Array.isArray(modeStatus.diagnostics)
+        ? modeStatus.diagnostics.readonly : null;
+      var readonlyNow = Boolean(readonlyInfo && readonlyInfo.writable === false);
+      // 黄条自动消失：只在已知只读态时轮询 getStatus（拍板：8 秒；setTimeout
+      // 递归防请求堆积；document.hidden 暂停，重新可见立刻拉一次）。恢复正常
+      // （writable 回 true）立即停止，不常驻轮询。
+      useEffect(function () {
+        if (!sessionId || !readonlyNow) return undefined;
+        var stopped = false;
+        var timer = null;
+        var hidden = function () { return typeof document !== "undefined" && document.hidden === true; };
+        var schedule = function () {
+          if (stopped) return;
+          timer = setTimeout(function () {
+            if (stopped) return;
+            if (hidden()) { schedule(); return; }
+            props.dsh.call("getStatus", sessionId, {}).then(function (status) {
+              if (stopped) return;
+              if (status && typeof status === "object") setModeStatus(status);
+              var next = status && status.diagnostics && typeof status.diagnostics === "object" && !Array.isArray(status.diagnostics)
+                ? status.diagnostics.readonly : null;
+              if (next && next.writable === false) schedule(); // 仍只读：下一轮
+              // 恢复可写：setModeStatus 已让 readonlyNow 翻 false → effect 清理停轮询
+            }, function () { if (!stopped) schedule(); }); // 单次失败静默，下一轮重试
+          }, 8000);
+        };
+        var onVisibility = function () {
+          if (hidden()) return;
+          if (timer !== null) { clearTimeout(timer); timer = null; }
+          props.dsh.call("getStatus", sessionId, {}).then(function (status) {
+            if (stopped || !status || typeof status !== "object") return;
+            setModeStatus(status);
+          }, function () { /* 静默 */ });
+        };
+        schedule();
+        if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+          document.addEventListener("visibilitychange", onVisibility);
+        }
+        return function () {
+          stopped = true;
+          if (timer !== null) clearTimeout(timer);
+          if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
+            document.removeEventListener("visibilitychange", onVisibility);
+          }
+        };
+      }, [sessionId, readonlyNow]);
       var sessionBlocked = Boolean(availability && availability.blocked && availability.sessionId === sessionId);
       var sessionProbing = Boolean(availability && availability.probing);
       var hintLines = [];
@@ -3669,6 +3943,8 @@ window.__ModuleLoader__.load({
             h("div", { className: "dshi_title" }, "Shiori 记忆面板"),
             h("div", { className: "dshi_titleSub" }, "dsh-shiori · 原生 bundle 面板 · 记忆的分层视图"))),
         h("div", { className: "dshi_sticky" },
+          // F7 黄条：只读态横幅（非报错、非红色；恢复写后随轮询自动消失）。
+          readonlyNow ? h("div", { className: "dshi_roBanner", "data-role": "readonly-banner" }, readonlyBannerText(readonlyInfo)) : null,
           workspaceOptions.length > 0
             ? h("div", { className: "dshi_row" },
                 h("label", { className: "dshi_label" }, "工作区（先选工作区，再选会话）",
@@ -3734,19 +4010,20 @@ window.__ModuleLoader__.load({
                 : "未选择会话。选择或输入会话后展示（状态/记忆/图谱/候选均按该会话的可信 scope 解析）。")
             : sessionBlocked
               ? h("div", { className: "dshi_hint" }, "当前会话被宿主标记为不可用，已暂停对该会话的数据请求。换一个会话，或点上方「刷新」强制重试。")
-              : h(fragment, null,
+                : h(fragment, null,
                   tab === "status" ? h(StatusTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,
                   tab === "budgets" ? h(BudgetsTab, { dsh: props.dsh, sessionId: sessionId, notifyRestart: notifyRestart }) : null,
-                  // 数据 tab（记忆/图谱/候选）：模式探测中或非 active 时以占位替代，不发数据请求
+                  // 数据 tab（记忆/图谱/候选/最近变更）：模式探测中或非 active 时以占位替代，不发数据请求
                   tab !== "status" && tab !== "budgets" && modeStatus === undefined
                     ? h("div", { className: "dshi_loading" }, "能力探测中…") : null,
                   tab !== "status" && tab !== "budgets" && modeStatus !== undefined && mode !== "active"
                     ? ModePlaceholder(mode) : null,
-                  tab === "memory" && (modeStatus === null || mode === "active") ? h(MemoryTab, { dsh: props.dsh, sessionId: sessionId, budgets: budgets, onSessionUnavailable: noteSessionUnavailable }) : null,
-                  tab === "graph" && (modeStatus === null || mode === "active") ? h(GraphTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,
-                  tab === "candidates" && (modeStatus === null || mode === "active") ? h(CandidatesTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,
-                  tab === "topics" && (modeStatus === null || mode === "active") ? h(TopicsTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,
-                  tab === "flashbacks" && (modeStatus === null || mode === "active") ? h(FlashbacksTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null));
+                  tab === "memory" && (modeStatus === null || mode === "active") ? h(MemoryTab, { dsh: props.dsh, sessionId: sessionId, budgets: budgets, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow }) : null,
+                  tab === "graph" && (modeStatus === null || mode === "active") ? h(GraphTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow, focusTarget: jumpRef.current && jumpRef.current.tab === "graph" ? jumpRef.current : null }) : null,
+                  tab === "candidates" && (modeStatus === null || mode === "active") ? h(CandidatesTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow }) : null,
+                  tab === "topics" && (modeStatus === null || mode === "active") ? h(TopicsTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow, focusTarget: jumpRef.current && jumpRef.current.tab === "topics" ? jumpRef.current : null }) : null,
+                  tab === "flashbacks" && (modeStatus === null || mode === "active") ? h(FlashbacksTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow }) : null,
+                  tab === "timeline" && (modeStatus === null || mode === "active") ? h(TimelineTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, onJump: jumpFromTimeline }) : null));
     }
 
     // ── F2 消息底部按钮（conversation.chat.assistant-actions 插槽）──────────

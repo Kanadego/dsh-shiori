@@ -57,6 +57,15 @@ function sanitizeOwner(owner) {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+// F7 面板展示补全：owner 恒含 pid + acquiredAt（谁在何时拿的锁），可选 host。
+// pid/acquiredAt 由锁自身注入、不接受调用方覆盖（防伪造）；host 与 app 等
+// 展示字段同口径清洗（非空字符串、限长），单独处理是为了不扩大 sanitizeOwner
+// 的键集——既有读取方按 app/workspace/instance 三个键断言的形状不变。
+function sanitizeOwnerHost(owner) {
+  const value = owner !== null && typeof owner === 'object' && !Array.isArray(owner) ? owner.host : undefined;
+  return typeof value === 'string' && value.length > 0 && value.length <= 200 ? { host: value } : undefined;
+}
+
 // Must run under guard. Only ENOENT means absent; malformed/empty/non-file stays occupied.
 async function readHeld(root) {
   const lockPath = path.join(root, LOCK_NAME);
@@ -186,11 +195,16 @@ export async function withLock(rootReal, opts, fn) {
   const token = randomBytes(16).toString('hex');
   let acquired = false, failed = false, primary, result;
   const owner = { root: rootReal, token, active: true };
-  // F7：payload 带可选 owner 展示信息（调用方 opts.owner 传入；缺省时 payload
-  // 与 v0.1.0 完全一致，旧读取方不受影响）。
+  // F7：payload 恒带 owner（pid + acquiredAt 由锁自身注入，不接受调用方覆盖；
+  // host / app / workspace / instance 为可选展示信息，调用方 opts.owner 传入，
+  // 畸形字段清洗后不出现）。旧 payload（v0.1.0 无 owner）的读取方按 top-level
+  // pid/acquiredAt 回退解析（见 inspectExternalHolder），不受影响。
   const payload = { pid: process.pid, token, acquiredAt: new Date().toISOString() };
+  payload.owner = { pid: payload.pid, acquiredAt: payload.acquiredAt };
+  const hostInfo = sanitizeOwnerHost(opts?.owner);
+  if (hostInfo) Object.assign(payload.owner, hostInfo);
   const ownerInfo = sanitizeOwner(opts?.owner);
-  if (ownerInfo) payload.owner = ownerInfo;
+  if (ownerInfo) Object.assign(payload.owner, ownerInfo);
   try {
     await acquire(rootReal, payload, Date.now() + timeoutMs, retryMs);
     acquired = true;
@@ -220,8 +234,9 @@ export function holdsLock(rootReal) {
 // 必须检查 pid 存活：崩溃残留锁若被当成 held:true，本 host 会滞回翻只读，
 // 而写路径恰好被只读挡住 → acquire 期的死主回收永远轮不到执行，只能手工删锁。
 // 只把 ESRCH 当死主（EPERM 等一律视为活，与 isPidAlive 一致）。
-// 返回 { held, owner }；owner 恒含 pid/acquiredAt，owner.app/workspace/instance
-// 仅在旧 payload 带有合法 owner 字段时出现（鸭子类型，缺失即回退 PID 展示）。
+// 返回 { held, owner }；owner 恒含 pid/acquiredAt（旧 payload 缺 owner 时按
+// top-level 字段回退拼出），owner.host 与 owner.app/workspace/instance 仅在
+// payload 带有合法 owner 字段时出现（鸭子类型，缺失即回退 PID 展示）。
 export async function inspectExternalHolder(rootReal) {
   const lockPath = path.join(rootReal, LOCK_NAME);
   let stat;
@@ -248,5 +263,7 @@ export async function inspectExternalHolder(rootReal) {
   };
   const extra = sanitizeOwner(payload.owner);
   if (extra) Object.assign(owner, extra);
+  const host = sanitizeOwnerHost(payload.owner);
+  if (host) Object.assign(owner, host);
   return { held: true, owner };
 }
