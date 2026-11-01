@@ -30,6 +30,40 @@ function fail(code, message, details) {
 const HEX64 = /^[0-9a-f]{64}$/;
 
 /**
+ * 读取 F5 水位采样历史（模块级独立导出：供后续预算建议计算，不必打开整个
+ * state store）。旧 scope 没有文件时返回空数组，不报错；sinceDays 给定时
+ * 只返回最近 N 天内的条目。水位数据只落 stateRoot，dataRoot 里不存在。
+ */
+export async function readWaterline(stateRoot, scopeId, { sinceDays } = {}) {
+  if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) {
+    fail("INVALID_INPUT", "readWaterline requires an absolute stateRoot", {});
+  }
+  if (typeof scopeId !== "string" || scopeId.length === 0) {
+    fail("INVALID_INPUT", "readWaterline requires a non-empty scopeId", {});
+  }
+  if (sinceDays !== undefined && sinceDays !== null
+    && (typeof sinceDays !== "number" || !Number.isFinite(sinceDays) || sinceDays <= 0)) {
+    fail("INVALID_INPUT", `readWaterline sinceDays must be a positive finite number, got ${JSON.stringify(sinceDays)}`, { sinceDays });
+  }
+  const file = path.join(stateRoot, "waterline", `${Buffer.from(scopeId, "utf8").toString("hex")}.json`);
+  const bytes = await readFileOrNull(file);
+  if (bytes === null) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    fail("INVALID_STATE", `waterline ledger is unreadable: ${error instanceof Error ? error.message : String(error)}`, { file });
+  }
+  const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
+  if (sinceDays === undefined || sinceDays === null) return entries;
+  const cutoff = Date.now() - sinceDays * 86_400_000;
+  return entries.filter((entry) => {
+    const at = Date.parse(entry?.at);
+    return Number.isFinite(at) && at >= cutoff;
+  });
+}
+
+/**
  * 单文件 JSON 账本：load() 读盘（缺失→empty），mutate(fn) 在锁内读-改-原子写。
  * mutate 的 fn 收到当前数据，返回新数据；写失败抛错不改内存态。
  */
@@ -56,6 +90,15 @@ function createLedger({ file, empty, lockRoot }) {
       if (next === undefined || next === null) {
         fail("INVALID_STATE", "state ledger mutate must return the next state", { file });
       }
+      // 无变更不落盘：L1 装配是每轮热路径，账本「读-判-写」若每次都原子写，
+      // 会把「绝不每轮写盘」的承诺变成每轮一次加锁 + 序列化 + rename。
+      // 序列化后按字节比较即可（同一份数据 → 同一份文本）。
+      const before = JSON.stringify(current);
+      const after = JSON.stringify(next);
+      if (before === after) {
+        cache = current;
+        return structuredClone(next);
+      }
       await fsp.mkdir(path.dirname(file), { recursive: true });
       await atomicReplace(file, Buffer.from(JSON.stringify(next, null, 2), "utf8"));
       cache = next;
@@ -78,11 +121,17 @@ function createLedger({ file, empty, lockRoot }) {
  *   <stateRoot>/l2/<scopeId>.json                  L2 投递账（scanned/pending/accepted/committed/hit/seen）
  *   <stateRoot>/plans/<scopeId>.json               plan 账（organize/forgetting，不可变）
  *   <stateRoot>/queues/<scopeId>.json              候选队列快照
+ *   <stateRoot>/waterline/<scopeId hex>.json       F5 前置 · L1 水位采样侧表（低频）
  */
-export function createStateStore({ stateRoot } = {}) {
+export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
   if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) {
     fail("INVALID_INPUT", "state store requires an absolute stateRoot", {});
   }
+  // 可注入时钟（waterline 采样节流测试用）；生产缺省取真实时间。
+  const nowDate = () => {
+    const value = now();
+    return value instanceof Date ? value : new Date(value);
+  };
 
   const safeSegment = (id) => {
     if (typeof id !== "string" || id.length === 0 || /[<>:"/\\|?*\u0000-\u001f]/.test(id)) {
@@ -127,24 +176,133 @@ export function createStateStore({ stateRoot } = {}) {
     lockRoot: stateRoot,
   });
 
+  /**
+   * 每个 scope 上次真正落盘的投影签名（revision\0hash）。
+   * L1 装配是每轮热路径：投影没变时就别进账本（withLock 要开/删锁文件、
+   * 再序列化对比、必要时 rename），否则「每轮一次磁盘写 + 一次加锁」。
+   * 进程内单写者（F7 座位保证），所以这份记忆是权威的。
+   */
+  const lastSavedL1 = new Map();
+
   /** L1 最近有效投影（超限外改时保留并告警；不截断铁律）。 */
   const projectionStore = {
-    async saveL1(scopeId, { text, revision }) {
-      await projectionLedger(scopeId).mutate((state) => {
-        state.l1 = {
-          text: structuredClone(text),
-          revision: revision ?? null,
-          hash: sha256Buffer(Buffer.from(text, "utf8")),
-          savedAt: new Date().toISOString(),
-        };
-        return state;
-      });
+    /**
+     * 保存 L1 投影。waterline 可选（F5 前置）：active 装配路径传入当前预算
+     * 水位线时，顺路做低频水位采样（state.mjs 内部节流，绝不每轮写盘）；
+     * 不传则行为与 0.1 完全一致。只读宿主（shadow / F7 只读降级）不经过
+     * 本路径（waterfall 仅 active 注册），天然不写。
+     */
+    async saveL1(scopeId, { text, revision, waterline }) {
+      const hash = sha256Buffer(Buffer.from(text, "utf8"));
+      const signature = `${revision ?? ""}\u0000${hash}`;
+      if (lastSavedL1.get(scopeId) !== signature) {
+        await projectionLedger(scopeId).mutate((state) => {
+          // savedAt 只记「投影真的变了」的时刻：同样的内容重复装配不刷新它。
+          state.l1 = {
+            text: structuredClone(text),
+            revision: revision ?? null,
+            hash,
+            savedAt: new Date().toISOString(),
+          };
+          return state;
+        });
+        lastSavedL1.set(scopeId, signature);
+      }
+      if (waterline !== undefined && waterline !== null) {
+        // 水位采样自带节流，且无变更不落盘（见 createLedger.mutate）。
+        await waterlineStore.maybeSample(scopeId, {
+          l1Chars: text.length,
+          softChars: waterline.softChars,
+          hardChars: waterline.hardChars,
+          hardCapChars: waterline.hardCapChars,
+        });
+      }
     },
     async loadL1(scopeId) {
       const state = await projectionLedger(scopeId).read();
       return state.l1 === null ? null : structuredClone(state.l1);
     },
   };
+
+  // ------------------------------------------------------------------
+  // F5 前置 · L1 水位采样侧表（<stateRoot>/waterline/<scopeId hex>.json）
+  // ------------------------------------------------------------------
+
+  /** 环形上限：超出丢最旧（F5 只算「过去 N 天 N 次触闸」，2000 条远超所需）。 */
+  const WATERLINE_MAX_ENTRIES = 2000;
+  /** 采样最小间隔：距上一条采样不足 1 小时且未跨阈值时不记（绝不每轮写盘）。 */
+  const WATERLINE_MIN_INTERVAL_MS = 60 * 60 * 1000;
+
+  const waterlineLedger = (scopeId) => createLedger({
+    file: path.join(stateRoot, "waterline", `${safeSegment(scopeId)}.json`),
+    empty: () => ({ entries: [] }),
+    lockRoot: stateRoot,
+  });
+
+  /** 水位三区：safe < softChars ≤ warning < hardChars ≤ danger。 */
+  function waterlineZone(l1Chars, softChars, hardChars) {
+    if (l1Chars >= hardChars) return "danger";
+    if (l1Chars >= softChars) return "warning";
+    return "safe";
+  }
+
+  const waterlineStore = {
+    /**
+     * 低频采样：满足其一才记一条 —— 距上一条采样 ≥ 1 小时；或由安全区
+     * 进入警告区 / 进入危险区（zone 相对「上一条自己记录的水位线」判定，
+     * 预算变更不产生假跨越；降回低区不记，等下一个间隔采样兜底）。
+     * 返回是否实际记录了一条。
+     */
+    async maybeSample(scopeId, { l1Chars, softChars, hardChars, hardCapChars }) {
+      for (const [field, value] of Object.entries({ l1Chars, softChars, hardChars, hardCapChars })) {
+        if (!Number.isInteger(value) || value < 0) {
+          fail("INVALID_INPUT", `waterline sample ${field} must be a non-negative integer, got ${JSON.stringify(value)}`, { field });
+        }
+      }
+      const zone = waterlineZone(l1Chars, softChars, hardChars);
+      let recorded = false;
+      await waterlineLedger(scopeId).mutate((state) => {
+        const entries = Array.isArray(state.entries) ? state.entries : [];
+        const last = entries.length > 0 ? entries[entries.length - 1] : null;
+        let trigger = null;
+        if (last === null) {
+          trigger = "interval"; // 首条：无历史可比，按间隔到期记
+        } else {
+          const elapsed = nowDate().getTime() - Date.parse(last.at);
+          if (!Number.isFinite(elapsed) || elapsed >= WATERLINE_MIN_INTERVAL_MS) {
+            trigger = "interval";
+          } else {
+            const lastZone = waterlineZone(last.l1Chars, last.softChars, last.hardChars);
+            if (zone !== lastZone) {
+              if (zone === "warning" && lastZone === "safe") trigger = "soft-cross";
+              else if (zone === "danger") trigger = "hard-cross";
+            }
+          }
+        }
+        if (trigger === null) return state;
+        entries.push({
+          at: nowDate().toISOString(),
+          l1Chars,
+          softChars,
+          hardChars,
+          hardCapChars,
+          trigger,
+        });
+        while (entries.length > WATERLINE_MAX_ENTRIES) entries.shift();
+        state.entries = entries;
+        recorded = true;
+        return state;
+      });
+      return recorded;
+    },
+  };
+
+  /**
+   * 水位采样历史读取（store 实例入口；实现见模块级 readWaterline 导出）。
+   */
+  function readWaterlineFor(scopeId, opts) {
+    return readWaterline(stateRoot, scopeId, opts);
+  }
 
   // ------------------------------------------------------------------
   // 工具 operationId 重放账
@@ -504,5 +662,5 @@ export function createStateStore({ stateRoot } = {}) {
     return { kind: "state-store", stateRoot };
   }
 
-  return { toolOpStore, l2Store, planStore, queueStore, projectionStore, analyzeOpStore, diagnostics };
+  return { toolOpStore, l2Store, planStore, queueStore, projectionStore, analyzeOpStore, waterlineStore, readWaterline: readWaterlineFor, diagnostics };
 }

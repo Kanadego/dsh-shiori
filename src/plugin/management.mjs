@@ -23,6 +23,8 @@ import { digestPlan as organizeDigestPlan, createOrganizerExecutor } from "../or
 import { analyzeForgetting } from "../forgetting/decay.mjs";
 import { createForgetExecutor } from "../forgetting/executor.mjs";
 import { validateManagementPayload } from "./protocol.mjs";
+import { coreBudgetsOf } from "./config.mjs";
+import { createTimelineReader } from "../timeline/index.mjs";
 import { pinScope, sessionEvidenceFromRpc, rejectIdentityFields } from "./scope.mjs";
 
 const MAIN_SESSION_ACTOR = "main-session";
@@ -48,6 +50,7 @@ function fail(code, message, details) {
  * @param {(grant: object) => object} deps.registerGrant   注册仅本次调用授权；返回带 revoke() 的句柄
  * @param {(scope: object) => Promise<object>} deps.executeToolForScope  工具执行（与真实工具路径同校验/CAS）
  * @param {(agent: object|null) => string|null} [deps.workspaceForAgent] 从宿主 agent 解析可信 workspace（只读）
+ * @param {object} [deps.timelineReader] 已构造的时间线读取器（测试注入；省略则按 dataRoot 惰性创建）
  * @param {() => string} [deps.nowIso]
  */
 export function createManagement(deps) {
@@ -80,6 +83,26 @@ export function createManagement(deps) {
     if (settings.mode !== "active") {
       fail("UNSUPPORTED", `${where} is a mutation and unsupported in shadow mode`, { mode: settings.mode });
     }
+  }
+
+  /**
+   * F7 只读宿主守门：后启动的宿主只有读权，面板的写方法（analyze /
+   * reviewCandidate / previewPlan / executePlan）必须与工具层同口径抛
+   * HOST_LOCKED——面板置灰挡不住直连 RPC，剧情外最强的写路径（执行计划）
+   * 全在这里，漏一处「只读」就是空话。
+   *
+   * deps.readonlyGuard 允许传取值函数：门面在 controller 构造期创建，而座位
+   * 守卫要等 start() 里才建（先占座、后建工具），构造期读不到实例。
+   * 缺省（未提供 / 尚为 null）放行——与工具层「无 guard → 行为不变」一致，
+   * 让注入式装配（测试、桌面宿主内嵌 service）不受影响。
+   */
+  function assertHostWritable(where) {
+    const guard = typeof deps.readonlyGuard === "function" ? deps.readonlyGuard() : deps.readonlyGuard;
+    if (guard === undefined || guard === null) return;
+    if (typeof guard.assertWritable !== "function") {
+      fail("INVALID_INPUT", `readonlyGuard dependency must expose assertWritable() (hooked from ${where})`, {});
+    }
+    guard.assertWritable();
   }
 
   function requireStarted() {
@@ -134,6 +157,18 @@ export function createManagement(deps) {
       return createCandidateQueue({ scopeId });
     }
     return createCandidateQueue({ scopeId, snapshot });
+  }
+
+  // ── F4 时间线（数据层在 src/timeline；本门面只固定可信 root 与 scope）──────
+  // 惰性创建：inert 挂载 dataRoot 为 null，工厂期创建会炸；getTimeline 走
+  // requireActiveDataAccess，到达时 dataRoot 必为绝对路径。
+
+  let timelineReader = deps.timelineReader ?? null;
+  function timelineReaderFor() {
+    if (timelineReader === null) {
+      timelineReader = createTimelineReader({ dataRoot });
+    }
+    return timelineReader;
   }
 
   async function queueDto(scopeId, queue) {
@@ -291,6 +326,7 @@ export function createManagement(deps) {
       validateManagementPayload("analyze", payload);
       requireActiveDataAccess("analyze");
       requireActive("analyze");
+      assertHostWritable("analyze");
       requireModule(payload.kind);
       const evidence = sessionEvidenceFromRpc(trustedContext);
       const scope = await scopeFromTrustedContext(trustedContext);
@@ -444,6 +480,7 @@ export function createManagement(deps) {
       validateManagementPayload("reviewCandidate", payload);
       requireActiveDataAccess("reviewCandidate");
       requireActive("reviewCandidate");
+      assertHostWritable("reviewCandidate");
       requireModule("organize");
       const scope = await scopeFromTrustedContext(trustedContext);
       const queue = await loadQueue(scope.scopeId);
@@ -461,6 +498,7 @@ export function createManagement(deps) {
       validateManagementPayload("previewPlan", payload);
       requireActiveDataAccess("previewPlan");
       requireActive("previewPlan");
+      assertHostWritable("previewPlan");
       const scope = await scopeFromTrustedContext(trustedContext);
 
       if (payload.kind === "forgetting") {
@@ -541,6 +579,7 @@ export function createManagement(deps) {
       requireConfigured();
       requireStarted();
       requireActive("executePlan");
+      assertHostWritable("executePlan");
       const scope = await scopeFromTrustedContext(trustedContext);
       const entry = await state.planStore.get(scope.scopeId, payload.planId);
       if (entry === null) {
@@ -605,7 +644,7 @@ export function createManagement(deps) {
             root: dataRoot,
             scopeId: scope.scopeId,
             authorize,
-            budgets: settings.budgets,
+            budgets: coreBudgetsOf(settings.budgets),
           });
           try {
             result = await executor.executeRound({
@@ -668,6 +707,30 @@ export function createManagement(deps) {
         operationId: payload.operationId,
         result,
       };
+    },
+
+    /**
+     * F4 最近变更时间线：journal committed + spark 写操作账双源合并，倒序
+     * 分页。数据层（src/timeline/index.mjs）负责分批扫与有界合并；本门面
+     * 只经 controller 固定 root 与可信 scope，不直接读文件、不收 payload
+     * 的 scope 字段（时间线恒出本 scope，不泄露别 scope）。
+     */
+    async getTimeline(trustedContext, payload) {
+      // payload 缺省时用空对象：校验放行 undefined，后面却直接解引用会抛裸
+      // TypeError（直调/嵌入方看到的是崩溃而不是 INVALID_INPUT）。
+      const p = payload ?? {};
+      validateManagementPayload("getTimeline", p);
+      requireActiveDataAccess("getTimeline");
+      const scope = await scopeFromTrustedContext(trustedContext);
+      const page = await timelineReaderFor().read({
+        scope: scope.scopeId,
+        offset: p.offset ?? 0,
+        limit: p.limit ?? 100,
+      });
+      // scanLimited 是数据层的诚实度标注（扫描窗口被截断 → 更早的历史根本不
+      // 在 items 里，深历史 ≠ 到底了）。它必须到达 wire，否则面板会把「窗口
+      // 截断」当成「没有更多」，用户看到的时间线静默缺一段。
+      return page;
     },
   };
 

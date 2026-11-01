@@ -64,7 +64,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/core/*.test.mjs test/host/*.test.mjs test/storage/*.test.mjs test/service/*.test.mjs test/integration/*.test.mjs test/runtime/*.test.mjs test/completion/*.test.mjs test/acceptance/*.test.mjs test/sparks/*.test.mjs test/organize/*.test.mjs test/forgetting/*.test.mjs test/plugin/*.test.mjs",
+    "test": "node --test test/core/*.test.mjs test/host/*.test.mjs test/storage/*.test.mjs test/service/*.test.mjs test/integration/*.test.mjs test/runtime/*.test.mjs test/completion/*.test.mjs test/acceptance/*.test.mjs test/sparks/*.test.mjs test/organize/*.test.mjs test/forgetting/*.test.mjs test/plugin/*.test.mjs test/semantic/*.test.mjs",
     "test:p5": "node --test test/plugin/*.test.mjs",
     "verify:package": "node scripts/verify-package.mjs",
     "test:integration": "node --test test/service/*.test.mjs test/integration/*.test.mjs",

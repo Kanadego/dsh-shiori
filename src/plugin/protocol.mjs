@@ -38,6 +38,33 @@ const queueItemEntry = {
   additionalProperties: true,
 };
 
+// F4 时间线条目（getTimeline.items[]；面板渲染字段：时间 / 动作 / 来源 /
+// scope / 对象 / 可回跳 id）。
+const timelineTarget = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    type: { enum: ["core", "topic", "spark"] },
+    id: nonEmptyString,
+    title: { oneOf: [{ type: "string" }, { type: "null" }] },
+  },
+  required: ["type", "id", "title"],
+};
+
+const timelineItem = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    at: nonEmptyString,
+    action: nonEmptyString,
+    source: { enum: ["journal", "spark"] },
+    scope: nonEmptyString,
+    target: timelineTarget,
+    detail: { type: "object", additionalProperties: true },
+  },
+  required: ["at", "action", "source", "scope", "target", "detail"],
+};
+
 const planSummary = {
   type: "object",
   additionalProperties: false,
@@ -398,6 +425,35 @@ export const MANAGEMENT_METHODS = Object.freeze({
         result: { type: "object", additionalProperties: true },
       },
       required: ["planId", "planDigest", "operationId", "result"],
+    },
+  },
+
+  // F4 最近变更时间线：双源（journal committed + spark 写操作账）合并后
+  // 倒序分页；scope 恒取自 trustedContext 解析出的可信 scope（不收 payload
+  // 的 scope 字段，不泄露别 scope）。hasMore 供面板渲染下一页按钮；
+  // skippedCorrupted 如实上报被跳过的损坏 journal / spark 库数量；
+  // scanLimited 如实上报「扫描窗口被截断」，此时 hasMore:false 只代表窗口内到底，
+  // 不代表更早的历史不存在。
+  getTimeline: {
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        offset: { type: "integer", minimum: 0 },
+        limit: { type: "integer", minimum: 1, maximum: 500 },
+      },
+    },
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        scope: nonEmptyString,
+        items: { type: "array", items: timelineItem },
+        hasMore: { type: "boolean" },
+        skippedCorrupted: { type: "integer", minimum: 0 },
+        scanLimited: { type: "boolean" },
+      },
+      required: ["scope", "items", "hasMore", "skippedCorrupted", "scanLimited"],
     },
   },
 });
