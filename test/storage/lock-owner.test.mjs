@@ -44,16 +44,24 @@ test('withLock: opts.owner 写入 payload（app/workspace/instance）', async t 
     assert.equal(payload.pid, process.pid);
     assert.equal(typeof payload.token, 'string');
     assert.equal(typeof payload.acquiredAt, 'string');
-    assert.deepEqual(payload.owner, { app: 'shiori-dsh', workspace: 'main', instance: 'host-1' });
+    // F7：owner 恒带锁自身注入的 pid/acquiredAt，调用方只补展示字段。
+    assert.equal(payload.owner.pid, process.pid);
+    assert.equal(typeof payload.owner.acquiredAt, 'string');
+    assert.equal(payload.owner.app, 'shiori-dsh');
+    assert.equal(payload.owner.workspace, 'main');
+    assert.equal(payload.owner.instance, 'host-1');
   });
   assert.equal(await fs.readdir(root).then(names => names.length), 0, '释放后无残留');
 });
 
-test('withLock: 不带 owner 时 payload 无 owner 字段（与 v0.1.0 一致）', async t => {
+test('withLock: 不带 owner 时 payload.owner 仍带 pid/acquiredAt（F7 让只读提示能说出持有者）', async t => {
   const { root, lock } = await fixture(t);
   await withLock(root, options, async () => {
     const payload = JSON.parse(await fs.readFile(lock, 'utf8'));
-    assert.equal('owner' in payload, false);
+    assert.equal(payload.owner.pid, process.pid);
+    assert.equal(payload.owner.acquiredAt, payload.acquiredAt);
+    // 调用方没给的展示字段一律不出现。
+    assert.deepEqual(Object.keys(payload.owner).sort(), ['acquiredAt', 'pid']);
   });
 });
 
@@ -61,7 +69,8 @@ test('withLock: 畸形 / 多余字段 owner 被清洗，不影响锁本身', asy
   const { root, lock } = await fixture(t);
   await withLock(root, { ...options, owner: { app: '', workspace: 42, token: ' smuggle', extra: 'x' } }, async () => {
     const payload = JSON.parse(await fs.readFile(lock, 'utf8'));
-    assert.equal('owner' in payload, false, '全字段无效时不得写入空 owner');
+    // 畸形字段全部清洗掉，但锁自身注入的 pid/acquiredAt 保留（不是空 owner）。
+    assert.deepEqual(Object.keys(payload.owner).sort(), ['acquiredAt', 'pid']);
   });
 });
 

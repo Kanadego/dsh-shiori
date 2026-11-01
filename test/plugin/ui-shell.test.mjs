@@ -214,9 +214,9 @@ test("U8 壳层：工作区/会话选择器与 tab 栏包进 sticky 壳条，CSS
     const inside = flattenVNode(sticky);
     // 会话选择器（首帧 sessions 未出 → input 分支）在壳条内。
     assert.ok(inside.some((n) => n.type === "input" && n.props.placeholder === "session id"), "会话选择器在壳条内");
-    // 六个 tab 按钮都在壳条内。
+    // 八个 tab 按钮都在壳条内（F2 闪回命中 + F4 最近变更各加一项）。
     const tabs = inside.filter((n) => n.type === "button" && String(n.props.className).includes("dshi_tab"));
-    assert.equal(tabs.length, 6, "tab 栏在壳条内");
+    assert.equal(tabs.length, 8, "tab 栏在壳条内");
     // 提示行不粘：壳条外仍有 hint 容器位（壳条本身不包含 dshi_hint 提示行）。
     assert.equal(flattenVNode(sticky).filter((n) => n.type === "div" && n.props.className === "dshi_hint").length, 0, "提示行不进壳条");
     const css = styleTextOf(fake);
@@ -232,10 +232,10 @@ test("U8 壳层：工作区/会话选择器与 tab 栏包进 sticky 壳条，CSS
 // d) tab 图标 + label 冻结
 // ---------------------------------------------------------------------------
 
-const TAB_LABELS = ["状态", "记忆 L0/L1", "图谱", "候选 / 计划", "L3/topic 记忆管理", "预算配置"];
-const TAB_IDS = ["status", "memory", "graph", "candidates", "topics", "budgets"];
+const TAB_LABELS = ["状态", "最近变更", "记忆 L0/L1", "图谱", "候选 / 计划", "L3/topic 记忆管理", "闪回命中", "预算配置"];
+const TAB_IDS = ["status", "timeline", "memory", "graph", "candidates", "topics", "flashbacks", "budgets"];
 
-test("U8 tab：六项 label 与改动前逐字一致，每项带图标（伪元素图形 + 每 tab 专属 mask）", async () => {
+test("U8 tab：八项 label 逐字一致（含 F2/F4 两项新增），每项带图标（伪元素图形 + 每 tab 专属 mask）", async () => {
   const fake = makeFakeDocument();
   const previousDocument = globalThis.document;
   globalThis.document = fake.doc;
@@ -243,7 +243,7 @@ test("U8 tab：六项 label 与改动前逐字一致，每项带图标（伪元�
     const mod = loadClientModule();
     const { cleanup, tree } = await mountSection(mod);
     const tabs = flattenVNode(tree).filter((n) => n.type === "button" && String(n.props.className).includes("dshi_tab"));
-    assert.equal(tabs.length, 6);
+    assert.equal(tabs.length, 8);
     // label 一个字都不许改（与 R8 断言同口径：children join 后逐项比较）。
     assert.deepEqual(tabs.map((n) => [].concat(n.children).join("")), TAB_LABELS);
     // 图标节点存在：按钮带 dshi_tabIco + 每 tab 专属类；图标本体是 CSS mask

@@ -197,15 +197,25 @@ test("semantic 段默认值正确（provider=none，零依赖零网络）", () =
   const settings = normalizePluginConfig({});
   assert.deepEqual(settings.semantic, {
     provider: "none",
-    local: { model: "bge-small-zh-v1.5", dims: 512 },
+    local: {
+      model: "Xenova/bge-small-zh-v1.5",
+      dims: 512,
+      dtype: "fp32",
+      cacheDir: "",
+      mirror: "https://hf-mirror.com/",
+    },
     api: { endpoint: null, keyRef: null },
   });
   assert.ok(Object.isFrozen(settings.semantic));
   // Schemastery schema 缺省同样给出该形状（宿主 settings UI 依赖它）。
   const parsed = Config({});
   assert.equal(parsed.semantic.provider, "none");
-  assert.equal(parsed.semantic.local.model, "bge-small-zh-v1.5");
+  assert.equal(parsed.semantic.local.model, "Xenova/bge-small-zh-v1.5");
   assert.equal(parsed.semantic.local.dims, 512);
+  assert.equal(parsed.semantic.local.dtype, "fp32");
+  // cacheDir 空串契约：由 controller.semanticProviderConfig() 解析成 <stateRoot>/semantic/models。
+  assert.equal(parsed.semantic.local.cacheDir, "");
+  assert.equal(parsed.semantic.local.mirror, "https://hf-mirror.com/");
   assert.equal(parsed.semantic.api.endpoint, null);
   assert.equal(parsed.semantic.api.keyRef, null);
 });
@@ -214,7 +224,13 @@ test("semantic 段：合法值通过、未知键与非法 provider 拒绝", () =
   const local = normalizePluginConfig({ semantic: { provider: "local", local: { dims: 768 } } });
   assert.deepEqual(local.semantic, {
     provider: "local",
-    local: { model: "bge-small-zh-v1.5", dims: 768 },
+    local: {
+      model: "Xenova/bge-small-zh-v1.5",
+      dims: 768,
+      dtype: "fp32",
+      cacheDir: "",
+      mirror: "https://hf-mirror.com/",
+    },
     api: { endpoint: null, keyRef: null },
   });
   const api = normalizePluginConfig({ semantic: { provider: "api", api: { endpoint: "https://example.invalid/embed", keyRef: "env:EMBED_KEY" } } });

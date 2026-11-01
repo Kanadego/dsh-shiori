@@ -186,6 +186,28 @@ function runSuite() {
 
   const profileManifest = (root) => JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 
+  // F1b：@huggingface/transformers 硬依赖 onnxruntime-node / protobufjs / sharp，三个包都带
+  // 安装脚本。pnpm 在非交互运行里一律拒跑未审批的脚本并整体失败（ERR_PNPM_IGNORED_BUILDS），
+  // 交互式 GUI 则是弹「允许运行安装脚本：{names}」再重试（dsh-plugin-manager 的
+  // build-approval 把结果写进 profile 的 pnpm-workspace.yaml allowBuilds）。
+  // 本测试走 CLI，所以把那次审批预先落盘，等价于用户在 GUI 里点了「允许」。
+  const BUILD_APPROVALS = ["onnxruntime-node", "protobufjs", "sharp"];
+  const seedBuildApprovals = (profileDir) => {
+    mkdirSync(profileDir, { recursive: true });
+    const file = join(profileDir, "pnpm-workspace.yaml");
+    const lines = [
+      "packages:",
+      "  - .",
+      "nodeLinker: hoisted",
+      "autoInstallPeers: false",
+      "allowBuilds:",
+      ...BUILD_APPROVALS.map((name) => `  ${name}: true`),
+      "",
+    ];
+    writeFileSync(file, lines.join("\n"), "utf8");
+    return file;
+  };
+
   before(() => {
     smoke = { root: mkdtempSync(join(tmpdir(), "shiori-q-dsh-smoke-")) };
     smoke.home = join(smoke.root, "home");
@@ -197,6 +219,7 @@ function runSuite() {
     smoke.profile = join(smoke.home, "profiles", "shiori-smoke");
     for (const dir of [smoke.home, smoke.agents, smoke.cwd, smoke.pkg, smoke.data, smoke.state]) mkdirSync(dir, { recursive: true });
     smoke.tgz = stagePackageCopy(smoke.pkg, { writeStubs: true });
+    seedBuildApprovals(smoke.profile);
 
     if (pFiles || treeHasRealP) {
       combined = { root: mkdtempSync(join(tmpdir(), "shiori-q-dsh-combined-")) };
@@ -209,6 +232,7 @@ function runSuite() {
       combined.profile = join(combined.home, "profiles", "shiori-smoke-p");
       for (const dir of [combined.home, combined.agents, combined.cwd, combined.pkg, combined.data, combined.state]) mkdirSync(dir, { recursive: true });
       combined.tgz = stagePackageCopy(combined.pkg, { overlayP: Boolean(pFiles) });
+      seedBuildApprovals(combined.profile);
       // R6 追加第 4 条：combined 必须真的加载 P 的 controller，不许「声明 combined 却跑 stub」。
       const combinedController = readFileSync(join(combined.pkg, "src", "plugin", "controller.mjs"), "utf8");
       assert.ok(!combinedController.includes("SYNTHETIC TEST STUB"), "combined pkg must not contain the synthetic stub controller");

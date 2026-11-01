@@ -104,19 +104,23 @@ async function mountSection(host, presets) {
 
 const FROZEN_TAB_LABELS = ["状态", "记忆 L0/L1", "图谱", "候选 / 计划", "L3/topic 记忆管理", "预算配置"];
 
-test("F2 tab：闪回命中追加在 TABS 末尾，前六项 label 逐字不变，图标 mask 类齐备且不塞 emoji", async () => {
+// 合并后（F2 + F4 同批）的最终顺序：闪回命中排在预算配置之前。
+const MERGED_TAB_LABELS = ["状态", "最近变更", "记忆 L0/L1", "图谱", "候选 / 计划", "L3/topic 记忆管理", "闪回命中", "预算配置"];
+
+test("F2 tab：闪回命中进入最终 8 项顺序，六项既有 label 逐字不变，图标 mask 类齐备且不塞 emoji", async () => {
   const host = makeStatefulReact();
   const tree = await mountSection(host, ["status", "session-A", "", null, { mode: "active" }]);
   const tabs = flattenVNode(tree).filter((n) => n.type === "button" && String(n.props.className).includes("dshi_tab"));
-  assert.equal(tabs.length, FROZEN_TAB_LABELS.length + 1);
-  assert.deepEqual(tabs.slice(0, 6).map((n) => [].concat(n.children).join("")), FROZEN_TAB_LABELS,
-    "既有六项 label 逐字不变（冻结清单测试的改法见交付 note）");
-  const last = tabs[tabs.length - 1];
-  assert.equal([].concat(last.children).join(""), "闪回命中", "末尾 tab label");
-  assert.equal(last.props.className.includes("dshi_tabIco-flashbacks"), true, "专属图标类");
-  assert.equal(last.props.className.includes("dshi_tabIco "), true, "图标标记类");
+  const labels = tabs.map((n) => [].concat(n.children).join(""));
+  assert.deepEqual(labels, MERGED_TAB_LABELS, "最终 tab 顺序");
+  // 既有六项一字未改（只是中间插入了「最近变更」）。
+  for (const frozen of FROZEN_TAB_LABELS) assert.ok(labels.includes(frozen), "既有 label 保持原样：" + frozen);
+  const flash = tabs.find((n) => [].concat(n.children).join("") === "闪回命中");
+  assert.ok(flash, "闪回命中 tab 存在");
+  assert.equal(flash.props.className.includes("dshi_tabIco-flashbacks"), true, "专属图标类");
+  assert.equal(flash.props.className.includes("dshi_tabIco "), true, "图标标记类");
   // 图标是 CSS mask 伪元素，label 是按钮唯一 children：不许 emoji、不许塞图形文本。
-  assert.equal(/\p{Extended_Pictographic}/u.test([].concat(last.children).join("")), false, "label 无 emoji");
+  assert.equal(/\p{Extended_Pictographic}/u.test([].concat(flash.children).join("")), false, "label 无 emoji");
 
   const cssFile = readFileSync(join(WORKQ, "client", "shiori.css"), "utf8");
   const bundleSource = readFileSync(join(WORKQ, "client", "index.js"), "utf8");

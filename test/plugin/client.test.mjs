@@ -3097,7 +3097,7 @@ async function mountTabById(mod, host, tabId, tabName) {
   };
 }
 
-test("R8：新增「L3/topic 记忆管理」tab，顺序在候选/计划之后、预算配置之前", async () => {
+test("R8：tab 栏八项冻结顺序（含 F2 闪回命中 / F4 最近变更）", async () => {
   const services = {
     "remote.session": { list: async () => ({ ok: true, value: { items: [{ sessionId: "session-A" }] } }) },
     "remote.shiori": { getStatus: async () => ({ ok: true, value: { mode: "active", configured: true } }) },
@@ -3107,7 +3107,7 @@ test("R8：新增「L3/topic 记忆管理」tab，顺序在候选/计划之后�
   const labels = flattenVNode(tree)
     .filter((n) => n.type === "button" && String((n.props && n.props.className) || "").includes("dshi_tab"))
     .map((n) => [].concat(n.children).join(""));
-  assert.deepEqual(labels, ["状态", "记忆 L0/L1", "图谱", "候选 / 计划", "L3/topic 记忆管理", "预算配置"]);
+  assert.deepEqual(labels, ["状态", "最近变更", "记忆 L0/L1", "图谱", "候选 / 计划", "L3/topic 记忆管理", "闪回命中", "预算配置"]);
   await cleanup();
 });
 

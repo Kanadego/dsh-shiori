@@ -62,17 +62,27 @@ test("createEmbeddingProvider: 缺配置 / provider none 一律返回 null（默
 
 // ── 2. local / api 显式 NOT_IMPLEMENTED ─────────────────────────────────────
 
-test("createEmbeddingProvider: local / api 显式 NOT_IMPLEMENTED，绝不静默返回 null", () => {
-  for (const config of [
-    { provider: "local", local: { model: "bge-small-zh-v1.5", dims: 512 } },
-    { provider: "api", api: { endpoint: "https://example.invalid/embed", keyRef: "ENV_VAR" } },
-  ]) {
-    assert.throws(
-      () => createEmbeddingProvider(config),
-      (error) => error.code === "NOT_IMPLEMENTED",
-      `provider ${config.provider} must fail loudly, not pretend to be available`,
-    );
-  }
+test("createEmbeddingProvider: local 返回 provider 形状（F1b 已实现，构造期不加载模型）；api 仍 NOT_IMPLEMENTED", () => {
+  // F1b：local 不再是 NOT_IMPLEMENTED，但必须遵守「构造不加载模型、不产文件」的懒加载契约。
+  const local = createEmbeddingProvider({
+    provider: "local",
+    local: { model: "Xenova/bge-small-zh-v1.5", dims: 512, dtype: "fp32", cacheDir: "", mirror: "https://hf-mirror.com/" },
+  });
+  assert.equal(local.kind, "local");
+  assert.equal(local.dims, 512);
+  assert.equal(typeof local.embed, "function");
+  // 构造阶段不许 import 真正的推理后端（否则 apply 路径会被拖慢/拖挂）。
+  assert.equal(
+    Object.keys(local).filter((key) => key !== "kind" && key !== "dims" && key !== "embed").length,
+    0,
+    "provider 只暴露契约形状，不带内部句柄",
+  );
+  // api 本期不做：仍必须显式失败，绝不静默返回 null。
+  assert.throws(
+    () => createEmbeddingProvider({ provider: "api", api: { endpoint: "https://example.invalid/embed", keyRef: "ENV_VAR" } }),
+    (error) => error.code === "NOT_IMPLEMENTED",
+    "provider api must fail loudly, not pretend to be available",
+  );
 });
 
 test("createEmbeddingProvider: 非法 provider 名与缺子字段按 INVALID_INPUT 拒绝", () => {
