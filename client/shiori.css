@@ -114,3 +114,9 @@
 .dshi_restartBanner{position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:1001;display:flex;align-items:center;gap:10px;max-width:640px;background:var(--dshi-warn);color:#fff;border-radius:0 0 var(--dshi-radius-sm) var(--dshi-radius-sm);padding:8px 14px;font-size:var(--dshi-font-sm);line-height:1.5}
 .dshi_restartText{flex:1;word-break:break-word}
 .dshi_restartClose{border:1px solid currentColor;background:none;color:inherit;font:inherit;font-size:var(--dshi-font-xs);border-radius:6px;padding:2px 8px;cursor:pointer}
+/* F4「最近变更」tab 图标（时钟）与 F7 只读黄条/置灰提示、时间线扫描截断提示。 */
+.dshi_tabIco-timeline{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%278%27 cy=%278%27 r=%276.2%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3Cpath d=%27M8 4.6V8l2.4 1.6%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linecap=%27round%27/%3E%3C/svg%3E')}
+.dshi_roBanner{border:1px solid var(--dshi-warn);background:rgba(180,83,9,.10);color:var(--dshi-warn);border-radius:8px;padding:8px 12px;font-size:12px;line-height:1.5;word-break:break-word}
+.dshi_roHint{font-size:11px;color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:8px;padding:4px 8px;word-break:break-word}
+.dshi_tlScan{font-size:11px;color:var(--dshi-warn)}
+.dshi_tlDedupe{border-color:var(--dshi-l3);color:var(--dshi-l3)}

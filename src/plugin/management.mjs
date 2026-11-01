@@ -105,6 +105,18 @@ export function createManagement(deps) {
     guard.assertWritable();
   }
 
+  /**
+   * F7 面板黄条数据源：getStatus.diagnostics.readonly 透出只读状态
+   * （writable/readonly/holder/座位心跳细节）。与 assertHostWritable 同一取值
+   * 函数口径；guard 未挂（inert/shadow/未 start）时为 null，面板无黄条。
+   * diagnostics 块在 wire 上是 additionalProperties:true，纯增量（typertRpc 同例），
+   * 不改描述符。
+   */
+  function readonlyGuardStatus() {
+    const guard = typeof deps.readonlyGuard === "function" ? deps.readonlyGuard() : deps.readonlyGuard;
+    return guard !== undefined && guard !== null && typeof guard.status === "function" ? guard.status() : null;
+  }
+
   function requireStarted() {
     if (!isStarted()) {
       fail("INVALID_STATE", "controller is not started", {});
@@ -210,6 +222,9 @@ export function createManagement(deps) {
           // 严格 codec 的实际状态——"strict" = 描述符已注册进宿主 typert registry；
           // "src" = 回退（reason 给出缺席/失败原因）。
           typertRpc: deps.typertRpcInfo?.() ?? { codec: "src", reason: "unknown" },
+          // F7：只读状态（writable=false 时面板显示黄条并置灰写按钮）。
+          // holder 为外部持有者（座位心跳的 pid/startedAt 等）；缺字段时面板回退 PID。
+          readonly: readonlyGuardStatus(),
         },
       };
       if (isInert || !isStarted()) return status;
