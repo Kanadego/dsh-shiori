@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "k": 5,
+  "description": "F1a 离线评测夹具（冻结用例）：对话片段 -> 应命中卡片。kind=literal 的用例触发词原样出现，现有字面匹配必须命中；kind=paraphrase 的用例是转述（原触发词不出现），字面匹配预期落空，留给语义召回（F1b）补位。本夹具同时守护未来对 src/sparks/match.mjs 的任何改动。",
+  "cards": [
+    { "id": "spark-coffee", "title": "用户喝手冲咖啡", "triggers": ["手冲咖啡", "手冲", "磨豆"], "entities": ["咖啡"] },
+    { "id": "spark-cat", "title": "用户的猫叫煤球", "triggers": ["煤球", "小黑猫"], "entities": ["宠物"] },
+    { "id": "spark-zhulong", "title": "项目代号烛龙", "triggers": ["烛龙", "zhulong"], "entities": ["工作"] },
+    { "id": "spark-milktea", "title": "用户在戒奶茶", "triggers": ["戒奶茶", "奶茶"], "entities": ["饮食"] },
+    { "id": "spark-gym", "title": "每周二四晚上健身", "triggers": ["健身", "撸铁", "gym"], "entities": ["运动"] },
+    { "id": "spark-book", "title": "在读《置身事内》", "triggers": ["置身事内", "兰小欢"], "entities": ["阅读"] },
+    { "id": "spark-mom-birthday", "title": "妈妈生日是3月8日", "triggers": ["妈妈生日", "母亲大人生日"], "entities": ["家人"] },
+    { "id": "spark-allergy", "title": "用户对花生过敏", "triggers": ["花生过敏", "花生"], "entities": ["饮食"] },
+    { "id": "spark-shanghai", "title": "用户住上海徐汇", "triggers": ["徐汇", "徐家汇"], "entities": ["位置"] },
+    { "id": "spark-vim", "title": "编辑器用 vim 键位", "triggers": ["vim", "键位"], "entities": ["工具"] }
+  ],
+  "cases": [
+    { "id": "case-l01", "kind": "literal", "utterance": "给我讲讲手冲咖啡的注水手法", "expectCardId": "spark-coffee", "expectTrigger": "手冲咖啡" },
+    { "id": "case-l02", "kind": "literal", "utterance": "煤球昨晚又把我的键盘占了", "expectCardId": "spark-cat", "expectTrigger": "煤球" },
+    { "id": "case-l03", "kind": "literal", "utterance": "烛龙这个项目下个月要立项了吗", "expectCardId": "spark-zhulong", "expectTrigger": "烛龙" },
+    { "id": "case-l04", "kind": "literal", "utterance": "我戒奶茶第十天了，好馋", "expectCardId": "spark-milktea", "expectTrigger": "戒奶茶" },
+    { "id": "case-l05", "kind": "literal", "utterance": "今晚健身房人少，多练了一会儿", "expectCardId": "spark-gym", "expectTrigger": "健身" },
+    { "id": "case-l06", "kind": "literal", "utterance": "《置身事内》第三章讲土地财政", "expectCardId": "spark-book", "expectTrigger": "置身事内" },
+    { "id": "case-l07", "kind": "literal", "utterance": "记得提醒我准备妈妈生日的礼物", "expectCardId": "spark-mom-birthday", "expectTrigger": "妈妈生日" },
+    { "id": "case-l08", "kind": "literal", "utterance": "刚才那碟花生就别给我了，花生过敏", "expectCardId": "spark-allergy", "expectTrigger": "花生过敏" },
+    { "id": "case-l09", "kind": "literal", "utterance": "徐汇这边周末有市集吗", "expectCardId": "spark-shanghai", "expectTrigger": "徐汇" },
+    { "id": "case-l10", "kind": "literal", "utterance": "把我的 vim 配置同步到新机器", "expectCardId": "spark-vim", "expectTrigger": "vim" },
+    { "id": "case-l11", "kind": "literal", "utterance": "今天磨豆子的时候发现豆子受潮了", "expectCardId": "spark-coffee", "expectTrigger": "磨豆" },
+    { "id": "case-l12", "kind": "literal", "utterance": "小黑猫今天特别黏人", "expectCardId": "spark-cat", "expectTrigger": "小黑猫" },
+    { "id": "case-p01", "kind": "paraphrase", "utterance": "他家那套滤杯和细口壶摆得整整齐齐，一早就给自己来了杯黑咖", "expectCardId": "spark-coffee" },
+    { "id": "case-p02", "kind": "paraphrase", "utterance": "家里那只黑毛小家伙今天又把杯子碰倒了", "expectCardId": "spark-cat" },
+    { "id": "case-p03", "kind": "paraphrase", "utterance": "代号的那个项目下个月总算要正式立项了", "expectCardId": "spark-zhulong" },
+    { "id": "case-p04", "kind": "paraphrase", "utterance": "那种带糖的茶饮我已经十天没碰了，馋得不行", "expectCardId": "spark-milktea" },
+    { "id": "case-p05", "kind": "paraphrase", "utterance": "周二和周四晚上都去举铁了，练完特别踏实", "expectCardId": "spark-gym" },
+    { "id": "case-p06", "kind": "paraphrase", "utterance": "那本讲中国经济治理的书我翻到第三章了，写得真透", "expectCardId": "spark-book" },
+    { "id": "case-p07", "kind": "paraphrase", "utterance": "三月初得订个蛋糕，妈妈的生日快到了", "expectCardId": "spark-mom-birthday" },
+    { "id": "case-p08", "kind": "paraphrase", "utterance": "点外卖记得备注无坚果，碰不得那种地上的干果", "expectCardId": "spark-allergy" },
+    { "id": "case-p09", "kind": "paraphrase", "utterance": "我家离龙华中路两站地，周末喜欢逛附近的市集", "expectCardId": "spark-shanghai" },
+    { "id": "case-p10", "kind": "paraphrase", "utterance": "新机器上我把编辑器切回了以前那套 modal 快捷键", "expectCardId": "spark-vim" },
+    { "id": "case-p11", "kind": "paraphrase", "utterance": "现在每天早上不喝一杯自己滤的深烘黑咖就没法开工", "expectCardId": "spark-coffee" },
+    { "id": "case-p12", "kind": "paraphrase", "utterance": "那只通体乌黑的小家伙最近学会开衣柜门了", "expectCardId": "spark-cat" }
+  ]
+}
