@@ -104,7 +104,20 @@ window.__ModuleLoader__.load({
 ".dshi_fieldRow{display:flex;align-items:baseline;gap:var(--dshi-space-sm);flex-wrap:wrap}" +
 ".dshi_modBadge{border:1px solid var(--dshi-warn);color:var(--dshi-warn);border-radius:var(--dshi-radius-pill);padding:0 8px;font-size:10px;white-space:nowrap}" +
 ".dshi_fieldError{font-size:var(--dshi-font-xs);color:var(--dshi-danger)}" +
-".dshi_blockError{border:var(--dshi-stroke);border-color:var(--dshi-danger);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm);font-size:var(--dshi-font-sm);color:var(--dshi-danger)}";
+".dshi_blockError{border:var(--dshi-stroke);border-color:var(--dshi-danger);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm);font-size:var(--dshi-font-sm);color:var(--dshi-danger)}" +
+    ".dshi_mdPreview{border:var(--dshi-stroke);background:var(--dshi-bg-panel);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm) var(--dshi-space);max-height:320px;overflow:auto;display:flex;flex-direction:column;gap:var(--dshi-space-xs);font-size:var(--dshi-font-sm)}" +
+    ".dshi_mdH1{font-size:var(--dshi-font-title);font-weight:600;margin-top:var(--dshi-space-xs)}" +
+    ".dshi_mdH2{font-size:var(--dshi-font);font-weight:600;margin-top:var(--dshi-space-xs)}" +
+    ".dshi_mdH3{font-size:var(--dshi-font-sm);font-weight:600;margin-top:var(--dshi-space-xs)}" +
+    ".dshi_mdP{white-space:pre-wrap;word-break:break-word}" +
+    ".dshi_mdList{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:2px}" +
+    ".dshi_mdQuote{margin:0;border-left:3px solid var(--dsw-alias-border-l2,#dce2eb);padding:2px 10px;color:var(--dshi-text-dim);white-space:pre-wrap;word-break:break-word}" +
+    ".dshi_mdPre{margin:0;font-family:ui-monospace,Consolas,monospace;font-size:var(--dshi-font-xs);line-height:1.6;white-space:pre-wrap;word-break:break-word;background:var(--dshi-bg-panel);border:var(--dshi-stroke);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}" +
+    ".dshi_mdCode{font-family:ui-monospace,Consolas,monospace;font-size:var(--dshi-font-xs);background:var(--dshi-bg-panel);border:var(--dshi-stroke);border-radius:var(--dshi-radius-sm);padding:0 4px;word-break:break-all}" +
+    ".dshi_mdBold{font-weight:600}" +
+    ".dshi_memEditor{min-height:320px}" +
+    ".dshi_empty{font-size:var(--dshi-font-sm);color:var(--dshi-text-dim);border:1px dashed var(--dsw-alias-border-l2,#dce2eb);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm) var(--dshi-space);line-height:1.7}" +
+    ".dshi_conflict{font-size:var(--dshi-font-sm);color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}";
     function ensureStyle() {
       try {
         if (document.getElementById("dsh-shiori-style")) return;
@@ -755,7 +768,9 @@ window.__ModuleLoader__.load({
       var editingState = useState(null);   // null | "l0" | "l1"
       var editing = editingState[0];
       var setEditing = editingState[1];
-      var draftState = useState("");
+      // 草稿按层保留（{l0:"...", l1:"..."}）：取消编辑不落盘也不清空已输入的
+      // 内容，重进编辑时若该层已有草稿则继续用草稿，不回填服务端版本。
+      var draftState = useState(null);
       var draft = draftState[0];
       var setDraft = draftState[1];
       var busyState = useState(false);
@@ -778,57 +793,188 @@ window.__ModuleLoader__.load({
       var l1 = view && (view.l1 || view.core);
       var budgets = (view && view.budgets) || props.budgets || {};
 
+      // 编辑初值：L1 的 text 是服务端渲染视图（core 正文 + 派生主题索引），整段写回
+      // 会把索引固化进 core，必须用 body（磁盘正文）。L0 没有派生部分，照旧用 text。
+      var initialDraftFor = function (kind, layer) {
+        if (kind === "l1" && layer && typeof layer.body === "string") return layer.body;
+        if (typeof layer === "string") return layer;
+        return String((layer && (layer.text ?? layer.content)) ?? "");
+      };
+      var draftFor = function (kind) {
+        return draft && typeof draft[kind] === "string" ? draft[kind] : "";
+      };
       var beginEdit = function (kind) {
+        if (!view) return;   // 数据未加载不进编辑，避免对着空壳误写
         var layer = kind === "l0" ? l0 : l1;
-        if (!layer) return;
         setEditing(kind);
-        // L1 的 text 是服务端渲染视图（core 正文 + 派生主题索引），整段写回会把索引
-        // 固化进 core；编辑初值必须用 body（磁盘正文）。L0 没有派生部分，照旧用 text。
-        setDraft(kind === "l1" && typeof layer.body === "string"
-          ? layer.body
-          : String(layer.text ?? layer.content ?? ""));
         setOk(null);
         setSaveError(null);
+        // 草稿按层保留：取消后重进编辑不清空用户已输入的内容，
+        // 只在该层还没有草稿时才回填服务端当前版本。
+        if (!draft || typeof draft[kind] !== "string") {
+          var patch = {};
+          patch[kind] = initialDraftFor(kind, layer);
+          setDraft(Object.assign({}, draft, patch));
+        }
       };
-      var cancelEdit = function () { setEditing(null); setDraft(""); setSaveError(null); };
+      // 取消：退出编辑、不落盘、不清空草稿（用户已输入的内容保留）。
+      var cancelEdit = function () { setEditing(null); setOk(null); setSaveError(null); };
       // 保存复用 executeTool（与面板其它写操作同一条链路）：L0 走 soul_update，
-      // L1 走 core_write 并带上服务端返回的 revision 做 CAS——revision 过期会报错，
-      // 不静默覆盖别人的修改。
+      // L1 走 core_write 并始终带 expectedRevision 做 CAS——revision 过期服务端报
+      // REVISION_CONFLICT，不静默覆盖别人的修改；冲突时停在编辑态、草稿原样保留。
       var save = async function () {
         if (!editing) return;
         var kind = editing;
+        var text = draftFor(kind);
         setBusy(true);
         setSaveError(null);
         setOk(null);
         try {
           if (kind === "l0") {
-            await props.dsh.call("executeTool", props.sessionId, { name: "soul_update", args: { content: draft } });
+            await props.dsh.call("executeTool", props.sessionId, { name: "soul_update", args: { content: text } });
           } else {
-            var args = { content: draft };
-            if (l1 && l1.revision !== undefined) args.expectedRevision = l1.revision;
+            // core_write 的 expectedRevision 是硬性要求（string，或首次创建时的
+            // null）；拿不到 revision 时传 null 让服务端拒绝，绝不静默覆盖。
+            var args = {
+              content: text,
+              expectedRevision: (l1 && l1.revision !== undefined && l1.revision !== null) ? l1.revision : null
+            };
             await props.dsh.call("executeTool", props.sessionId, { name: "core_write", args: args });
           }
+          var cleared = {};
+          cleared[kind] = "";
+          setDraft(Object.assign({}, draft, cleared));
           setEditing(null);
-          setDraft("");
           setOk(kind === "l0" ? "人设卡已保存（下一轮对话即生效）" : "记忆核心已保存");
           await load();
         } catch (e) {
+          // 冲突/失败都不丢草稿：停在编辑态，已输入的内容原样保留在文本框里。
           setSaveError(e);
         } finally {
           setBusy(false);
         }
       };
+      // ── 预览态：markdown 安全子集渲染 ─────────────────────────────────
+      // 只支持：标题（# ~ ###）、无序/有序列表、引用块、粗体、行内代码、围栏
+      // 代码块。全部经 DOM API（React 元素 + 文本节点）构建，绝不 innerHTML——
+      // 记忆内容只会以字符串子节点的形式出现，<script>/<img onerror> 之类
+      // 一律按字面显示；不支持的语法（#### 四级标题、未闭合的 ** / ` 等）
+      // 按原样文本显示，不吞内容。
+      var mdInline = function (text) {
+        var out = [];
+        var rest = String(text);
+        var buf = "";
+        var flush = function () { if (buf !== "") { out.push(buf); buf = ""; } };
+        while (rest.length > 0) {
+          var tick = rest.indexOf("`");
+          var star = rest.indexOf("**");
+          if (tick < 0 && star < 0) { buf += rest; break; }
+          if (tick >= 0 && (star < 0 || tick < star)) {
+            var endTick = rest.indexOf("`", tick + 1);
+            if (endTick < 0) { buf += rest; break; }   // 未闭合：按字面输出
+            flush();
+            out.push(h("code", { key: out.length, className: "dshi_mdCode" }, rest.slice(tick + 1, endTick)));
+            rest = rest.slice(endTick + 1);
+          } else {
+            var endStar = rest.indexOf("**", star + 2);
+            if (endStar < 0) { buf += rest; break; }   // 未闭合：按字面输出
+            flush();
+            out.push(h("strong", { key: out.length, className: "dshi_mdBold" }, rest.slice(star + 2, endStar)));
+            rest = rest.slice(endStar + 2);
+          }
+        }
+        flush();
+        return out;
+      };
+      var mdBlocks = function (text) {
+        var lines = String(text).split(/\r\n|\n|\r/);
+        var blocks = [];
+        var i = 0;
+        var isBlockStart = /^(#{1,3}\s|[-*]\s|\d+[.)]\s|>|```)/;
+        while (i < lines.length) {
+          var line = lines[i];
+          if (/^\s*```/.test(line)) {
+            // 围栏代码块：内容整体作为单个文本节点，不做任何行内解析。
+            var codeLines = [];
+            i += 1;
+            while (i < lines.length && !/^\s*```/.test(lines[i])) { codeLines.push(lines[i]); i += 1; }
+            if (i < lines.length) i += 1;   // 跳过闭合围栏；未闭合到结尾也照常收块
+            blocks.push(h("pre", { key: blocks.length, className: "dshi_mdPre" }, codeLines.join("\n")));
+            continue;
+          }
+          var heading = line.match(/^(#{1,3})\s+(.*)$/);
+          if (heading) {
+            blocks.push(h("div", { key: blocks.length, className: "dshi_mdH" + heading[1].length }, mdInline(heading[2])));
+            i += 1;
+            continue;
+          }
+          if (/^\s*>\s?/.test(line)) {
+            var quoteLines = [];
+            while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+              quoteLines.push(lines[i].replace(/^\s*>\s?/, ""));
+              i += 1;
+            }
+            blocks.push(h("blockquote", { key: blocks.length, className: "dshi_mdQuote" }, mdInline(quoteLines.join("\n"))));
+            continue;
+          }
+          if (/^\s*[-*]\s+/.test(line)) {
+            var ulItems = [];
+            while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+              ulItems.push(h("li", { key: ulItems.length }, mdInline(lines[i].replace(/^\s*[-*]\s+/, ""))));
+              i += 1;
+            }
+            blocks.push(h("ul", { key: blocks.length, className: "dshi_mdList" }, ulItems));
+            continue;
+          }
+          if (/^\s*\d+[.)]\s+/.test(line)) {
+            var olItems = [];
+            while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
+              olItems.push(h("li", { key: olItems.length }, mdInline(lines[i].replace(/^\s*\d+[.)]\s+/, ""))));
+              i += 1;
+            }
+            blocks.push(h("ol", { key: blocks.length, className: "dshi_mdList" }, olItems));
+            continue;
+          }
+          if (line.trim() === "") { i += 1; continue; }
+          var paraLines = [line];
+          i += 1;
+          while (i < lines.length && lines[i].trim() !== "" && !isBlockStart.test(lines[i])) {
+            paraLines.push(lines[i]);
+            i += 1;
+          }
+          blocks.push(h("div", { key: blocks.length, className: "dshi_mdP" }, mdInline(paraLines.join("\n"))));
+        }
+        return blocks;
+      };
+      var layerRawText = function (layer) {
+        if (typeof layer === "string") return layer;
+        return String((layer && (layer.text ?? layer.content ?? layer.rendered)) ?? "");
+      };
+      // 空状态：说明记忆怎么组织、从哪里开始写第一条、需要先配置什么，不留白。
+      var renderEmptyLayer = function (kind, title) {
+        var guide = kind === "l0"
+          ? "人设卡（L0）还是空的。记忆按层组织：L0 是每轮对话常驻注入的身份与规则卡，L1 是记忆核心，更细的事实记录在 L2/L3（由记忆工具与候选整理维护）。写第一条：点下方「编辑」，写下这份人设的身份、语气与边界，保存后下一轮对话即生效。开始前请先确认面板处于 active 模式，并在「预算配置」里设置人设卡最大字符数。"
+          : "记忆核心（L1）还是空的。它是长期记忆的正文区，服务端渲染时会自动在正文后附加主题索引，不用手写。写第一条：点下方「编辑」，用一段话记录值得长期记住的事实或偏好，保存即生效。开始前请先确认面板处于 active 模式，并在「预算配置」里设置记忆核心的目标字符数与硬上限。";
+        return h("div", { className: "dshi_card" },
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_cardTitle" }, title),
+            h("span", { style: { flex: 1 } }),
+            h("button", { className: "dshi_btn", onClick: function () { beginEdit(kind); } }, "编辑")),
+          h("div", { className: "dshi_empty" }, guide));
+      };
       var renderLayer = function (kind, title, layer, hint) {
-        if (!layer) return null;
         var isEditing = editing === kind;
+        var rawText = layerRawText(layer);
+        // 空状态：层缺数据或正文为空时给引导文案（编辑中除外，编辑态照常给文本框）。
+        if ((!layer || rawText.trim() === "") && !isEditing) return renderEmptyLayer(kind, title);
         // revision 是 shiori-r1.<base64>.<sha256> 的长 token，直接铺在标题行会顶出屏幕：
         // 只显示前缀，完整值放 title 属性，需要时悬停看。
-        var revisionText = layer.revision === undefined || layer.revision === null ? "" : "rev " + shortRev(layer.revision);
+        var revisionText = layer && layer.revision !== undefined && layer.revision !== null ? "rev " + shortRev(layer.revision) : "";
         return h("div", { className: "dshi_card" },
           h("div", { className: "dshi_row" },
             h("span", { className: "dshi_cardTitle" }, title),
             revisionText ? h("span", { className: "dshi_badgeDim dshi_badge", title: "完整版本号：" + String(layer.revision) }, revisionText) : null,
-            layer.stale === true ? h("span", { className: "dshi_badge dshi_badgeWarn" }, "磁盘已被外部修改") : null,
+            layer && layer.stale === true ? h("span", { className: "dshi_badge dshi_badgeWarn" }, "磁盘已被外部修改") : null,
             h("span", { style: { flex: 1 } }),
             isEditing
               ? h(fragment, null,
@@ -838,12 +984,18 @@ window.__ModuleLoader__.load({
           hint ? h("div", { className: "dshi_hint" }, hint) : null,
           isEditing
             ? h("textarea", {
-                className: "dshi_textarea",
-                value: draft,
-                rows: 18,
-                onChange: function (event) { setDraft(event.target.value); }
+                className: "dshi_textarea dshi_memEditor",
+                value: draftFor(kind),
+                onChange: function (event) {
+                  var value = event && event.target ? event.target.value : "";
+                  setDraft(function (prev) {
+                    var next = Object.assign({}, prev);
+                    next[kind] = value;
+                    return next;
+                  });
+                }
               })
-            : h("pre", { className: "dshi_pre" }, String(layer.text ?? layer.content ?? layer.rendered ?? "")));
+            : h("div", { className: "dshi_mdPreview" }, mdBlocks(rawText)));
       };
 
       return h("div", null,
@@ -852,6 +1004,10 @@ window.__ModuleLoader__.load({
           h("button", { className: "dshi_btn", onClick: load }, "刷新")),
         ErrorBox(error),
         saveError ? ErrorBox(saveError) : null,
+        saveError && saveError.code === "REVISION_CONFLICT"
+          ? h("div", { className: "dshi_conflict" },
+            "记忆已在别处更新，请重新加载后再改。你的草稿仍保留在编辑框里，点上方「刷新」取回最新版本后再保存，已输入的内容不会丢失。")
+          : null,
         okText ? h("div", { className: "dshi_ok" }, okText) : null,
         view ? h(fragment, null,
           h("div", { className: "dshi_grid2" },
