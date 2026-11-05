@@ -167,7 +167,21 @@ window.__ModuleLoader__.load({
 ".dshi_roBanner{border:1px solid var(--dshi-warn);background:rgba(180,83,9,.10);color:var(--dshi-warn);border-radius:8px;padding:8px 12px;font-size:12px;line-height:1.5;word-break:break-word}" +
 ".dshi_roHint{font-size:11px;color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:8px;padding:4px 8px;word-break:break-word}" +
 ".dshi_tlScan{font-size:11px;color:var(--dshi-warn)}" +
-".dshi_tlDedupe{border-color:var(--dshi-l3);color:var(--dshi-l3)}";
+".dshi_tlDedupe{border-color:var(--dshi-l3);color:var(--dshi-l3)}" +
+    // U5 整理与遗忘页：筛选条（chips）、搜索框、kind 分组组头、就地预览 diff 区。
+    // 只引用 --dshi-* token；diff 区最小高度 240px、可滚动、字号不小于 12px。
+".dshi_filterBar{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap}" +
+".dshi_filterChip{border:1px solid var(--dsw-alias-border-l2,#dce2eb);background:var(--dshi-bg-card);color:var(--dshi-text-dim);border-radius:var(--dshi-radius-pill);padding:2px 10px;font:inherit;font-size:var(--dshi-font-xs);cursor:pointer}" +
+".dshi_filterChip:hover{color:var(--dshi-text)}" +
+".dshi_filterChipOn{border-color:transparent;background:linear-gradient(135deg,var(--dshi-accent-a),var(--dshi-accent-b));color:#fff;font-weight:600}" +
+".dshi_searchInput{flex:1;min-width:160px;max-width:240px}" +
+".dshi_groupHead{display:flex;align-items:center;gap:var(--dshi-space-xs);cursor:pointer;border:none;background:none;padding:2px 0;font:inherit;font-size:var(--dshi-font-sm);font-weight:600;color:var(--dshi-text);text-align:left}" +
+".dshi_groupHead:hover{color:var(--dshi-accent)}" +
+".dshi_groupCount{font-size:var(--dshi-font-xs);font-weight:400;color:var(--dshi-text-dim)}" +
+".dshi_diffBox{display:flex;flex-direction:column;gap:var(--dshi-space-sm);min-height:240px;max-height:480px;overflow:auto;border:var(--dshi-stroke);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}" +
+".dshi_diffBox .dshi_pre{font-size:var(--dshi-font-sm)}" +
+".dshi_kindGroup{display:flex;flex-direction:column;gap:var(--dshi-space-xs)}" +
+".dshi_advanced{display:flex;flex-direction:column;gap:var(--dshi-space-xs);margin-top:var(--dshi-space-xs)}";
     function ensureStyle() {
       try {
         if (document.getElementById("dsh-shiori-style")) return;
@@ -777,7 +791,14 @@ window.__ModuleLoader__.load({
 
     function ErrorBox(error) {
       if (!error) return null;
-      return h("div", { className: "dshi_error" }, (error.code ? "[" + error.code + "] " : "") + (error.message || String(error)));
+      // U5：人话提示在盒子正文；服务端原始错误收进默认折叠的 details（排查用），
+      // 不再把原始大红字直接顶出来。detail 由 candidateActionError 等映射层携带。
+      var detail = error.detail !== undefined && error.detail !== null ? String(error.detail) : null;
+      return h("div", { className: "dshi_error" },
+        (error.code ? "[" + error.code + "] " : "") + (error.message || String(error)),
+        detail ? h("details", { className: "dshi_details" },
+          h("summary", { className: "dshi_hint" }, "原始错误信息"),
+          h("pre", { className: "dshi_pre" }, detail)) : null);
     }
 
     // U3 水位三档具名常量：ratio < WATER_WARN_RATIO 正常、达到 WATER_WARN_RATIO 警示、
@@ -1903,21 +1924,24 @@ window.__ModuleLoader__.load({
       if (after.length === before.length) return "合并后正文与原正文相同（没有任何变化），服务端会拒绝。";
       return null;
     }
-    // Q-B：候选/计划脏数据的人话错误（保留原 code，便于排查）。
+    // Q-B：候选/计划脏数据的人话错误（保留原 code 便于排查）。
+    // U5：服务端原文不再拼进 message 顶大红字——放 detail 字段，ErrorBox 收进
+    // 默认折叠的 details。映射口径：候选已变化 → 请刷新后重新分析；
+    // REVISION_CONFLICT → 队列已更新请刷新；NOT_FOUND → 该候选已不存在。
     function candidateActionError(error) {
       var code = error && error.code ? String(error.code) : "";
       var detail = (error && error.message) || String(error);
       if (code === "NOT_FOUND") {
-        return { code: code, message: "该候选或计划已过期：源卡可能已被合并 / 归档，或计划已不存在。请点「刷新」重新分析后再试。（原始信息：" + detail + "）" };
+        return { code: code, message: "该候选已不存在：该候选或计划已过期（源卡可能已被合并 / 归档，或计划已不存在）。请点「刷新」重新分析后再试。", detail: detail };
       }
       if (code === "INVALID_INPUT") {
-        return { code: code, message: "服务端拒绝了这次操作：数据可能已过期（请点「刷新」重新分析），或参数未通过服务端校验。（原始信息：" + detail + "）" };
+        return { code: code, message: "服务端拒绝了这次操作：候选内容可能已变化，请刷新后重新分析；若在高级区手写 proposal，请检查它是否符合协议形状。", detail: detail };
       }
       if (code === "REVISION_CONFLICT") {
-        return { code: code, message: "revision 冲突：该计划可能已被执行，或主题 / 队列在此期间被修改。请刷新后重新预览，不要重试旧预览。（原始信息：" + detail + "）" };
+        return { code: code, message: "revision 冲突：队列已更新，请刷新后重新预览 / 执行，不要重试旧预览（该计划可能已被执行，或主题 / 队列在此期间被修改）。", detail: detail };
       }
       if (code === "UNSUPPORTED") {
-        return { code: code, message: "服务端不支持该操作（例如 legacy 主题只读，不能作为合并目标）。（原始信息：" + detail + "）" };
+        return { code: code, message: "服务端不支持该操作（例如 legacy 主题只读，不能作为合并目标）。", detail: detail };
       }
       return error;
     }
@@ -1941,6 +1965,15 @@ window.__ModuleLoader__.load({
     // 未知 kind / status 保留原文，绝不吞掉服务端新增的分类。
     var CANDIDATE_KIND_LABELS = { cluster: "集群", isolated: "孤立卡", link: "可建链接" };
     var CANDIDATE_STATUS_LABELS = { pending: "待处理", reviewed: "已阅", dismissed: "已忽略" };
+    // U5：候选分组（渲染顺序即组顺序；kind 缺失 / 未知归入「其他」）与状态筛选条。
+    // 筛选只是前端视图（协议仍发 decision=reviewed / dismissed），「已阅」分组可切回。
+    var CANDIDATE_FILTERS = [["all", "全部"], ["pending", "待处理"], ["reviewed", "已阅"], ["dismissed", "已忽略"]];
+    var CANDIDATE_KIND_GROUPS = [
+      { kind: "cluster", label: "集群" },
+      { kind: "link", label: "可建链接" },
+      { kind: "isolated", label: "孤立卡" },
+      { kind: "other", label: "其他" }
+    ];
     var PLAN_STATE_LABELS = { open: "待执行", executed: "已执行", superseded: "已作废" };
     var PLAN_KIND_LABELS = { organize: "整理", forgetting: "遗忘" };
     function candidateKindLabel(kind) {
@@ -2080,6 +2113,26 @@ window.__ModuleLoader__.load({
       var titlesState = useState({});
       var titles = titlesState[0];
       var setTitles = titlesState[1];
+      // ── U5 追加（全部排在既有 hook 之后，老测试的 states[0..6] 布局不变）──────
+      // filter：状态筛选（pending 默认——「稍后再说」后该行立即离开当前分组）；
+      // search：纯前端搜索（标题 / 短 id）；collapsedKinds：kind 分组折叠表
+      // （孤立卡默认折叠；计划卡里已执行/已作废分组用原生 details 折叠，不需要状态）；
+      // advancedOpen / advancedCandidate：高级手动 proposal 调试区（默认折叠）。
+      var filterState = useState("pending");
+      var filter = filterState[0];
+      var setFilter = filterState[1];
+      var searchState = useState("");
+      var search = searchState[0];
+      var setSearch = searchState[1];
+      var collapsedKindsState = useState({ isolated: true });
+      var collapsedKinds = collapsedKindsState[0];
+      var setCollapsedKinds = collapsedKindsState[1];
+      var advancedOpenState = useState(false);
+      var advancedOpen = advancedOpenState[0];
+      var setAdvancedOpen = advancedOpenState[1];
+      var advancedCandidateState = useState("");
+      var advancedCandidate = advancedCandidateState[0];
+      var setAdvancedCandidate = advancedCandidateState[1];
       // F7：只读态（另一实例在写）——analyze / review / preview / execute 与合并
       // 流程全部置灰（服务端 assertHostWritable 同口径），页内黄字说明原因。
       var ro = props.readOnly === true;
@@ -2190,51 +2243,69 @@ window.__ModuleLoader__.load({
           setBusy(false);
         }
       };
-      var doPreviewOrganize = function (candidateId) {
-        // B-Q2：空 proposal（默认态）不发送——按候选 kind 预填：link 候选给带真实
-        // 源卡 id 的骨架；cluster 候选指引走「合并进主题」（merge-topic 需服务端
-        // 签发的 revision token，文本框手写必然失败）。
-        var candidate = null;
+      // U5：行内候选查找（真机 queueDto 与旧扁平形状都兼容，queueItemCandidate 统一入口）。
+      var findCandidateById = function (candidateId) {
         for (var i = 0; i < items.length; i++) {
           var c = queueItemCandidate(items[i]);
-          if (c && c.id !== undefined && c.id !== null && String(c.id) === String(candidateId)) {
-            candidate = c;
-            break;
-          }
+          if (c && c.id !== undefined && c.id !== null && String(c.id) === String(candidateId)) return c;
         }
-        var text = String(proposal ?? "");
-        if (text.trim() === "") {
+        return null;
+      };
+      // U5：发送 organize 预览并就地钉定 targetId——预览确认卡渲染在该候选行正下方
+      // （复用合并卡的就地展开写法），不再依赖底部共享状态。
+      var sendOrganizePreview = function (candidateId, parsed) {
+        setPreviewError(null);
+        var origin = mark();
+        guardPreview(async function () {
+          var result = await props.dsh.call("previewPlan", props.sessionId, withRevision({ kind: "organize", candidateId: candidateId, proposal: parsed, operationId: newId() }));
+          if (isStale(origin)) return;
+          setPreview({ sessionId: props.sessionId, plan: result, queueRevision: queueRevision, targetId: String(candidateId) });
+        });
+      };
+      var doPreviewOrganize = function (candidateId) {
+        // U5 根因修复：底部共享 proposal 文本框已删除。此前它是全局单一 state——
+        // 点 A 行先预填骨架再点 B 行时文本框非空，B 行的 candidateId 配了 A 行的
+        // 骨架 → 服务端校验失败报 INVALID_INPUT。现在点行按钮直接按该候选生成
+        // 骨架并发送 previewPlan，不再需要人编辑 JSON；手写入口收进高级调试区。
+        var candidate = findCandidateById(candidateId);
+        var parsed = null;
+        try {
+          parsed = JSON.parse(proposalSkeleton(candidate));
+        } catch (e) {
+          parsed = null;
+        }
+        // Q-B：死 payload（如骨架异常）在本地拦下，不发必然失败的 RPC。
+        var problem = parsed === null ? "proposal 骨架生成失败（候选数据异常），请刷新后重试。" : validateOrganizeProposalLocal(parsed);
+        if (problem) {
           setPreview(null);
-          if (candidate && String(candidate.kind) === "cluster") {
-            setPreviewError({ code: "ui/use-merge-flow", message: "cluster 候选请使用「合并进主题」一键流程（自动选/建主题并带服务端签发的 revision token）；手动 merge-topic 需要真实 token，不在文本框手写。" });
-            return;
-          }
-          setProposal(proposalSkeleton(candidate));
-          setPreviewError({ code: "ui/proposal-prefilled", message: "已按该候选预填 link 骨架（源卡 id 来自候选）。请确认 target 是另一张真实卡 id 后，再点「preview organize」发送。" });
+          setPreviewError({ code: "ui/invalid-proposal", message: problem });
+          return;
+        }
+        sendOrganizePreview(candidateId, parsed);
+      };
+      // U5：高级调试区手写 proposal（原 B-Q2 口径：本地校验 → 发送）。
+      var doPreviewManual = function () {
+        var manualId = String(advancedCandidate ?? "").trim();
+        if (!manualId) {
+          setPreview(null);
+          setPreviewError({ code: "ui/invalid-proposal", message: "请先填要预览的候选完整 id（从候选行的 title 或「原始数据」里复制）。" });
           return;
         }
         var parsed;
         try {
-          parsed = JSON.parse(text);
+          parsed = JSON.parse(String(proposal ?? ""));
         } catch (e) {
           setPreview(null);
           setPreviewError({ code: "ui/invalid-json", message: "proposal JSON 解析失败：" + e.message });
           return;
         }
-        // Q-B：死 payload（如空 links）在本地拦下，不发必然失败的 RPC。
         var problem = validateOrganizeProposalLocal(parsed);
         if (problem) {
           setPreview(null);
           setPreviewError({ code: "ui/invalid-proposal", message: problem });
           return;
         }
-        setPreviewError(null);
-        var origin = mark();
-        guardPreview(async function () {
-          var result = await props.dsh.call("previewPlan", props.sessionId, withRevision({ kind: "organize", candidateId: candidateId, proposal: parsed, operationId: newId() }));
-          if (isStale(origin)) return;
-          setPreview({ sessionId: props.sessionId, plan: result });
-        });
+        sendOrganizePreview(manualId, parsed);
       };
       var doPreviewForgetting = function (planId) {
         setPreviewError(null);
@@ -2242,7 +2313,7 @@ window.__ModuleLoader__.load({
         guardPreview(async function () {
           var result = await props.dsh.call("previewPlan", props.sessionId, { kind: "forgetting", planId: planId });
           if (isStale(origin)) return;
-          setPreview({ sessionId: props.sessionId, plan: result });
+          setPreview({ sessionId: props.sessionId, plan: result, targetId: String(planId) });
         });
       };
       // R4：确认执行前校验 preview 钉住的来源会话与当前会话一致，不一致拒绝发送
@@ -2470,6 +2541,191 @@ window.__ModuleLoader__.load({
                 h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy || ro, onClick: doMergePreview }, "预览 diff（previewPlan）"))) : null
           ));
       };
+      // ── U5：筛选 / 搜索 / kind 分组 / 就地预览（纯前端推导，协议与守卫不变）───
+      // 候选人话标题：集群说共享词 + 卡数，链接说「A ↔ B」，孤立卡直接给源卡标题；
+      // 都没有时退化成短 id（titles 拉不到图谱时为空对象）。
+      var candidateTitleOf = function (candidate) {
+        var sourceIds = candidate && Array.isArray(candidate.sources)
+          ? candidate.sources.map(function (s) { return String(s && s.id); }).filter(Boolean) : [];
+        var sourceTitles = sourceIds.map(function (id) { return titles[id] || shortId(id); });
+        var evidence = candidate && candidate.evidence && typeof candidate.evidence === "object" ? candidate.evidence : {};
+        var candidateKind = candidate && candidate.kind ? String(candidate.kind) : "";
+        if (candidateKind === "cluster") {
+          var sharedTerm = evidence.sharedTerm || evidence.field;
+          return sharedTerm
+            ? "合并「" + String(sharedTerm) + "」相关的 " + sourceIds.length + " 张卡"
+            : "合并 " + sourceIds.length + " 张卡";
+        }
+        if (candidateKind === "link" && sourceTitles.length >= 2) return "连接：" + sourceTitles.join(" ↔ ");
+        if (sourceTitles.length === 1) return sourceTitles[0];
+        if (sourceTitles.length > 1) return sourceTitles.join("、");
+        return null;
+      };
+      var statusOfItem = function (item) {
+        return item && item.status ? String(item.status) : "pending";
+      };
+      var searchQuery = String(search ?? "").trim().toLowerCase();
+      var rowVisible = function (item, candidate) {
+        if (filter !== "all" && statusOfItem(item) !== filter) return false;
+        if (searchQuery) {
+          var id = candidate && candidate.id !== undefined && candidate.id !== null ? String(candidate.id) : "";
+          var hay = ((candidateTitleOf(candidate) || "") + " " + id + " " + (id ? shortId(id) : "")).toLowerCase();
+          if (hay.indexOf(searchQuery) === -1) return false;
+        }
+        return true;
+      };
+      var statusCounts = { all: items.length, pending: 0, reviewed: 0, dismissed: 0 };
+      items.forEach(function (item) {
+        var status = statusOfItem(item);
+        if (status === "pending" || status === "reviewed" || status === "dismissed") statusCounts[status] += 1;
+      });
+      var toggleKindGroup = function (kind) {
+        var next = assign({}, collapsedKinds);
+        next[kind] = !(next[kind] === true);
+        setCollapsedKinds(next);
+      };
+      // 预览钉定的目标（候选 id 或计划 id）：有 targetId 且目标行可见 → 就地展开在
+      // 该行正下方；targetId 缺失（旧状态 / 手动注入）或目标行已消失 → 回落到底部卡。
+      var previewTargetId = preview && preview.targetId !== undefined && preview.targetId !== null
+        ? String(preview.targetId) : null;
+      var previewTargetVisible = false;
+      if (previewTargetId !== null) {
+        previewTargetVisible = items.some(function (item) {
+          var c = queueItemCandidate(item);
+          return c && c.id !== undefined && c.id !== null && String(c.id) === previewTargetId;
+        }) || plans.some(function (p) {
+          var pid = p && p.planId !== undefined && p.planId !== null
+            ? String(p.planId)
+            : (p && p.id !== undefined && p.id !== null ? String(p.id) : null);
+          return pid !== null && pid === previewTargetId;
+        });
+      }
+      var showBottomPreview = preview !== null && preview.sessionId === props.sessionId
+        && (previewTargetId === null || !previewTargetVisible);
+      // 就地预览确认卡：内容与旧底部确认卡逐字一致（含 queueRevision / executed 守卫），
+      // 仅外壳复用合并卡的 dshi_itemMerge 就地展开写法；diff 区套 dshi_diffBox
+      // （最小高度 240px、可滚动、字号 ≥12px）。
+      var renderPreviewCard = function (key) {
+        if (!preview || preview.sessionId !== props.sessionId) return null;
+        return h("div", { key: key, className: "dshi_itemMerge", style: { minWidth: 0 } },
+          h("div", { className: "dshi_confirm", style: { marginLeft: 12 } },
+            h("div", { className: "dshi_cardTitle" }, "PlanView 预览（" + String(preview.plan.kind) + "）",
+              h("span", { className: "dshi_mono" }, String(preview.plan.planId)),
+              h("span", { className: "dshi_badgeDim dshi_badge" }, String(preview.plan.planDigest))),
+            preview.plan.summary ? h("div", { className: "dshi_hint" }, String(preview.plan.summary)) : null,
+            Array.isArray(preview.plan.diff) && preview.plan.diff.length > 0 ? h("div", { className: "dshi_diffBox" }, preview.plan.diff.map(function (entry, index) {
+              return h("div", { key: index, className: "dshi_item" },
+                h("div", { className: "dshi_mono" }, String(entry.path ?? index)),
+                h("div", { className: "dshi_hint" }, "old"),
+                h("pre", { className: "dshi_pre" }, String(entry.oldText ?? "")),
+                h("div", { className: "dshi_hint" }, "new"),
+                h("pre", { className: "dshi_pre" }, String(entry.newText ?? "")));
+            })) : h("div", { className: "dshi_hint" }, "（无 diff 条目）"),
+            // Q-B：预览对应的计划若已在 plans 列表里标记 executed / superseded，执行按钮禁用
+            (function () {
+              var row = plans.find(function (p) { return String(p && p.planId) === String(preview.plan && preview.plan.planId); });
+              return row && (row.executed === true || row.superseded === true);
+            })() ? h("div", { className: "dshi_hint" }, "该计划已执行或已被新预览作废（plans 列表标记），执行按钮已禁用。") : null,
+            h("div", { className: "dshi_row" },
+              h("button", {
+                className: "dshi_btn dshi_btnDanger",
+                disabled: busy || ro || (function () {
+                  var row = plans.find(function (p) { return String(p && p.planId) === String(preview.plan && preview.plan.planId); });
+                  return Boolean(row && (row.executed === true || row.superseded === true));
+                })(),
+                onClick: doExecute
+              }, "确认执行（不可撤销）"),
+              h("button", { className: "dshi_btn", disabled: busy, onClick: function () { setPreview(null); } }, "取消"))));
+      };
+      var renderCandidateRow = function (item, index, candidate) {
+        var businessId = candidate && candidate.id !== undefined && candidate.id !== null
+          ? String(candidate.id) : null;
+        var key = businessId !== null ? businessId : String(index);
+        var isCluster = candidate ? String(candidate.kind ?? "") === "cluster" : false;
+        var rowDisabled = actionsDisabled || businessId === null;
+        var mergeForThisRow = Boolean(merge) && businessId !== null && String(merge.candidateId) === businessId;
+        var previewForThisRow = previewTargetId !== null && businessId !== null && previewTargetId === businessId;
+        var candidateTitle = candidateTitleOf(candidate);
+        var row = h("div", { key: key, className: "dshi_item" },
+          h("div", { className: "dshi_itemHead" },
+            h("span", null, candidateTitle || "（未识别的卡片）"),
+            h("span", { className: "dshi_mono" }, businessId !== null ? shortId(businessId) : "（缺少 candidate.id）"),
+            candidate && candidate.kind ? h("span", { className: "dshi_badgeDim dshi_badge" }, candidateKindLabel(candidate.kind)) : null,
+            item.status ? h("span", { className: "dshi_badge" }, candidateStatusLabel(item.status)) : null,
+            // U5 改名：「稍后再说」（协议仍发 decision=reviewed）——只是收起来，
+            // 不删除任何记忆；点击后该行立即离开「待处理」分组，可在「已阅」分组切回来。
+            h("button", { className: "dshi_btn", disabled: rowDisabled, title: "只是收起来，不会删除任何记忆", onClick: function () { doReview(businessId, "reviewed"); } }, "稍后再说"),
+            h("button", { className: "dshi_btn", disabled: rowDisabled, title: "把候选状态置为 dismissed", onClick: function () { doReview(businessId, "dismissed"); } }, "忽略"),
+            h("button", { className: "dshi_btn", disabled: rowDisabled, onClick: function () { doPreviewOrganize(businessId); } }, "预览整理计划"),
+            // Q-A：cluster 候选一键进入「合并进主题」流程（选/建主题 → 自动 proposal
+            // → preview diff → 确认执行），不再要求手写 proposal JSON。
+            isCluster ? h("button", { className: "dshi_btn dshi_btnPrimary", disabled: rowDisabled, onClick: function () { openMerge(businessId); } }, "合并进主题") : null),
+          // 原始 JSON 默认折叠：details 不写 open，铺满屏幕的长串移出主视线。
+          h("details", { className: "dshi_details" },
+            h("summary", { className: "dshi_hint" }, "原始数据（JSON）"),
+            h("pre", { className: "dshi_pre" }, stableStringify(item))));
+        var extra = [];
+        if (mergeForThisRow) extra.push(renderMergeCard(businessId));
+        if (previewForThisRow) extra.push(renderPreviewCard("preview-" + key));
+        return extra.length > 0 ? [row].concat(extra) : row;
+      };
+      var renderKindGroup = function (group) {
+        var rows = [];
+        items.forEach(function (item, index) {
+          var candidate = queueItemCandidate(item);
+          var kindKey = candidate && candidate.kind ? String(candidate.kind) : "other";
+          // U5：「其他」组兜底收下一切未知 kind（服务端未来新增分类时行不消失，
+          // 徽章保留原文）；三个已知组仍用严格相等。
+          if (group.kind === "other") {
+            if (kindKey === "cluster" || kindKey === "link" || kindKey === "isolated") return;
+          } else if (kindKey !== group.kind) {
+            return;
+          }
+          if (!rowVisible(item, candidate)) return;
+          rows.push(renderCandidateRow(item, index, candidate));
+        });
+        var collapsed = collapsedKinds[group.kind] === true;
+        return h("div", { key: group.kind, className: "dshi_kindGroup" },
+          h("button", { type: "button", className: "dshi_groupHead", title: collapsed ? "展开" : "收起", onClick: function () { toggleKindGroup(group.kind); } },
+            h("span", null, (collapsed ? "▸ " : "▾ ") + group.label),
+            h("span", { className: "dshi_groupCount" }, "（" + rows.length + "）")),
+          collapsed || rows.length === 0 ? null : h("div", { className: "dshi_items" }, rows));
+      };
+      var renderPlanRow = function (plan, index) {
+        // 与候选行同一原则：下标只用作渲染 key，planId 缺失时禁用动作而非发下标。
+        var businessPlanId = plan && plan.planId !== undefined && plan.planId !== null
+          ? String(plan.planId)
+          : (plan && plan.id !== undefined && plan.id !== null ? String(plan.id) : null);
+        var planId = businessPlanId !== null ? businessPlanId : String(index);
+        // Q-B：区分 open / executed / superseded（planStore list 投影的布尔；
+        // superseded = 新预览作废旧 open 计划，P 侧 state.mjs 投影提供）。
+        // operationId 仅在 DTO 提供时显示（当前投影只含 executed/superseded 布尔，向前兼容）。
+        var executed = plan.executed === true;
+        var superseded = plan.superseded === true;
+        var executedWith = plan.executedWith ?? plan.operationId;
+        var isForgetting = plan.kind === undefined || String(plan.kind) === "forgetting";
+        var previewForThisPlan = previewTargetId !== null && businessPlanId !== null && previewTargetId === businessPlanId;
+        var row = h("div", { key: planId, className: "dshi_item" },
+          h("div", { className: "dshi_itemHead" },
+            h("span", { className: "dshi_mono" }, businessPlanId !== null ? businessPlanId : "（缺少 planId）"),
+            plan.kind ? h("span", { className: "dshi_badgeDim dshi_badge" }, planKindLabel(plan.kind)) : null,
+            executed ? h("span", { className: "dshi_badge dshi_badgeWarn" }, planStateLabel("executed"))
+              : superseded ? h("span", { className: "dshi_badge dshi_badgeWarn" }, planStateLabel("superseded"))
+              : h("span", { className: "dshi_badgeDim dshi_badge" }, planStateLabel("open")),
+            executedWith !== undefined && executedWith !== null ? h("span", { className: "dshi_hint dshi_mono" }, "op " + String(executedWith)) : null,
+            executed || !isForgetting ? null
+              : h("button", { className: "dshi_btn", disabled: actionsDisabled || businessPlanId === null || superseded, onClick: function () { doPreviewForgetting(businessPlanId); } }, "预览遗忘计划")),
+          executed ? h("div", { className: "dshi_hint" }, "该计划已执行：不可再次预览 / 执行；如需再次整理请重新 analyze。")
+            : superseded ? h("div", { className: "dshi_hint" }, "该计划已被新预览作废（superseded）：不可再预览 / 执行（服务端会拒绝并报 REVISION_CONFLICT），请使用最新计划。")
+            : (!isForgetting ? h("div", { className: "dshi_hint" }, "organize 计划请从对应候选的「预览 / 合并进主题」流程执行。") : null),
+          h("details", { className: "dshi_details" },
+            h("summary", { className: "dshi_hint" }, "原始数据（JSON）"),
+            h("pre", { className: "dshi_pre" }, stableStringify(plan))));
+        return previewForThisPlan ? [row, renderPreviewCard("preview-" + planId)] : row;
+      };
+      // U5：open 计划直接列出；executed / superseded 收进默认折叠的分组（数量在组头）。
+      var activePlans = plans.filter(function (p) { return !(p && (p.executed === true || p.superseded === true)); });
+      var archivedPlans = plans.filter(function (p) { return Boolean(p && (p.executed === true || p.superseded === true)); });
       return h("div", null,
         h("div", { className: "dshi_row", style: { marginBottom: 8 } },
           h("span", { className: "dshi_cardTitle" }, "整理 / 遗忘：候选审阅与执行"),
@@ -2483,120 +2739,44 @@ window.__ModuleLoader__.load({
           h("div", { className: "dshi_card" },
           h("div", { className: "dshi_cardTitle" }, "候选（" + items.length + "）"),
           h("div", { className: "dshi_hint" }, "候选由「分析整理候选 / 分析遗忘候选」生成：集群（≥8 张共享实体或触发词的卡）可直接「合并进主题」，孤立卡只能用内置预览，可建链接用「预览整理计划」。"),
-          items.length === 0 ? h("div", { className: "dshi_hint" }, "（空）") : h("div", { className: "dshi_items" }, items.map(function (item, index) {
-            // 真机 queueDto：id/kind 在 item.candidate 里（queueItemCandidate 兼容旧扁平形状）。
-            // 下标只用作渲染 key；没有业务 id 的行禁用全部动作，不把下标当 candidateId 发 RPC。
-            var candidate = queueItemCandidate(item);
-            var businessId = candidate && candidate.id !== undefined && candidate.id !== null
-              ? String(candidate.id) : null;
-            var key = businessId !== null ? businessId : String(index);
-            var isCluster = candidate ? String(candidate.kind ?? "") === "cluster" : false;
-            var rowDisabled = actionsDisabled || businessId === null;
-            // 就地展开：只有被点击的那一行才在自身正下方渲染合并卡（同一 dshi_items 容器内）。
-            var mergeForThisRow = Boolean(merge) && businessId !== null && String(merge.candidateId) === businessId;
-            // 有了 id→标题映射就把候选翻译成人话：集群说共享词 + 卡数，
-            // 链接说「A ↔ B」，孤立卡直接给源卡标题；都没有时退化成短 id。
-            var sourceIds = candidate && Array.isArray(candidate.sources)
-              ? candidate.sources.map(function (s) { return String(s && s.id); }).filter(Boolean) : [];
-            var sourceTitles = sourceIds.map(function (id) { return titles[id] || shortId(id); });
-            var evidence = candidate && candidate.evidence && typeof candidate.evidence === "object" ? candidate.evidence : {};
-            var candidateKind = candidate && candidate.kind ? String(candidate.kind) : "";
-            var candidateTitle = null;
-            if (candidateKind === "cluster") {
-              var sharedTerm = evidence.sharedTerm || evidence.field;
-              candidateTitle = sharedTerm
-                ? "合并「" + String(sharedTerm) + "」相关的 " + sourceIds.length + " 张卡"
-                : "合并 " + sourceIds.length + " 张卡";
-            } else if (candidateKind === "link" && sourceTitles.length >= 2) {
-              candidateTitle = "连接：" + sourceTitles.join(" ↔ ");
-            } else if (sourceTitles.length === 1) {
-              candidateTitle = sourceTitles[0];
-            } else if (sourceTitles.length > 1) {
-              candidateTitle = sourceTitles.join("、");
-            }
-            var row = h("div", { key: key, className: "dshi_item" },
-              h("div", { className: "dshi_itemHead" },
-                h("span", null, candidateTitle || "（未识别的卡片）"),
-                h("span", { className: "dshi_mono" }, businessId !== null ? shortId(businessId) : "（缺少 candidate.id）"),
-                candidate && candidate.kind ? h("span", { className: "dshi_badgeDim dshi_badge" }, candidateKindLabel(candidate.kind)) : null,
-                item.status ? h("span", { className: "dshi_badge" }, candidateStatusLabel(item.status)) : null,
-                h("button", { className: "dshi_btn", disabled: rowDisabled, title: "把候选状态置为 reviewed", onClick: function () { doReview(businessId, "reviewed"); } }, "标记已阅"),
-                h("button", { className: "dshi_btn", disabled: rowDisabled, title: "把候选状态置为 dismissed", onClick: function () { doReview(businessId, "dismissed"); } }, "忽略"),
-                h("button", { className: "dshi_btn", disabled: rowDisabled, onClick: function () { doPreviewOrganize(businessId); } }, "预览整理计划"),
-                // Q-A：cluster 候选一键进入「合并进主题」流程（选/建主题 → 自动 proposal
-                // → preview diff → 确认执行），不再要求手写 proposal JSON。
-                isCluster ? h("button", { className: "dshi_btn dshi_btnPrimary", disabled: rowDisabled, onClick: function () { openMerge(businessId); } }, "合并进主题") : null),
-              // 原始 JSON 默认折叠：details 不写 open，铺满屏幕的长串移出主视线。
-              h("details", { className: "dshi_details" },
-                h("summary", { className: "dshi_hint" }, "原始数据（JSON）"),
-                h("pre", { className: "dshi_pre" }, stableStringify(item))));
-            return mergeForThisRow ? [row, renderMergeCard(businessId)] : row;
-          })),
-          h("div", { className: "dshi_cardTitle", style: { marginTop: 6 } }, "计划（" + plans.length + "）"),
+          // U5：筛选条（状态 chips，含各分组计数）+ 纯前端搜索框（按标题或短 id 过滤）。
+          h("div", { className: "dshi_filterBar" },
+            CANDIDATE_FILTERS.map(function (f) {
+              return h("button", { key: f[0], className: "dshi_filterChip" + (filter === f[0] ? " dshi_filterChipOn" : ""), onClick: function () { setFilter(f[0]); } }, f[1] + "（" + statusCounts[f[0]] + "）");
+            }),
+            h("input", { className: "dshi_input dshi_searchInput", placeholder: "搜索：按标题或短 id 过滤", value: search, onChange: function (event) { setSearch(event.target.value); } })),
+          // U5：按 kind 分组折叠（组头显示数量，点组头展开 / 收起；孤立卡默认折叠）。
+          items.length === 0 ? h("div", { className: "dshi_hint" }, "（空）") : CANDIDATE_KIND_GROUPS.map(function (group) {
+            return renderKindGroup(group);
+          }),
+          // U5：底部共享 proposal 文本框已删除（INVALID_INPUT 根因）；调试用手写入口
+          // 收进默认折叠的高级区。
+          h("div", { className: "dshi_advanced" },
+            h("button", { type: "button", className: "dshi_groupHead", onClick: function () { setAdvancedOpen(!advancedOpen); } }, (advancedOpen ? "▾ " : "▸ ") + "高级：手动编辑 proposal"),
+            advancedOpen ? h("div", { className: "dshi_fieldRow" },
+              h("div", { className: "dshi_hint" }, "调试用：正常流程请点候选行「预览整理计划」（自动按该候选生成骨架并发送 previewPlan，不需要手写 JSON）。"),
+              h("label", { className: "dshi_label" }, "候选 id（完整 id，从候选行 title 或「原始数据」里复制）",
+                h("input", { className: "dshi_input", value: advancedCandidate, onChange: function (event) { setAdvancedCandidate(event.target.value); } })),
+              h("label", { className: "dshi_label" }, "proposal（buildDraft 形状，服务端严格校验；留空不发送）",
+                h("textarea", { className: "dshi_textarea", value: proposal, placeholder: "留空＝未填写（不发送）。按协议手写 link / merge-topic 形状。", onChange: function (event) { setProposal(event.target.value); } })),
+              h("div", { className: "dshi_row" },
+                h("button", { className: "dshi_btn", disabled: busy || ro || !loaded, onClick: doPreviewManual }, "发送预览（手动 proposal）"))) : null)),
+          // U5：计划列表独立成卡（不再挤在候选卡底部）；已执行 / 已作废默认折叠。
+          h("div", { className: "dshi_card" },
+          h("div", { className: "dshi_cardTitle" }, "计划（" + plans.length + "）"),
           h("div", { className: "dshi_hint" }, "计划＝预览（previewPlan）生成的待执行变更，含 diff 与 planDigest；确认执行后标为「已执行」，被新预览作废的标为「已作废」。整理类计划请从对应候选的「预览整理计划 / 合并进主题」发起，遗忘类计划可用行内「预览遗忘计划」。"),
-          plans.length === 0 ? h("div", { className: "dshi_hint" }, "（空）") : h("div", { className: "dshi_items" }, plans.map(function (plan, index) {
-            // 与候选行同一原则：下标只用作渲染 key，planId 缺失时禁用动作而非发下标。
-            var businessPlanId = plan && plan.planId !== undefined && plan.planId !== null
-              ? String(plan.planId)
-              : (plan && plan.id !== undefined && plan.id !== null ? String(plan.id) : null);
-            var planId = businessPlanId !== null ? businessPlanId : String(index);
-            // Q-B：区分 open / executed / superseded（planStore list 投影的布尔；
-            // superseded = 新预览作废旧 open 计划，P 侧 state.mjs 投影提供）。
-            // operationId 仅在 DTO 提供时显示（当前投影只含 executed/superseded 布尔，向前兼容）。
-            var executed = plan.executed === true;
-            var superseded = plan.superseded === true;
-            var executedWith = plan.executedWith ?? plan.operationId;
-            var isForgetting = plan.kind === undefined || String(plan.kind) === "forgetting";
-            return h("div", { key: planId, className: "dshi_item" },
-              h("div", { className: "dshi_itemHead" },
-                h("span", { className: "dshi_mono" }, businessPlanId !== null ? businessPlanId : "（缺少 planId）"),
-                plan.kind ? h("span", { className: "dshi_badgeDim dshi_badge" }, planKindLabel(plan.kind)) : null,
-                executed ? h("span", { className: "dshi_badge dshi_badgeWarn" }, planStateLabel("executed"))
-                  : superseded ? h("span", { className: "dshi_badge dshi_badgeWarn" }, planStateLabel("superseded"))
-                  : h("span", { className: "dshi_badgeDim dshi_badge" }, planStateLabel("open")),
-                executedWith !== undefined && executedWith !== null ? h("span", { className: "dshi_hint dshi_mono" }, "op " + String(executedWith)) : null,
-                executed || !isForgetting ? null
-                  : h("button", { className: "dshi_btn", disabled: actionsDisabled || businessPlanId === null || superseded, onClick: function () { doPreviewForgetting(businessPlanId); } }, "预览遗忘计划")),
-              executed ? h("div", { className: "dshi_hint" }, "该计划已执行：不可再次预览 / 执行；如需再次整理请重新 analyze。")
-                : superseded ? h("div", { className: "dshi_hint" }, "该计划已被新预览作废（superseded）：不可再预览 / 执行（服务端会拒绝并报 REVISION_CONFLICT），请使用最新计划。")
-                : (!isForgetting ? h("div", { className: "dshi_hint" }, "organize 计划请从对应候选的「预览 / 合并进主题」流程执行。") : null),
-              h("details", { className: "dshi_details" },
-                h("summary", { className: "dshi_hint" }, "原始数据（JSON）"),
-                h("pre", { className: "dshi_pre" }, stableStringify(plan))));
-          })),
-          h("label", { className: "dshi_label", style: { marginTop: 6 } }, "organize proposal（buildDraft 形状，服务端严格校验；默认留空——点候选行「preview organize」按候选预填骨架，cluster 候选推荐直接用「合并进主题」）",
-            h("textarea", { className: "dshi_textarea", value: proposal, placeholder: "留空＝未填写（不发送）。点候选行「preview organize」自动预填；或按协议手写 link / merge-topic 形状。", onChange: function (event) { setProposal(event.target.value); } }))),
+          plans.length === 0 ? h("div", { className: "dshi_hint" }, "（空）") : null,
+          activePlans.length > 0 ? h("div", { className: "dshi_items" }, activePlans.map(renderPlanRow)) : null,
+          // U5：已执行 / 已作废默认折叠——原生 details（不写 open），行仍在 DOM 里，
+          // 点开即可切回来查看；组头带数量。
+          archivedPlans.length > 0 ? h("details", { className: "dshi_details" },
+            h("summary", { className: "dshi_groupHead" },
+              h("span", null, "已执行 / 已作废"),
+              h("span", { className: "dshi_groupCount" }, "（" + archivedPlans.length + "）")),
+            h("div", { className: "dshi_items" }, archivedPlans.map(renderPlanRow))) : null),
         ) : null,
         previewError ? ErrorBox(previewError) : null,
-        preview && preview.sessionId === props.sessionId ? h("div", { className: "dshi_confirm" },
-          h("div", { className: "dshi_cardTitle" }, "PlanView 预览（" + String(preview.plan.kind) + "）",
-            h("span", { className: "dshi_mono" }, String(preview.plan.planId)),
-            h("span", { className: "dshi_badgeDim dshi_badge" }, String(preview.plan.planDigest))),
-          preview.plan.summary ? h("div", { className: "dshi_hint" }, String(preview.plan.summary)) : null,
-          Array.isArray(preview.plan.diff) && preview.plan.diff.length > 0 ? preview.plan.diff.map(function (entry, index) {
-            return h("div", { key: index, className: "dshi_item" },
-              h("div", { className: "dshi_mono" }, String(entry.path ?? index)),
-              h("div", { className: "dshi_hint" }, "old"),
-              h("pre", { className: "dshi_pre" }, String(entry.oldText ?? "")),
-              h("div", { className: "dshi_hint" }, "new"),
-              h("pre", { className: "dshi_pre" }, String(entry.newText ?? "")));
-          }) : h("div", { className: "dshi_hint" }, "（无 diff 条目）"),
-          // Q-B：预览对应的计划若已在 plans 列表里标记 executed / superseded，执行按钮禁用
-          (function () {
-            var row = plans.find(function (p) { return String(p && p.planId) === String(preview.plan && preview.plan.planId); });
-            return row && (row.executed === true || row.superseded === true);
-          })() ? h("div", { className: "dshi_hint" }, "该计划已执行或已被新预览作废（plans 列表标记），执行按钮已禁用。") : null,
-          h("div", { className: "dshi_row" },
-            h("button", {
-              className: "dshi_btn dshi_btnDanger",
-              disabled: busy || ro || (function () {
-                var row = plans.find(function (p) { return String(p && p.planId) === String(preview.plan && preview.plan.planId); });
-                return Boolean(row && (row.executed === true || row.superseded === true));
-              })(),
-              onClick: doExecute
-            }, "确认执行（不可撤销）"),
-            h("button", { className: "dshi_btn", disabled: busy, onClick: function () { setPreview(null); } }, "取消")))
-        : null);
+        showBottomPreview ? renderPreviewCard("preview-bottom") : null);
     }
 
     // ── L3：主题（topic）记忆管理 ────────────────────────────────────────────
@@ -3531,7 +3711,8 @@ window.__ModuleLoader__.load({
       { id: "timeline", label: "最近变更" },
       { id: "memory", label: "记忆 L0/L1" },
       { id: "graph", label: "图谱" },
-      { id: "candidates", label: "候选 / 计划" },
+      // U5 改名：候选审阅 + 计划执行合称「整理与遗忘」（tab id 仍为 candidates，协议不变）。
+      { id: "candidates", label: "整理与遗忘" },
       { id: "topics", label: "L3/topic 记忆管理" },
       { id: "flashbacks", label: "闪回命中" },
       { id: "budgets", label: "预算配置" }

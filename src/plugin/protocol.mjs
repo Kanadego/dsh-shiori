@@ -363,7 +363,18 @@ export const MANAGEMENT_METHODS = Object.freeze({
   },
 
   listCandidates: {
-    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    // 可选 limit / offset 分页（缺省都不传 = 不分页，行为与旧版一致）。
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        limit: { type: "integer", minimum: 0 },
+        offset: { type: "integer", minimum: 0 },
+      },
+    },
+    // total/groups/statusCounts 为增量字段（groups/statusCounts 按分页前
+    // 全量 items 计数）；items 内 candidate.sources 增量补 title（queueItemEntry
+    // 为 additionalProperties:true，无需改条目形状）。
     outputSchema: {
       type: "object",
       additionalProperties: false,
@@ -371,8 +382,29 @@ export const MANAGEMENT_METHODS = Object.freeze({
         queueRevision,
         items: { type: "array", items: queueItemEntry },
         plans: { type: "array", items: planSummary },
+        total: { type: "integer", minimum: 0 },
+        groups: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            cluster: { type: "integer", minimum: 0 },
+            link: { type: "integer", minimum: 0 },
+            isolated: { type: "integer", minimum: 0 },
+          },
+          required: ["cluster", "link", "isolated"],
+        },
+        statusCounts: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            pending: { type: "integer", minimum: 0 },
+            reviewed: { type: "integer", minimum: 0 },
+            dismissed: { type: "integer", minimum: 0 },
+          },
+          required: ["pending", "reviewed", "dismissed"],
+        },
       },
-      required: ["queueRevision", "items", "plans"],
+      required: ["queueRevision", "items", "plans", "total", "groups", "statusCounts"],
     },
   },
 

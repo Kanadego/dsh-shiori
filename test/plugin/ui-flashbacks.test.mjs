@@ -102,10 +102,10 @@ async function mountSection(host, presets) {
 // a) tab：TABS 末尾追加「闪回命中」，图标走 CSS mask、不塞 emoji
 // ---------------------------------------------------------------------------
 
-const FROZEN_TAB_LABELS = ["状态", "记忆 L0/L1", "图谱", "候选 / 计划", "L3/topic 记忆管理", "预算配置"];
+const FROZEN_TAB_LABELS = ["状态", "记忆 L0/L1", "图谱", "整理与遗忘", "L3/topic 记忆管理", "预算配置"];
 
 // 合并后（F2 + F4 同批）的最终顺序：闪回命中排在预算配置之前。
-const MERGED_TAB_LABELS = ["状态", "最近变更", "记忆 L0/L1", "图谱", "候选 / 计划", "L3/topic 记忆管理", "闪回命中", "预算配置"];
+const MERGED_TAB_LABELS = ["状态", "最近变更", "记忆 L0/L1", "图谱", "整理与遗忘", "L3/topic 记忆管理", "闪回命中", "预算配置"];
 
 test("F2 tab：闪回命中进入最终 8 项顺序，六项既有 label 逐字不变，图标 mask 类齐备且不塞 emoji", async () => {
   const host = makeStatefulReact();

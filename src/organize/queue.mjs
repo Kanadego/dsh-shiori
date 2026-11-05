@@ -832,6 +832,112 @@ export function createCandidateQueue(params) {
 }
 
 // ---------------------------------------------------------------------------
+// listQueue：候选队列的展示投影（source 标题补全 / 分组与状态计数 / 可选分页）
+// ---------------------------------------------------------------------------
+
+/**
+ * 把队列 items（业务快照里的 {candidate,status} 列表）投影成客户端一次请求
+ * 即可渲染的列表视图：
+ * - items[i].candidate.sources[j] 在既有字段（id/revision 等）之外补 title
+ *   （按 id 从 records 取卡片标题；取不到给 null；不删原字段、不改顺序）；
+ * - 候选对象的既有字段（含 evidence）原样保留，只增不改；
+ * - 顶层补 groups（按候选 kind 计数）与 statusCounts（按条目 status 计数），
+ *   计数恒覆盖分页前的全量 items；
+ * - limit / offset 可选分页：缺省（都不传）时行为与不分页完全一致；
+ *   total 恒为分页前的 items 总数。
+ *
+ * 本函数是纯只读投影：不重算候选 digest（那是 createCandidateQueue /
+ * buildDraft 的职责）、不写任何状态、不产生队列事务；修改返回值不影响输入。
+ *
+ * @param {object} input
+ * @param {Array} input.items     业务快照 items（{candidate,status} 数组）
+ * @param {Array} [input.records] 完整 active 卡记录（store.listActive 形状）；缺省时 title 一律 null
+ * @param {number} [input.limit]  页大小（>=0 整数；缺省不截断）
+ * @param {number} [input.offset] 页起点（>=0 整数；缺省 0）
+ * @returns {{items: Array, total: number,
+ *           groups: {cluster: number, link: number, isolated: number},
+ *           statusCounts: {pending: number, reviewed: number, dismissed: number}}}
+ */
+export function listQueue(input) {
+  if (!isPlainObject(input)) fail('INVALID_INPUT', 'listQueue 参数必须是对象');
+  assertAllowedKeys(input, ['items'], ['records', 'limit', 'offset'], 'listQueue 参数');
+  const { items, records } = input;
+  if (!Array.isArray(items)) fail('INVALID_INPUT', 'listQueue items 必须是数组');
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    if (!isPlainObject(item)) fail('INVALID_INPUT', `listQueue items[${i}] 必须是普通对象`);
+    if (!isPlainObject(item.candidate)) {
+      fail('INVALID_INPUT', `listQueue items[${i}].candidate 必须是普通对象`);
+    }
+    if (!CANDIDATE_KINDS.has(item.candidate.kind)) {
+      fail('INVALID_INPUT', `listQueue items[${i}].candidate.kind 必须是 isolated/link/cluster（得到 ${JSON.stringify(item.candidate.kind)}）`);
+    }
+    if (!Array.isArray(item.candidate.sources)) {
+      fail('INVALID_INPUT', `listQueue items[${i}].candidate.sources 必须是数组`);
+    }
+    for (let j = 0; j < item.candidate.sources.length; j += 1) {
+      const sourceRef = item.candidate.sources[j];
+      if (!isPlainObject(sourceRef) || typeof sourceRef.id !== 'string') {
+        fail('INVALID_INPUT', `listQueue items[${i}].candidate.sources[${j}] 必须是含字符串 id 的普通对象`);
+      }
+    }
+    if (!ITEM_STATUSES.has(item.status)) {
+      fail('INVALID_INPUT', `listQueue items[${i}].status 必须是 pending/reviewed/dismissed`);
+    }
+  }
+
+  // title 索引：只认字符串标题；同 id 重复记录取先到者（store 的 listActive
+  // 不会重复给 id，这里仅为防御，不静默覆盖）。
+  const titlesById = new Map();
+  if (records !== undefined && records !== null) {
+    if (!Array.isArray(records)) fail('INVALID_INPUT', 'listQueue records 必须是数组');
+    for (let i = 0; i < records.length; i += 1) {
+      const record = records[i];
+      if (!isPlainObject(record) || typeof record.id !== 'string') {
+        fail('INVALID_INPUT', `listQueue records[${i}] 必须是含字符串 id 的普通对象`);
+      }
+      if (!titlesById.has(record.id) && typeof record.title === 'string' && record.title.isWellFormed()) {
+        titlesById.set(record.id, record.title);
+      }
+    }
+  }
+
+  const total = items.length;
+  const groups = { cluster: 0, link: 0, isolated: 0 };
+  const statusCounts = { pending: 0, reviewed: 0, dismissed: 0 };
+  for (const item of items) {
+    groups[item.candidate.kind] += 1;
+    statusCounts[item.status] += 1;
+  }
+
+  let offset = 0;
+  if (input.offset !== undefined) {
+    if (!Number.isInteger(input.offset) || input.offset < 0) {
+      fail('INVALID_INPUT', `listQueue offset 必须是 >=0 的整数（实际 ${JSON.stringify(input.offset)}）`);
+    }
+    offset = input.offset;
+  }
+  let limit = total;
+  if (input.limit !== undefined) {
+    if (!Number.isInteger(input.limit) || input.limit < 0) {
+      fail('INVALID_INPUT', `listQueue limit 必须是 >=0 的整数（实际 ${JSON.stringify(input.limit)}）`);
+    }
+    limit = input.limit;
+  }
+
+  const page = items.slice(offset, offset + limit).map((item) => {
+    const clone = deepClone(item);
+    clone.candidate.sources = clone.candidate.sources.map((ref) => ({
+      ...ref,
+      title: titlesById.get(ref.id) ?? null,
+    }));
+    return clone;
+  });
+
+  return { items: page, total, groups, statusCounts };
+}
+
+// ---------------------------------------------------------------------------
 // buildDraft：候选 + 完整 active records + proposal -> { plan, digest, diff, changedItems }
 // ---------------------------------------------------------------------------
 
@@ -1044,9 +1150,14 @@ function buildLinkDraft(candidate, recordsById, proposal) {
   for (let i = 0; i < proposal.links.length; i += 1) {
     const entry = proposal.links[i];
     assertExactKeys(entry, ['id', 'after'], `proposal.links[${i}]`);
-    // 被改源必须是候选源中的卡
+    // 被改源必须是候选源中的卡（details 供客户端结构化提示；message 前缀
+    // 保持原样——前端仍按 message 兜底，错误码不变）。
     if (!sourceIds.has(entry.id)) {
-      fail('INVALID_INPUT', `proposal.links[${i}].id "${entry.id}" 必须是 candidate.sources 中的卡`);
+      fail('INVALID_INPUT', `proposal.links[${i}].id "${entry.id}" 必须是 candidate.sources 中的卡`, {
+        field: `proposal.links[${i}].id`,
+        reason: `"${entry.id}" 不在本次候选的 candidate.sources 中`,
+        hint: '这次预览用的候选已经变了，请刷新后重新分析',
+      });
     }
     if (seenEntryIds.has(entry.id)) {
       fail('INVALID_INPUT', `proposal.links 存在重复被改源 "${entry.id}"`);

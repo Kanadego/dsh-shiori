@@ -232,7 +232,7 @@ test("U8 壳层：工作区/会话选择器与 tab 栏包进 sticky 壳条，CSS
 // d) tab 图标 + label 冻结
 // ---------------------------------------------------------------------------
 
-const TAB_LABELS = ["状态", "最近变更", "记忆 L0/L1", "图谱", "候选 / 计划", "L3/topic 记忆管理", "闪回命中", "预算配置"];
+const TAB_LABELS = ["状态", "最近变更", "记忆 L0/L1", "图谱", "整理与遗忘", "L3/topic 记忆管理", "闪回命中", "预算配置"];
 const TAB_IDS = ["status", "timeline", "memory", "graph", "candidates", "topics", "flashbacks", "budgets"];
 
 test("U8 tab：八项 label 逐字一致（含 F2/F4 两项新增），每项带图标（伪元素图形 + 每 tab 专属 mask）", async () => {

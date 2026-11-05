@@ -18,7 +18,7 @@
 // - 候选队列持久快照跨重启恢复（queueStore）；plan 账不可变（planStore）。
 
 import { analyzeCandidates } from "../organize/analyze.mjs";
-import { createCandidateQueue, buildDraft as buildOrganizeDraft, buildForgetArchiveDiff } from "../organize/queue.mjs";
+import { createCandidateQueue, buildDraft as buildOrganizeDraft, buildForgetArchiveDiff, listQueue } from "../organize/queue.mjs";
 import { digestPlan as organizeDigestPlan, createOrganizerExecutor } from "../organize/executor.mjs";
 import { analyzeForgetting } from "../forgetting/decay.mjs";
 import { createForgetExecutor } from "../forgetting/executor.mjs";
@@ -183,12 +183,20 @@ export function createManagement(deps) {
     return timelineReader;
   }
 
-  async function queueDto(scopeId, queue) {
+  /**
+   * 队列 DTO：items 经 organize/queue.mjs 的 listQueue 投影——候选 sources 补
+   * 卡片 title（取不到给 null），其余字段原样（只增不改）。records 缺省时
+   * 不投影（保持旧形状，供无需标题的内部路径复用）。
+   */
+  async function queueDto(scopeId, queue, records) {
     const snapshot = queue.snapshot();
     const plans = await state.planStore.list(scopeId);
+    const items = records === undefined
+      ? snapshot.items
+      : listQueue({ items: snapshot.items, records }).items;
     return {
       queueRevision: snapshot.revision,
-      items: snapshot.items,
+      items,
       plans,
     };
   }
@@ -395,13 +403,31 @@ export function createManagement(deps) {
       return executeToolForScope(scope, payload.name, payload.args ?? {});
     },
 
-    /** 候选队列与计划摘要（同 scope；不泄露别卡）。 */
+    /**
+     * 候选队列与计划摘要（同 scope；不泄露别卡）。可选 limit / offset 分页
+     * （缺省不分页，行为与旧版完全一致）；候选项 sources 补卡片 title、
+     * 顶层补 total / groups / statusCounts（计数不受分页影响），客户端一次
+     * 请求即可渲染分组与标题，无需二次取卡。投影走 organize/queue.mjs 的
+     * listQueue（纯只读），不改变队列状态。
+     */
     async listCandidates(trustedContext, payload) {
-      validateManagementPayload("listCandidates", payload ?? {});
+      const p = payload ?? {};
+      validateManagementPayload("listCandidates", p);
       requireActiveDataAccess("listCandidates");
       const scope = await scopeFromTrustedContext(trustedContext);
+      const resources = await resourcesFor(scope.scopeId, sessionEvidenceFromRpc(trustedContext).agent);
+      const records = await resources.sparkStore.listActive();
       const queue = await loadQueue(scope.scopeId);
-      return queueDto(scope.scopeId, queue);
+      const snapshot = queue.snapshot();
+      const page = listQueue({ items: snapshot.items, records, limit: p.limit, offset: p.offset });
+      return {
+        queueRevision: snapshot.revision,
+        items: page.items,
+        plans: await state.planStore.list(scope.scopeId),
+        total: page.total,
+        groups: page.groups,
+        statusCounts: page.statusCounts,
+      };
     },
 
     /**
@@ -445,7 +471,8 @@ export function createManagement(deps) {
           }
         }
         const queue = await loadQueue(scope.scopeId);
-        const dto = await queueDto(scope.scopeId, queue);
+        const replayRecords = await resources.sparkStore.listActive();
+        const dto = await queueDto(scope.scopeId, queue, replayRecords);
         return { ...dto, analysis: prior.analysis };
       }
 
@@ -498,7 +525,7 @@ export function createManagement(deps) {
           keepPlanId: null,
           operationId: payload.operationId,
         });
-        const dto = await queueDto(scope.scopeId, queue);
+        const dto = await queueDto(scope.scopeId, queue, records);
         return { ...dto, analysis };
       }
 
@@ -554,7 +581,7 @@ export function createManagement(deps) {
       });
       const plans = await state.planStore.list(scope.scopeId);
       const queue = await loadQueue(scope.scopeId);
-      const dto = await queueDto(scope.scopeId, queue);
+      const dto = await queueDto(scope.scopeId, queue, records);
       return {
         queueRevision: dto.queueRevision,
         items: dto.items,
@@ -571,6 +598,8 @@ export function createManagement(deps) {
       assertHostWritable("reviewCandidate");
       requireModule("organize");
       const scope = await scopeFromTrustedContext(trustedContext);
+      const resources = await resourcesFor(scope.scopeId, sessionEvidenceFromRpc(trustedContext).agent);
+      const records = await resources.sparkStore.listActive();
       const queue = await loadQueue(scope.scopeId);
       queue.review(payload.candidateId, {
         decision: payload.decision,
@@ -578,7 +607,7 @@ export function createManagement(deps) {
         operationId: payload.operationId,
       });
       await state.queueStore.save(scope.scopeId, queue.snapshot());
-      return queueDto(scope.scopeId, queue);
+      return queueDto(scope.scopeId, queue, records);
     },
 
     /** 计划预览：organize proposal 走 buildDraft；forgetting 用 planId 取回 analyze 保存的计划。 */

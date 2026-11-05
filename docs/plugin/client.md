@@ -47,9 +47,9 @@ analyze / reviewCandidate / previewPlan / executePlan / getTimeline
 - **记忆 L0/L1**：`getMemoryView`——L0 persona 与完整 L1（含派生索引）预览、UTF-16 占用条（对照 budgets）、revision。两层都能**就地编辑**（第 8 轮）：L0 走 `executeTool soul_update {content}`，L1 走 `core_write {content, expectedRevision}`；L1 的编辑初值取 `l1.body`（磁盘正文），不是含派生索引的 `l1.text`——否则保存会把索引固化进 core。revision 是 `shiori-r1.<base64url>.<sha256>` 的长 token，标题行只显示 12 字符前缀 + 省略号，完整值放 `title` 属性与「完整 DTO」折叠区。
 - **图谱**：`getGraph`——SVG 拖拽平移；缩放支持按钮与**鼠标滚轮**（原生 `addEventListener("wheel", {passive:false})`，React 的 onWheel 在宿主里是 passive、preventDefault 无效；以指针为锚点、scale 夹在 0.3~3）。节点按 evergreen / ephemeral / 非 active 异色，边中性；点击节点看详情。详情里的**「卡片内容」只编辑 spark 卡片本身**（标题 / 摘要 / 正文 / 触发词 / 实体 / 重要度，保存走 `spark_update` 且只提交改动字段，带 expectedRevision）；人设卡 / 记忆核心在「记忆 L0/L1」页改，主题在「L3/topic 记忆管理」页改。关联连线同样在详情里增删：改动先留在本地，点「保存连线」才写 `spark_update {links}`（整体替换），删错点「撤销修改」退回读取时的快照，不发请求。不经模型消息返回整图。
 - **L3/topic 记忆管理（第 8 轮新增，位于「候选 / 计划」之后）**：`executeTool memory_list_topics` 拉主题列表，默认只显示 key / title / 字符数，**点「展开」才 `memory_read` 读正文**（不预读全文）；编辑整篇覆盖走 `memory_rewrite {topic, content, expectedRevision}`，保存后重读 detail 与列表。`updated === "legacy-unknown"` 的 legacy 主题标「legacy 只读」，不渲染编辑按钮（服务端拒 `UNSUPPORTED`）。
-- **候选 / 计划**：`listCandidates`（queueRevision + items + plans）、`analyze`（organize / forgetting）、`reviewCandidate`（reviewed / dismissed）、`previewPlan`（organize proposal JSON 按 buildDraft 形状 / forgetting planId）→ 展示 `PlanView` diff 后**明确确认**才 `executePlan { confirmed: true }`。
+- **整理与遗忘（原「候选 / 计划」，tab 名随 U5 改版落地）**：数据流不变——`listCandidates`（queueRevision + items + plans）、`analyze`（organize / forgetting）、`reviewCandidate`（reviewed / dismissed）、`previewPlan`（organize proposal JSON 按 buildDraft 形状 / forgetting planId）→ 展示 `PlanView` diff 后**明确确认**才 `executePlan { confirmed: true }`。页面形态（分组折叠 / 筛选搜索 / 就地预览 / 三种状态可见性 / 错误口径）见文末「整理与遗忘」章节，其中「本次目标」小节在改版合入前不得当作已完成。
 - **候选行取值（第 5 轮返工，对齐宿主真实 queueDto）**：`listCandidates` 返回的 items 是**嵌套形状** `items[i] = { candidate: {id, kind, scopeId, sources, evidence}, status }`（src/organize/queue.mjs item 结构 / src/plugin/management.mjs queueDto）——id / kind / sources / evidence 都在 `item.candidate` 里。面板统一经 `queueItemCandidate(item)` 取值（兼容旧扁平形状 `{candidateId|id, kind, …}`）；候选与 plans 两个列表里，**数组下标只用作渲染 key**：拿不到业务 id 的行显示「（缺少 candidate.id）」并禁用全部动作按钮，绝不把下标当 candidateId / planId 发 RPC。
-- **organize proposal 本地校验与预填（第 5 轮 Q-B，第 6 轮完善）**：proposal 文本框**默认留空**（不再预置必红死值）。点候选行「preview organize」时：空 proposal 先按候选 kind 预填——link 候选给带真实源卡 id 的骨架 `{"kind":"link","links":[{"id":"<sources[0]>","after":[{"target":"<另一张卡>","rel":"related"}]}]}`（骨架即可发送，target 需确认为另一张真实卡 id）；cluster 候选不预填、指引走「合并进主题」（merge-topic 需服务端签发的 revision token，文本框手写必然失败）。发送前经 `validateOrganizeProposalLocal` 预检（服务端 protocol.mjs `organizeProposal` 仍是权威）：未知 kind、空 `links`、link 每项 `id` / `after[{target,rel}]` 非空与 rel 类型、merge-topic `topic` 七键齐全与 append-only、以及**各层多余键**（协议 additionalProperties:false）都在本地拦下并给中文指引。注定 INVALID_INPUT 的 payload 不发往服务端。
+- **organize proposal 本地校验与预填（第 5 轮 Q-B，第 6 轮完善）**：proposal 文本框**默认留空**（不再预置必红死值）。点候选行「preview organize」时：空 proposal 先按候选 kind 预填——link 候选给带真实源卡 id 的骨架 `{"kind":"link","links":[{"id":"<sources[0]>","after":[{"target":"<另一张卡>","rel":"related"}]}]}`（骨架即可发送，target 需确认为另一张真实卡 id）；cluster 候选不预填、指引走「合并进主题」（merge-topic 需服务端签发的 revision token，文本框手写必然失败）。发送前经 `validateOrganizeProposalLocal` 预检（服务端 protocol.mjs `organizeProposal` 仍是权威）：未知 kind、空 `links`、link 每项 `id` / `after[{target,rel}]` 非空与 rel 类型、merge-topic `topic` 七键齐全与 append-only、以及**各层多余键**（协议 additionalProperties:false）都在本地拦下并给中文指引。注定 INVALID_INPUT 的 payload 不发往服务端。（U5 改版后页面级 proposal 文本框移除，骨架预填与本地预检逻辑转入行内就地预览，预检规则继续有效，见文末「整理与遗忘」章节——属本次目标。）
 - **合并进主题（cluster 候选的一键流程，第 4 轮 Q-A）**：候选行对 `item.candidate.kind === "cluster"` 提供「合并进主题」入口，流程全部经 `executeTool` / `previewPlan` / `executePlan` 完成，不再要求手写 proposal JSON：
   0. **步骤引导（纯展示）**：卡片顶部按当前进度高亮编号步骤——① 选目标主题（点某行「合并到这个主题」或在下方新建）→ ② 选定后自动载入 before 正文与 revision token、出现「合并表单」→ ③ 在表单里编辑 after → 点「预览 diff（previewPlan）」→ 下方确认卡「确认执行」。未选目标主题时 ① 标「进行中」（`dshi_badge`，其余 dim），并在主题列表与「或新建主题」之间渲染一条中性提示（`dshi_hint` 加粗，非 ErrorBox/红色）：「还没有选择目标主题……选定之后才会出现合并表单和预览 diff 按钮」；选定后同位置换成「已在合并表单中：编辑 after 后点预览 diff，再在下方确认卡里确认执行」。legacy 行的「合并到这个主题」按钮带 `title`「legacy 主题只读，不能作为合并目标」（列表通常已在 `loadTopics` 过滤，保留防御性提示，按钮不禁用）。
   1. `executeTool memory_list_topics` 拉当前 scope 主题列表，展示 key / title / updated / revision 前缀；**`updated === "legacy-unknown"` 的 legacy 主题被过滤**（服务端拒 `UNSUPPORTED legacy topics remain read-only`）；列表里没有可用主题时提示新建。
@@ -84,10 +84,78 @@ typert / Gateway 缺席：RPC diagnostics 返回 `transport: "unavailable"`、`u
 >   `dsh.client = { platform: "web" }`）；把 seed require 编码成图依赖是语义错误，
 >   verify-package 会拒绝。
 
-## 候选面板布局与中文文案（第 7 轮）
+## 整理与遗忘（候选 / 计划页，U5 改版）
 
-- **合并卡就地展开**：点候选行「合并进主题」后，合并卡渲染在**该行正下方、同一个 `dshi_items` 容器内**（外层 `dshi_itemMerge` 包一层 `dshi_card`，缩进 12px），不再排在候选列表 / plans / proposal 文本框之后。三点状态机（openMerge / closeMerge / openTopicForMerge / submitNewTopic / doMergePreview 等）逻辑未改，只搬渲染位置。标题只显示候选 id 前 8 位（`slice(0, 8) + "…"`），完整 id 放 `title` 属性。
+> 本页正在重做（实现由另一会话进行）。本章区分两套口径：**现状（0.2.0）** 是
+> 已合入的形态；**本次目标** 是改版落地后的形态，**在合入之前不得当作已完成
+> 引用**。两版都成立的协议事实（DTO 形状、decision 值、守卫行为）不重复标注。
+> 术语以 `docs/GLOSSARY.md` 为准（「整理与遗忘」「稍后再说（已阅）」两条已收录）。
+
+### 现状（0.2.0，第 7 轮布局）
+
+- tab 名「候选 / 计划」，页面为两个平铺列表（候选、plans）+ 页面级 proposal 文本框。
+- **合并卡就地展开**：点候选行「合并进主题」后，合并卡渲染在**该行正下方、同一个 `dshi_items` 容器内**（外层 `dshi_itemMerge` 包一层 `dshi_card`，缩进 12px），不再排在候选列表 / plans / proposal 文本框之后。状态机（openMerge / closeMerge / openTopicForMerge / submitNewTopic / doMergePreview 等）逻辑不变，只搬渲染位置。标题只显示候选 id 前 8 位（`slice(0, 8) + "…"`），完整 id 放 `title` 属性。
 - **按钮与徽章中文化**（只改显示文案，协议值一律不变）：`analyze organize` → 「分析整理候选」、`analyze forgetting` → 「分析遗忘候选」、`reviewed` → 「标记已阅」、`dismissed` → 「忽略」、`preview organize` → 「预览整理计划」、`preview forgetting` → 「预览遗忘计划」；候选 kind 徽章 cluster / isolated / link → 集群 / 孤立卡 / 可建链接（未知保留原文），status 徽章 pending / reviewed / dismissed → 待处理 / 已阅 / 已忽略；plans 徽章 open / executed / superseded → 待执行 / 已执行 / 已作废；plans 行首的计划类型徽章 organize / forgetting → 整理 / 遗忘（`plan.kind` 协议值仍用于逻辑判断与 PlanView 预览标题）。**`reviewCandidate` 的 decision 仍发 reviewed / dismissed，`previewPlan` 的 kind 仍发 organize / forgetting**。
 - **两处 dshi_hint 说明**：「候选（n）」标题下说明候选来源与三类 kind 各自的可用流程；「计划（n）」标题下说明计划 = `previewPlan` 生成的待执行变更（含 diff 与 planDigest）、执行后标「已执行」、被新预览作废标「已作废」，以及整理类 / 遗忘类计划各自的发起入口。
 - **原始 JSON 折叠**：候选行与计划行的 `stableStringify` 结果包进 `<details class="dshi_details">` + `<summary class="dshi_hint">原始数据（JSON）</summary>`，默认不展开（不写 open），需要核对 DTO 时手动点开。
-- **回归**：`test/plugin/client.test.mjs`「第 7 轮」三条用例分别断言就地展开的 DOM 顺序（容器直接子节点为 候选行 / 合并卡 / 候选行）、旧英文按钮文案不再出现且「标记已阅」仍发 `decision: "reviewed"`、以及 details 无 open 属性。
+- **回归**：`test/plugin/client.test.mjs`「第 7 轮」三条用例分别断言就地展开的 DOM 顺序（容器直接子节点为 候选行 / 合并卡 / 候选行）、旧英文按钮文案不再出现且「标记已阅」仍发 `decision: "reviewed"`、以及 details 无 open 属性。U5 改版落地时这三条回归需同步更新断言文案（按钮改名后仍断言 decision 值不变），验收语义不变。
+
+### 本次目标：页面形态
+
+tab 名改「整理与遗忘」（GLOSSARY「三、tab 名称对照」的目标名随本页落地）。
+数据流与协议不变：仍是 `listCandidates` → `analyze` → `reviewCandidate` /
+`previewPlan` → `executePlan`。
+
+#### 分组逻辑（待处理候选）
+
+- 待处理候选按 kind 分三组折叠：**集群（cluster）** / **可建链接（link）** / **孤立卡（isolated）**；未知 kind 兜底「其他」组并保留原文徽章。
+- 组头 = 中文组名 + 数量徽标；**集群、可建链接默认展开，孤立卡默认折叠**——孤立卡是没有可执行动作的一类，默认收起以减少首屏噪音，需要时点组头展开。点任意组头切换折叠。
+- plans 列表不参与 kind 分组，保持单一列表，用状态徽章区分待执行 / 已执行 / 已作废。
+- 空组不渲染，不占屏。
+
+#### 筛选与搜索
+
+- **状态筛选**：默认「待处理」，可切「已阅」「已忽略」「全部」；作用于候选列表，plans 列表不受影响。
+- **搜索**：只做客户端本地过滤、不新增 RPC；匹配当前行渲染出的**标题与短 id**，不猜正文。与状态筛选叠加生效。
+- 无结果时显示「没有匹配的候选」空态，不渲染空白列表。
+
+#### 三种状态的可见性
+
+| 状态 | 默认视图 | 可见时能做什么 | 口径 |
+| --- | --- | --- | --- |
+| 待处理（pending） | 三组折叠展示，占组头数量 | 全部动作：稍后再说 / 忽略 / 就地预览（集群走「合并进主题」） | 唯一默认展示的状态 |
+| 已阅（reviewed） | 收起，不占组头数量 | 切「已阅」筛选可见；行内可就地预览查看 | 只是收起，**不删除任何记忆** |
+| 已忽略（dismissed） | 收起，不占组头数量 | 切「已忽略」筛选可见；行内可就地预览查看 | 同上，不删除任何记忆 |
+
+- `reviewed` / `dismissed` 都是**收起而非删除**：人设卡、记忆核心、闪回卡片、专题一概不动；被收起的候选不消失，可随时通过筛选找回。
+- 协议没有「取消已阅 / 取消忽略」，界面**不提供**恢复待处理的入口，也不假装可以撤销；如后续协议支持改标，再补界面。
+
+#### 「稍后再说」（原「标记已阅」）
+
+- 改名原因：「已阅」读起来像「这条已经处理完了」，实际语义只是**这条先不看**。
+- 点击后该行立即从待处理视图收起，不弹确认框；`reviewCandidate` 仍发 `decision: "reviewed"`。
+- 明确口径：**稍后再说不删除任何记忆**，只影响这条候选在页面上的可见性。
+
+#### 就地预览
+
+- 点行内「预览整理计划」按钮触发就地预览，在该行正下方展开预览卡——沿用现状「合并卡就地展开」的容器与缩进语义（`dshi_itemMerge` + `dshi_card`，缩进 12px）。**不做整行点击**（行内含「原始数据（JSON）」折叠，避免误触）。
+- **页面级全局 proposal JSON 文本框移除**：第 5/6 轮的骨架预填与 `validateOrganizeProposalLocal` 本地预检转入行内预览卡（预检规则继续有效，服务端 `protocol.mjs` 的 `organizeProposal` 仍是权威）；需要核对 DTO 时用行内「原始数据（JSON）」折叠。
+- **各 kind 的预览入口（实现口径）**：任意 kind 的候选行都有「预览整理计划」按钮——按该候选的**前两张源卡**生成 link 骨架直接发 `previewPlan`（服务端校验为准），返回 diff 渲染 PlanView。集群行在此之外另有「合并进主题」按钮走 merge-topic 流程（选主题 → 载入 before 与 revision token → 编辑 after → 预览 diff → 确认执行），是集群的推荐入口。
+- **计划行**：待执行（open）的行可点开看 PlanView diff；已执行 / 已作废不渲染预览。
+- 确认执行链路不变：`previewPlan` → PlanView diff → 确认卡「确认执行」→ `executePlan { confirmed: true }`（带 planDigest）；stale preview 守卫（会话切换 / queueRevision 前进使旧预览失效）不变，plans 行 executed 不渲染预览、superseded 禁用预览也不变。
+
+#### 错误提示口径
+
+全部中文、说人话、必须带**下一步动作**；原始 code / details / violations 一律收进行内「技术细节」折叠或 `title` 属性，不得把传输层裸文案（如 `connection: invalid server-response failure`）直接甩给用户。
+
+| 场景 | 用户看到 | 原始 code（收进技术细节） |
+| --- | --- | --- |
+| 过期候选 / 计划 | 「该候选或计划已过期：源卡片可能已被合并或归档。点『刷新』重新分析。」 | `NOT_FOUND` / `INVALID_INPUT` |
+| 旧预览失效 | 「候选列表已更新，这份预览已失效，请重新点开候选预览。」 | `shiori/ui-stale-preview`（本地守卫） |
+| 内容被并行修改 | 「内容刚被其他窗口改过，请重新打开预览后再试。」 | `REVISION_CONFLICT` |
+| legacy 主题作合并目标 | 「legacy 主题只读，不能作为合并目标，请新建一个主题。」 | `UNSUPPORTED` |
+| 无权限 | 「当前会话没有权限执行这个操作。」 | `shiori/unauthorized` |
+| 只读占用 | 「记忆正被另一个窗口占用（只读中），请稍后再试。」 | `HOST_LOCKED` |
+| 行缺业务 id | 行禁用并显示「（缺少 candidate.id）」，不发 RPC | — |
+
+文案基线沿用第 4–6 轮映射并统一措辞；新增错误先落这张表再上界面，找不到现成条目的按「场景 + 下一步动作」现写，不硬翻 code。
