@@ -2114,6 +2114,10 @@ window.__ModuleLoader__.load({
     // 文本框手写必然失败，应走「合并进主题」一键流程。
     function proposalSkeleton(candidate) {
       var sources = candidate && Array.isArray(candidate.sources) ? candidate.sources : [];
+      // 孤立卡只有一张源卡，没有可连的第二张——second 会退化成占位符
+      // "<另一张卡 id>"，服务端 validateSparkIdLocal 必拒（INVALID_INPUT）。
+      // 少于 2 个源时返回 null，由调用方本地拦截，不发必然失败的 RPC。
+      if (sources.length < 2) return null;
       var first = sources[0] && sources[0].id ? String(sources[0].id) : "<源卡 id>";
       var second = sources[1] && sources[1].id ? String(sources[1].id) : "<另一张卡 id>";
       return JSON.stringify({ kind: "link", links: [{ id: first, after: [{ target: second, rel: "related" }] }] }, null, 2);
@@ -2321,14 +2325,23 @@ window.__ModuleLoader__.load({
         // 骨架 → 服务端校验失败报 INVALID_INPUT。现在点行按钮直接按该候选生成
         // 骨架并发送 previewPlan，不再需要人编辑 JSON；手写入口收进高级调试区。
         var candidate = findCandidateById(candidateId);
+        var skeleton = proposalSkeleton(candidate);
         var parsed = null;
         try {
-          parsed = JSON.parse(proposalSkeleton(candidate));
+          parsed = skeleton === null ? null : JSON.parse(skeleton);
         } catch (e) {
           parsed = null;
         }
         // Q-B：死 payload（如骨架异常）在本地拦下，不发必然失败的 RPC。
-        var problem = parsed === null ? "proposal 骨架生成失败（候选数据异常），请刷新后重试。" : validateOrganizeProposalLocal(parsed);
+        // 孤立卡（单源候选）没有第二张卡可连，骨架为 null——本来就不该有这个入口。
+        var problem;
+        if (skeleton === null) {
+          problem = "这张卡还没有和任何卡相连，没有可预览的整理计划";
+        } else if (parsed === null) {
+          problem = "proposal 骨架生成失败（候选数据异常），请刷新后重试。";
+        } else {
+          problem = validateOrganizeProposalLocal(parsed);
+        }
         if (problem) {
           setPreview(null);
           setPreviewError({ code: "ui/invalid-proposal", message: problem });
@@ -2800,6 +2813,9 @@ window.__ModuleLoader__.load({
           ? String(candidate.id) : null;
         var key = businessId !== null ? businessId : String(index);
         var isCluster = candidate ? String(candidate.kind ?? "") === "cluster" : false;
+        // 孤立卡只有一张源卡，没有可连的第二张——「预览整理计划」必然失败
+        // （骨架占位符被服务端拒），入口不渲染，只保留「稍后再说」「忽略」。
+        var isIsolated = candidate ? String(candidate.kind ?? "") === "isolated" : false;
         var rowDisabled = actionsDisabled || businessId === null;
         var mergeForThisRow = Boolean(merge) && businessId !== null && String(merge.candidateId) === businessId;
         var previewForThisRow = previewTargetId !== null && businessId !== null && previewTargetId === businessId;
@@ -2817,7 +2833,7 @@ window.__ModuleLoader__.load({
             // 不删除任何记忆；点击后该行立即离开「待处理」分组，可在「已阅」分组切回来。
             h("button", { className: "dshi_btn", disabled: rowDisabled, title: "只是收起来，不会删除任何记忆", onClick: function () { doReview(businessId, "reviewed"); } }, "稍后再说"),
             h("button", { className: "dshi_btn", disabled: rowDisabled, title: "把候选状态置为 dismissed", onClick: function () { doReview(businessId, "dismissed"); } }, "忽略"),
-            h("button", { className: "dshi_btn", disabled: rowDisabled, onClick: function () { doPreviewOrganize(businessId); } }, "预览整理计划"),
+            isIsolated ? null : h("button", { className: "dshi_btn", disabled: rowDisabled, onClick: function () { doPreviewOrganize(businessId); } }, "预览整理计划"),
             // Q-A：cluster 候选一键进入「合并进主题」流程（选/建主题 → 自动 proposal
             // → preview diff → 确认执行），不再要求手写 proposal JSON。
             isCluster ? h("button", { className: "dshi_btn dshi_btnPrimary", disabled: rowDisabled, onClick: function () { openMerge(businessId); } }, "合并进主题") : null),

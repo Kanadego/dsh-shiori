@@ -688,7 +688,9 @@ function findButton(tree, label) {
 //   而 R3/R4 测的是 revision 附带与会话守卫语义，需要 previewPlan 真正发出）
 function loadedStates(sessionId) {
   return [
-    { queueRevision: 0, items: [{ candidateId: "candidate-A" }], plans: [] },
+    // 真实形状补正（review a1 打回项 1）：link 候选必是两卡配对，扁平 candidateId 形状保留，
+    // 但 sources 必须给足 2 张——单源候选会被 proposalSkeleton 本地拦截，previewPlan 发不出。
+    { queueRevision: 0, items: [{ candidateId: "candidate-A", kind: "link", sources: [{ id: "s-a" }, { id: "s-b" }] }], plans: [] },
     null, false, JSON.stringify({ kind: "link", links: [{ id: "s1", after: [{ target: "t-a", rel: null }] }] }), null, null,
     { sessionId, gen: 0 },
   ];
@@ -726,11 +728,15 @@ test("R3 回归：数据已加载时 expectedQueueRevision 以数值附带，pre
   const renderCandidates = await mountCandidates(mod, host);
   const calls = [];
   let previewResolve;
+  // 真实形状补正（review a1 打回项 1 延伸）：analyze 的真实响应是 queueDto（setData 整包
+  // 替换），stub 返回 {} 会把队列冲空、候选消失；listCandidates 同步给两卡配对的 link 候选。
+  const analyzeQueueDto = { queueRevision: 0, items: [{ candidateId: "candidate-A", kind: "link", sources: [{ id: "s-a" }, { id: "s-b" }] }], plans: [] };
   const dsh = {
     call: async (method, session, payload) => {
       calls.push({ method, session, payload });
       if (method === "previewPlan") return new Promise((resolve) => { previewResolve = resolve; });
-      if (method === "listCandidates") return { queueRevision: 0, items: [{ candidateId: "candidate-A" }], plans: [] };
+      if (method === "listCandidates") return analyzeQueueDto;
+      if (method === "analyze") return analyzeQueueDto;
       return {};
     },
   };
@@ -2153,7 +2159,8 @@ function clusterLoadedStates(sessionId) {
       }, {
         candidate: {
           id: "link-B", kind: "link", scopeId: "default",
-          sources: [{ id: "s3", revision: 1 }], evidence: {},
+          // 真实形状补正（review a1 打回项 2）：link 候选两卡配对，补第二张源卡。
+          sources: [{ id: "s3", revision: 1 }, { id: "s4", revision: 1 }], evidence: {},
         },
         status: "pending",
       }],
@@ -2322,7 +2329,7 @@ test("Q-A/Q-B 回归：合并与执行的错误路径给出可读中文提示（
   host.states.length = 0;
   host.states.push(
     // merge 卡片改为「就地展开」：只有队列里存在被点击的那一行时才渲染，故这里必须真给一条 cluster 候选
-    { queueRevision: 0, items: [{ candidate: { id: "cluster-A", kind: "cluster", scopeId: "default", sources: [{ id: "s1", revision: 1 }], evidence: {} }, status: "pending" }], plans: [] },
+    { queueRevision: 0, items: [{ candidate: { id: "cluster-A", kind: "cluster", scopeId: "default", sources: [{ id: "s1", revision: 1 }, { id: "s2", revision: 1 }], evidence: {} }, status: "pending" }], plans: [] },
     // proposal 预填合法 link 形状（NOT_FOUND 阶段要真正发 previewPlan 才能测服务端错误映射）
     null, false, JSON.stringify({ kind: "link", links: [{ id: "s1", after: [{ target: "t-a", rel: null }] }] }),
     // preview：预置一条 merge-topic 预览（走确认执行错误路径）
@@ -2358,7 +2365,8 @@ test("Q-A/Q-B 回归：合并与执行的错误路径给出可读中文提示（
 
   // NOT_FOUND：过期候选的 preview organize（guard 已把 data 刷成空列表，补一条候选）
   calls.length = 0;
-  host.states[0] = { queueRevision: 0, items: [{ candidateId: "cand-1" }], plans: [] };
+  // 真实形状补正（review a1 打回项 4）：两卡配对的 link 候选才能发出 previewPlan 触达服务端 NOT_FOUND。
+  host.states[0] = { queueRevision: 0, items: [{ candidateId: "cand-1", kind: "link", sources: [{ id: "s-a" }, { id: "s-b" }] }], plans: [] };
   const boomDsh = {
     call: async (method, session, payload) => {
       calls.push({ method, session, payload });
@@ -2607,7 +2615,9 @@ test("U5 回归（原 Q-B）：点一次「预览整理计划」即按该候选�
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
   const calls = [];
-  const nestedItems = [{ candidate: { id: "link-B", kind: "link", scopeId: "default", sources: [{ id: "s3", revision: 1 }], evidence: {} }, status: "pending" }];
+  // 真实形状补正（review a1 打回项 5）：link 候选两卡配对，补第二张源卡（断言不动，
+  // links[0].id 仍是 s3、after 非空由真实 target s4 满足而非占位符）。
+  const nestedItems = [{ candidate: { id: "link-B", kind: "link", scopeId: "default", sources: [{ id: "s3", revision: 1 }, { id: "s4", revision: 1 }], evidence: {} }, status: "pending" }];
   const dsh = {
     call: async (method, session, payload) => {
       calls.push({ method, session, payload });
@@ -3759,4 +3769,113 @@ test("U5b：预览卡未知 kind——标题原样显示 kind、正文走 summar
   assert.ok(confirm, "unknown kind keeps generic 确认执行 button");
   assert.ok(String(confirm.props.className || "").includes("dshi_btnDanger"), "unknown kind confirm stays danger");
   assert.ok(text.includes("旧") && text.includes("新"), "raw diff still reachable inside 原始信息");
+});
+
+// ── U5-c：孤立卡不提供「预览整理计划」──────────────────────────────────────
+// 背景：孤立卡（kind=isolated）只有 1 张源卡，proposalSkeleton 退化为占位符
+// "<另一张卡 id>"，服务端 validateSparkIdLocal 必拒（INVALID_INPUT）。
+// 修复：孤立卡行不渲染该入口；proposalSkeleton 对 sources<2 返回 null；
+// doPreviewOrganize 本地报人话错误，不发任何 RPC。
+
+function candidateRowsOf(tree) {
+  return flattenVNode(tree).filter((n) => n.type === "div" && n.props && n.props.className === "dshi_item");
+}
+function previewButtonsIn(node) {
+  return flattenVNode(node).filter((n) => n.type === "button" && n.children.includes("预览整理计划"));
+}
+
+test("U5-c：孤立卡候选行不出现「预览整理计划」按钮（集群/可建链接行仍出现）", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderCandidates = await mountCandidates(mod, host);
+  const items = [
+    { candidate: { id: "cluster-A", kind: "cluster", scopeId: "default", sources: [{ id: "s1" }, { id: "s2" }], evidence: {} }, status: "pending" },
+    { candidate: { id: "link-B", kind: "link", scopeId: "default", sources: [{ id: "s3" }, { id: "s4" }], evidence: {} }, status: "pending" },
+    { candidate: { id: "iso-C", kind: "isolated", scopeId: "default", sources: [{ id: "s5" }], evidence: {} }, status: "pending" },
+  ];
+  const dsh = {
+    call: async (method) => (method === "listCandidates" ? { queueRevision: 5, items, plans: [] } : {}),
+  };
+  host.states.length = 0;
+  host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
+  let tree = renderCandidates(dsh, "session-A");
+  // 孤立卡组默认折叠：先点组头展开
+  const groupHeads = (t) => flattenVNode(t).filter((n) => n.type === "button" && String(n.props.className || "").includes("dshi_groupHead"));
+  const isolatedHead = groupHeads(tree).find((n) => collectText(n).includes("孤立卡"));
+  assert.ok(isolatedHead, "isolated group header present");
+  isolatedHead.props.onClick();
+  tree = renderCandidates(dsh, "session-A");
+  assert.ok(candidateRowsOf(tree).some((row) => collectText(row).includes("iso-C")), "isolated row rendered after expanding");
+
+  const rows = candidateRowsOf(tree);
+  const clusterRow = rows.find((row) => collectText(row).includes("cluster-A"));
+  const linkRow = rows.find((row) => collectText(row).includes("link-B"));
+  const isoRow = rows.find((row) => collectText(row).includes("iso-C"));
+  assert.ok(clusterRow && linkRow && isoRow, "all three kind rows rendered");
+  assert.equal(previewButtonsIn(clusterRow).length, 1, "cluster row keeps 预览整理计划");
+  assert.equal(previewButtonsIn(linkRow).length, 1, "link row keeps 预览整理计划");
+  assert.equal(previewButtonsIn(isoRow).length, 0, "isolated row has no 预览整理计划 entry");
+  // 孤立卡行只保留原有两个动作，行本身不消失
+  const isoButtonLabels = flattenVNode(isoRow).filter((n) => n.type === "button" && !String(n.props.className || "").includes("dshi_groupHead")).map((n) => n.children.join(""));
+  assert.deepEqual(isoButtonLabels, ["稍后再说", "忽略"], "isolated row keeps exactly 稍后再说 + 忽略");
+});
+
+test("U5-c：proposalSkeleton 对单源候选返回 null（经 doPreviewOrganize 定点错误消息观测，非通用骨架失败文案）", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderCandidates = await mountCandidates(mod, host);
+  const calls = [];
+  const items = [
+    { candidate: { id: "link-single", kind: "link", scopeId: "default", sources: [{ id: "s-only" }], evidence: {} }, status: "pending" },
+  ];
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (method === "listCandidates") return { queueRevision: 5, items, plans: [] };
+      return {};
+    },
+  };
+  host.states.length = 0;
+  host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
+  let tree = renderCandidates(dsh, "session-A");
+  // kind=link 单源候选：入口仍在（入口隐藏只针对 isolated），点它走骨架生成路径
+  findButton(tree, "预览整理计划").props.onClick();
+  await flush();
+  tree = renderCandidates(dsh, "session-A");
+  const text = collectText(tree);
+  // 定点文案只在 skeleton === null 分支出现——JSON.parse 失败会走通用文案，
+  // 占位符骨架（旧行为）会通过本地校验直接发 previewPlan。三者在文案上可区分。
+  assert.ok(text.includes("这张卡还没有和任何卡相连，没有可预览的整理计划"),
+    "null skeleton surfaces the dedicated message");
+  assert.equal(text.includes("proposal 骨架生成失败"), false,
+    "generic skeleton-failure message not used (proves skeleton === null, not a JSON.parse failure)");
+  assert.equal(calls.some((c) => c.method === "previewPlan"), false, "no previewPlan issued");
+});
+
+test("U5-c：doPreviewOrganize 在单源候选下不发 previewPlan RPC（本地拦截，零出网）", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderCandidates = await mountCandidates(mod, host);
+  const calls = [];
+  const items = [
+    { candidate: { id: "link-single", kind: "link", scopeId: "default", sources: [{ id: "s-only" }], evidence: {} }, status: "pending" },
+  ];
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (method === "listCandidates") return { queueRevision: 5, items, plans: [] };
+      return {};
+    },
+  };
+  host.states.length = 0;
+  host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
+  let tree = renderCandidates(dsh, "session-A");
+  const callsBefore = calls.length;
+  findButton(tree, "预览整理计划").props.onClick();
+  await flush();
+  assert.equal(calls.length, callsBefore, "clicking 预览整理计划 on a single-source candidate sends zero RPC");
+  assert.equal(calls.some((c) => c.method === "previewPlan"), false, "previewPlan never issued");
+  tree = renderCandidates(dsh, "session-A");
+  assert.ok(collectText(tree).includes("这张卡还没有和任何卡相连，没有可预览的整理计划"),
+    "dedicated local error message rendered");
 });
