@@ -1926,19 +1926,20 @@ window.__ModuleLoader__.load({
     }
     // Q-B：候选/计划脏数据的人话错误（保留原 code 便于排查）。
     // U5：服务端原文不再拼进 message 顶大红字——放 detail 字段，ErrorBox 收进
-    // 默认折叠的 details。映射口径：候选已变化 → 请刷新后重新分析；
-    // REVISION_CONFLICT → 队列已更新请刷新；NOT_FOUND → 该候选已不存在。
+    // 默认折叠的 details。映射口径：候选已变化 → 请点「分析整理候选」重新分析；
+    // REVISION_CONFLICT → 队列已更新请重新分析（不要重试旧预览）；NOT_FOUND → 该候选已不存在。
+    // 注意：「刷新」按钮只重读队列快照、不会重新分析，文案一律指向「分析整理候选」。
     function candidateActionError(error) {
       var code = error && error.code ? String(error.code) : "";
       var detail = (error && error.message) || String(error);
       if (code === "NOT_FOUND") {
-        return { code: code, message: "该候选已不存在：该候选或计划已过期（源卡可能已被合并 / 归档，或计划已不存在）。请点「刷新」重新分析后再试。", detail: detail };
+        return { code: code, message: "该候选已不存在：该候选或计划已过期（源卡可能已被合并 / 归档，或计划已不存在）。请点「分析整理候选」重新分析后再试。", detail: detail };
       }
       if (code === "INVALID_INPUT") {
-        return { code: code, message: "服务端拒绝了这次操作：候选内容可能已变化，请刷新后重新分析；若在高级区手写 proposal，请检查它是否符合协议形状。", detail: detail };
+        return { code: code, message: "服务端拒绝了这次操作：候选内容可能已变化，请点「分析整理候选」重新分析后再试；若在高级区手写 proposal，请检查它是否符合协议形状。", detail: detail };
       }
       if (code === "REVISION_CONFLICT") {
-        return { code: code, message: "revision 冲突：队列已更新，请刷新后重新预览 / 执行，不要重试旧预览（该计划可能已被执行，或主题 / 队列在此期间被修改）。", detail: detail };
+        return { code: code, message: "revision 冲突：队列已更新，请点「分析整理候选」重新分析后再试，不要重试旧预览（该计划可能已被执行，或主题 / 队列在此期间被修改）。", detail: detail };
       }
       if (code === "UNSUPPORTED") {
         return { code: code, message: "服务端不支持该操作（例如 legacy 主题只读，不能作为合并目标）。", detail: detail };
@@ -2907,7 +2908,7 @@ window.__ModuleLoader__.load({
       return h("div", null,
         h("div", { className: "dshi_row", style: { marginBottom: 8 } },
           h("span", { className: "dshi_cardTitle" }, "整理 / 遗忘：候选审阅与执行"),
-          h("button", { className: "dshi_btn", onClick: load, disabled: busy }, "刷新"),
+          h("button", { className: "dshi_btn", title: "只重新读取队列快照，不会重新分析；要重新分析请点「分析整理候选」", onClick: load, disabled: busy }, "刷新"),
           h("button", { className: "dshi_btn", title: "找出该合并进主题、该建链接、该单独成卡的卡（只读分析，不改数据）", onClick: function () { doAnalyze("organize"); }, disabled: actionsDisabled }, "分析整理候选"),
           h("button", { className: "dshi_btn", title: "按衰减分数找出该归档的旧卡（只读分析）", onClick: function () { doAnalyze("forgetting"); }, disabled: actionsDisabled }, "分析遗忘候选"),
           loaded ? h("span", { className: "dshi_badgeDim dshi_badge" }, "queueRevision " + queueRevision) : null),

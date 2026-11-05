@@ -56,7 +56,7 @@ analyze / reviewCandidate / previewPlan / executePlan / getTimeline
   2. 「新建主题」走 `executeTool topic_create {topic,title,summary,operationId}`，成功后**重新 `memory_list_topics` 取服务端权威 revision token**（形如 `shiori-r1.<base64url>.<sha256>`，不自行构造），再自动进入合并表单。
   3. 选中主题后 `executeTool memory_read {topic}` 拉当前正文作 `before`、返回的 revision 作 `expectedRevision`——**before 绝不传空串**：执行端以 `plan.topic.after` 整体替换正文（executor 锁内重读一致性校验），空 before 会截断既有正文。`after` = before + 默认合并草稿（evidence.sharedTerm + 源卡 id 清单），标题 / 摘要 / updated 自动填、可编辑；发送前本地轻量预检（append-only、单行摘要 ≤60、非空变化），服务端 `buildMergeTopicDraft` 仍是权威（源数 8..19、源保全块自动追加）。
   4. `previewPlan`（kind=organize，带 candidateId + proposal + expectedQueueRevision + operationId）返回的 diff（`topic:<key>` 与 `spark:<id>`）渲染成可视确认，`executePlan`（confirmed: true + planDigest）执行；成功后收起合并流程并刷新队列（图谱 / 记忆 L1 在切到对应 tab 时按会话重新拉取）。
-- **候选 / 计划脏数据的面板表现（第 4 轮 Q-B，第 5/6 轮扩展）**：过期候选（源卡已 merged / archived）的 preview 报 NOT_FOUND / INVALID_INPUT 时给出具体中文提示（"该候选或计划已过期……请点刷新重新分析"，原 code 保留）；`REVISION_CONFLICT` / `UNSUPPORTED`（如 legacy 主题只读）同样有专属文案。preview 钉定 `{sessionId, queueRevision, plan}`：会话切换（既有 R4 守卫）与**队列 revision 前进**都会使旧 preview 失效，拒绝拿旧 preview 去 execute（`shiori/ui-stale-preview`）。plans 列表区分 open / executed / superseded：executed 行不渲染预览按钮；superseded（被新预览作废，P a4 起投影提供该布尔）行渲染但**禁用**预览按钮并提示「该计划已被新预览作废……请使用最新计划」；预览对应计划若已 executed / superseded，确认执行按钮禁用。
+- **候选 / 计划脏数据的面板表现（第 4 轮 Q-B，第 5/6 轮扩展）**：过期候选（源卡已 merged / archived）的 preview 报 NOT_FOUND / INVALID_INPUT 时给出具体中文提示（"该候选或计划已过期……请点「分析整理候选」重新分析"，原 code 保留）；`REVISION_CONFLICT` / `UNSUPPORTED`（如 legacy 主题只读）同样有专属文案。preview 钉定 `{sessionId, queueRevision, plan}`：会话切换（既有 R4 守卫）与**队列 revision 前进**都会使旧 preview 失效，拒绝拿旧 preview 去 execute（`shiori/ui-stale-preview`）。plans 列表区分 open / executed / superseded：executed 行不渲染预览按钮；superseded（被新预览作废，P a4 起投影提供该布尔）行渲染但**禁用**预览按钮并提示「该计划已被新预览作废……请使用最新计划」；预览对应计划若已 executed / superseded，确认执行按钮禁用。
 - **RPC 错误 details 契约（第 6 轮 B-Q3，该文件属本槽已修）**：`src/plugin/client-rpc.mjs` 全部 6 个 `RemoteError` 出口的 `details` **恒为对象**——业务错误优先透传 P protocol `failInvalid` 携带的 details（如 `{ violations }`、`{ planId }`），没有则给 `{ code }`（守卫出口附 `method` / `principalKind`）。此前 details 为 undefined，gateway 原样搬运丢键后，宿主客户端判据 `isRecord(error.details)` 不成立，**任何业务错误都被显示成 `connection: invalid server-response failure`**——第 5 轮的中文错误映射在真机上被这条传输层拒绝遮断，修好后自然生效。回归测试用宿主真实判据（gateway `rpcFailure` 搬运 + JSON 往返 + `parseConnectionResponseFailure`）断言各出口 details 为 record 且 violations 可达。
 - **diagnostics 容错（第 4 轮 Q-C）**：状态 tab 对 P 新增的 codec / transport 等字段按 key: value 照常渲染，未知未来字段容忍，值为 undefined 的键忽略（不显示 undefined、不伪装成 null），序列化异常降级 String()，不崩。
 - **记忆预算（0.2 U2 重写，标杆页）**：`ctx.configForms.get("shiori")` 原生设置作用域（命名空间能被 settings 服务收录，靠的是 schema 里 volatile 的 `budgets` 字段），整段 budgets 单 revision fence 写入。命名三层分离：界面名主位、技术名进 tooltip 与页尾「技术细节」折叠区、机制说明写成后果描述。顶部**实时水位条**：`当前占用 ─ 软水位 · 硬闸 · 硬顶`，占用取 `getStatus` 返回的真实 `occupancy.l1Chars`（取不到如实显示「占用数据不可用」），填充色随水位分安全绿 / 警告黄 / 危险红。`softRatio` / `hardRatio` 不再直接编辑，改为 `softChars` / `hardChars` 字符数水位滑杆 + 数字联动，软/硬互相钳制（软 ≤ 硬-1 < 硬顶）。按人设卡（L0）/ 记忆核心（L1）/ 闪回卡片（L2）三组分组卡片（层号已按 U0 纠错：core 是 L1 不是 L0）。已修改字段标「已修改」徽章 + 单字段恢复默认；越界校验全部就地中文提示并禁用保存按钮。`targetChars` 不在界面出现（D3）——它不能反过来当用户改不动的硬约束：草稿里的 `clampCoreWater` 随硬顶/软/硬把 `targetChars` 收敛进 `softChars ≤ targetChars < hardChars-1`，保存时按收敛值写回（调小硬顶不会因为一个看不见的字段禁用保存）；越界文案点名界面上看得见的中文字段名，不出现隐藏的技术名。保存时同时清掉旧 ratio 字段避免双源真相。`budgets` 为 volatile：宿主热提交、不触发插件重载；运行中的 controller 仍持启动时快照，新预算在下次插件重载或宿主重启后生效。`persona.maxChars` 输入上限 60000（与服务端 `BUDGET_CEILINGS` 同步）。
@@ -183,6 +183,7 @@ tab 名改「整理与遗忘」（GLOSSARY「三、tab 名称对照」的目标�
 | 未知 kind | 确认执行 | danger 红 | 按协议行为 | 兜底文案，不假装认识这个 kind |
 
 - 「取消」按钮不变：关掉预览卡不产生任何写入。
+- 「执行成功后该候选会从队列移除、`queueRevision` 前进；想对同一对卡再连一次，需要点「分析整理候选」重新分析（页面上的「刷新」按钮只重新读取队列快照，不会重新分析）。
 - 现状（0.2.0）确认按钮不分 kind 统一为「确认执行（不可撤销）」——上表是本次目标形态，合入前不得当作已完成。
 
 #### 错误提示口径
@@ -191,7 +192,7 @@ tab 名改「整理与遗忘」（GLOSSARY「三、tab 名称对照」的目标�
 
 | 场景 | 用户看到 | 原始 code（收进技术细节） |
 | --- | --- | --- |
-| 过期候选 / 计划 | 「该候选或计划已过期：源卡片可能已被合并或归档。点『刷新』重新分析。」 | `NOT_FOUND` / `INVALID_INPUT` |
+| 过期候选 / 计划 | 「该候选或计划已过期：源卡片可能已被合并或归档。点『分析整理候选』重新分析。」 | `NOT_FOUND` / `INVALID_INPUT` |
 | 旧预览失效 | 「候选列表已更新，这份预览已失效，请重新点开候选预览。」 | `shiori/ui-stale-preview`（本地守卫） |
 | 内容被并行修改 | 「内容刚被其他窗口改过，请重新打开预览后再试。」 | `REVISION_CONFLICT` |
 | legacy 主题作合并目标 | 「legacy 主题只读，不能作为合并目标，请新建一个主题。」 | `UNSUPPORTED` |

@@ -3879,3 +3879,43 @@ test("U5-c：doPreviewOrganize 在单源候选下不发 previewPlan RPC（本地
   assert.ok(collectText(tree).includes("这张卡还没有和任何卡相连，没有可预览的整理计划"),
     "dedicated local error message rendered");
 });
+
+// U5-d：错误文案必须指向真正管用的「分析整理候选」按钮（「刷新」只重读队列快照、不会重新分析）；
+// 「刷新」按钮补 title 说明，避免 REVISION_CONFLICT 时把用户往死路上引。
+test("U5-d：REVISION_CONFLICT 提示指向「分析整理候选」；「刷新」按钮 title 说明只重读快照", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderCandidates = await mountCandidates(mod, host);
+  const calls = [];
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (method === "listCandidates") return { queueRevision: 0, items: [], plans: [] };
+      if (method === "executePlan") throw Object.assign(new Error("plan already executed"), { code: "REVISION_CONFLICT" });
+      return {};
+    },
+  };
+  host.states.length = 0;
+  host.states.push(
+    { queueRevision: 0, items: [], plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
+  // 预置一条已成功预览（模拟用户此前已预览过 merge-topic 计划），走确认执行错误路径
+  host.states[4] = { sessionId: "session-A", plan: { kind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "", diff: [] }, queueRevision: 0 };
+  let tree = renderCandidates(dsh, "session-A");
+  findButton(tree, "确认合并（不可撤销）").props.onClick();
+  await flush();
+  tree = renderCandidates(dsh, "session-A");
+  const text = collectText(tree);
+  assert.ok(text.includes("revision 冲突"), "REVISION_CONFLICT explained in Chinese");
+  assert.ok(text.includes("请点「分析整理候选」重新分析后再试"), "guidance points to the working button");
+  assert.ok(text.includes("不要重试旧预览"), "do-not-retry-stale-preview warning retained");
+  assert.ok(!text.includes("请刷新后重新分析") && !text.includes("请刷新后重新预览"),
+    "misleading refresh wording removed");
+  assert.ok(text.includes("plan already executed"), "original message retained");
+
+  // 「刷新」按钮：title 必须说明它只重读队列快照、不会重新分析
+  tree = renderCandidates(dsh, "session-A");
+  const refreshButton = findButton(tree, "刷新");
+  const refreshTitle = String(refreshButton.props.title || "");
+  assert.ok(refreshTitle.includes("只重新读取队列快照") && refreshTitle.includes("不会重新分析"),
+    "refresh button title clarifies it does not re-analyze");
+});

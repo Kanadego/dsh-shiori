@@ -170,8 +170,13 @@ test("organize 全链：analyze 入队（持久）→ review → previewPlan（b
   }, { bindings: bindings2 });
   await controller2.start();
   const restored = await controller2.management.listCandidates(trusted, {});
-  assert.equal(restored.queueRevision, reviewed.queueRevision);
-  assert.equal(restored.items.find((it) => it.candidate.id === candidate.id).status, "reviewed");
+  // P-A 收敛新语义：executePlan 成功后把本次执行的候选从队列移除（queueRevision
+  // 前进 1），已执行候选不再画成可审阅条目；plan 账保留 executed 审计。
+  assert.equal(restored.queueRevision, reviewed.queueRevision + 1);
+  assert.ok(
+    !restored.items.some((it) => it.candidate.id === candidate.id),
+    "executed candidate must be removed from the queue",
+  );
   assert.ok(restored.plans.some((p) => p.planId === preview.planId && p.executed === true));
   await controller2.stop();
 });
@@ -547,7 +552,9 @@ test("P-A 队列收敛：执行（link+forgetting）后 re-analyze 清失效候�
     args: { title: "旧临时", content: "临时。", triggers: ["旧词"], vitality: "ephemeral" },
   });
 
-  // 1) 首轮 analyze（rev 0→1）+ review 首个候选。
+  // 1) 首轮 analyze（rev 0→1）+ review 首个候选；另选一条「源卡不会被本次
+  //    link 执行波及」的 link 候选一并 review，供第 4 步验证 reviewed 保留
+  //    （被执行的那个候选已不在队列，不能再拿它验）。
   const first = await controller.management.analyze(trusted, { kind: "organize", operationId: "pa-an-1" });
   const reviewedId = first.items[0].candidate.id;
   const reviewedAfterReview = await controller.management.reviewCandidate(trusted, {
@@ -555,22 +562,42 @@ test("P-A 队列收敛：执行（link+forgetting）后 re-analyze 清失效候�
     expectedQueueRevision: first.queueRevision, operationId: "pa-rv-1",
   });
   assert.equal(reviewedAfterReview.queueRevision, first.queueRevision + 1);
-
-  // 2) link 计划执行（源卡保持 active，队列候选不受影响）。
   const candidate = first.items[0].candidate;
+  const touchedIds = new Set([candidate.sources[0].id, candidate.sources[1].id]);
+  const retained = first.items.find((it) =>
+    it.candidate.id !== reviewedId
+    && it.candidate.kind === "link"
+    && it.candidate.sources.every((s) => !touchedIds.has(s.id)));
+  assert.ok(retained, "fixture must contain a link candidate untouched by the link plan");
+  const retainedReviewedId = retained.candidate.id;
+  const retainedAfterReview = await controller.management.reviewCandidate(trusted, {
+    candidateId: retainedReviewedId, decision: "reviewed",
+    expectedQueueRevision: reviewedAfterReview.queueRevision, operationId: "pa-rv-1b",
+  });
+  assert.equal(retainedAfterReview.queueRevision, reviewedAfterReview.queueRevision + 1);
+
+  // 2) link 计划执行：源卡保持 active，但本次执行的候选（plan.candidateId 指向
+  //    的那条）被从队列收敛移除、queueRevision 前进 1——面板 load() 一刷新就
+  //    拿不到旧候选，用户不会再点到一个注定 REVISION_CONFLICT 的按钮。
   const proposal = {
     kind: "link",
     links: [{ id: candidate.sources[0].id, after: [{ target: candidate.sources[1].id, rel: "相关" }] }],
   };
   const previewLink = await controller.management.previewPlan(trusted, {
     kind: "organize", candidateId: candidate.id, proposal,
-    expectedQueueRevision: reviewedAfterReview.queueRevision, operationId: "pa-pv-1",
+    expectedQueueRevision: retainedAfterReview.queueRevision, operationId: "pa-pv-1",
   });
   const executedLink = await controller.management.executePlan(trusted, {
     planId: previewLink.planId, planDigest: previewLink.planDigest,
     operationId: "pa-ex-1", confirmed: true,
   });
   assert.equal(executedLink.result.status, "completed");
+  const afterExec = await controller.management.listCandidates(trusted, {});
+  assert.equal(afterExec.queueRevision, retainedAfterReview.queueRevision + 1);
+  assert.ok(
+    !afterExec.items.some((it) => it.candidate.id === candidate.id),
+    "executed candidate must be removed from the queue right after executePlan",
+  );
 
   // 3) forgetting analyze 两次：第二次应作废第一次的 open 计划（收敛到 1 open），
   //    然后执行归档（1 张卡 archived → 队列中引用它的候选失效）。
@@ -588,17 +615,22 @@ test("P-A 队列收敛：执行（link+forgetting）后 re-analyze 清失效候�
 
   // 4) re-analyze organize：以本次分析为准收敛——
   //    - items 恰等于新分析结果（无失效候选：无任何 item 引用已归档卡）；
-  //    - 仍存在的候选保留 reviewed status（不退回 pending）。
+  //    - 仍存在的候选保留 reviewed status（不退回 pending）。被执行的候选
+  //      （reviewedId）已由 executePlan 收敛移除，reviewed 保留改用源卡未被
+  //      执行波及的另一条候选（retainedReviewedId）验证。
   const second = await controller.management.analyze(trusted, { kind: "organize", operationId: "pa-an-2" });
   assert.equal(second.items.length, second.analysis.candidates);
   for (const item of second.items) {
     const refsArchived = item.candidate.sources.some((s) => s.id === savedEphemeral.id);
     assert.equal(refsArchived, false, "no candidate may reference the archived card");
   }
-  const keptReviewed = second.items.find((it) => it.candidate.id === reviewedId);
-  if (keptReviewed !== undefined) {
-    assert.equal(keptReviewed.status, "reviewed");
-  }
+  assert.ok(
+    !second.items.some((it) => it.candidate.id === reviewedId),
+    "executed candidate must not reappear after re-analyze",
+  );
+  const keptReviewed = second.items.find((it) => it.candidate.id === retainedReviewedId);
+  assert.ok(keptReviewed !== undefined, "reviewed candidate with untouched sources must survive re-analyze");
+  assert.equal(keptReviewed.status, "reviewed");
 
   // 5) 计划收敛：无仍 open 的计划；已执行计划保留审计。
   const listed = await controller.management.listCandidates(trusted, {});
@@ -617,6 +649,91 @@ test("P-A 队列收敛：执行（link+forgetting）后 re-analyze 清失效候�
   assert.deepEqual(fgReplay.analysis, fg2.analysis);
   assert.equal(fgReplay.plans.filter((p) => p.executed === false && p.superseded !== true).length, 0);
 
+  await controller.stop();
+});
+
+test("P-A 用户路径：执行后旧候选 previewPlan 报 NOT_FOUND（非 REVISION_CONFLICT），重新 analyze 后新候选 revision 最新、preview 成功", async (t) => {
+  const { controller, trusted } = await setup(t);
+  // 3 张同实体卡 → analyze 产出 link pair 候选（两卡间无既有边）。
+  for (let i = 0; i < 3; i++) {
+    await controller.management.executeTool(trusted, {
+      name: "spark_save",
+      args: {
+        title: `卡${i}`, content: `同实体内容 ${i}。`, triggers: [`词${i}`],
+        entities: ["同实体"], vitality: "evergreen",
+      },
+    });
+  }
+  const analyzed = await controller.management.analyze(trusted, { kind: "organize", operationId: "up-an-1" });
+  const linkItem = analyzed.items.find((it) => it.candidate.kind === "link");
+  assert.ok(linkItem, "expected a link pair candidate");
+  const oldCandidate = linkItem.candidate;
+  // 全部候选的源卡 revision 基线（isolated 候选覆盖每张卡）。
+  const oldRevisions = new Map();
+  for (const it of analyzed.items) {
+    for (const s of it.candidate.sources) {
+      if (!oldRevisions.has(s.id)) oldRevisions.set(s.id, s.revision);
+    }
+  }
+
+  const proposal = {
+    kind: "link",
+    links: [{ id: oldCandidate.sources[0].id, after: [{ target: oldCandidate.sources[1].id, rel: "相关" }] }],
+  };
+  const preview = await controller.management.previewPlan(trusted, {
+    kind: "organize", candidateId: oldCandidate.id, proposal,
+    expectedQueueRevision: analyzed.queueRevision, operationId: "up-pv-1",
+  });
+  const executed = await controller.management.executePlan(trusted, {
+    planId: preview.planId, planDigest: preview.planDigest, operationId: "up-ex-1", confirmed: true,
+  });
+  assert.equal(executed.result.status, "completed");
+
+  // 执行后：该候选已不在队列、queueRevision 前进 1。
+  const afterExec = await controller.management.listCandidates(trusted, {});
+  assert.equal(afterExec.queueRevision, analyzed.queueRevision + 1);
+  assert.ok(
+    !afterExec.items.some((it) => it.candidate.id === oldCandidate.id),
+    "executed candidate must be gone from the queue",
+  );
+
+  // 用户拿旧候选再点预览：NOT_FOUND（不是 REVISION_CONFLICT）——候选已被
+  // 收敛移除，客户端按「刷新队列」处理，而不是误判为并发冲突。
+  await assert.rejects(
+    () => controller.management.previewPlan(trusted, {
+      kind: "organize", candidateId: oldCandidate.id, proposal,
+      expectedQueueRevision: afterExec.queueRevision, operationId: "up-pv-2",
+    }),
+    (e) => e.code === "NOT_FOUND",
+  );
+
+  // 重新 analyze：新候选的 sources[].revision 绑定卡片最新 revision
+  // （被执行 link 的源卡 revision +1，其余不变），previewPlan 成功。
+  const reanalyzed = await controller.management.analyze(trusted, { kind: "organize", operationId: "up-an-2" });
+  const modifiedId = oldCandidate.sources[0].id; // 被 link 执行写入的源卡
+  const newItem = reanalyzed.items.find((it) =>
+    it.candidate.kind === "link"
+    && it.candidate.sources.some((s) => s.id === modifiedId));
+  assert.ok(newItem, "expected a fresh link candidate bound to latest revisions");
+  for (const ref of newItem.candidate.sources) {
+    const expected = ref.id === modifiedId
+      ? oldRevisions.get(ref.id) + 1
+      : oldRevisions.get(ref.id);
+    assert.equal(ref.revision, expected, `candidate source "${ref.id}" must bind the latest card revision`);
+  }
+  const newPreview = await controller.management.previewPlan(trusted, {
+    kind: "organize", candidateId: newItem.candidate.id,
+    proposal: {
+      kind: "link",
+      links: [{
+        id: newItem.candidate.sources[0].id,
+        after: [{ target: newItem.candidate.sources[1].id, rel: "相关" }],
+      }],
+    },
+    expectedQueueRevision: reanalyzed.queueRevision, operationId: "up-pv-3",
+  });
+  assert.match(newPreview.planDigest, /^[a-f0-9]{64}$/);
+  assert.ok(newPreview.diff.length > 0);
   await controller.stop();
 });
 

@@ -796,19 +796,28 @@ export function createManagement(deps) {
         fail("AUTHORIZATION_REQUIRED", "executePlan cancelled before execution was recorded", { planId: payload.planId });
       }
       await state.planStore.markExecuted(scope.scopeId, payload.planId, payload.operationId);
-      // P-A：执行后立即收敛队列——移除引用「已不再是 active」源卡的候选
-      // （merge 退休 / forgetting 归档后，面板不再把失效条目画成可审阅；
-      // link 计划源卡仍 active，不动队列）。确定性/重放安全：移除集合由
-      // 「队列项 ∩ 非 active 源卡」决定；重放同 operationId 时首轮已移除、
-      // 幸存集合不变 → 不动队列、不记队列事务。队列 operationId 复用本次
-      // 执行 operationId（面板各操作生成唯一 operationId）。
+      // P-A：执行后立即收敛队列——移除两类候选：
+      //   1) 引用「已不再是 active」源卡的候选（merge 退休 / forgetting 归档后，
+      //      面板不再把失效条目画成可审阅）；
+      //   2) 本次执行的候选本身（organize plan.candidateId 指向的那条）：它已
+      //      被执行完毕，留在队列里只会让用户再点一个注定 REVISION_CONFLICT
+      //      的按钮（link 计划源卡仍 active，旧逻辑因此漏掉它）。收敛/保存后
+      //      queueRevision 前进，客户端 load() 刷新即拿不到旧候选。
+      // forgetting 计划（archive-ephemeral）没有 candidateId → executedCandidateId
+      // 为 null，此时行为与只按 active 过滤完全一致。
+      // 确定性/重放安全：移除集合由「队列项 ∩ (非 active 源卡 ∪ 已执行候选)」
+      // 决定；重放同 operationId 时首轮已移除、幸存集合不变 → 不动队列、不记
+      // 队列事务。队列 operationId 复用本次执行 operationId（面板各操作生成
+      // 唯一 operationId）。
       // P-A 残留收紧：收敛/保存抛错时 grant 也必须撤销（merge 已落盘但
       // 调用报错——grant 泄漏会放大授权窗口），finally 保证两条路径都撤销。
+      const executedCandidateId = typeof entry.plan?.candidateId === "string" ? entry.plan.candidateId : null;
       try {
         const queue = await loadQueue(scope.scopeId);
         const snapshot = queue.snapshot();
         const activeIds = new Set((await resources.sparkStore.listActive()).map((r) => r.id));
         const survivors = snapshot.items
+          .filter((it) => executedCandidateId === null || it.candidate.id !== executedCandidateId)
           .filter((it) => it.candidate.sources.every((s) => activeIds.has(s.id)))
           .map((it) => it.candidate);
         if (survivors.length !== snapshot.items.length) {
