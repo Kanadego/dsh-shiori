@@ -1976,6 +1976,59 @@ window.__ModuleLoader__.load({
     ];
     var PLAN_STATE_LABELS = { open: "待执行", executed: "已执行", superseded: "已作废" };
     var PLAN_KIND_LABELS = { organize: "整理", forgetting: "遗忘" };
+    // U5b：预览卡标题按 plan.kind（link / merge-topic / thin-core）翻成人话；
+    // 未知 kind 原样显示，绝不吞掉、不崩。
+    var PLAN_PREVIEW_TITLES = { "link": "连起来", "merge-topic": "合并进主题", "thin-core": "core 瘦身" };
+    function planPreviewTitle(kind) {
+      var text = String(kind ?? "");
+      return PLAN_PREVIEW_TITLES[text] ?? text;
+    }
+    // U5b：候选行「理由」小字——把 evidence 翻成人话（纯展示）。evidence 缺失 /
+    // 形状不对 / 未知 kind 返回 null：调用方不渲染该行，行本身绝不消失、绝不抛错。
+    // 词条一律按纯文本拼接（React 文本节点，无 HTML 注入面）。
+    function candidateReasonOf(candidate) {
+      var kind = candidate && candidate.kind !== undefined && candidate.kind !== null ? String(candidate.kind) : "";
+      var evidence = candidate && candidate.evidence
+        && typeof candidate.evidence === "object" && !Array.isArray(candidate.evidence)
+        ? candidate.evidence : null;
+      if (evidence === null) return null;
+      // 字段缺失按「空」处理；字段存在但不是数组按「形状不对」处理（返回 null）。
+      var wordList = function (value) {
+        if (value === undefined || value === null) return [];
+        if (!Array.isArray(value)) return null;
+        return value
+          .filter(function (t) { return t !== null && t !== undefined && String(t) !== ""; })
+          .map(function (t) { return String(t); });
+      };
+      var quoteList = function (words) {
+        return words.map(function (w) { return "「" + w + "」"; }).join("");
+      };
+      if (kind === "link") {
+        var entities = wordList(evidence.sharedEntities);
+        var triggers = wordList(evidence.sharedTriggers);
+        if (entities === null || triggers === null) return null;
+        var parts = [];
+        if (entities.length > 0) parts.push("两张卡都提到实体" + quoteList(entities));
+        if (triggers.length > 0) parts.push("都带触发词" + quoteList(triggers));
+        return parts.length > 0 ? parts.join("；") : "两张卡有共同关键词";
+      }
+      if (kind === "cluster") {
+        var sources = candidate && Array.isArray(candidate.sources) ? candidate.sources : null;
+        var field = evidence.field;
+        var term = evidence.sharedTerm;
+        if (sources === null || (field !== "entities" && field !== "triggers")) return null;
+        if (term === undefined || term === null || String(term) === "") return null;
+        var noun = field === "triggers" ? "触发词" : "实体";
+        return sources.length + " 张卡都共享" + noun + "「" + String(term) + "」，可以合并成一个主题";
+      }
+      if (kind === "isolated") {
+        var retired = wordList(evidence.ignoredRetiredTargets);
+        if (retired === null) return null;
+        var base = "这张卡没有和任何卡相连";
+        return retired.length > 0 ? base + "（另有 " + retired.length + " 条指向已退休卡的旧连线）" : base;
+      }
+      return null;
+    }
     function candidateKindLabel(kind) {
       var text = String(kind ?? "");
       return CANDIDATE_KIND_LABELS[text] ?? text;
@@ -2561,6 +2614,95 @@ window.__ModuleLoader__.load({
         if (sourceTitles.length > 1) return sourceTitles.join("、");
         return null;
       };
+      // ── U5b：预览卡正文翻人话（纯展示，协议与守卫不动）─────────────────────
+      // 展示名：优先 titles 里的卡标题，拉不到退化成短 id。
+      var displayIdOf = function (id) {
+        var text = String(id ?? "");
+        return titles[text] || shortId(text);
+      };
+      // link diff 的 newText / oldText 是 after / before 边表 JSON（{target,rel}[]），
+      // 新增边 = after 里 before 没有的那一条；解析失败 / 形状不对返回 null，由调用方走兜底句。
+      var parseLinkEdgeFromDiff = function (entry) {
+        try {
+          var after = JSON.parse(String((entry && entry.newText) ?? ""));
+          if (!Array.isArray(after)) return null;
+          var before = [];
+          try {
+            var parsedBefore = JSON.parse(String((entry && entry.oldText) ?? ""));
+            if (Array.isArray(parsedBefore)) before = parsedBefore;
+          } catch (e2) { before = []; }
+          var edgeKey = function (l) {
+            var rel = l && l.rel !== undefined && l.rel !== null ? String(l.rel) : "";
+            return String((l && l.target) ?? "") + "\u0000" + rel;
+          };
+          var beforeKeys = new Set(before.map(edgeKey));
+          for (var i = 0; i < after.length; i++) {
+            var edge = after[i];
+            if (!edge || typeof edge !== "object" || edge.target === undefined || edge.target === null) continue;
+            if (!beforeKeys.has(edgeKey(edge))) return { target: String(edge.target), rel: edge.rel === undefined ? null : edge.rel };
+          }
+          // 没有可识别的新增边：退回第一条可读边（previewPlan 已拒绝零新增草案，正常到不了）。
+          for (var j = 0; j < after.length; j++) {
+            var fallback = after[j];
+            if (fallback && typeof fallback === "object" && fallback.target !== undefined && fallback.target !== null) {
+              return { target: String(fallback.target), rel: fallback.rel === undefined ? null : fallback.rel };
+            }
+          }
+          return null;
+        } catch (e) { return null; }
+      };
+      // 预览正文按 plan.kind 翻人话；未知 kind 返回空数组（原始 diff 都在「原始信息」里）。
+      var previewBodyLines = function (plan) {
+        var kind = plan && plan.kind !== undefined && plan.kind !== null ? String(plan.kind) : "";
+        var diff = plan && Array.isArray(plan.diff) ? plan.diff : [];
+        var first = diff.length > 0 && diff[0] && typeof diff[0] === "object" ? diff[0] : null;
+        var lines = [];
+        if (kind === "link") {
+          var sourceId = first && typeof first.path === "string" && first.path.indexOf("spark:") === 0
+            ? first.path.slice("spark:".length) : null;
+          var edge = first !== null ? parseLinkEdgeFromDiff(first) : null;
+          if (sourceId !== null && sourceId !== "" && edge !== null) {
+            var relText = edge.rel === null || edge.rel === "related" ? "相关" : String(edge.rel);
+            lines.push("把『" + displayIdOf(sourceId) + "』关联到『" + displayIdOf(edge.target) + "』");
+            lines.push("关系：" + relText);
+          } else {
+            lines.push("给两张卡新增一条连线（明细见下方「原始信息」）");
+          }
+          lines.push("执行后两张卡的内容都不变，只多一条连线；连错了到卡片详情里删掉这条连线即可。");
+          return lines;
+        }
+        if (kind === "merge-topic") {
+          var topicKey = null;
+          for (var k = 0; k < diff.length; k++) {
+            var entryPath = diff[k] && typeof diff[k].path === "string" ? diff[k].path : "";
+            if (entryPath.indexOf("topic:") === 0) { topicKey = entryPath.slice("topic:".length); break; }
+          }
+          var sparkCount = diff.filter(function (entry) {
+            return entry && typeof entry.path === "string" && entry.path.indexOf("spark:") === 0;
+          }).length;
+          if (sparkCount === 0 && plan && typeof plan.changedItems === "number" && plan.changedItems > 0) {
+            sparkCount = plan.changedItems - 1;
+          }
+          if (topicKey !== null && topicKey !== "") {
+            lines.push(sparkCount > 0
+              ? "把 " + sparkCount + " 张卡合并进主题『" + topicKey + "』"
+              : "把源卡合并进主题『" + topicKey + "』");
+          } else {
+            lines.push("把源卡合并进一个主题（明细见下方「原始信息」）");
+          }
+          lines.push("合并后源卡会退休，这一步不可撤销。");
+          return lines;
+        }
+        if (kind === "thin-core") {
+          if (first !== null) {
+            lines.push("core 正文 " + String((first.oldText) ?? "").length + " → " + String((first.newText) ?? "").length + " 字");
+          } else {
+            lines.push("core 正文将瘦身（长度变化见下方「原始信息」）");
+          }
+          return lines;
+        }
+        return lines;
+      };
       var statusOfItem = function (item) {
         return item && item.status ? String(item.status) : "pending";
       };
@@ -2602,39 +2744,55 @@ window.__ModuleLoader__.load({
       }
       var showBottomPreview = preview !== null && preview.sessionId === props.sessionId
         && (previewTargetId === null || !previewTargetVisible);
-      // 就地预览确认卡：内容与旧底部确认卡逐字一致（含 queueRevision / executed 守卫），
-      // 仅外壳复用合并卡的 dshi_itemMerge 就地展开写法；diff 区套 dshi_diffBox
-      // （最小高度 240px、可滚动、字号 ≥12px）。
+      // 就地预览确认卡：U5b 起标题 / 正文翻人话（planPreviewTitle / previewBodyLines），
+      // planId / planDigest / summary / 原始 diff 收进默认折叠的「原始信息」details
+      // （link 的 JSON 不再默认铺开）；确认按钮文案按 kind 区分（link 不用 danger 红）。
+      // doExecute 与 queueRevision / executed / superseded 守卫一字不动。
       var renderPreviewCard = function (key) {
         if (!preview || preview.sessionId !== props.sessionId) return null;
+        var plan = preview.plan;
+        var planKind = plan && plan.kind !== undefined && plan.kind !== null ? String(plan.kind) : "";
+        var planIdText = plan && plan.planId !== undefined && plan.planId !== null ? String(plan.planId) : "";
+        var planDigestText = plan && plan.planDigest !== undefined && plan.planDigest !== null ? String(plan.planDigest) : "";
+        var bodyLines = previewBodyLines(plan);
+        // Q-B：预览对应的计划若已在 plans 列表里标记 executed / superseded，执行按钮禁用
+        var rowLocked = (function () {
+          var row = plans.find(function (p) { return String(p && p.planId) === String(plan && plan.planId); });
+          return Boolean(row && (row.executed === true || row.superseded === true));
+        })();
+        var confirmLabel = planKind === "link" ? "就这么连起来"
+          : planKind === "merge-topic" ? "确认合并（不可撤销）"
+          : planKind === "thin-core" ? "确认瘦身"
+          : "确认执行";
         return h("div", { key: key, className: "dshi_itemMerge", style: { minWidth: 0 } },
           h("div", { className: "dshi_confirm", style: { marginLeft: 12 } },
-            h("div", { className: "dshi_cardTitle" }, "PlanView 预览（" + String(preview.plan.kind) + "）",
-              h("span", { className: "dshi_mono" }, String(preview.plan.planId)),
-              h("span", { className: "dshi_badgeDim dshi_badge" }, String(preview.plan.planDigest))),
-            preview.plan.summary ? h("div", { className: "dshi_hint" }, String(preview.plan.summary)) : null,
-            Array.isArray(preview.plan.diff) && preview.plan.diff.length > 0 ? h("div", { className: "dshi_diffBox" }, preview.plan.diff.map(function (entry, index) {
-              return h("div", { key: index, className: "dshi_item" },
-                h("div", { className: "dshi_mono" }, String(entry.path ?? index)),
-                h("div", { className: "dshi_hint" }, "old"),
-                h("pre", { className: "dshi_pre" }, String(entry.oldText ?? "")),
-                h("div", { className: "dshi_hint" }, "new"),
-                h("pre", { className: "dshi_pre" }, String(entry.newText ?? "")));
-            })) : h("div", { className: "dshi_hint" }, "（无 diff 条目）"),
-            // Q-B：预览对应的计划若已在 plans 列表里标记 executed / superseded，执行按钮禁用
-            (function () {
-              var row = plans.find(function (p) { return String(p && p.planId) === String(preview.plan && preview.plan.planId); });
-              return row && (row.executed === true || row.superseded === true);
-            })() ? h("div", { className: "dshi_hint" }, "该计划已执行或已被新预览作废（plans 列表标记），执行按钮已禁用。") : null,
+            h("div", { className: "dshi_cardTitle" }, planPreviewTitle(planKind)),
+            bodyLines.map(function (line, index) {
+              return h("div", { key: index, className: "dshi_hint" }, line);
+            }),
+            // 未知 kind：翻不了人话，summary（服务端原始摘要）兜底展示，不空屏。
+            bodyLines.length === 0 && plan && plan.summary ? h("div", { className: "dshi_hint" }, String(plan.summary)) : null,
+            rowLocked ? h("div", { className: "dshi_hint" }, "该计划已执行或已被新预览作废（plans 列表标记），执行按钮已禁用。") : null,
+            // planId / planDigest / summary / 原始 diff：默认折叠，点开才见。
+            h("details", { className: "dshi_details" },
+              h("summary", { className: "dshi_hint" }, "原始信息"),
+              planIdText !== "" ? h("div", { className: "dshi_hint dshi_mono" }, "planId " + planIdText) : null,
+              planDigestText !== "" ? h("div", { className: "dshi_hint dshi_mono" }, "planDigest " + planDigestText) : null,
+              plan && plan.summary ? h("div", { className: "dshi_hint" }, String(plan.summary)) : null,
+              Array.isArray(plan && plan.diff) && plan.diff.length > 0 ? h("div", { className: "dshi_diffBox" }, plan.diff.map(function (entry, index) {
+                return h("div", { key: index, className: "dshi_item" },
+                  h("div", { className: "dshi_mono" }, String((entry && entry.path) ?? index)),
+                  h("div", { className: "dshi_hint" }, "old"),
+                  h("pre", { className: "dshi_pre" }, String((entry && entry.oldText) ?? "")),
+                  h("div", { className: "dshi_hint" }, "new"),
+                  h("pre", { className: "dshi_pre" }, String((entry && entry.newText) ?? "")));
+              })) : h("div", { className: "dshi_hint" }, "（无 diff 条目）")),
             h("div", { className: "dshi_row" },
               h("button", {
-                className: "dshi_btn dshi_btnDanger",
-                disabled: busy || ro || (function () {
-                  var row = plans.find(function (p) { return String(p && p.planId) === String(preview.plan && preview.plan.planId); });
-                  return Boolean(row && (row.executed === true || row.superseded === true));
-                })(),
+                className: planKind === "link" ? "dshi_btn dshi_btnPrimary" : "dshi_btn dshi_btnDanger",
+                disabled: busy || ro || rowLocked,
                 onClick: doExecute
-              }, "确认执行（不可撤销）"),
+              }, confirmLabel),
               h("button", { className: "dshi_btn", disabled: busy, onClick: function () { setPreview(null); } }, "取消"))));
       };
       var renderCandidateRow = function (item, index, candidate) {
@@ -2646,6 +2804,9 @@ window.__ModuleLoader__.load({
         var mergeForThisRow = Boolean(merge) && businessId !== null && String(merge.candidateId) === businessId;
         var previewForThisRow = previewTargetId !== null && businessId !== null && previewTargetId === businessId;
         var candidateTitle = candidateTitleOf(candidate);
+        // U5b：标题下「理由」小字——evidence 缺失 / 形状不对 / 未知 kind 时为 null，
+        // 不渲染该行（行本身绝不消失），不抛错。
+        var candidateReason = candidateReasonOf(candidate);
         var row = h("div", { key: key, className: "dshi_item" },
           h("div", { className: "dshi_itemHead" },
             h("span", null, candidateTitle || "（未识别的卡片）"),
@@ -2660,6 +2821,7 @@ window.__ModuleLoader__.load({
             // Q-A：cluster 候选一键进入「合并进主题」流程（选/建主题 → 自动 proposal
             // → preview diff → 确认执行），不再要求手写 proposal JSON。
             isCluster ? h("button", { className: "dshi_btn dshi_btnPrimary", disabled: rowDisabled, onClick: function () { openMerge(businessId); } }, "合并进主题") : null),
+          candidateReason !== null ? h("div", { className: "dshi_hint" }, "理由：" + candidateReason) : null,
           // 原始 JSON 默认折叠：details 不写 open，铺满屏幕的长串移出主视线。
           h("details", { className: "dshi_details" },
             h("summary", { className: "dshi_hint" }, "原始数据（JSON）"),

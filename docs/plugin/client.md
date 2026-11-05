@@ -99,6 +99,7 @@ typert / Gateway 缺席：RPC diagnostics 返回 `transport: "unavailable"`、`u
 - **两处 dshi_hint 说明**：「候选（n）」标题下说明候选来源与三类 kind 各自的可用流程；「计划（n）」标题下说明计划 = `previewPlan` 生成的待执行变更（含 diff 与 planDigest）、执行后标「已执行」、被新预览作废标「已作废」，以及整理类 / 遗忘类计划各自的发起入口。
 - **原始 JSON 折叠**：候选行与计划行的 `stableStringify` 结果包进 `<details class="dshi_details">` + `<summary class="dshi_hint">原始数据（JSON）</summary>`，默认不展开（不写 open），需要核对 DTO 时手动点开。
 - **回归**：`test/plugin/client.test.mjs`「第 7 轮」三条用例分别断言就地展开的 DOM 顺序（容器直接子节点为 候选行 / 合并卡 / 候选行）、旧英文按钮文案不再出现且「标记已阅」仍发 `decision: "reviewed"`、以及 details 无 open 属性。U5 改版落地时这三条回归需同步更新断言文案（按钮改名后仍断言 decision 值不变），验收语义不变。
+- **0.2.0 没有的东西（别看错版本）**：候选行**没有理由行**（evidence 不会被渲染成人话，只能展开「原始数据（JSON）」核对）；预览卡**没有分 kind 的人话文案**；确认按钮**不分 kind 统一**「确认执行（不可撤销）」。理由行 / 预览卡人话文案 / 确认按钮文案对照表都是下面「本次目标」的内容，在合入之前不得当作已完成。
 
 ### 本次目标：页面形态
 
@@ -136,6 +137,19 @@ tab 名改「整理与遗忘」（GLOSSARY「三、tab 名称对照」的目标�
 - 点击后该行立即从待处理视图收起，不弹确认框；`reviewCandidate` 仍发 `decision: "reviewed"`。
 - 明确口径：**稍后再说不删除任何记忆**，只影响这条候选在页面上的可见性。
 
+#### 候选行的理由行（本次目标）
+
+候选行**标题行结束后的下方单独一行**（`dshi_hint` 小字，前缀「理由：」），把 `item.candidate.evidence`（`src/organize/analyze.mjs` 产出的机械证据）翻成人话，不新发 RPC、不猜正文；这一行之下才是「原始数据（JSON）」折叠。三种 kind 各显示什么：
+
+| kind | 理由行内容（实现文案） | 数据来源（evidence 键） |
+| --- | --- | --- |
+| link（可建链接） | 「两张卡都提到实体「a」「b」；都带触发词「c」」——两组各自只在非空时出现；两组都空时整句为「两张卡有共同关键词」 | `evidence.sharedEntities` / `evidence.sharedTriggers`（数组，逐项列出） |
+| cluster（集群） | 「N 张卡都共享实体「term」，可以合并成一个主题」（N = `candidate.sources.length`；`evidence.field` 为 `"triggers"` 时写「触发词」而不是「实体」） | `evidence.sharedTerm` + `evidence.field` |
+| isolated（孤立卡） | 「这张卡没有和任何卡相连」；`ignoredRetiredTargets` 非空时追加「（另有 N 条指向已退休卡的旧连线）」 | `evidence.inDegree` + `evidence.outDegree` + `evidence.ignoredRetiredTargets`（孤立卡两者恒为 0，只作 DTO 字段保留、不进文案；文案只取 `ignoredRetiredTargets` 的条数） |
+
+- `evidence` 缺失、形状不对（键存在但不是数组等）或未知 kind 时**不渲染理由行**——宁可空白，不编造理由；行本身绝不消失、绝不抛错，行内仍有「原始数据（JSON）」折叠兜底。
+- 理由行是纯展示：不参与状态筛选、搜索匹配（搜索仍只匹配标题与短 id）与分组数量。
+
 #### 就地预览
 
 - 点行内「预览整理计划」按钮触发就地预览，在该行正下方展开预览卡——沿用现状「合并卡就地展开」的容器与缩进语义（`dshi_itemMerge` + `dshi_card`，缩进 12px）。**不做整行点击**（行内含「原始数据（JSON）」折叠，避免误触）。
@@ -143,6 +157,33 @@ tab 名改「整理与遗忘」（GLOSSARY「三、tab 名称对照」的目标�
 - **各 kind 的预览入口（实现口径）**：任意 kind 的候选行都有「预览整理计划」按钮——按该候选的**前两张源卡**生成 link 骨架直接发 `previewPlan`（服务端校验为准），返回 diff 渲染 PlanView。集群行在此之外另有「合并进主题」按钮走 merge-topic 流程（选主题 → 载入 before 与 revision token → 编辑 after → 预览 diff → 确认执行），是集群的推荐入口。
 - **计划行**：待执行（open）的行可点开看 PlanView diff；已执行 / 已作废不渲染预览。
 - 确认执行链路不变：`previewPlan` → PlanView diff → 确认卡「确认执行」→ `executePlan { confirmed: true }`（带 planDigest）；stale preview 守卫（会话切换 / queueRevision 前进使旧预览失效）不变，plans 行 executed 不渲染预览、superseded 禁用预览也不变。
+
+#### 预览卡人话文案（本次目标）
+
+就地预览卡（`preview.plan.kind`，与候选 kind 是两回事）改为**「标题 + 2–3 行正文」**的形态，卡片上方只留标题、正文行、按钮：
+
+- **标题**按计划 kind 翻人话：link →「连起来」、merge-topic →「合并进主题」、thin-core →「core 瘦身」；未知 kind 原样显示 kind 原文，绝不吞掉、不崩。
+- **正文**按 kind 渲染 2–3 行（`dshi_hint` 小字）：
+  - **link**（三行）：①「把『A』关联到『B』」（A / B 取卡片标题，取不到退化短 id；从 diff 解析不出新增边时退化为「给两张卡新增一条连线（明细见下方「原始信息」）」）②「关系：相关」（rel 不是 `related` 时原样显示）③「执行后两张卡的内容都不变，只多一条连线；连错了到卡片详情里删掉这条连线即可。」
+  - **merge-topic**（两行）：①「把 N 张卡合并进主题『KEY』」（N 取 diff 里 `spark:` 条目数，取不到用 `changedItems - 1`；主题 key 缺失时「把源卡合并进一个主题（明细见下方「原始信息」）」）②「合并后源卡会退休，这一步不可撤销。」
+  - **thin-core**（一行）：「core 正文 X → Y 字」（X / Y 取 diff 首条 oldText / newText 的字符长度；无 diff 时「core 正文将瘦身（长度变化见下方「原始信息」）」）。不可执行是按钮与服务端的事，正文只报长度变化。
+  - **未知 kind**：正文为空时用服务端 `plan.summary` 兜底展示，不空屏。
+- **「原始信息」折叠（默认不展开）**：planId、planDigest、summary、**整个原始 diff 逐条（path / old / new）**都在折叠内——普通用户只看标题、正文与按钮，需要核对 DTO 时点开。
+- 现状（0.2.0）预览卡没有这套「标题 + 正文 + 折叠」的人话形态（标题平铺「PlanView 预览（kind）」、planId / planDigest 平铺、diff 直接铺开），此条在合入前不得当作已完成。
+
+#### 确认按钮文案对照表（本次目标）
+
+确认按钮文案按计划 kind 区分，**可撤销性直接写进按钮**：
+
+| 计划 kind | 确认按钮文案 | 按钮样式 | 可撤销性 | 撤销路径 / 原因 |
+| --- | --- | --- | --- | --- |
+| link | 就这么连起来 | 主按钮（**不是 danger 红**） | **可撤销** | 执行后到「图谱」点开任一相关卡片详情，在关联连线里删掉这条连线再「保存连线」（走 `spark_update {links}` 整体替换） |
+| merge-topic | 确认合并（不可撤销） | danger 红 | **不可撤销** | 源卡转 merged 退休、主题正文整体覆盖，协议没有回退入口 |
+| thin-core | 确认瘦身 | danger 红 | 不可执行，谈不上撤销 | **有按钮**，但点下去服务端一律拒 `UNSUPPORTED`（thin-core 仅草案、`changedItems = 0`，受审执行器一律拒绝执行） |
+| 未知 kind | 确认执行 | danger 红 | 按协议行为 | 兜底文案，不假装认识这个 kind |
+
+- 「取消」按钮不变：关掉预览卡不产生任何写入。
+- 现状（0.2.0）确认按钮不分 kind 统一为「确认执行（不可撤销）」——上表是本次目标形态，合入前不得当作已完成。
 
 #### 错误提示口径
 
