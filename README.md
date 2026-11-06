@@ -229,7 +229,7 @@ dsh plugin --profile web remove dsh-shiori
 <details open>
 <summary>v0.2.x</summary>
 
-### v0.2.1 · 2026-11-06（面板「整理与遗忘」改版）
+### v0.2.1 · 2026-11-07（面板「整理与遗忘」改版）
 
 把「候选 / 计划」页整个重做了一遍，目标只有一个：让人看得懂该点哪。
 
