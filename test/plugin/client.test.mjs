@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
-import { register } from "node:module";
+import { register, createRequire } from "node:module";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKQ = join(HERE, "..", "..");
@@ -280,7 +280,16 @@ export async function resolve(specifier, context, nextResolve) {
 register(`data:text/javascript,${encodeURIComponent(loaderSource)}`, pathToFileURL(HERE).href);
 
 const { mountShioriRpc } = await import(pathToFileURL(join(WORKQ, "src", "plugin", "client-rpc.mjs")).href);
-const { remoteMethods, RemoteError, remoteErrorOf } = await import(`file:///${HOST_MODULES}/@deepseek-ai/dsh-typert-protocol/lib/index.js`);
+// 与被测代码同一解析路径取宿主协议包：src/plugin/*.mjs 以裸说明符导入
+// @deepseek-ai/dsh-typert-protocol，Node 从 <工作树>/node_modules 解析。
+// 之前的 HOST_MODULES 绝对 file URL 取到的是全局 DSH 安装树的另一份副本
+// （工作树 rc.5 / 全局 rc.4，两个 realpath → 两个构造函数，instanceof 恒为 false）。
+// createRequire().resolve 只取路径不执行，随后动态 import 拿到的就是被测代码
+// 实际加载的那份模块图——本工作树 rc.5、主仓 junction 树 rc.4，各自自洽。
+const requireFromSrc = createRequire(pathToFileURL(join(WORKQ, "src", "plugin", "client-rpc.mjs")));
+const { remoteMethods, RemoteError, remoteErrorOf } = await import(
+  pathToFileURL(requireFromSrc.resolve("@deepseek-ai/dsh-typert-protocol")).href
+);
 
 // 伪造 Cordis 上下文：reflect.provide 记录服务；get 提供可选服务；invocation 按调用方注入。
 function fakeCtx({ typert = true, agents = true } = {}) {
