@@ -3820,6 +3820,26 @@ test("U5-c：孤立卡候选行不出现「预览整理计划」按钮（集群/
   assert.deepEqual(isoButtonLabels, ["稍后再说", "忽略"], "isolated row keeps exactly 稍后再说 + 忽略");
 });
 
+test("U5-c：候选区提示语与 0.2.1 行为一致（孤立卡不提内置预览）", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderCandidates = await mountCandidates(mod, host);
+  const items = [
+    { candidate: { id: "cluster-A", kind: "cluster", scopeId: "default", sources: [{ id: "s1" }, { id: "s2" }], evidence: {} }, status: "pending" },
+    { candidate: { id: "link-B", kind: "link", scopeId: "default", sources: [{ id: "s3" }, { id: "s4" }], evidence: {} }, status: "pending" },
+    { candidate: { id: "iso-C", kind: "isolated", scopeId: "default", sources: [{ id: "s5" }], evidence: {} }, status: "pending" },
+  ];
+  const dsh = {
+    call: async (method) => (method === "listCandidates" ? { queueRevision: 5, items, plans: [] } : {}),
+  };
+  host.states.length = 0;
+  host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
+  const tree = renderCandidates(dsh, "session-A");
+  const text = collectText(tree);
+  assert.ok(text.includes("孤立卡没有可连的第二张卡"), "hint states isolated cards have no second card to link");
+  assert.equal(text.includes("孤立卡只能用内置预览"), false, "stale 0.2.0 hint about built-in preview removed");
+});
+
 test("U5-c：proposalSkeleton 对单源候选返回 null（经 doPreviewOrganize 定点错误消息观测，非通用骨架失败文案）", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));

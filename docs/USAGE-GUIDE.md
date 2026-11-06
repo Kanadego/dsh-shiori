@@ -105,7 +105,7 @@ dsh plugin --profile <名称> remove dsh-shiori
 | `workspacePersonas` | `[]` | `[{workspace: 绝对路径, persona}]`，按最长路径边界匹配 |
 | `budgets` | 见下 | **volatile** 字段：面板保存是热提交，但插件用启动快照，**重启/重载后生效** |
 | `l2.enabled` | `false` | Spark 自动投递总开关 |
-| `organize.enabled` | `false` | 整理（候选 / 计划 / 执行）开关 |
+| `organize.enabled` | `false` | 整理功能（候选分析 / 计划预览 / 执行）开关 |
 | `forgetting.enabled` | `false` | 遗忘开关；显式 `includeArchived` 的冷检索不受它限制 |
 | `forgetting.policy` | `30 / 240 / 0.25` | baseHalfLifeDays / maxHalfLifeDays / archiveScore |
 | `semantic` | `none` | 语义召回接口预留（F1 方案 C，字段名冻结）：`provider: none/local/api`、`local.model`（默认 `bge-small-zh-v1.5`）、`local.dims`（默认 512）、`api.endpoint` / `api.keyRef`（默认 `null`）。0.2 本期只定契约不实现召回，`provider: none` 时零依赖、零网络、行为与 0.1 一致 |
@@ -176,7 +176,7 @@ dsh plugin --profile <名称> remove dsh-shiori
 | 最近变更 | 记忆操作时间线（core / topic 写入 + spark 存卡 / 改卡 / 归档 / 替代 / 织网），倒序、每页 100 条，来源徽章标明 core / 主题 / 卡片 | 回答「这阵子谁动了什么」；扫到窗口上限会提示「更早的历史本次不可达」，点条目可跳到对应 tab 定位 |
 | 记忆 L0/L1 | L0 人设卡全文、L1 渲染（core + 索引）、占用字符，两层都可就地编辑 | 预览的是模型真实看到的内容；L1 编辑框里是磁盘正文，保存带 revision 校验 |
 | 图谱 | Spark 卡片节点与边，拖拽平移、滚轮缩放、点开详情；卡片内容与连线都能改 | 卡多时布局会变密；连线改动可「撤销修改」 |
-| 候选 / 计划 | 跑 analyze、候选列表、reviewed / dismissed、preview / 执行、计划列表 | 合并记忆的主战场，见下 |
+| 整理与遗忘 | 跑整理 / 遗忘分析（「分析整理候选」/「分析遗忘候选」），待处理候选按集群 / 可建链接 / 孤立卡三组折叠展示，状态筛选（待处理 / 已阅 / 已忽略 / 全部）与本地搜索，行内「预览整理计划」就地预览 diff，候选过期标「卡片已改」徽章并置灰预览按钮，顶部「重新分析」提示条；计划列表用状态徽章区分 | 合并记忆的主战场，见下 |
 | L3 / topic | 专题列表（默认只显示 key / 标题 / 字数），展开读正文、整篇编辑保存 | 旧版写入的专题只读 |
 | 闪回命中 | 从未命中的卡片（含存续天数）、命中 top10、投递吞吐（总投递张数 / 轮次 / 重复投递率） | 回答「这几张卡到底用没用上」；只覆盖 L2 开启期间，命中＝进入投递包、不代表被采用 |
 | 预算 | 记忆预算页（0.2 U2 重写）：顶部实时水位条（当前占用 ─ 软水位 · 硬闸 · 硬顶，占用取真实 getStatus 数据），人设卡 / 记忆核心 / 闪回卡片三组卡片，水位用滑杆 + 字符数联动，已改字段标「已修改」徽章、可单字段恢复默认 | 技术名收进 tooltip 与页尾「技术细节」；越界就地中文提示并禁用保存；空输入=不改；保存后需重启生效 |
@@ -190,9 +190,11 @@ dsh plugin --profile <名称> remove dsh-shiori
 
 ### 合并记忆的三步（只有 cluster 候选有「合并进主题」）
 
-1. 候选 tab 点 `analyze organize`，cluster 行出现「合并进主题」；
-2. 展开合并卡：选一个已有专题（必须**非 legacy**）或新建专题（key / 标题 / 摘要），点「创建并选择」；
-3. 选定目标后才出现合并表单与「预览 diff」，确认 diff 与 `changedItems` 后点「确认执行」。执行后源卡变 `state: merged`，专题正文末尾追加源保全块。
+1. 「整理与遗忘」tab 点「分析整理候选」，集群（cluster）候选行出现「合并进主题」；
+2. 点「合并进主题」进入合并流程：选一个已有专题（必须**非 legacy**）或新建专题（key / 标题 / 摘要）；
+3. 点「预览 diff（previewPlan）」，预览卡直接渲染在该候选行正下方（不会跑到页面底部）；确认 diff 后点「确认合并（不可撤销）」执行。执行后源卡变 `state: merged`，专题正文末尾追加源保全块。
+
+连错的可建链接不怕：执行后到「图谱」点开卡片详情，在关联连线里删掉这条连线再保存即可；但**合并进主题不可撤销**——源卡会退休、内容以源保全块追加到主题正文末尾（主题原有正文保留），协议没有回退入口，确认前看清 diff。
 
 ### 计划与状态徽章
 
@@ -325,7 +327,7 @@ store.save({ /* … */ }, { operationId: 'batch-001' });
 | 面板整块空白 | 前端渲染抛错 | 浏览器控制台（F12） |
 | 每个 tab 都顶一行红字 | 会话被宿主标记不可用（写句柄被占用） | 换一个会话；看提示里的 code：`session/writer-held` / `session/agent-busy` |
 | 会话下拉变成手填框 | `session.list` 瞬时失败 | 点「刷新」（内置 3 次重试）；仍失败就整页刷新 |
-| `[INVALID_STATE] 候选已 reviewed` | 重复点 reviewed / dismissed | 重新 analyze 生成新一轮候选 |
+| `[INVALID_STATE] 候选已 reviewed` | 重复点「稍后再说」/「忽略」 | 重新分析生成新一轮候选 |
 | `REVISION_CONFLICT` | 卡片 / 专题 / 计划被外部改过，revision 过期 | 重新 `memory_read` / `memory_list_topics` 取新 token |
 | `LOCK_BUSY` / `live owner or unknown lock content` | 同一 DSH_HOME 有两个宿主持有写句柄 | 只留一个宿主；残留锁手工确认后删 |
 | `UNSUPPORTED module is disabled…` | l2 / organize / forgetting 开关没开 | 改配置重启 |

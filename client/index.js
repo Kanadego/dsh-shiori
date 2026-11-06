@@ -2957,7 +2957,7 @@ window.__ModuleLoader__.load({
         data ? h(fragment, null,
           h("div", { className: "dshi_card" },
           h("div", { className: "dshi_cardTitle" }, "候选（" + items.length + "）"),
-          h("div", { className: "dshi_hint" }, "候选由「分析整理候选 / 分析遗忘候选」生成：集群（≥8 张共享实体或触发词的卡）可直接「合并进主题」，孤立卡只能用内置预览，可建链接用「预览整理计划」。"),
+          h("div", { className: "dshi_hint" }, "候选由「分析整理候选 / 分析遗忘候选」生成：集群（≥8 张共享实体或触发词的卡）可「合并进主题」，可建链接的候选可「预览整理计划」，孤立卡没有可连的第二张卡，只能「稍后再说」或「忽略」。"),
           // U5：筛选条（状态 chips，含各分组计数）+ 纯前端搜索框（按标题或短 id 过滤）。
           h("div", { className: "dshi_filterBar" },
             CANDIDATE_FILTERS.map(function (f) {
