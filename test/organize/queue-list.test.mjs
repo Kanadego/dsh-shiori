@@ -149,6 +149,7 @@ test('listQueue：空队列 → 空投影，计数全 0、total 0', () => {
     total: 0,
     groups: { cluster: 0, link: 0, isolated: 0 },
     statusCounts: { pending: 0, reviewed: 0, dismissed: 0 },
+    staleCount: 0,
   });
 });
 
@@ -261,4 +262,112 @@ test('buildDraft link：合法草案不受 details 改动影响（plan/digest �
   assert.equal(built.plan.kind, 'link');
   assert.match(built.digest, /^[0-9a-f]{64}$/);
   assert.equal(built.changedItems, 1);
+});
+
+// ===========================================================================
+// listQueue：stale 过期标记与 staleCount（records 提供时才出现）
+// ===========================================================================
+
+test('listQueue stale：全新队列（sources revision 与 records 一致）→ 全部 stale=false、staleCount=0', () => {
+  const items = [
+    { candidate: makeCandidate({ kind: 'link', sources: [ref('a', 1), ref('b', 1)] }), status: 'pending' },
+    { candidate: makeCandidate({ kind: 'isolated', sources: [ref('c', 1)], evidence: {} }), status: 'reviewed' },
+  ];
+  const view = listQueue({ items, records: [makeCard('a'), makeCard('b'), makeCard('c')] });
+  assert.equal(view.staleCount, 0);
+  for (const item of view.items) {
+    assert.equal(item.stale, false);
+    assert.ok(typeof item.stale === 'boolean');
+  }
+});
+
+test('listQueue stale：单条过期（revision 不一致）→ 只有那条 stale=true、staleCount=1', () => {
+  const items = [
+    { candidate: makeCandidate({ kind: 'link', sources: [ref('a', 1), ref('b', 1)] }), status: 'pending' },
+    // 'a' 的 revision 已推进到 2，与 records（revision 1）不一致 → 过期
+    { candidate: makeCandidate({ kind: 'link', sources: [ref('a', 2), ref('b', 1)] }), status: 'pending' },
+  ];
+  const view = listQueue({ items, records: [makeCard('a'), makeCard('b')] });
+  assert.equal(view.staleCount, 1);
+  assert.equal(view.items[0].stale, false);
+  assert.equal(view.items[1].stale, true);
+  // 多源候选拼一个过期源即整条过期；新鲜源不连带
+  assert.deepEqual(view.items[1].candidate.sources, [
+    { id: 'a', revision: 2, title: 'title-a' },
+    { id: 'b', revision: 1, title: 'title-b' },
+  ]);
+});
+
+test('listQueue stale：源卡已不在 records（被归档/删除）→ stale=true（fail-closed）', () => {
+  const items = [
+    { candidate: makeCandidate({ kind: 'link', sources: [ref('a', 1)] }), status: 'pending' },
+    { candidate: makeCandidate({ kind: 'isolated', sources: [ref('gone', 1)], evidence: {} }), status: 'pending' },
+  ];
+  const view = listQueue({ items, records: [makeCard('a')] });
+  assert.equal(view.staleCount, 1);
+  assert.equal(view.items[0].stale, false);
+  assert.equal(view.items[1].stale, true);
+});
+
+test('listQueue stale：records.revision 非整数 → 该条 stale=true（不进 revisions 索引）', () => {
+  const items = [
+    { candidate: makeCandidate({ kind: 'isolated', sources: [ref('q', 2)], evidence: {} }), status: 'pending' },
+  ];
+  // ref.revision 是整数 2，但 records.revision 是非整数 → 视为无有效记录，过期
+  const view = listQueue({ items, records: [makeCard('q', { revision: 2.5 })] });
+  assert.equal(view.staleCount, 1);
+  assert.equal(view.items[0].stale, true);
+
+  // 同理：records 缺 revision 字段 → 也算过期
+  const noRev = makeCard('q');
+  delete noRev.revision;
+  const view2 = listQueue({ items, records: [noRev] });
+  assert.equal(view2.staleCount, 1);
+  assert.equal(view2.items[0].stale, true);
+});
+
+test('listQueue stale：分页（limit 小于总数）时 staleCount 仍是分页前全量口径', () => {
+  const items = [
+    { candidate: makeCandidate({ kind: 'link', sources: [ref('a', 1)] }), status: 'pending' },
+    // 下面 3 条全部过期
+    { candidate: makeCandidate({ kind: 'link', sources: [ref('b', 9)] }), status: 'pending' },
+    { candidate: makeCandidate({ kind: 'isolated', sources: [ref('gone', 1)], evidence: {} }), status: 'pending' },
+    { candidate: makeCandidate({ kind: 'cluster', sources: [ref('c', 9), ref('g', 1)], evidence: { topic: 't' } }), status: 'pending' },
+  ];
+  const records = [makeCard('a'), makeCard('b'), makeCard('c'), makeCard('g')];
+  const view = listQueue({ items, records, limit: 1, offset: 0 });
+  // 当前页只有 1 条（新鲜），但 staleCount 是全量的 3
+  assert.equal(view.items.length, 1);
+  assert.equal(view.items[0].stale, false);
+  assert.equal(view.total, 4);
+  assert.equal(view.staleCount, 3);
+
+  // 第二页同理：页内 1 条过期，staleCount 仍是 3
+  const page2 = listQueue({ items, records, limit: 1, offset: 1 });
+  assert.equal(page2.items[0].stale, true);
+  assert.equal(page2.staleCount, 3);
+
+  // limit=0 空页：staleCount 仍是全量口径
+  const zero = listQueue({ items, records, limit: 0 });
+  assert.deepEqual(zero.items, []);
+  assert.equal(zero.staleCount, 3);
+});
+
+test('listQueue stale：records 缺省（含 null）时不含 staleCount、条目不含 stale 键', () => {
+  const items = makeItems();
+  const view = listQueue({ items });
+  assert.equal(Object.hasOwn(view, 'staleCount'), false);
+  for (const item of view.items) {
+    assert.equal(Object.hasOwn(item, 'stale'), false);
+  }
+  // records: null 与缺省同语义（不加 stale/staleCount）
+  const view2 = listQueue({ items, records: null });
+  assert.equal(Object.hasOwn(view2, 'staleCount'), false);
+  for (const item of view2.items) {
+    assert.equal(Object.hasOwn(item, 'stale'), false);
+  }
+  // 纯只读：判定 stale 不得改动输入 items
+  const before = JSON.stringify(items);
+  listQueue({ items, records: RECORDS });
+  assert.equal(JSON.stringify(items), before, 'listQueue 不得改动输入 items');
 });

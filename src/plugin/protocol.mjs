@@ -372,9 +372,11 @@ export const MANAGEMENT_METHODS = Object.freeze({
         offset: { type: "integer", minimum: 0 },
       },
     },
-    // total/groups/statusCounts 为增量字段（groups/statusCounts 按分页前
-    // 全量 items 计数）；items 内 candidate.sources 增量补 title（queueItemEntry
-    // 为 additionalProperties:true，无需改条目形状）。
+    // total/groups/statusCounts/staleCount 为增量字段（groups/statusCounts/
+    // staleCount 按分页前全量 items 计数）；items 内 candidate.sources 增量补
+    // title、条目增量补 stale（该候选任一源的 revision 与 records 不一致、
+    // 源卡已不在 records 或 ref.revision 缺失/非整数即过期，fail-closed；
+    // queueItemEntry 为 additionalProperties:true，无需改条目形状）。
     outputSchema: {
       type: "object",
       additionalProperties: false,
@@ -383,6 +385,7 @@ export const MANAGEMENT_METHODS = Object.freeze({
         items: { type: "array", items: queueItemEntry },
         plans: { type: "array", items: planSummary },
         total: { type: "integer", minimum: 0 },
+        staleCount: { type: "integer", minimum: 0 },
         groups: {
           type: "object",
           additionalProperties: false,
@@ -404,7 +407,7 @@ export const MANAGEMENT_METHODS = Object.freeze({
           required: ["pending", "reviewed", "dismissed"],
         },
       },
-      required: ["queueRevision", "items", "plans", "total", "groups", "statusCounts"],
+      required: ["queueRevision", "items", "plans", "total", "groups", "statusCounts", "staleCount"],
     },
   },
 

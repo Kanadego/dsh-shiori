@@ -406,9 +406,11 @@ export function createManagement(deps) {
     /**
      * 候选队列与计划摘要（同 scope；不泄露别卡）。可选 limit / offset 分页
      * （缺省不分页，行为与旧版完全一致）；候选项 sources 补卡片 title、
-     * 顶层补 total / groups / statusCounts（计数不受分页影响），客户端一次
-     * 请求即可渲染分组与标题，无需二次取卡。投影走 organize/queue.mjs 的
-     * listQueue（纯只读），不改变队列状态。
+     * 条目补 stale（源 revision 与 records 不一致 / 源卡不在 records 即过期）、
+     * 顶层补 total / groups / statusCounts / staleCount（计数不受分页影响，
+     * staleCount 为分页前全量口径），客户端一次请求即可渲染分组与标题，
+     * 无需二次取卡比对。投影走 organize/queue.mjs 的 listQueue（纯只读），
+     * 不改变队列状态。
      */
     async listCandidates(trustedContext, payload) {
       const p = payload ?? {};
@@ -427,6 +429,7 @@ export function createManagement(deps) {
         total: page.total,
         groups: page.groups,
         statusCounts: page.statusCounts,
+        staleCount: page.staleCount,
       };
     },
 

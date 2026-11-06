@@ -220,6 +220,48 @@ test("organize：merge-topic 计划仅更新已有 topic（目标缺失明确报
   await controller.stop();
 });
 
+test("listCandidates：候选过期时透传条目 stale 与全量 staleCount（分页不受影响）", async (t) => {
+  const { controller, trusted } = await setup(t);
+  for (let i = 0; i < 9; i++) {
+    await controller.management.executeTool(trusted, {
+      name: "spark_save",
+      args: {
+        title: `S卡${i}`, content: `共同实体内容 ${i}。`, triggers: [`s词${i}`],
+        entities: ["stale实体"], vitality: "evergreen",
+      },
+    });
+  }
+  const analyzed = await controller.management.analyze(trusted, { kind: "organize", operationId: "st-an" });
+  assert.ok(analyzed.items.length > 0, "organize analyze must yield candidates");
+
+  // 全新队列：全部新鲜
+  const fresh = await controller.management.listCandidates(trusted, {});
+  assert.equal(fresh.staleCount, 0);
+  for (const item of fresh.items) assert.equal(item.stale, false);
+
+  // 推进其中一张源卡的 revision（spark_update）→ 引用它的候选全部过期
+  const bumped = analyzed.items[0].candidate.sources[0].id;
+  await controller.management.executeTool(trusted, {
+    name: "spark_update",
+    args: { id: bumped, patch: { content: "被更新过的内容，revision 已前进。" } },
+  });
+
+  const listed = await controller.management.listCandidates(trusted, {});
+  assert.equal(listed.total, analyzed.items.length, "列表未分页时条目数应等于全量");
+  for (const item of listed.items) {
+    const refsBumped = item.candidate.sources.some((s) => s.id === bumped);
+    assert.equal(item.stale, refsBumped, "item.stale 应精确等于『引用了被推进的卡』");
+  }
+  assert.equal(listed.staleCount, listed.items.filter((it) => it.stale).length);
+
+  // 分页：staleCount 仍是分页前全量口径，不随 limit/offset 缩水
+  const paged = await controller.management.listCandidates(trusted, { limit: 1, offset: 0 });
+  assert.equal(paged.items.length, 1);
+  assert.equal(paged.total, listed.total);
+  assert.equal(paged.staleCount, listed.staleCount);
+  await controller.stop();
+});
+
 // ── P4 forgetting 门面 ───────────────────────────────────────
 
 /** 注入未来时钟的 setup：新卡在 controller 时间观里已 90 天。 */

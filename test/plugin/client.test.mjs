@@ -3919,3 +3919,101 @@ test("U5-d：REVISION_CONFLICT 提示指向「分析整理候选」；「刷新�
   assert.ok(refreshTitle.includes("只重新读取队列快照") && refreshTitle.includes("不会重新分析"),
     "refresh button title clarifies it does not re-analyze");
 });
+
+// ---------------------------------------------------------------------------
+// U5-e：过期候选就地标注（行内「卡片已改」徽章 + 预览按钮置灰）与顶部重新分析入口。
+// ---------------------------------------------------------------------------
+
+test("U5-e：stale 候选渲染「卡片已改」徽章 + 理由小字，「预览整理计划」「合并进主题」置灰，「稍后再说」「忽略」仍可用", async () => {
+  const items = [
+    { candidate: { id: "link-stale", kind: "link", scopeId: "default", sources: [{ id: "a-1" }, { id: "b-2" }], evidence: { sharedEntities: ["小樱"] } }, status: "pending", stale: true },
+    { candidate: { id: "link-fresh", kind: "link", scopeId: "default", sources: [{ id: "c-1" }, { id: "d-2" }], evidence: { sharedEntities: ["小兰"] } }, status: "pending" },
+    { candidate: { id: "cluster-stale", kind: "cluster", scopeId: "default", sources: [{ id: "s1" }, { id: "s2" }, { id: "s3" }], evidence: { field: "triggers", sharedTerm: "海贼王" } }, status: "pending", stale: true },
+    { candidate: { id: "cluster-fresh", kind: "cluster", scopeId: "default", sources: [{ id: "s4" }, { id: "s5" }, { id: "s6" }], evidence: { field: "triggers", sharedTerm: "火影" } }, status: "pending" },
+  ];
+  const make = await mountCandidatesWithItems(items)();
+  const tree = make.renderCandidates(make.dsh, "session-A");
+  const text = collectText(tree);
+  assert.ok(text.includes("卡片已改"), "stale badge text rendered");
+  assert.ok(text.includes("这条候选绑定的卡片在你上次分析之后被改过，重新分析后才能用"),
+    "stale reason line rendered");
+  // 过期行徽章类名存在；未过期行不出现
+  const badges = flattenVNode(tree).filter((n) => String(n.props.className || "").includes("dshi_badgeStale"));
+  assert.equal(badges.length, 2, "one stale badge per stale row");
+  // 「预览整理计划」按行区分：stale 行置灰（title 写明原因），fresh 行可用
+  // （link 与 cluster 行都有预览入口，只有 isolated 没有）
+  const previewButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("预览整理计划"));
+  assert.equal(previewButtons.length, 4, "all non-isolated rows expose the preview entry");
+  const stalePreview = previewButtons.filter((b) => b.props.disabled === true);
+  const freshPreview = previewButtons.filter((b) => b.props.disabled === false);
+  assert.ok(stalePreview.length === 2 && freshPreview.length === 2, "preview disabled exactly on the stale rows");
+  assert.ok(stalePreview.every((b) => String(b.props.title || "").includes("重新分析")),
+    "disabled preview title explains why");
+  // rework a1：「合并进主题」stale 同样置灰（合并流程最后也走 previewPlan 的 revision 校验）
+  const mergeButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("合并进主题"));
+  assert.equal(mergeButtons.length, 2, "both cluster rows expose the merge entry");
+  const staleMerge = mergeButtons.find((b) => b.props.disabled === true);
+  const freshMerge = mergeButtons.find((b) => b.props.disabled === false);
+  assert.ok(staleMerge && freshMerge, "merge disabled exactly on the stale cluster row");
+  assert.equal(staleMerge.props.disabled, true, "stale cluster merge button disabled");
+  assert.ok(String(staleMerge.props.title || "").includes("重新分析"), "disabled merge title explains why");
+  assert.equal(freshMerge.props.disabled, false, "fresh cluster merge button stays enabled");
+  // 「稍后再说」「忽略」不受 stale 影响（只改 status，不校验 revision）
+  assert.equal(findButton(tree, "稍后再说").props.disabled, false, "review button stays enabled");
+  assert.equal(findButton(tree, "忽略").props.disabled, false, "dismiss button stays enabled");
+});
+
+test("U5-e：staleCount > 0 时顶部提示条出现，点「重新分析」复用 analyze(kind=organize)", async () => {
+  const items = [
+    { candidate: { id: "link-stale", kind: "link", scopeId: "default", sources: [{ id: "a-1" }, { id: "b-2" }] }, status: "pending", stale: true },
+  ];
+  const queueDto = { queueRevision: 5, staleCount: 1, items, plans: [] };
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderCandidates = await mountCandidates(mod, host);
+  const calls = [];
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (method === "listCandidates" || method === "analyze") return queueDto;
+      return {};
+    },
+  };
+  host.states.length = 0;
+  host.states.push(queueDto, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
+  const tree = renderCandidates(dsh, "session-A");
+  const bar = flattenVNode(tree).find((n) => String(n.props.className || "") === "dshi_staleBar");
+  assert.ok(bar, "stale bar rendered when staleCount > 0");
+  assert.ok(collectText(bar).includes("1 条候选"), "bar text carries the count");
+  const reanalyze = findButton(tree, "重新分析");
+  assert.equal(reanalyze.props.disabled, false, "re-analyze enabled after load");
+  reanalyze.props.onClick();
+  await flush();
+  const analyze = calls.find((c) => c.method === "analyze");
+  assert.ok(analyze, "re-analyze issues an analyze call");
+  assert.equal(analyze.payload.kind, "organize", "reuses the organize analyze path");
+  assert.equal(analyze.payload.expectedQueueRevision, 5, "revision token attached like the manual entry");
+});
+
+test("U5-e：staleCount 为 0 或缺失时提示条不渲染、行内无徽章（向后兼容旧服务端）", async () => {
+  // 情形一：staleCount 明确为 0
+  const zeroDto = { queueRevision: 5, staleCount: 0, items: [{ candidate: { id: "link-1", kind: "link", scopeId: "default", sources: [{ id: "a-1" }, { id: "b-2" }] }, status: "pending" }], plans: [] };
+  const makeZero = await mountCandidatesWithItems(zeroDto.items)();
+  makeZero.host.states[0] = zeroDto;
+  let tree = makeZero.renderCandidates(makeZero.dsh, "session-A");
+  assert.equal(flattenVNode(tree).find((n) => String(n.props.className || "") === "dshi_staleBar"), undefined,
+    "no stale bar when staleCount = 0");
+  assert.equal(collectText(tree).includes("卡片已改"), false, "no stale badge when staleCount = 0");
+  assert.equal(findButton(tree, "预览整理计划").props.disabled, false, "preview stays enabled");
+
+  // 情形二：旧服务端不带回 staleCount / stale 字段
+  const legacyDto = { queueRevision: 5, items: zeroDto.items, plans: [] };
+  const makeLegacy = await mountCandidatesWithItems(legacyDto.items)();
+  makeLegacy.host.states[0] = legacyDto;
+  tree = makeLegacy.renderCandidates(makeLegacy.dsh, "session-A");
+  assert.equal(flattenVNode(tree).find((n) => String(n.props.className || "") === "dshi_staleBar"), undefined,
+    "no stale bar when staleCount missing");
+  assert.equal(collectText(tree).includes("卡片已改"), false, "no stale badge when stale missing");
+  assert.equal(flattenVNode(tree).find((n) => n.type === "button" && n.children.includes("重新分析")), undefined,
+    "no re-analyze button");
+});

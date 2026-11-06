@@ -844,7 +844,12 @@ export function createCandidateQueue(params) {
  * - 顶层补 groups（按候选 kind 计数）与 statusCounts（按条目 status 计数），
  *   计数恒覆盖分页前的全量 items；
  * - limit / offset 可选分页：缺省（都不传）时行为与不分页完全一致；
- *   total 恒为分页前的 items 总数。
+ *   total 恒为分页前的 items 总数；
+ * - records 提供时（非 undefined/null）：每个条目副本补 stale 布尔（候选
+ *   sources 里任一源 revision 与 records 不一致、源卡已不在 records、或
+ *   ref.revision 缺失/非整数即视为过期，fail-closed），顶层补 staleCount
+ *   （分页前全量 items 里 stale 为真的条数，口径同 total/groups，不受分页
+ *   影响）。records 缺省时不加 stale / staleCount，形状与旧版完全一致。
  *
  * 本函数是纯只读投影：不重算候选 digest（那是 createCandidateQueue /
  * buildDraft 的职责）、不写任何状态、不产生队列事务；修改返回值不影响输入。
@@ -856,7 +861,8 @@ export function createCandidateQueue(params) {
  * @param {number} [input.offset] 页起点（>=0 整数；缺省 0）
  * @returns {{items: Array, total: number,
  *           groups: {cluster: number, link: number, isolated: number},
- *           statusCounts: {pending: number, reviewed: number, dismissed: number}}}
+ *           statusCounts: {pending: number, reviewed: number, dismissed: number},
+ *           staleCount?: number}}
  */
 export function listQueue(input) {
   if (!isPlainObject(input)) fail('INVALID_INPUT', 'listQueue 参数必须是对象');
@@ -888,8 +894,13 @@ export function listQueue(input) {
 
   // title 索引：只认字符串标题；同 id 重复记录取先到者（store 的 listActive
   // 不会重复给 id，这里仅为防御，不静默覆盖）。
+  // revisions 索引：只认整数 revision（供 stale 判定）；同 id 重复取先到者，
+  // 与 titlesById 的防御口径一致。
   const titlesById = new Map();
+  const revisionsById = new Map();
+  let recordsProvided = false;
   if (records !== undefined && records !== null) {
+    recordsProvided = true;
     if (!Array.isArray(records)) fail('INVALID_INPUT', 'listQueue records 必须是数组');
     for (let i = 0; i < records.length; i += 1) {
       const record = records[i];
@@ -898,6 +909,9 @@ export function listQueue(input) {
       }
       if (!titlesById.has(record.id) && typeof record.title === 'string' && record.title.isWellFormed()) {
         titlesById.set(record.id, record.title);
+      }
+      if (!revisionsById.has(record.id) && Number.isInteger(record.revision)) {
+        revisionsById.set(record.id, record.revision);
       }
     }
   }
@@ -909,6 +923,16 @@ export function listQueue(input) {
     groups[item.candidate.kind] += 1;
     statusCounts[item.status] += 1;
   }
+
+  // stale：按分页前全量 items 判定（staleCount 口径同 total/groups，不受分页
+  // 影响）。fail-closed：ref.revision 缺失/非整数、源卡不在 records、或
+  // records.revision 与 ref 不严格相等，一律视为过期。
+  const itemStale = recordsProvided
+    ? items.map((item) => item.candidate.sources.some((ref) => isStaleSourceRef(ref, revisionsById)))
+    : null;
+  const staleCount = recordsProvided
+    ? itemStale.reduce((n, stale) => (stale ? n + 1 : n), 0)
+    : 0;
 
   let offset = 0;
   if (input.offset !== undefined) {
@@ -925,16 +949,31 @@ export function listQueue(input) {
     limit = input.limit;
   }
 
-  const page = items.slice(offset, offset + limit).map((item) => {
+  const page = items.slice(offset, offset + limit).map((item, i) => {
     const clone = deepClone(item);
     clone.candidate.sources = clone.candidate.sources.map((ref) => ({
       ...ref,
       title: titlesById.get(ref.id) ?? null,
     }));
+    // stale 与 title 补全同在分页后的副本上，只增不改；records 缺省时不加该键。
+    if (recordsProvided) clone.stale = itemStale[offset + i];
     return clone;
   });
 
-  return { items: page, total, groups, statusCounts };
+  return recordsProvided
+    ? { items: page, total, groups, statusCounts, staleCount }
+    : { items: page, total, groups, statusCounts };
+}
+
+/**
+ * 单个 source ref 是否过期（fail-closed）：revision 缺失/非整数、源卡不在
+ * records（revisionsById 没有该 id）、或 records.revision 与 ref.revision 不
+ * 严格相等，都算过期。
+ */
+function isStaleSourceRef(ref, revisionsById) {
+  if (!Number.isInteger(ref.revision)) return true;
+  const recordRevision = revisionsById.get(ref.id);
+  return recordRevision === undefined || recordRevision !== ref.revision;
 }
 
 // ---------------------------------------------------------------------------

@@ -60,6 +60,7 @@ window.__ModuleLoader__.load({
 ".dshi_badge{border:1px solid var(--dshi-gold-ink,#c98a1b);color:var(--dshi-gold-ink,#c98a1b);border-radius:999px;padding:0 8px;font-size:10px;white-space:nowrap}" +
 ".dshi_badgeWarn{border-color:var(--dsw-alias-state-error-primary,#f85149);color:var(--dsw-alias-state-error-primary,#f85149)}" +
 ".dshi_badgeDim{border-color:var(--dsw-alias-border-l2,#dce2eb);color:var(--dsw-alias-label-tertiary)}" +
+".dshi_badgeStale{border-color:var(--dshi-warn);color:var(--dshi-warn)}" +
 ".dshi_btn{border:1px solid var(--dsw-alias-border-l2,#dce2eb);background:var(--dsw-alias-bg-layer-3,#fff);color:var(--dsw-alias-label-primary);border-radius:8px;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer}" +
 ".dshi_btn:hover:not(:disabled){border-color:var(--dshi-accent-a,#e5484d)}" +
 ".dshi_btn:disabled{opacity:.5;cursor:default}" +
@@ -181,7 +182,12 @@ window.__ModuleLoader__.load({
 ".dshi_diffBox{display:flex;flex-direction:column;gap:var(--dshi-space-sm);min-height:240px;max-height:480px;overflow:auto;border:var(--dshi-stroke);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}" +
 ".dshi_diffBox .dshi_pre{font-size:var(--dshi-font-sm)}" +
 ".dshi_kindGroup{display:flex;flex-direction:column;gap:var(--dshi-space-xs)}" +
-".dshi_advanced{display:flex;flex-direction:column;gap:var(--dshi-space-xs);margin-top:var(--dshi-space-xs)}";
+".dshi_advanced{display:flex;flex-direction:column;gap:var(--dshi-space-xs);margin-top:var(--dshi-space-xs)}" +
+    // U5-e：过期候选——行内徽章（warn 色沿用 --dshi-warn）、顶部提示条与重析按钮
+    //（底色沿用 dshi_roBanner 的 rgba(180,83,9,.10)，不引入新色系）。
+".dshi_staleBar{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap;border:1px solid var(--dshi-warn);background:rgba(180,83,9,.10);color:var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-xs) var(--dshi-space-sm);font-size:var(--dshi-font-sm)}" +
+".dshi_staleBarBtn{border:1px solid var(--dshi-warn);background:none;color:var(--dshi-warn);font:inherit;font-size:var(--dshi-font-xs);border-radius:var(--dshi-radius-sm);padding:2px 10px;cursor:pointer}" +
+".dshi_staleBarBtn:disabled{opacity:.5;cursor:default}";
     function ensureStyle() {
       try {
         if (document.getElementById("dsh-shiori-style")) return;
@@ -2224,6 +2230,9 @@ window.__ModuleLoader__.load({
       var loaded = queueRevision !== null;
       // DTO 守卫：items / plans 只按数组渲染（对象形态不调 .length/.map）。
       var items = Array.isArray(data && data.items) ? data.items : [];
+      // U5-e：顶层 staleCount（全量口径，不受当前筛选 / 搜索影响）——>0 时顶部
+      // 显示提示条；旧服务端不带回该字段时按 0 处理（提示条不渲染）。
+      var staleCount = data && typeof data.staleCount === "number" ? data.staleCount : 0;
       var plans = Array.isArray(data && data.plans) ? data.plans : [];
 
       var load = async function () {
@@ -2824,21 +2833,41 @@ window.__ModuleLoader__.load({
         // U5b：标题下「理由」小字——evidence 缺失 / 形状不对 / 未知 kind 时为 null，
         // 不渲染该行（行本身绝不消失），不抛错。
         var candidateReason = candidateReasonOf(candidate);
+        // U5-e：过期候选就地标注——队列是快照，源卡在面板外被改动后 revision 前进，
+        // 服务端在队列 item 上投影 stale 布尔（旧扁平形状兼容读 candidate.stale）。
+        // stale 行置灰「预览整理计划」与「合并进主题」（两条入口最后都走 previewPlan
+        // 的 revision 校验，必然失败）；「稍后再说」「忽略」只改 status 不校验
+        // revision，保持可用。
+        var staleRow = item.stale === true || Boolean(candidate && candidate.stale === true);
         var row = h("div", { key: key, className: "dshi_item" },
           h("div", { className: "dshi_itemHead" },
             h("span", null, candidateTitle || "（未识别的卡片）"),
             h("span", { className: "dshi_mono" }, businessId !== null ? shortId(businessId) : "（缺少 candidate.id）"),
             candidate && candidate.kind ? h("span", { className: "dshi_badgeDim dshi_badge" }, candidateKindLabel(candidate.kind)) : null,
             item.status ? h("span", { className: "dshi_badge" }, candidateStatusLabel(item.status)) : null,
+            staleRow ? h("span", { className: "dshi_badge dshi_badgeStale", title: "该候选绑定的卡片版本与分析时不一致" }, "卡片已改") : null,
             // U5 改名：「稍后再说」（协议仍发 decision=reviewed）——只是收起来，
             // 不删除任何记忆；点击后该行立即离开「待处理」分组，可在「已阅」分组切回来。
             h("button", { className: "dshi_btn", disabled: rowDisabled, title: "只是收起来，不会删除任何记忆", onClick: function () { doReview(businessId, "reviewed"); } }, "稍后再说"),
             h("button", { className: "dshi_btn", disabled: rowDisabled, title: "把候选状态置为 dismissed", onClick: function () { doReview(businessId, "dismissed"); } }, "忽略"),
-            isIsolated ? null : h("button", { className: "dshi_btn", disabled: rowDisabled, onClick: function () { doPreviewOrganize(businessId); } }, "预览整理计划"),
+            isIsolated ? null : h("button", {
+              className: "dshi_btn",
+              disabled: rowDisabled || staleRow,
+              title: staleRow ? "这条候选绑定的卡片在你上次分析之后被改过，重新分析后才能预览" : undefined,
+              onClick: function () { doPreviewOrganize(businessId); }
+            }, "预览整理计划"),
             // Q-A：cluster 候选一键进入「合并进主题」流程（选/建主题 → 自动 proposal
             // → preview diff → 确认执行），不再要求手写 proposal JSON。
-            isCluster ? h("button", { className: "dshi_btn dshi_btnPrimary", disabled: rowDisabled, onClick: function () { openMerge(businessId); } }, "合并进主题") : null),
+            // U5-e（rework a1）：合并流程最后同样走 previewPlan 的 revision 校验，
+            // stale 行一并置灰（否则过期 cluster 从这个后门还是吃到同一颗冲突）。
+            isCluster ? h("button", {
+              className: "dshi_btn dshi_btnPrimary",
+              disabled: rowDisabled || staleRow,
+              title: staleRow ? "这条候选绑定的卡片在你上次分析之后被改过，重新分析后才能合并" : undefined,
+              onClick: function () { openMerge(businessId); }
+            }, "合并进主题") : null),
           candidateReason !== null ? h("div", { className: "dshi_hint" }, "理由：" + candidateReason) : null,
+          staleRow ? h("div", { className: "dshi_hint" }, "这条候选绑定的卡片在你上次分析之后被改过，重新分析后才能用") : null,
           // 原始 JSON 默认折叠：details 不写 open，铺满屏幕的长串移出主视线。
           h("details", { className: "dshi_details" },
             h("summary", { className: "dshi_hint" }, "原始数据（JSON）"),
@@ -2912,6 +2941,17 @@ window.__ModuleLoader__.load({
           h("button", { className: "dshi_btn", title: "找出该合并进主题、该建链接、该单独成卡的卡（只读分析，不改数据）", onClick: function () { doAnalyze("organize"); }, disabled: actionsDisabled }, "分析整理候选"),
           h("button", { className: "dshi_btn", title: "按衰减分数找出该归档的旧卡（只读分析）", onClick: function () { doAnalyze("forgetting"); }, disabled: actionsDisabled }, "分析遗忘候选"),
           loaded ? h("span", { className: "dshi_badgeDim dshi_badge" }, "queueRevision " + queueRevision) : null),
+        // U5-e：过期候选顶部提示条——staleCount 是全量口径（不随筛选 / 搜索变化），
+        // 当前视图里没有可见的过期行时仍然显示。「重新分析」复用 doAnalyze("organize")
+        // （与「分析整理候选」同一路径），不新造 RPC。
+        staleCount > 0 ? h("div", { className: "dshi_staleBar" },
+          h("span", null, "有 " + staleCount + " 条候选在你的卡片被改动之后过期了，重新分析后才会更新"),
+          h("button", {
+            className: "dshi_staleBarBtn",
+            title: "重新分析整理候选，过期候选会随之更新",
+            disabled: actionsDisabled,
+            onClick: function () { doAnalyze("organize"); }
+          }, "重新分析")) : null,
         ErrorBox(error),
         ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
         data ? h(fragment, null,

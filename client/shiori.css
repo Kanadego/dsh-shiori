@@ -22,6 +22,7 @@
 .dshi_badge{border:1px solid var(--dshi-gold-ink,#c98a1b);color:var(--dshi-gold-ink,#c98a1b);border-radius:999px;padding:0 8px;font-size:10px;white-space:nowrap}
 .dshi_badgeWarn{border-color:var(--dsw-alias-state-error-primary,#f85149);color:var(--dsw-alias-state-error-primary,#f85149)}
 .dshi_badgeDim{border-color:var(--dsw-alias-border-l2,#dce2eb);color:var(--dsw-alias-label-tertiary)}
+.dshi_badgeStale{border-color:var(--dshi-warn);color:var(--dshi-warn)}
 .dshi_btn{border:1px solid var(--dsw-alias-border-l2,#dce2eb);background:var(--dsw-alias-bg-layer-3,#fff);color:var(--dsw-alias-label-primary);border-radius:8px;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer}
 .dshi_btn:hover:not(:disabled){border-color:var(--dshi-accent-a,#e5484d)}
 .dshi_btn:disabled{opacity:.5;cursor:default}
@@ -140,3 +141,9 @@
 .dshi_diffBox .dshi_pre{font-size:var(--dshi-font-sm)}
 .dshi_kindGroup{display:flex;flex-direction:column;gap:var(--dshi-space-xs)}
 .dshi_advanced{display:flex;flex-direction:column;gap:var(--dshi-space-xs);margin-top:var(--dshi-space-xs)}
+/* U5-e 过期候选：顶部提示条与重析按钮（底色沿用 dshi_roBanner 的
+   rgba(180,83,9,.10)，不引入新色系）；行内「卡片已改」徽章 dshi_badgeStale
+   在上方 dshi_badgeDim 之后，与内嵌 CSS 顺序一致。 */
+.dshi_staleBar{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap;border:1px solid var(--dshi-warn);background:rgba(180,83,9,.10);color:var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-xs) var(--dshi-space-sm);font-size:var(--dshi-font-sm)}
+.dshi_staleBarBtn{border:1px solid var(--dshi-warn);background:none;color:var(--dshi-warn);font:inherit;font-size:var(--dshi-font-xs);border-radius:var(--dshi-radius-sm);padding:2px 10px;cursor:pointer}
+.dshi_staleBarBtn:disabled{opacity:.5;cursor:default}
