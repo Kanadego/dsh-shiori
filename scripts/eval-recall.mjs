@@ -10,7 +10,7 @@
 //
 // 模型缓存解析顺序（任务书 i 条：模型不存在时可用 SPIKE 环境变量指向 spike 目录）：
 //   1) --cache-dir 参数；
-//   2) 环境变量 SPIKE_MODELS（或 SPIKE），如 D:/AIagent/spike-f1b/models；
+//   2) 环境变量 SPIKE_MODELS（或 SPIKE），如 /path/to/spike/models；
 //   3) 空字符串（transformers.js 默认缓存位置；首次会经 mirror 下载 23–91MB）。
 // 镜像默认 https://hf-mirror.com/（与配置线默认一致；可用 --mirror 覆盖）。
 //
@@ -90,7 +90,7 @@ try {
   console.error(`模型加载失败（${error.code ?? "UNCODED"}）：${error.message}`);
   if (error.code === "SEMANTIC_UNAVAILABLE" && !cacheDir) {
     console.error("提示：本机没有模型缓存时，可用 SPIKE 环境变量指向已有模型目录，例如：");
-    console.error("  SPIKE_MODELS=D:/AIagent/spike-f1b/models node scripts/eval-recall.mjs");
+    console.error("  SPIKE_MODELS=/path/to/spike/models node scripts/eval-recall.mjs");
   }
   process.exit(1);
 }

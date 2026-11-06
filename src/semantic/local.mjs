@@ -10,7 +10,7 @@
 //   code="SEMANTIC_UNAVAILABLE" 的 coded error，带底层 cause 与中文可读
 //   message；绝不静默降级冒充可用。是否回退纯字面由召回合并层决定。
 // - embed(text) 返回 Float32Array(dims)：pipeline("feature-extraction")
-//   + pooling mean + normalize，与 spike（D:/AIagent/spike-f1b/结论.md）
+//   + pooling mean + normalize，与 spike（见 spike 目录的结论.md）
 //   实测配置一致（q8 短文本 p95 3.98ms，512 维）。
 
 // 本模块不引入宿主依赖；fail 与 index.mjs 同风格（可序列化 .code + .details）。
@@ -105,7 +105,7 @@ export function createLocalEmbeddingProvider({
     }
     try {
       const { pipeline, env } = transformers;
-      // 与 spike bench 完全一致的 env 配置（D:/AIagent/spike-f1b/bench2.mjs）：
+      // 与 spike bench 完全一致的 env 配置（见 spike 目录的 bench2.mjs）：
       // allowLocalModels=true + cacheDir + remoteHost（hf-mirror）。
       // 注意 env 是该模块的全局单例：本插件是进程内唯一的 transformers 消费方。
       env.allowLocalModels = true;
