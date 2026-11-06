@@ -284,3 +284,37 @@ test("unknown extra fields on topics are tolerated (data forward-compatibility)"
   const result = selectVisibleTopics({ activeScopeId: "amber", topics: [topic] });
   assert.equal(result[0].archived, false);
 });
+
+test("archivedAt 归档标记：合法 ISO 串可通过校验并透传；非法形状显式拒绝", () => {
+  const ok = selectVisibleTopics({
+    activeScopeId: "amber",
+    topics: [makeTopic({ key: "cold", scopeId: "amber", archivedAt: "2026-11-07T00:00:00.000Z" })],
+  });
+  assert.equal(ok[0].archivedAt, "2026-11-07T00:00:00.000Z");
+
+  // 老文件没有该字段 = 未归档，行为不变
+  const old = selectVisibleTopics({
+    activeScopeId: "amber",
+    topics: [makeTopic({ key: "warm", scopeId: "amber" })],
+  });
+  assert.equal(old[0].archivedAt, undefined);
+
+  // 归档与否不影响 scope 可见性（归档专题仍参与 active 覆盖 global 的去重）
+  const dedup = selectVisibleTopics({
+    activeScopeId: "amber",
+    topics: [
+      makeTopic({ key: "k", scopeId: "global", archivedAt: "2026-11-07T00:00:00.000Z" }),
+      makeTopic({ key: "k", scopeId: "amber" }),
+    ],
+  });
+  assert.equal(dedup.length, 1);
+  assert.equal(dedup[0].scopeId, "amber");
+  assert.equal(dedup[0].archivedAt, undefined);
+
+  for (const bad of ["", 123, "a\nb"]) {
+    assert.throws(
+      () => selectVisibleTopics({ activeScopeId: "amber", topics: [makeTopic({ key: "bad", scopeId: "amber", archivedAt: bad })] }),
+      (error) => error.code === "INVALID_INPUT" && /archivedAt/.test(error.message),
+    );
+  }
+});

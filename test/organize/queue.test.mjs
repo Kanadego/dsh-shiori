@@ -799,7 +799,7 @@ test('merge-topic 陈旧源与缺失源：REVISION_CONFLICT / NOT_FOUND', () => 
 // buildDraft · thin-core（仅草案）
 // ===========================================================================
 
-test('thin-core 仅草案：plan.core、changedItems=0、diff 展示、无执行字段', () => {
+test('thin-core 草案：plan.core、changedItems=1（core 替换）、diff 展示、无执行字段', () => {
   const candidate = makeCandidate({ kind: 'isolated', sources: sortedRefs('a'), evidence: {} });
   const records = [makeCard('a')];
   const draft = buildDraft({
@@ -808,7 +808,7 @@ test('thin-core 仅草案：plan.core、changedItems=0、diff 展示、无执行
   });
   assert.deepEqual(Object.keys(draft.plan).sort(), ['candidateId', 'core', 'kind', 'scopeId', 'sources', 'version']);
   assert.deepEqual(draft.plan.core, { before: 'L1 原文', after: 'L1 精简后' });
-  assert.equal(draft.changedItems, 0);
+  assert.equal(draft.changedItems, 1);
   assert.deepEqual(draft.diff, [{ path: 'core', oldText: 'L1 原文', newText: 'L1 精简后' }]);
   assert.equal(draft.digest, digestPlan(draft.plan));
   assert.ok(!Object.keys(draft.plan).includes('approval'));

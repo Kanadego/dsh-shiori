@@ -250,11 +250,11 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
     // ── L2/L3 检索 ────────────────────────────────────────────────────────
     {
       name: "memory_search",
-      description: "Keyword search over visible topics (and archived entries when the service exposes them). Returns keys, titles and summaries only; use memory_read(topic) for full text. Lexical search, not semantic matching.",
+      description: "Keyword search over visible topics; archived (cold) topics are included by default but return summary-level entries only (state='archived', score=0, listed after active hits) — never full text; use memory_read(topic) for full text. Returns keys, titles and summaries only. Lexical search, not semantic matching.",
       inputSchema: {
         query: { type: "string", required: true, description: "Keywords or a short question." },
         limit: { type: "integer", description: "Maximum results, 1–20 (default 5)." },
-        includeArchived: { type: "boolean", description: "Explicitly include archived (cold) spark cards. Always read-only; archived cards are never revived or re-matched automatically." },
+        includeArchived: { type: "boolean", description: "Explicitly include archived (cold) spark cards; only affects spark cold cards — topic archives are always included as summary entries. Always read-only; archived cards are never revived or re-matched automatically." },
       },
       outputSchema: TOOL_OUTPUT_SCHEMAS["memory_search"],
       outputRender: renderToolOutput,

@@ -94,6 +94,16 @@ export function validateTopic(topic, where) {
   if (topic.body !== undefined && typeof topic.body !== "string") {
     fail("INVALID_INPUT", `${where}: body must be a string when present`);
   }
+  // 归档标记（可选）：有值即归档（ISO 时间串），缺省/空 = 未归档；
+  // 老文件没有该字段，行为不变（DESIGN §2.1 已定方案）。
+  if (topic.archivedAt !== undefined) {
+    if (typeof topic.archivedAt !== "string" || topic.archivedAt.length === 0) {
+      fail("INVALID_INPUT", `${where}: archivedAt must be a non-empty string when present`);
+    }
+    if (topic.archivedAt.includes("\n") || topic.archivedAt.includes("\r")) {
+      fail("INVALID_INPUT", `${where}: archivedAt must not contain line breaks`);
+    }
+  }
   return topic;
 }
 

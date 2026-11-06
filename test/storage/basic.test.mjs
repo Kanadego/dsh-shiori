@@ -1,4 +1,4 @@
-// 基础读取语义：fallback、去重、两卡同 key 不串、revision 哈希、legacy 兼容。
+// 基础读取语义：fallback、去重、两卡同 key 不串、revision 哈希、legacy 报错、archivedAt。
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -163,49 +163,112 @@ describe('readTopic', () => {
   });
 });
 
-describe('legacy 旧 Markdown 只读兼容', () => {
-  it('无 front-matter 文件可读（title/summary 推导），进影子报告，提交不改原文件', async (t) => {
+describe('legacy 裸 md 直接报错（不再只读兼容）', () => {
+  it('readTopic 遇无 front-matter 文件抛 INVALID_STATE，错误带文件名与路径', async (t) => {
     const root = await makeTmpRoot(t);
     const dirG = path.join(root, 'scopes', 'global', 'topics');
     await fsp.mkdir(dirG, { recursive: true });
     const legacyBody = '# 旧专题\n\n第一段摘要行\n\n正文内容';
-    await fsp.writeFile(path.join(dirG, 'legacy-topic.md'), Buffer.from(legacyBody, 'utf8'));
+    const file = path.join(dirG, 'legacy-topic.md');
+    await fsp.writeFile(file, Buffer.from(legacyBody, 'utf8'));
 
     const store = await createFileStore(opts({ root }));
-    const topic = await store.readTopic('legacy-topic');
-    assert.equal(topic.title, '旧专题');
-    assert.equal(topic.summary, '第一段摘要行');
-    // R8：updated 用非空哨兵串，DTO 可直接通过真实 A 的 validateTopic
-    assert.equal(topic.updated, 'legacy-unknown');
-    assert.equal(topic.revision, sha256(Buffer.from(legacyBody, 'utf8')));
-
-    const report = await store.legacyReport();
-    assert.ok(report.legacy.some((l) => l.key === 'legacy-topic'));
-
-    // 只读兼容：原文件逐字未动
-    const after = await fsp.readFile(path.join(dirG, 'legacy-topic.md'), 'utf8');
-    assert.equal(after, legacyBody);
+    await assert.rejects(() => store.readTopic('legacy-topic'), (err) => {
+      assert.equal(err.code, 'INVALID_STATE');
+      assert.ok(err.message.includes('legacy-topic.md'), '错误信息含文件名');
+      assert.ok(err.message.includes(file.replace(/\\/g, '/')) || err.message.includes(file), '错误信息含路径');
+      assert.ok(err.message.includes('缺少 front-matter'), '错误信息说明缺 front-matter');
+      assert.ok(err.message.includes('非法数据'), '错误信息说明属非法数据');
+      return true;
+    });
+    // 原文件不动
+    assert.equal(await fsp.readFile(file, 'utf8'), legacyBody);
   });
 
-  it('旧文件推导摘要超 60：影子索引按规则截断，全文留在 body/legacySummaryFull，原文件不动', async (t) => {
+  it('列举路径（listTopics/snapshot/legacyReport）同样直接抛错，不静默跳过、不降级', async (t) => {
     const root = await makeTmpRoot(t);
     const dirG = path.join(root, 'scopes', 'global', 'topics');
     await fsp.mkdir(dirG, { recursive: true });
-    const longLine = '长'.repeat(80);
-    const body = `# 长摘要旧专题\n\n${longLine}\n\n正文`;
-    await fsp.writeFile(path.join(dirG, 'long-legacy.md'), Buffer.from(body, 'utf8'));
+    await fsp.writeFile(path.join(dirG, 'long-legacy.md'), Buffer.from('# 长摘要旧专题\n\n正文', 'utf8'));
 
     const store = await createFileStore(opts({ root }));
-    const topic = await store.readTopic('long-legacy');
-    assert.equal(topic.summary.length, 60); // 影子索引按规则截断
-    assert.equal(topic.legacySummaryFull, longLine); // 全文可追溯
-    assert.equal(topic.body, body); // 正文未截断
-    const report = await store.legacyReport();
-    const entry = report.legacy.find((l) => l.key === 'long-legacy');
-    assert.ok(entry.reason.includes('非无损迁移'));
+    await assert.rejects(() => store.listTopics(), (err) => err.code === 'INVALID_STATE' && err.message.includes('long-legacy.md'));
+    await assert.rejects(() => store.snapshot(), (err) => err.code === 'INVALID_STATE');
+    await assert.rejects(() => store.legacyReport(), (err) => err.code === 'INVALID_STATE');
+    // 提交也被阻止（加载非法数据不能绕过）
+    await assert.rejects(() => store.commit({
+      operationId: 'blocked-by-legacy', expectedGeneration: 0,
+      changes: [{ kind: 'core', expectedRevision: null, text: '新铁律\n' }],
+    }), (err) => err.code === 'INVALID_STATE');
+  });
+});
 
-    // 原文件逐字未动
-    assert.equal(await fsp.readFile(path.join(dirG, 'long-legacy.md'), 'utf8'), body);
+describe('archivedAt 归档标记（store 层）', () => {
+  it('带 archivedAt 的 topic：readTopic/listTopics/snapshot 带出标记', async (t) => {
+    const root = await makeTmpRoot(t);
+    const dirA = path.join(root, 'scopes', 'amber', 'topics');
+    await fsp.mkdir(dirA, { recursive: true });
+    await fsp.writeFile(path.join(dirA, 'cold.md'), Buffer.from(topicRawText({
+      key: 'cold', scopeId: 'amber', body: '冷专题正文',
+    }).replace('---\n', '---\narchivedAt: "2026-11-07T00:00:00.000Z"\n'), 'utf8'));
+
+    const store = await createFileStore(opts({ root }));
+    const topic = await store.readTopic('cold');
+    assert.equal(topic.archivedAt, '2026-11-07T00:00:00.000Z');
+    assert.equal(topic.body, '冷专题正文');
+    const topics = await store.listTopics();
+    assert.equal(topics.length, 1);
+    assert.equal(topics[0].archivedAt, '2026-11-07T00:00:00.000Z');
+    const snap = await store.snapshot();
+    assert.equal(snap.topics[0].archivedAt, '2026-11-07T00:00:00.000Z');
+  });
+
+  it('老文件没有 archivedAt 字段 = 未归档，行为不变', async (t) => {
+    const root = await makeTmpRoot(t);
+    const dirA = path.join(root, 'scopes', 'amber', 'topics');
+    await fsp.mkdir(dirA, { recursive: true });
+    await fsp.writeFile(path.join(dirA, 'warm.md'), Buffer.from(topicRawText({ key: 'warm', scopeId: 'amber' }), 'utf8'));
+
+    const store = await createFileStore(opts({ root }));
+    const topic = await store.readTopic('warm');
+    assert.equal(topic.archivedAt, undefined);
+    assert.ok(!('archivedAt' in topic), 'DTO 不携带 archivedAt 字段');
+  });
+
+  it('结构化写入：archivedAt 有值落盘、空串省略、非 ISO 拒绝', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await createFileStore(opts({ root }));
+    await store.commit({
+      operationId: 'archive-create', expectedGeneration: 0,
+      changes: [{ kind: 'topic', key: 'cold', expectedRevision: null,
+        topic: { title: '冷', summary: '摘要', updated: '2026-11-07T00:00:00.000Z',
+          archivedAt: '2026-11-07T12:00:00.000Z', body: '正文' } }],
+    });
+    const raw = await fsp.readFile(path.join(root, 'scopes', 'amber', 'topics', 'cold.md'), 'utf8');
+    assert.match(raw, /^archivedAt: "2026-11-07T12:00:00\.000Z"$/m);
+    assert.equal((await store.readTopic('cold')).archivedAt, '2026-11-07T12:00:00.000Z');
+
+    // 空串 = 取消归档：序列化省略该行
+    const snap = await store.snapshot();
+    const rev = snap.topics[0].revision;
+    await store.commit({
+      operationId: 'unarchive', expectedGeneration: 1,
+      changes: [{ kind: 'topic', key: 'cold', expectedRevision: rev,
+        topic: { title: '冷', summary: '摘要', updated: '2026-11-07T01:00:00.000Z',
+          archivedAt: '', body: '正文' } }],
+    });
+    const raw2 = await fsp.readFile(path.join(root, 'scopes', 'amber', 'topics', 'cold.md'), 'utf8');
+    assert.doesNotMatch(raw2, /^archivedAt:/m);
+    assert.equal((await store.readTopic('cold')).archivedAt, undefined);
+
+    // 非 ISO 拒绝
+    const currentRev = (await store.snapshot()).topics[0].revision;
+    await assert.rejects(() => store.commit({
+      operationId: 'bad-archive', expectedGeneration: 2,
+      changes: [{ kind: 'topic', key: 'cold', expectedRevision: currentRev,
+        topic: { title: '冷', summary: '摘要', updated: '2026-11-07T02:00:00.000Z',
+          archivedAt: 'not-a-date', body: '正文' } }],
+    }), (err) => err.code === 'INVALID_INPUT');
   });
 });
 

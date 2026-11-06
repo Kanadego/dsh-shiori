@@ -196,6 +196,29 @@ test("memory_search / memory_list_topics：结果形状与 limit 校验", async 
   await bridge.stop();
 });
 
+test("memory_search：归档摘要条目原样透传（state=archived、score=0、排在未归档之后），limit 截断不吞未归档结果", async () => {
+  const { host, service, bridge } = await activeBridge();
+  // 服务层已保证排序（未归档在前、归档在后且只回摘要级）；桥透传并只做 limit 截断
+  service.search = async (query) => [
+    { key: "warm", title: "热专题", summary: "排障热版", scopeId: "amber", score: 2 },
+    { key: "cold-1", title: "冷专题一", summary: "排障冷版一", scopeId: "amber", score: 0, state: "archived" },
+    { key: "cold-2", title: "冷专题二", summary: "排障冷版二", scopeId: "amber", score: 0, state: "archived" },
+  ];
+  const found = await host.tools.get("memory_search").execute({ query: "排障" });
+  assert.deepEqual(found.matches.map((m) => [m.key, m.score, m.state ?? null]), [
+    ["warm", 2, null],
+    ["cold-1", 0, "archived"],
+    ["cold-2", 0, "archived"],
+  ]);
+  for (const m of found.matches) {
+    assert.ok(!("body" in m), "memory_search 不回正文");
+  }
+  // limit=1 只保留未归档首条：归档条目永远排在未归档之后
+  const limited = await host.tools.get("memory_search").execute({ query: "排障", limit: 1 });
+  assert.deepEqual(limited.matches.map((m) => m.key), ["warm"]);
+  await bridge.stop();
+});
+
 test("service 缺 readCore 时核心写路径显式 UNSUPPORTED（不拿渲染视图回写）", async () => {
   const service = createFakeService();
   delete service.readCore;

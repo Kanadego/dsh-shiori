@@ -1,9 +1,9 @@
 // Shiori P3-ORGANIZE · L 槽受审执行器（P3-APPROVED-EXECUTOR）
 //
 // 职责（CONTRACTS §4）：只执行调用方每轮显式提交的单个已批准 plan
-// （link / merge-topic），复用既有 createShioriService / createFileStore /
-// openSparkStore 与它们的锁、CAS、journal、operation 幂等，不重写 topic
-// 文件、不重写 sparks.json、不新增通用跨 DB 协调 journal。
+// （link / merge-topic / thin-core），复用既有 createShioriService /
+// createFileStore / openSparkStore 与它们的锁、CAS、journal、operation 幂等，
+// 不重写 topic 文件、不重写 sparks.json、不新增通用跨 DB 协调 journal。
 //
 // 授权模型：authorize 是宿主注入的判定函数；await authorize(...) 必须
 // 严格 === true 才继续（客户端声明不是认证）。merge-topic 在「新退休源」
@@ -34,12 +34,13 @@
 // executeRound 不接受自动循环。
 
 import path from 'node:path';
+import { promises as fsp } from 'node:fs';
 
 import { validateConfig, renderL1, evaluateMutation } from '../core/index.mjs';
 import { createShioriService } from '../service/index.mjs';
 import { createFileStore } from '../storage/index.mjs';
-import { validateScopeId, validateOperationId } from '../storage/paths.mjs';
-import { assertEncodableUtf8, sha256Buffer } from '../storage/fsutil.mjs';
+import { validateScopeId, validateOperationId, assertNoEscapeViaSymlink } from '../storage/paths.mjs';
+import { assertEncodableUtf8, sha256Buffer, writeFileSynced } from '../storage/fsutil.mjs';
 import { openSparkStore } from '../sparks/store.mjs';
 
 const APPROVAL_ACTORS = new Set(['main-session', 'authorized-idle-heartbeat']);
@@ -51,6 +52,13 @@ const LINK_SOURCES_MAX = 64;      // 与提案 spark-store.mjs 保持一致
 const MERGE_SOURCES_MIN = 8;
 const MERGE_SOURCES_MAX = 19;
 const LINKS_MAX = 20;
+
+// thin-core 不经 sparkStore.bindOrganizeRound（sparks store 对 thin-core 硬拒
+// 且 thin-core 不动任何卡，跳过不影响卡账）；回执显式记录，不静默。
+const THIN_CORE_BINDING_SKIPPED = {
+  skipped: true,
+  reason: 'bindOrganizeRound rejects thin-core plans and thin-core touches no spark cards',
+};
 
 // plan 每 kind 允许的顶层键（禁止未知字段，digest/approval/operationId
 // 由执行轮另行绑定，不允许出现在 plan 内）。
@@ -293,7 +301,7 @@ function validateRoundPlan(plan, boundScopeId) {
     return plan;
   }
 
-  // thin-core：完整形状校验（仅草案；executeRound 一律拒绝执行）
+  // thin-core：完整形状校验（before/after 正文；执行语义见 executeThinCoreRound）
   const c = plan.core;
   if (!isPlainObject(c)) throw err('INVALID_INPUT', 'plan.core 必须是对象');
   const cKeys = Object.keys(c);
@@ -355,22 +363,32 @@ function buildSourcesBlock(cards) {
  * @param {object} [params.budgets] P5：可信自定义预算（validateConfig 形状）；
  *                                  缺省沿用默认配置。禁止调用方借预算绕闸——
  *                                  预算仍经 validateConfig 整体校验后才进入执行。
+ * @param {string} [params.stateRoot] 显式绝对状态根（thin-core 写前备份落
+ *                                  <stateRoot>/core-backups/<tc operationId>.md）。
+ *                                  缺失时 thin-core 备份跳过并在回执如实标注
+ *                                  （不静默）；不参与其它 kind 的任何读写。
  */
 export async function createOrganizerExecutor(params) {
   if (!isPlainObject(params)) {
-    throw err('INVALID_INPUT', 'createOrganizerExecutor 参数必须是 {root,scopeId,authorize[,budgets]} 对象');
+    throw err('INVALID_INPUT', 'createOrganizerExecutor 参数必须是 {root,scopeId,authorize[,budgets][,stateRoot]} 对象');
   }
   const keys = Object.keys(params);
   const baseKeys = ['root', 'scopeId', 'authorize'];
   const hasBudgets = keys.includes('budgets');
-  if (keys.length !== (hasBudgets ? 4 : 3)
+  const hasStateRoot = keys.includes('stateRoot');
+  const optionalKeys = (hasBudgets ? 1 : 0) + (hasStateRoot ? 1 : 0);
+  if (keys.length !== baseKeys.length + optionalKeys
     || !baseKeys.every((k) => keys.includes(k))
     || (hasBudgets && params.budgets !== undefined && !isPlainObject(params.budgets))) {
-    throw err('INVALID_INPUT', 'createOrganizerExecutor 只接受恰好 root/scopeId/authorize（可选 budgets）参数');
+    throw err('INVALID_INPUT', 'createOrganizerExecutor 只接受恰好 root/scopeId/authorize（可选 budgets、stateRoot）参数');
   }
   const { root, scopeId, authorize } = params;
   if (typeof root !== 'string' || root.trim() === '' || !path.isAbsolute(root)) {
     throw err('INVALID_INPUT', 'root 必须显式提供且是绝对路径', { root });
+  }
+  const stateRoot = hasStateRoot && params.stateRoot !== undefined ? params.stateRoot : null;
+  if (stateRoot !== null && (typeof stateRoot !== 'string' || stateRoot.trim() === '' || !path.isAbsolute(stateRoot))) {
+    throw err('INVALID_INPUT', 'stateRoot 必须显式提供且是绝对路径（缺省为 null：thin-core 备份跳过并在回执标注）', { stateRoot });
   }
   validateScopeId(scopeId);
   if (typeof authorize !== 'function') {
@@ -615,11 +633,137 @@ export async function createOrganizerExecutor(params) {
     };
   }
 
+  /**
+   * thin-core 写前备份：旧 core 正文存 <stateRoot>/core-backups/<tc 子
+   * operationId>.md（目录不存在则建；fsync 落盘）。
+   * fail-closed：stateRoot 已提供但备份落盘失败 → 抛错中止，core 不写；
+   * stateRoot 缺失 → 跳过并在回执如实标注（不静默）。已知缺口（主审
+   * q-b40eda3bfee42fa0）：0.2.2 生产 caller management.mjs 未传 stateRoot，
+   * 线上一定走 skipped，下一批接线补齐。
+   */
+  async function backupCoreBeforeWrite(subOperationId, oldText) {
+    if (stateRoot === null) {
+      return { skipped: true, reason: 'stateRoot not provided by caller' };
+    }
+    const dir = path.join(stateRoot, 'core-backups');
+    const file = path.join(dir, `${subOperationId}.md`);
+    await assertNoEscapeViaSymlink(stateRoot, file);
+    let bytes;
+    try {
+      await fsp.mkdir(dir, { recursive: true });
+      bytes = Buffer.from(oldText, 'utf8');
+      await writeFileSynced(file, bytes);
+    } catch (e) {
+      throw err('INVALID_STATE', 'core 写前备份失败（fail-closed：旧正文未落备份盘，拒绝写入 core）', {
+        phase: 'core-backup', coreCommitted: false, stateRoot, backupPath: file,
+        cause: e instanceof Error ? e.message : String(e),
+      });
+    }
+    return { skipped: false, path: file, bytes: bytes.length };
+  }
+
+  /**
+   * thin-core 执行：确认后整体替换 L1 core 正文（0.2.2 只做替换，不做删减
+   * 段落下沉 topic）。与 link/merge 同走 demandApproval（executeRound 主流程
+   * stage:'round'，重试含重放同样重新判定）。
+   *
+   * 幂等重放语义（主审 q-b40eda3bfee42fa0 拍板 A：内容判定）。要求 4 的
+   * 「复用 storage journal 早退」按字面不可达：service revision token 每次
+   * readCore 新发 issuedAt/generation，重放 payload（expectedRevision=
+   * hash(after)、generation=G2）与首跑（hash(before)、G1）必然不同，
+   * journal payloadHash 不可能命中——本 round 的「是否已提交」改由当前
+   * core 正文与 plan.core.before/after 的逐字节比对判定：
+   *   正文 == plan.core.before → 首跑：备份（fail-closed）→ service.mutate
+   *     （expectedRevision 用 service token CAS，不裸哈希）；
+   *   正文 == plan.core.after → 本 round 已完成：零写，返回与首跑同形回执
+   *     + replayed:true（已知残余风险：无关操作恰好写入与 after 逐字节相同
+   *     正文时会误判归属；thin-core 无退休类破坏性动作，无数据丢失）；
+   *   都不等 → REVISION_CONFLICT，不落盘。
+   *
+   * 失败标记（照 merge 的 phase/coreCommitted 写法）：mutate 抛错 ⟹ tc 从未
+   * 持久提交（已提交的同 payload 只会幂等早退成功，不可能再抛 CAS 错），
+   * 附 phase:'core-commit' / coreCommitted:false / coreSubOperationId。
+   * 0.2.2 core 写入后无后续步骤（下沉明确不做）；未来追加写后步骤失败时
+   * 须标 coreCommitted:true，重试凭同 tc operationId 走 service journal
+   * 幂等早退，不得二次写。
+   */
+  async function executeThinCoreRound({ plan, planDigest, operationId }) {
+    const coreSubOperationId = deriveStageOperationId(scopeId, operationId, 'tc');
+
+    // 1) 写前核验：读当前 core 磁盘正文与 service revision token。
+    //    必须用 readCore 的 text（磁盘 body），不能用 readCoreView 的 text
+    //    （渲染后含派生索引的视图，永远比不中 after）。
+    const current = await service.readCore();
+    if (current.text !== plan.core.before && current.text !== plan.core.after) {
+      throw err('REVISION_CONFLICT', 'plan.core.before 与当前 L1 core 正文逐字节不一致（已被外部修改），拒绝执行且不落盘', {
+        phase: 'core-precheck', coreCommitted: false, candidateId: plan.candidateId,
+      });
+    }
+
+    if (current.text === plan.core.after) {
+      // 2) 完成重放：零写，返回首次回执语义（同形 + replayed）。
+      //    generation 与备份细节随首跑落盘，重放不可重建，如实缺省。
+      return {
+        status: 'completed',
+        operationId,
+        planDigest,
+        kind: 'thin-core',
+        changedItems: 1,
+        replayed: true,
+        core: {
+          operationId: coreSubOperationId,
+          beforeRevision: sha256Buffer(Buffer.from(plan.core.before, 'utf8')),
+          afterRevision: sha256Buffer(Buffer.from(plan.core.after, 'utf8')),
+        },
+        backup: null,
+        binding: THIN_CORE_BINDING_SKIPPED,
+      };
+    }
+
+    // 3) 首跑：备份（fail-closed，core 未写时抛错不落盘）→ service.mutate
+    //    （CAS 用 service revision token：绑定 root/scope/generation，拒绝
+    //    裸哈希绕过 service 核验）。
+    const backup = await backupCoreBeforeWrite(coreSubOperationId, current.text);
+    let receipt;
+    try {
+      receipt = await service.mutate({
+        operationId: coreSubOperationId,
+        changes: [{ kind: 'core', expectedRevision: current.revision, text: plan.core.after }],
+      });
+    } catch (e) {
+      e.phase = e.phase ?? 'core-commit';
+      e.coreCommitted = false;
+      e.coreSubOperationId = coreSubOperationId;
+      throw e;
+    }
+
+    // 4) core 已写入（见上「失败标记」注：0.2.2 无写后步骤）。
+    return {
+      status: 'completed',
+      operationId,
+      planDigest,
+      kind: 'thin-core',
+      changedItems: 1,
+      core: {
+        operationId: coreSubOperationId,
+        beforeRevision: receipt.changes[0].beforeRevision,
+        afterRevision: receipt.changes[0].afterRevision,
+        generation: receipt.generation,
+        scopeId: receipt.changes[0].scope,
+      },
+      backup,
+      binding: THIN_CORE_BINDING_SKIPPED,
+    };
+  }
+
   return Object.freeze({
     /**
      * 执行一轮：一次只接受一个 plan，写入量 <=20（link 每被改源计 1；
-     * merge-topic 每退休源 + topic 计 1），不得拆子轮绕过。
-     * 失败抛带 code 异常；merge 若 topic 已提交会附 phase/topicCommitted 阶段信息。
+     * merge-topic 每退休源 + topic 计 1；thin-core 替换 L1 core 计 1），
+     * 不得拆子轮绕过。
+     * 失败抛带 code 异常；merge 若 topic 已提交会附 phase/topicCommitted 阶段
+     * 信息，thin-core 失败附 phase/coreCommitted/coreSubOperationId（见
+     * executeThinCoreRound 的重放与备份语义）。
      */
     async executeRound(args) {
       ensureOpen();
@@ -652,22 +796,24 @@ export async function createOrganizerExecutor(params) {
       validateRoundPlan(plan, scopeId);
       const planDigest = digestPlan(plan);
 
-      if (plan.kind === 'thin-core') {
-        throw err('UNSUPPORTED', 'thin-core 仅草案（changedItems=0），受审执行器一律拒绝执行', {
-          phase: 'rejected', topicCommitted: false, candidateId: plan.candidateId,
-        });
-      }
-
       await demandApproval({ approval, planDigest, plan, operationId, stage: 'round' });
 
-      await sparkStore.bindOrganizeRound(plan, {
-        operationId: deriveStageOperationId(scopeId, operationId, 'bd'),
-      });
+      // bind 只针对动卡的 kind（link / merge-topic）；thin-core 不动卡，且
+      // sparkStore.bindOrganizeRound 对 thin-core 硬拒——跳过，回执里显式
+      // 记录 binding:{skipped,...}（见 THIN_CORE_BINDING_SKIPPED）。
+      if (plan.kind !== 'thin-core') {
+        await sparkStore.bindOrganizeRound(plan, {
+          operationId: deriveStageOperationId(scopeId, operationId, 'bd'),
+        });
+      }
 
       if (plan.kind === 'link') {
         return executeLinkRound({ plan, planDigest, operationId });
       }
-      return executeMergeRound({ plan, planDigest, operationId, approval });
+      if (plan.kind === 'merge-topic') {
+        return executeMergeRound({ plan, planDigest, operationId, approval });
+      }
+      return executeThinCoreRound({ plan, planDigest, operationId });
     },
 
     /** 关闭执行器（幂等）；关闭 sparkStore，此后 executeRound → INVALID_STATE。 */

@@ -12,7 +12,7 @@ import os from 'node:os';
 import { createFileStore } from '../../src/storage/index.mjs';
 import {
   sha256, stubRenderL1, stubEvaluateMutation, TEST_CONFIG,
-  makeTmpRoot, putCore, spawnNode, waitForFile, readJson, topicObject,
+  makeTmpRoot, putCore, spawnNode, waitForFile, readJson, topicObject, topicRawText,
 } from './helpers.mjs';
 
 function opts(overrides = {}) {
@@ -206,9 +206,10 @@ describe('恢复与手改冲突（不覆盖较新内容）', () => {
     const root = await seedRoot(t);
     await runCrashChild(t, root, 'first-rename', makePlan());
     // 此时 core 已被 rename 为 NEXT（已应用），t1/t2 尚未应用
-    // 手动制造 t1 目标的第三方内容（哈希既非 before 也非 after）
+    // 手动制造 t1 目标的第三方内容（哈希既非 before 也非 after；
+    // 用合法 front-matter 字节——legacy 裸 md 现在会在加载时直接抛错）
     const t1File = path.join(root, 'scopes', 'amber', 'topics', 't1.md');
-    const handTopic = 'hand-written topic bytes';
+    const handTopic = topicRawText({ key: 't1', scopeId: 'amber', title: '手改', summary: '手改摘要', body: '手改正文' });
     await fsp.mkdir(path.dirname(t1File), { recursive: true });
     await fsp.writeFile(t1File, Buffer.from(handTopic, 'utf8'));
 

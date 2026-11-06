@@ -36,7 +36,7 @@ import {
   assertNoCaseCollision, assertNoEscapeViaSymlink, assertRealInsideRoot, joinUnder,
 } from './paths.mjs';
 import { withLock } from './lockfile.mjs';
-import { serializeTopicFile, parseTopicFile, parseLegacyMarkdown } from './frontmatter.mjs';
+import { serializeTopicFile, parseTopicFile } from './frontmatter.mjs';
 import {
   computePayloadHash, readJournal, saveJournal, listJournals, newJournal,
 } from './journal.mjs';
@@ -162,7 +162,7 @@ class FileStore {
     this.retryMs = retryMs;
     this.faultAfter = faultAfter;
     this.dirs = dirs;
-    /** @type {{shadow: Array, legacy: Array}} 最近一次扫描的兼容/异常清单 */
+    /** @type {{shadow: Array, legacy: Array}} 最近一次扫描的异常清单（legacy 恒为空：裸 md 现已直接抛错） */
     this.lastScan = { shadow: [], legacy: [] };
   }
 
@@ -194,11 +194,11 @@ class FileStore {
 
   /**
    * 当前可见快照：core（含 active→global fallback）+ 可见 topics（active 优先去重、
-   * 稳定 key 排序）。必须在锁内调用。旧格式/不可解析文件记入 lastScan，不中断列举。
+   * 稳定 key 排序）。必须在锁内调用。不可解析文件记入 lastScan.shadow，不中断列举；
+   * legacy 裸 md（无 front-matter）属非法数据，直接抛错（见下方扫描分支）。
    */
   async #effectiveView() {
     const shadow = [];
-    const legacy = [];
 
     // core：active 不存在才 fallback global；空文件不触发 fallback。
     // 磁盘字节严格 UTF-8 解码：损坏文件显式 INVALID_STATE，不静默替换（R6）。
@@ -275,30 +275,12 @@ class FileStore {
           continue;
         }
         if (!parsed.hasFrontMatter) {
-          // 旧 Markdown 兼容只读（R8）：DTO 必须能通过真实 A 的 validateTopic——
-          // updated 用稳定哨兵串；推导摘要 >60 时影子索引按 60 截断显示，
-          // 全文保留在 body 与 legacySummaryFull，正文与原文件不动，报告中声明非无损。
-          const lp = parseLegacyMarkdown(raw);
-          const fullSummary = lp.summary;
-          const summaryOver = fullSummary.length > 60;
-          const topic = {
-            key,
-            title: lp.title || key,
-            summary: summaryOver ? fullSummary.slice(0, 60) : fullSummary,
-            scopeId,
-            revision,
-            updated: 'legacy-unknown',
-            body: lp.body,
-          };
-          if (summaryOver) topic.legacySummaryFull = fullSummary;
-          byKey.set(key, topic);
-          legacy.push({
-            file, key, scopeId,
-            reason: summaryOver
-              ? '旧格式：推导摘要超 60 UTF16，影子索引按规则截断显示（正文未动，非无损迁移）'
-              : '无 front-matter 的旧 Markdown，只读兼容',
-          });
-          continue;
+          // legacy 裸 md（无 front-matter）属非法数据：不提供只读兼容、不静默跳过，
+          // 直接抛错（错误带文件名与完整路径），阻止整个加载。
+          throw invalidState(
+            `topic 文件 "${name}"（${file}）缺少 front-matter，属非法数据；`
+            + '请补全 YAML front-matter 或移除该文件后重试',
+          );
         }
         const { meta, body } = parsed;
         if (meta.key !== key) {
@@ -320,11 +302,12 @@ class FileStore {
         byKey.set(key, {
           key, title: meta.title, summary: meta.summary, scopeId,
           revision, updated: meta.updated, body,
+          ...(meta.archivedAt ? { archivedAt: meta.archivedAt } : {}),
         });
       }
     }
     const topics = [...byKey.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-    this.lastScan = { shadow, legacy };
+    this.lastScan = { shadow, legacy: [] };
     return { core, topics };
   }
 
@@ -355,19 +338,11 @@ class FileStore {
         if (raw === null) continue;
         const parsed = parseTopicFile(raw); // 内部严格解码（R6）
         if (!parsed.hasFrontMatter) {
-          const lp = parseLegacyMarkdown(raw);
-          const fullSummary = lp.summary;
-          const summaryOver = fullSummary.length > 60;
-          const topic = {
-            key, title: lp.title || key,
-            summary: summaryOver ? fullSummary.slice(0, 60) : fullSummary,
-            scopeId,
-            revision: sha256Buffer(raw),
-            updated: 'legacy-unknown',
-            body: lp.body,
-          };
-          if (summaryOver) topic.legacySummaryFull = fullSummary;
-          return topic;
+          // legacy 裸 md（无 front-matter）属非法数据：不提供只读兼容，直接抛错
+          throw invalidState(
+            `topic 文件 "${path.basename(file)}"（${file}）缺少 front-matter，属非法数据；`
+            + '请补全 YAML front-matter 或移除该文件后重试',
+          );
         }
         const { meta, body } = parsed;
         if (meta.key !== key) {
@@ -385,6 +360,7 @@ class FileStore {
         return {
           key, title: meta.title, summary: meta.summary, scopeId,
           revision: sha256Buffer(raw), updated: meta.updated, body,
+          ...(meta.archivedAt ? { archivedAt: meta.archivedAt } : {}),
         };
       }
       throw notFound(`topic "${key}" 在可见 scope 中不存在`, { key, activeScopeId: this.activeScopeId });
@@ -609,6 +585,7 @@ class FileStore {
           revision: e.afterRevision,
           updated: meta ? meta.updated : null,
           body: parsed.hasFrontMatter ? parsed.body : e.buffer.toString('utf8'),
+          ...(meta?.archivedAt ? { archivedAt: meta.archivedAt } : {}),
         });
       }
       const candidateTopics = [...topicMap.values()]
@@ -745,6 +722,12 @@ class FileStore {
       updated: t.updated,
       scopeId: this.activeScopeId,
     };
+    if (t.archivedAt !== undefined) {
+      if (typeof t.archivedAt !== 'string') {
+        throw invalidInput(`changes[${index}].topic.archivedAt 必须是字符串（ISO 时间串；空串 = 取消归档）`);
+      }
+      meta.archivedAt = t.archivedAt; // serializeTopicFile：空省略，非空校验 ISO
+    }
     this.#validateTopicMeta(index, key, meta, t);
     let extra;
     if (t.extra !== undefined) {
@@ -784,6 +767,11 @@ class FileStore {
     }
     if (meta.updated.length === 0) {
       throw invalidInput(`${where} 的 updated 必须为非空字符串`);
+    }
+    // 归档标记：非空时必须是可解析的 ISO 时间串（空串 = 取消归档，允许）
+    if (meta.archivedAt !== undefined && meta.archivedAt !== ''
+        && Number.isNaN(Date.parse(meta.archivedAt))) {
+      throw invalidInput(`${where} 的 archivedAt 必须是 ISO 时间串，收到: "${meta.archivedAt.slice(0, 60)}"`);
     }
     if (meta.key !== key) {
       throw invalidInput(`${where} front-matter key 与 change.key 不一致`, { metaKey: meta.key, key });

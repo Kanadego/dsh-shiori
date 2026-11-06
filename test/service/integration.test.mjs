@@ -175,3 +175,73 @@ test('persona adapter receives isolated CAS request; mixed writes are unsupporte
   await service.mutate(req); assert.deepEqual(received, req);
   await assert.rejects(service.mutate({ operationId: 'mixed', changes: [...req.changes, core('unused', 'body', null).changes[0]] }), code('UNSUPPORTED'));
 });
+
+test('L3 归档：listTopics 带归档标记，L1 索引跳过归档项并出现钩子行（N=0 消失）', async t => {
+  const { service, store } = await fixture(t);
+  await store.commit({ operationId: 'seed-warm', changes: [{ kind: 'topic', key: 'warm', expectedRevision: null,
+    topic: { title: 'Warm', summary: '热专题摘要', updated: '2026-01-01T00:00:00.000Z', body: 'warm body\n' } }] });
+  await store.commit({ operationId: 'seed-cold', changes: [{ kind: 'topic', key: 'cold', expectedRevision: null,
+    topic: { title: 'Cold', summary: '冷专题摘要', updated: '2026-01-01T00:00:00.000Z',
+      archivedAt: '2026-11-07T00:00:00.000Z', body: 'cold body\n' } }] });
+
+  const listed = await service.listTopics();
+  assert.deepEqual(
+    listed.map(x => [x.key, x.archived, x.archivedAt ?? null]).sort((a, b) => (a[0] < b[0] ? -1 : 1)),
+    [['cold', true, '2026-11-07T00:00:00.000Z'], ['warm', false, null]],
+  );
+
+  // L1 渲染：归档项不进索引条目，末尾出现 N=1 钩子行
+  const view = await service.readCoreView();
+  assert.ok(!view.text.includes('- cold [amber]'), '归档专题不进 L1 索引');
+  assert.ok(view.text.includes('- warm [amber] — 热专题摘要'));
+  assert.ok(view.text.includes('另有 1 篇冷专题，memory_search 可查'));
+
+  // 删掉 archivedAt（空串 = 取消归档）即恢复：钩子行消失，索引复原
+  const cold = await store.readTopic('cold');
+  await store.commit({ operationId: 'unarchive-cold', changes: [{ kind: 'topic', key: 'cold',
+    expectedRevision: cold.revision,
+    topic: { title: 'Cold', summary: '冷专题摘要', updated: cold.updated, archivedAt: '', body: cold.body } }] });
+  const view2 = await service.readCoreView();
+  assert.ok(!view2.text.includes('另有'), 'N=0 时钩子行整行不出现');
+  assert.ok(view2.text.includes('- cold [amber] — 冷专题摘要'));
+});
+
+test('memory_read 不受归档影响：归档专题照常返回全文', async t => {
+  const { service, store } = await fixture(t);
+  await store.commit({ operationId: 'seed-cold', changes: [{ kind: 'topic', key: 'cold', expectedRevision: null,
+    topic: { title: 'Cold', summary: '冷专题摘要', updated: '2026-01-01T00:00:00.000Z',
+      archivedAt: '2026-11-07T00:00:00.000Z', body: '全文正文不能丢\n' } }] });
+  const topic = await service.readTopic('cold');
+  assert.equal(topic.body, '全文正文不能丢\n');
+  assert.equal(topic.archivedAt, '2026-11-07T00:00:00.000Z');
+  assert.equal(topic.title, 'Cold');
+});
+
+test('memory_search 冷搜：默认包含归档 topic，但只回摘要级（state=archived、score=0、排后、无正文）', async t => {
+  const { service, store } = await fixture(t);
+  await store.commit({ operationId: 'seed-2', changes: [
+    { kind: 'topic', key: 'warm', expectedRevision: null,
+      topic: { title: 'Warm', summary: '排障手册热版', updated: '2026-01-01T00:00:00.000Z', body: 'warm 正文\n' } },
+    { kind: 'topic', key: 'cold', expectedRevision: null,
+      topic: { title: 'Cold', summary: '排障手册冷版', updated: '2026-01-01T00:00:00.000Z',
+        archivedAt: '2026-11-07T00:00:00.000Z', body: 'cold 正文\n' } },
+  ] });
+
+  const hits = await service.search('排障手册');
+  assert.deepEqual(hits.map(h => [h.key, h.score, h.state ?? null]), [
+    ['warm', 1, null],   // 未归档在前，正常计分
+    ['cold', 0, 'archived'], // 归档在后，score 恒 0，state 标 archived
+  ]);
+  for (const hit of hits) {
+    const expectedKeys = hit.state === 'archived'
+      ? ['key', 'title', 'summary', 'scopeId', 'score', 'state']
+      : ['key', 'title', 'summary', 'scopeId', 'score'];
+    assert.deepEqual(Object.keys(hit).sort(), expectedKeys.sort());
+    assert.ok(!('body' in hit), '搜索结果绝不返回正文');
+    assert.ok(!JSON.stringify(hit).includes('正文'), '摘要级信息不含正文片段');
+  }
+
+  // 只命中归档专题正文、不命中 key/title/summary 时也能被搜到（冷搜可考古）
+  const coldOnly = await service.search('cold 正文专属词');
+  assert.deepEqual(coldOnly.map(h => [h.key, h.state]), [['cold', 'archived']]);
+});

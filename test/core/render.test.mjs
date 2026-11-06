@@ -259,3 +259,45 @@ test("R3 regression: input and topics must be plain records with own properties"
     assert.equal(saved, undefined);
   }
 });
+
+test("归档专题跳过索引条目，末尾出现 N 篇冷专题钩子行（global 与 amber scope 都生效）", () => {
+  const result = renderL1({
+    coreText: "## 铁律",
+    topics: [
+      makeTopic({ key: "warm-amber", scopeId: "amber", summary: "热专题" }),
+      makeTopic({ key: "cold-a", scopeId: "amber", summary: "冷专题A", archivedAt: "2026-11-07T00:00:00.000Z" }),
+      makeTopic({ key: "cold-g", scopeId: "global", summary: "冷专题G", archivedAt: "2026-11-06T00:00:00.000Z" }),
+    ],
+  });
+  assert.ok(result.text.includes("- warm-amber [amber] — 热专题"));
+  assert.ok(!result.text.includes("- cold-a"));
+  assert.ok(!result.text.includes("冷专题A"), "归档专题 summary 不得出现在索引");
+  assert.ok(result.text.endsWith("另有 2 篇冷专题，memory_search 可查"));
+  assert.equal(result.indexText, `${HEADER}\n- warm-amber [amber] — 热专题\n另有 2 篇冷专题，memory_search 可查`);
+});
+
+test("N=0（无归档专题）时钩子行整行不出现，格式与旧版完全一致", () => {
+  const result = renderL1({
+    coreText: "## 铁律",
+    topics: [makeTopic({ key: "warm", summary: "热专题" })],
+  });
+  assert.ok(!result.text.includes("冷专题"), "无归档时不出现钩子行");
+  assert.equal(result.indexText, `${HEADER}\n- warm [global] — 热专题`);
+});
+
+test("全部 topic 已归档：索引只剩标题行与钩子行；空 topics + 无归档仍无索引", () => {
+  const onlyArchived = renderL1({
+    coreText: "",
+    topics: [makeTopic({ key: "cold", summary: "冷", archivedAt: "2026-11-07T00:00:00.000Z" })],
+  });
+  assert.equal(onlyArchived.indexText, `${HEADER}\n另有 1 篇冷专题，memory_search 可查`);
+
+  const none = renderL1({ coreText: "core", topics: [] });
+  assert.equal(none.indexText, "");
+});
+
+test("archivedAt 非法形状（空串/非字符串/含换行）显式拒绝", () => {
+  assertRejected({ coreText: "x", topics: [makeTopic({ archivedAt: "" })], }, /archivedAt/);
+  assertRejected({ coreText: "x", topics: [makeTopic({ archivedAt: 7 })], }, /archivedAt/);
+  assertRejected({ coreText: "x", topics: [makeTopic({ archivedAt: "a\nb" })], }, /archivedAt/);
+});

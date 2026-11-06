@@ -7,6 +7,7 @@
 //   summary: "≤60 UTF16，允许空串"
 //   updated: "2026-10-24T00:00:00.000Z"
 //   scopeId: "amber"
+//   archivedAt: "2026-11-07T00:00:00.000Z"   ← 可选；空/缺省时整行省略
 //   ---
 //   <body 逐字节保留>
 //
@@ -18,6 +19,8 @@
 //   或保守的单行 plain 标量；块标量/列表/嵌套 map → INVALID_STATE；
 // - 必填字段：key/title/summary/updated/scopeId 必须存在；summary 允许空串，
 //   其余不得为空（与 A.validateTopic 的读写规则一致，R7）；
+// - archivedAt（归档标记，ISO 时间串）：可选字段，磁盘上有值即归档、
+//   删掉即恢复（真相只在专题文件本身，不另开账本）；老文件没有该字段 = 未归档；
 // - 解码后的值含孤立代理码元 → INVALID_STATE（无法无损再序列化）；
 // - 未知字段允许（前向兼容），但必须也是单行标量；
 // - 闭合 --- 之后的全部字节为 body，逐字保留（含 CRLF）。
@@ -30,7 +33,9 @@ const NON_EMPTY_FIELDS = ['key', 'title', 'updated', 'scopeId'];
 
 /**
  * 序列化 topic 文件字节。所有字符串先做可无损编码校验（R5）。
- * @param {{key:string,title:string,summary:string,updated:string,scopeId:string, extra?:Record<string,string>}} meta
+ * archivedAt 为可选归档标记（ISO 时间串）：空值/缺省时整行省略（= 未归档）。
+ * @param {{key:string,title:string,summary:string,updated:string,scopeId:string,
+ *          archivedAt?:string, extra?:Record<string,string>}} meta
  * @param {string} body
  * @returns {Buffer}
  */
@@ -50,6 +55,21 @@ export function serializeTopicFile(meta, body) {
   for (const name of order) {
     emit(name, String(meta[name] ?? ''));
     seen.add(name);
+  }
+  // 归档标记：有值即归档，空/缺省 = 未归档，序列化时省略（不写空行）
+  if (meta.archivedAt !== undefined && meta.archivedAt !== null && meta.archivedAt !== '') {
+    const value = meta.archivedAt;
+    if (typeof value !== 'string') {
+      throw invalidInput('front-matter 字段 "archivedAt" 必须是字符串（ISO 时间串）');
+    }
+    if (hasLoneSurrogate(value)) {
+      throw invalidInput('front-matter 字段 "archivedAt" 含孤立代理码元，无法无损写入');
+    }
+    if (Number.isNaN(Date.parse(value))) {
+      throw invalidInput(`front-matter 字段 "archivedAt" 必须是 ISO 时间串，收到: "${value.slice(0, 60)}"`);
+    }
+    lines.push(`archivedAt: ${JSON.stringify(value)}`);
+    seen.add('archivedAt');
   }
   if (meta.extra) {
     for (const name of Object.keys(meta.extra).sort()) {
@@ -160,27 +180,4 @@ export function parseTopicFile(raw) {
     }
   }
   return { hasFrontMatter: true, meta, body };
-}
-
-/**
- * 从无 front-matter 的旧 Markdown 提取可读元数据（只读兼容，影子报告用）。
- * title 取首个 `# ` 标题；summary 取首个非空正文行（不截断，
- * 截断策略由 store 层按影子规则处理并留报告）。
- */
-export function parseLegacyMarkdown(raw) {
-  const text = decodeUtf8Strict(raw, 'topic 文件(legacy)');
-  let title = null;
-  let summary = null;
-  for (const line of text.split(/\r?\n/)) {
-    const t = line.trim();
-    if (title === null && /^#\s+/.test(t)) {
-      title = t.replace(/^#\s+/, '');
-      continue;
-    }
-    if (t !== '' && !/^#/.test(t) && summary === null) {
-      summary = t;
-    }
-    if (title !== null && summary !== null) break;
-  }
-  return { title: title ?? '', summary: summary ?? '', body: text };
 }

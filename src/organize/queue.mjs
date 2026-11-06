@@ -1380,9 +1380,11 @@ function buildThinCoreDraft(candidate, proposal) {
     sources: deepClone(candidate.sources),
     core: { before: proposal.before, after: proposal.after },
   };
-  // 仅展示草案：changedItems 恒为 0；K 不读写真实 L1，不做自动删减，执行器必须拒绝执行。
+  // changedItems=1（core 整体替换计 1 项）：此处只出展示草案，K 不读写真实
+  // L1；用户确认后由执行器 executeThinCoreRound 凭 service token CAS 替换
+  // core，删减的旧正文进 core-backups 备份（不做自动下沉 topic）。
   const diff = [{ path: 'core', oldText: proposal.before, newText: proposal.after }];
-  return { plan, diff, changedItems: 0 };
+  return { plan, diff, changedItems: 1 };
 }
 
 // ---------------------------------------------------------------------------

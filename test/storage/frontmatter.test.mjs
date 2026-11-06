@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { serializeTopicFile, parseTopicFile, parseLegacyMarkdown } from '../../src/storage/frontmatter.mjs';
+import { serializeTopicFile, parseTopicFile } from '../../src/storage/frontmatter.mjs';
 import { topicRawText } from './helpers.mjs';
 
 const META = {
@@ -110,18 +110,48 @@ describe('解析严格性（不支持格式明确失败）', () => {
   });
 });
 
-describe('legacy Markdown 推导', () => {
-  it('title 取首个 # 标题，summary 取首个非空正文行，不截断', () => {
-    const r = parseLegacyMarkdown(Buffer.from('# 长标题\n\n这是一段非常长的摘要行'.padEnd(200, 'x') + '\n正文', 'utf8'));
-    assert.equal(r.title, '长标题');
-    assert.ok(r.summary.length > 60); // 不截断，影子报告如实反映
-    assert.equal(r.body, '# 长标题\n\n这是一段非常长的摘要行'.padEnd(200, 'x') + '\n正文');
-  });
-
+describe('测试夹具自检', () => {
   it('topicRawText 夹具与序列化器解析一致（测试工具自检）', () => {
     const raw = topicRawText({ key: 'k1', scopeId: 'amber', body: 'B' });
     const parsed = parseTopicFile(Buffer.from(raw, 'utf8'));
     assert.equal(parsed.meta.key, 'k1');
     assert.equal(parsed.body, 'B');
+  });
+});
+
+describe('archivedAt 归档标记（可选字段）', () => {
+  it('有值时序列化输出 ISO 时间串，往返保留', () => {
+    const meta = { ...META, archivedAt: '2026-11-07T00:00:00.000Z' };
+    const buf = serializeTopicFile(meta, 'body');
+    const text = buf.toString('utf8');
+    assert.match(text, /^archivedAt: "2026-11-07T00:00:00\.000Z"$/m);
+    const parsed = parseTopicFile(buf);
+    assert.equal(parsed.meta.archivedAt, '2026-11-07T00:00:00.000Z');
+  });
+
+  it('空串/undefined/null 时整行省略（= 未归档，序列化为空时省略）', () => {
+    for (const archivedAt of ['', undefined, null]) {
+      const buf = serializeTopicFile({ ...META, archivedAt }, 'body');
+      const text = buf.toString('utf8');
+      assert.doesNotMatch(text, /^archivedAt:/m, `archivedAt=${String(archivedAt)}`);
+      const parsed = parseTopicFile(buf);
+      assert.equal(parsed.meta.archivedAt, undefined);
+    }
+    // 完全不带 archivedAt 的老文件形状不变
+    assert.doesNotMatch(serializeTopicFile(META, 'body').toString('utf8'), /^archivedAt:/m);
+  });
+
+  it('非 ISO 时间串 → INVALID_INPUT', () => {
+    assert.throws(() => serializeTopicFile({ ...META, archivedAt: '不是时间' }, 'b'),
+      (e) => e.code === 'INVALID_INPUT');
+    assert.throws(() => serializeTopicFile({ ...META, archivedAt: 123 }, 'b'),
+      (e) => e.code === 'INVALID_INPUT');
+  });
+
+  it('磁盘上有 archivedAt（含 plain 标量）可解析为普通字段', () => {
+    const parsed = parseTopicFile(Buffer.from(
+      '---\nkey: "a"\ntitle: "t"\nsummary: "s"\nupdated: "u"\nscopeId: "g"\narchivedAt: "2026-11-07T08:30:00.000Z"\n---\nb', 'utf8',
+    ));
+    assert.equal(parsed.meta.archivedAt, '2026-11-07T08:30:00.000Z');
   });
 });

@@ -34,31 +34,22 @@ function opts(overrides = {}) {
 }
 
 describe('真实 A.renderL1 / A.evaluateMutation / A.DEFAULT_CONFIG 注入', () => {
-  it('legacy topic 在场时 snapshot 与无关 core 提交可运行；旧文件字节不变（R8）', async (t) => {
+  it('legacy 裸 md 在场时加载直接抛 INVALID_STATE（不再只读兼容），旧文件字节不变', async (t) => {
     const root = await makeTmpRoot(t);
     const dirG = path.join(root, 'scopes', 'global', 'topics');
     await fsp.mkdir(dirG, { recursive: true });
-    // 含超长摘要行的旧 Markdown（曾因 updated:null / summary>60 卡死真实 A）
+    // 含超长摘要行的旧 Markdown（曾在 R8 下走只读兼容分支）
     const longLine = '长'.repeat(90);
     const legacyBytes = Buffer.from(`# 旧专题\n\n${longLine}\n\n正文内容`, 'utf8');
-    await fsp.writeFile(path.join(dirG, 'legacy-old.md'), legacyBytes);
+    const legacyFile = path.join(dirG, 'legacy-old.md');
+    await fsp.writeFile(legacyFile, legacyBytes);
 
     const store = await createFileStore(opts({ root }));
-    const snap = await store.snapshot(); // 返回原始 core（渲染属调用方）
-    assert.ok(snap.topics.some((x) => x.key === 'legacy-old'));
-    // legacy DTO 直接通过真实 A 的 validateTopic 并完成渲染（R8 的关键判据）
-    const rendered = A.renderL1({ coreText: snap.core.text, topics: snap.topics });
-    assert.ok(rendered.text.includes('## 主题记忆索引 / Topic memory index'));
-    assert.ok(rendered.text.includes('- legacy-old [global] — '));
-    assert.equal(rendered.chars, rendered.text.length); // A 的 UTF16 口径
+    await assert.rejects(() => store.snapshot(),
+      (err) => err.code === 'INVALID_STATE' && err.message.includes('legacy-old.md') && err.message.includes('缺少 front-matter'));
 
-    const r = await store.commit({
-      operationId: 'unrelated-core', expectedGeneration: 0,
-      changes: [{ kind: 'core', expectedRevision: null, text: '新铁律\n' }],
-    });
-    assert.equal(r.generation, 1);
-    assert.equal(r.budget.reason, 'ok'); // 真实 evaluateMutation 的稳定 reason
-    assert.deepEqual(await fsp.readFile(path.join(dirG, 'legacy-old.md')), legacyBytes); // 旧文件字节不变
+    // 旧文件字节不变（报错路径绝不改写数据）
+    assert.deepEqual(await fsp.readFile(legacyFile), legacyBytes);
   });
 
   it('空 core + 空 summary topic + 中文 key：完整渲染只剩索引（R7/R9）', async (t) => {

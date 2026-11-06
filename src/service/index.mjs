@@ -140,16 +140,35 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
   async function listTopics() {
     return store.withLock(async () => {
       const s = await store.snapshot(); const at = timestamp();
-      return s.topics.map(item => ({ ...item, revision: tokenFor('topic', item, s.generation, at) }));
+      // 归档标记供面板第二批接线（L3 页归档徽章/排序）使用：
+      // archived 布尔 + 原始 archivedAt（缺省 = 未归档，字段省略）。
+      return s.topics.map(item => ({ ...item,
+        archived: typeof item.archivedAt === 'string' && item.archivedAt.length > 0,
+        revision: tokenFor('topic', item, s.generation, at) }));
     });
   }
   async function search(query) {
     text(query, 'query');
     const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
     if (!words.length) fail('INVALID_INPUT', 'query must not be empty');
-    return (await listTopics()).map(t => ({ key: t.key, title: t.title, summary: t.summary, scopeId: t.scopeId,
-      score: words.filter(w => (t.key + ' ' + t.title + ' ' + t.summary + ' ' + t.body).toLowerCase().includes(w)).length }))
-      .filter(t => t.score > 0).sort((a, b) => b.score - a.score || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    // 搜索范围默认包含已归档 topic（冷搜），但归档结果只回 key/title/summary
+    // 摘要级信息：state 标 'archived'、score 置 0、排在未归档结果之后，绝不返回正文；
+    // 要看全文用 memory_read(key)。与 spark 冷卡 searchArchived 的 includeArchived
+    // 语义无关，spark 行为不受影响。
+    const active = [];
+    const archived = [];
+    for (const t of await listTopics()) {
+      const score = words.filter(w => (t.key + ' ' + t.title + ' ' + t.summary + ' ' + t.body).toLowerCase().includes(w)).length;
+      if (!score) continue;
+      if (t.archived) {
+        archived.push({ key: t.key, title: t.title, summary: t.summary, scopeId: t.scopeId, score: 0, state: 'archived' });
+      } else {
+        active.push({ key: t.key, title: t.title, summary: t.summary, scopeId: t.scopeId, score });
+      }
+    }
+    active.sort((a, b) => b.score - a.score || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    archived.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    return [...active, ...archived];
   }
   async function readPersona() {
     return personaAdapter ? personaAdapter.read() : { name: null, text: null };
@@ -192,7 +211,11 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
       if (c.kind === 'core') return { ...base, text: text(c.text, 'core text') };
       record(c.topic, 'topic metadata'); noScope(c.topic);
       if (Object.keys(c.topic).some(k => !['title', 'summary', 'updated'].includes(k))) fail('INVALID_INPUT', 'topic metadata accepts title/summary/updated only');
-      if (token?.meta.updated === 'legacy-unknown') fail('UNSUPPORTED', 'legacy topics remain read-only');
+      if (token?.meta.updated === 'legacy-unknown') {
+        // 防御分支：legacy 裸 md（缺 front-matter）在 storage 加载时已直接抛错，
+        // 正常流程造不出这种 token；保留显式拒绝以防伪造 revision token。
+        fail('UNSUPPORTED', 'legacy topic 拒写：缺少 front-matter，属非法数据（请补全 front-matter 或重建专题）');
+      }
       if (isTopicCreate && !c.topic.title) fail('INVALID_INPUT', 'topic creation requires explicit topic.title');
       if (isTopicCreate && !c.topic.summary) fail('INVALID_INPUT', 'topic creation requires explicit topic.summary');
       return { ...base, key: c.key, topic: {

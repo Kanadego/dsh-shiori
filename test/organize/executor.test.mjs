@@ -275,25 +275,8 @@ describe('P3-L approval 防线（全部零写）', () => {
     sparkStore.close();
   });
 
-  it('thin-core 仅草案：执行拒绝 UNSUPPORTED 且零写', async (t) => {
-    const root = await makeRoot(t);
-    const { sparkStore } = await openStores(root);
-    let calls = 0;
-    const exec = await createOrganizerExecutor({
-      root, scopeId: 'amber', authorize: async () => { calls += 1; return true; },
-    });
-    await seedCard(sparkStore, 'card-a');
-    const before = await dbBytes(root);
-    const plan = {
-      version: 1, scopeId: 'amber', candidateId: 'c'.repeat(64), kind: 'thin-core',
-      sources: [{ id: 'card-a', revision: 1 }], core: { before: '旧核心', after: '新核心' },
-    };
-    await assert.rejects(exec.executeRound(round(plan, 'r-thin')), code('UNSUPPORTED'));
-    assert.equal(calls, 0, '草案拒绝不进入授权询问');
-    assert.equal(sha(await dbBytes(root)), sha(before));
-    exec.close();
-    sparkStore.close();
-  });
+  // thin-core 执行用例移至 executor-thin-core.test.mjs（0.2.2 起可执行，
+  // 不再 UNSUPPORTED 硬拒）。
 });
 
 // ---------------------------------------------------------------------------
