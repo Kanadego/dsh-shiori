@@ -315,6 +315,116 @@ describe('links 与图谱投影', () => {
     await assertRejects(store.update('b', { links: [{ target: 'ghost', rel: '断链' }] }), 'INVALID_INPUT');
   });
 
+  it('连线 rel 校验报错是人话：缺失/null / 非字符串 / 纯空白 / 超长（update patch 路径）', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 'a' });
+    await saveCard(store, { id: 'b' });
+
+    // rel 缺失（undefined / 不带 rel 键）与 null：同款人话，含第几条与可执行建议
+    for (const bad of [{ target: 'a', rel: undefined }, { target: 'a' }, { target: 'a', rel: null }]) {
+      const err = await assertRejects(
+        store.update('b', { links: [{ target: 'a', rel: '相关' }, bad] }),
+        'INVALID_INPUT',
+      );
+      assert.match(err.message, /更新卡片：第 2 条连线的关系名是空的或没填：需要 1–64 个字的字符串，例如 related/);
+      assert.ok(err.details && err.details.index === 1, `details 应含 index=1，实际：${JSON.stringify(err.details)}`);
+    }
+
+    // rel 非字符串：指出收到类型
+    const errType = await assertRejects(
+      store.update('b', { links: [{ target: 'a', rel: 42 }] }),
+      'INVALID_INPUT',
+    );
+    assert.match(errType.message, /更新卡片：第 1 条连线的关系名必须是文字：收到 number，请改成 1–64 个字的字符串/);
+
+    // rel 空串 / 纯空白：不能是空白
+    for (const bad of ['', '   ']) {
+      const err = await assertRejects(
+        store.update('b', { links: [{ target: 'a', rel: bad }] }),
+        'INVALID_INPUT',
+      );
+      assert.match(err.message, /更新卡片：第 1 条连线的关系名不能是空白：需要 1–64 个字的字符串，例如 related/);
+    }
+
+    // rel 超长（65 字）：报实际长度
+    const errLong = await assertRejects(
+      store.update('b', { links: [{ target: 'a', rel: 'r'.repeat(65) }] }),
+      'INVALID_INPUT',
+    );
+    assert.match(errLong.message, /更新卡片：第 1 条连线的关系名太长（实际 65 个字，最多 64）/);
+
+    // 合法 rel 仍可通过（64 字边界不放宽不收紧）
+    await store.update('b', { links: [{ target: 'a', rel: 'r'.repeat(64) }] });
+  });
+
+  it('连线 target 不合法报错是人话，且保留原始 reason/details（update patch 路径）', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 'a' });
+    const err = await assertRejects(
+      store.update('a', { links: [{ target: '坏/id', rel: '相关' }] }),
+      'INVALID_INPUT',
+    );
+    assert.match(err.message, /更新卡片：第 1 条连线的目标卡 id 不合法：需要 64 位十六进制的卡片 id/);
+    assert.ok(
+      err.details && typeof err.details.reason === 'string' && err.details.reason.length > 0,
+      `details 应含原始 reason，实际：${JSON.stringify(err.details)}`,
+    );
+  });
+
+  it('plan.links 路径共用同一套人话文案（organize link plan）', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 'm1' });
+    await saveCard(store, { id: 'm2' });
+    const basePlan = () => ({
+      version: 1,
+      scopeId: 'amber',
+      candidateId: 'cand-rel-1',
+      kind: 'link',
+      sources: [
+        { id: 'm1', revision: 1 },
+        { id: 'm2', revision: 1 },
+      ],
+      links: [
+        {
+          id: 'm1',
+          expectedRevision: 1,
+          before: [],
+          after: [{ target: 'm2', rel: '相关' }],
+        },
+      ],
+    });
+
+    // rel null → 与 update patch 同款文案，前缀为「整理计划」
+    const planNull = basePlan();
+    planNull.links[0].after[0].rel = null;
+    const errNull = await assertRejects(
+      store.bindOrganizeRound(planNull, { operationId: 'op-plan-rel-null' }),
+      'INVALID_INPUT',
+    );
+    assert.match(errNull.message, /整理计划（plan.links.after）：第 1 条连线的关系名是空的或没填：需要 1–64 个字的字符串，例如 related/);
+
+    // rel 超长 → 同款「太长」文案
+    const planLong = basePlan();
+    planLong.links[0].after[0].rel = 'r'.repeat(65);
+    const errLong = await assertRejects(
+      store.bindOrganizeRound(planLong, { operationId: 'op-plan-rel-long' }),
+      'INVALID_INPUT',
+    );
+    assert.match(errLong.message, /整理计划（plan.links.after）：第 1 条连线的关系名太长（实际 65 个字，最多 64）/);
+
+    // target 不合法 → 同款人话
+    const planTarget = basePlan();
+    planTarget.links[0].after[0].target = '坏/id';
+    const errTarget = await assertRejects(
+      store.bindOrganizeRound(planTarget, { operationId: 'op-plan-target-bad' }),
+      'INVALID_INPUT',
+    );
+    assert.match(errTarget.message, /整理计划（plan.links.after）：第 1 条连线的目标卡 id 不合法：需要 64 位十六进制的卡片 id/);
+  });
+
   it('graph：只含 active 节点与两端 active 的边；按 vitality 标注；稳定排序去重', async (t) => {
     const root = await makeTmpRoot(t);
     const store = await open(root, 'amber');

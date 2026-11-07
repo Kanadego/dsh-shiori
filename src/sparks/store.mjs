@@ -222,6 +222,52 @@ function checkWordArray(value, field, { where, maxCount }) {
   return out;
 }
 
+// —— 连线 rel / target 的人话报错（update patch 与 organize plan 两条路径共用）——
+// 只改文案，不改规则：rel 仍必须存在、1..relChars 字符、不得纯空白；
+// target 仍必须是合法 id（validateSparkId 原规则）。错误码与 details 保留。
+function linkRelHint() {
+  return `需要 1–${LIMITS.relChars} 个字的字符串，例如 related`;
+}
+
+/** 单条连线的 target：规则同 validateSparkId，报错换成人话并保留原始 reason/details。 */
+function checkLinkTarget(target, label, nth) {
+  try {
+    return validateSparkId(target, 'link.target');
+  } catch (err) {
+    const e = invalidInput(
+      `${label}第 ${nth} 条连线的目标卡 id 不合法：需要 64 位十六进制的卡片 id`,
+      { ...(err.details ?? {}), index: nth - 1, reason: err.message },
+    );
+    e.cause = err;
+    throw e;
+  }
+}
+
+/** 单条连线的 rel：规则同通用 checkString(min=1, max=relChars) + 非纯空白，四种情形给人话。 */
+function checkLinkRel(rel, label, nth) {
+  const at = `${label}第 ${nth} 条连线`;
+  if (rel === undefined || rel === null) {
+    throw invalidInput(`${at}的关系名是空的或没填：${linkRelHint()}`, { index: nth - 1 });
+  }
+  if (typeof rel !== 'string') {
+    throw invalidInput(
+      `${at}的关系名必须是文字：收到 ${typeof rel}，请改成 1–${LIMITS.relChars} 个字的字符串`,
+      { index: nth - 1, got: typeof rel },
+    );
+  }
+  if (rel.trim() === '') {
+    throw invalidInput(`${at}的关系名不能是空白：${linkRelHint()}`, { index: nth - 1 });
+  }
+  if (rel.length > LIMITS.relChars) {
+    throw invalidInput(
+      `${at}的关系名太长（实际 ${rel.length} 个字，最多 ${LIMITS.relChars}）`,
+      { index: nth - 1, length: rel.length },
+    );
+  }
+  assertEncodableUtf8(rel, `${at}的关系名`);
+  return rel;
+}
+
 function checkLinks(value, field, { where }) {
   if (!Array.isArray(value)) {
     throw invalidInput(`${where}.${field} 必须是 {target, rel} 数组`);
@@ -231,7 +277,8 @@ function checkLinks(value, field, { where }) {
   }
   const seen = new Set();
   const out = [];
-  for (const entry of value) {
+  const label = where === 'update patch' ? '更新卡片：' : '保存卡片：';
+  for (const [index, entry] of value.entries()) {
     if (!isPlainObject(entry)) {
       throw invalidInput(`${where}.${field} 的每一项必须是对象`);
     }
@@ -240,11 +287,8 @@ function checkLinks(value, field, { where }) {
         throw invalidInput(`${where}.${field} 项只允许 target/rel 字段，未知键 "${key}"`);
       }
     }
-    const target = validateSparkId(entry.target, `${field}.target`);
-    const rel = checkString(entry.rel, 'rel', { min: 1, max: LIMITS.relChars, where: `${where}.${field}` });
-    if (rel.trim() === '') {
-      throw invalidInput(`${where}.${field}.rel 不得为纯空白`);
-    }
+    const target = checkLinkTarget(entry.target, label, index + 1);
+    const rel = checkLinkRel(entry.rel, label, index + 1);
     const key = `${target}\u0000${rel}`;
     if (!seen.has(key)) { seen.add(key); out.push({ target, rel }); }
   }
@@ -397,15 +441,15 @@ function checkPlanLinkPairs(value, field) {
     throw invalidInput(`plan.${field} 最多 ${LIMITS.linksMax} 项（实际 ${value.length}）`);
   }
   let prevKey = null;
-  for (const p of value) {
+  const label = `整理计划（plan.${field}）：`;
+  for (const [index, p] of value.entries()) {
     if (!isPlainObject(p)) throw invalidInput(`plan.${field} 项必须是对象`);
     const keys = Object.keys(p);
     if (keys.length !== 2 || !Object.hasOwn(p, 'target') || !Object.hasOwn(p, 'rel')) {
       throw invalidInput(`plan.${field} 项只允许恰好 target/rel 两个键`);
     }
-    validateSparkId(p.target, `${field}.target`);
-    const rel = checkString(p.rel, 'rel', { min: 1, max: LIMITS.relChars, where: `plan.${field}` });
-    if (rel.trim() === '') throw invalidInput(`plan.${field}.rel 不得为纯空白`);
+    checkLinkTarget(p.target, label, index + 1);
+    checkLinkRel(p.rel, label, index + 1);
     const key = `${p.target}\u0000${p.rel}`;
     if (prevKey !== null && !(prevKey < key)) {
       throw invalidInput(`plan.${field} 必须按 target 再 rel 升序且无 (target,rel) 重复`);

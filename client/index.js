@@ -1734,6 +1734,144 @@ window.__ModuleLoader__.load({
       return positions;
     }
 
+    // ── 标签去重叠（0.2.3 实测反馈：节点被力导向挤在中间后，十来个标签全叠在一起）──
+    // forceLayout 之后、渲染之前算一次确定性排布：无 Math.random、同一份数据两次
+    // 调用结果完全一致。输入 nodes + layout + nodeRadiusOf（+ 强制画标签的节点 id
+    // 清单），输出 id → { x, y, anchor, text, forced } 或 null（四锚皆撞不画）。
+    // 字号 10px（.dshi_nodeLabel）：ASCII 按 6px、CJK/全角（以及其余非 ASCII）按
+    // 10px 估宽，再加 4px 余量；高度按 12px。
+    var LABEL_CHAR_WIDE = 10;
+    var LABEL_CHAR_NARROW = 6;
+    var LABEL_MARGIN = 4;
+    var LABEL_HEIGHT = 12;
+    var LABEL_MAX_WIDTH = 120;
+    var LABEL_GAP = 2;       // 标签矩形之间至少留 2px 间距
+    var LABEL_NODE_PAD = 2;  // 节点圆用 (x±(r+2), y±(r+2)) 方框近似
+
+    function estimateLabelWidth(text) {
+      var width = LABEL_MARGIN;
+      for (var i = 0; i < text.length; i++) {
+        width += text.charCodeAt(i) < 0x80 ? LABEL_CHAR_NARROW : LABEL_CHAR_WIDE;
+      }
+      return width;
+    }
+
+    // 估算宽度超过 120px 时按字符累加截断并补「…」；高代理项不收尾，避免在半个字上切。
+    function truncateLabelText(title) {
+      if (estimateLabelWidth(title) <= LABEL_MAX_WIDTH) return title;
+      var kept = "";
+      for (var i = 0; i < title.length; i++) {
+        var code = title.charCodeAt(i);
+        if (code >= 0xd800 && code <= 0xdbff) continue;
+        if (estimateLabelWidth(title.slice(0, i + 1) + "…") > LABEL_MAX_WIDTH) break;
+        kept = title.slice(0, i + 1);
+      }
+      return kept + "…";
+    }
+
+    // 标签矩形：锚点 y 视作垂直居中（上下各 6px），x 按 text-anchor 方向展开。
+    function labelRectOf(anchor, width) {
+      var x = anchor.anchor === "end" ? anchor.x - width
+        : anchor.anchor === "middle" ? anchor.x - width / 2 : anchor.x;
+      return { x: x, y: anchor.y - LABEL_HEIGHT / 2, w: width, h: LABEL_HEIGHT };
+    }
+
+    // 矩形相交；gap>0 时两矩形净距不足 gap 也算相交（标签之间的 2px 间距）。
+    function rectsCollide(a, b, gap) {
+      return !(a.x >= b.x + b.w + gap || b.x >= a.x + a.w + gap
+        || a.y >= b.y + b.h + gap || b.y >= a.y + a.h + gap);
+    }
+
+    // 度数读取口径与 nodeRadiusOf 一致（raw.degree，非数字按 0）。
+    function nodeDegreeOf(node) {
+      var raw = node && node.raw;
+      var degree = raw ? Number(raw.degree) : 0;
+      return Number.isFinite(degree) && degree > 0 ? degree : 0;
+    }
+
+    // 四个候选锚点：右侧（左对齐）、左侧（end 对齐）、下方（居中）、上方（居中）。
+    function labelAnchorsOf(position, radius) {
+      return [
+        { x: position.x + radius + 4, y: position.y + 4, anchor: "start" },
+        { x: position.x - radius - 4, y: position.y + 4, anchor: "end" },
+        { x: position.x, y: position.y + radius + 14, anchor: "middle" },
+        { x: position.x, y: position.y - radius - 8, anchor: "middle" }
+      ];
+    }
+
+    function labelLayoutOf(nodes, layout, radiusOf, forcedIds) {
+      var placements = {};
+      var count = Array.isArray(nodes) ? nodes.length : 0;
+      if (count === 0) return placements;
+      var forced = {};
+      if (Array.isArray(forcedIds)) {
+        for (var f = 0; f < forcedIds.length; f++) {
+          if (forcedIds[f] !== null && forcedIds[f] !== undefined) forced[String(forcedIds[f])] = true;
+        }
+      }
+      // 所有节点圆的方框近似都参与碰撞判定
+      var nodeBoxes = [];
+      for (var n0 = 0; n0 < count; n0++) {
+        var pos0 = layout[nodes[n0].id];
+        if (!pos0) continue;
+        var pad0 = radiusOf(nodes[n0]) + LABEL_NODE_PAD;
+        nodeBoxes.push({ x: pos0.x - pad0, y: pos0.y - pad0, w: pad0 * 2, h: pad0 * 2 });
+      }
+      // 排序：度降序，再 id 升序——度大的节点先挑位，标签顺序与数据顺序解耦
+      var order = nodes.slice().sort(function (a, b) {
+        var byDegree = nodeDegreeOf(b) - nodeDegreeOf(a);
+        if (byDegree !== 0) return byDegree;
+        var ai = String(a.id);
+        var bi = String(b.id);
+        return ai < bi ? -1 : ai > bi ? 1 : 0;
+      });
+      var placedRects = [];
+      for (var i = 0; i < order.length; i++) {
+        var node = order[i];
+        var id = String(node.id);
+        if (forced[id]) continue;   // 强制标签最后单独画，不占普通排布
+        var position = layout[node.id];
+        if (!position) { placements[id] = null; continue; }
+        var radius = radiusOf(node);
+        var text = truncateLabelText(node.title);
+        var width = estimateLabelWidth(text);
+        var anchors = labelAnchorsOf(position, radius);
+        var chosen = null;
+        for (var a = 0; a < anchors.length; a++) {
+          var rect = labelRectOf(anchors[a], width);
+          var hit = false;
+          for (var p = 0; p < placedRects.length; p++) {
+            if (rectsCollide(rect, placedRects[p], LABEL_GAP)) { hit = true; break; }
+          }
+          for (var b = 0; !hit && b < nodeBoxes.length; b++) {
+            if (rectsCollide(rect, nodeBoxes[b], 0)) { hit = true; break; }
+          }
+          if (!hit) { chosen = { rect: rect, anchor: anchors[a] }; break; }
+        }
+        if (!chosen) { placements[id] = null; continue; }   // 四锚皆撞：不渲染该标签
+        placedRects.push(chosen.rect);
+        placements[id] = {
+          x: chosen.anchor.x, y: chosen.anchor.y, anchor: chosen.anchor.anchor,
+          text: text, width: width, forced: false
+        };
+      }
+      // hover / 选中节点的标签永远画：强制右侧、不参与碰撞判定、渲染在最上层。
+      for (var j = 0; j < order.length; j++) {
+        var node2 = order[j];
+        var id2 = String(node2.id);
+        if (!forced[id2]) continue;
+        var position2 = layout[node2.id];
+        if (!position2) { placements[id2] = null; continue; }
+        var radius2 = radiusOf(node2);
+        var text2 = truncateLabelText(node2.title);
+        placements[id2] = {
+          x: position2.x + radius2 + 4, y: position2.y + 4, anchor: "start",
+          text: text2, width: estimateLabelWidth(text2), forced: true
+        };
+      }
+      return placements;
+    }
+
     // hover 邻居高亮的邻接表：id → 直接邻居 id 集合。
     function adjacencyOf(normalized) {
       var adj = {};
@@ -1833,6 +1971,14 @@ window.__ModuleLoader__.load({
       // 力导向布局：normalized 不变就不重算。邻居表只服务 hover 高亮。
       var layout = useMemo(function () { return forceLayout(normalized.nodes, normalized.edges); }, [normalized]);
       var adjacency = useMemo(function () { return adjacencyOf(normalized); }, [normalized]);
+      // 标签去重叠排布：normalized 不变就不重算；hover / 选中变化只重排一次
+      // （强制标签不参与碰撞，普通标签位置不受 hover 抖动影响——只受障碍集影响）。
+      var labelLayout = useMemo(function () {
+        var forcedIds = [];
+        if (hoverId !== null && hoverId !== undefined) forcedIds.push(hoverId);
+        if (selected && selected.id !== hoverId) forcedIds.push(selected.id);
+        return labelLayoutOf(normalized.nodes, layout, nodeRadiusOf, forcedIds);
+      }, [normalized, layout, hoverId, selected]);
       // F4 时间线跳转：目标卡在图里 → 选中节点；不在（已删 / 已归档）→ 降级提示，
       // 不报错、不发必然失败的 RPC。deps 带 normalized：图谱刷新到货后重跑。
       // 跳转目标消费一次（consumed 标记，审查 P3①）：同一 seq 只处理一次，用户
@@ -1946,6 +2092,7 @@ window.__ModuleLoader__.load({
                 var position = layout[node.id] || { x: 400, y: 190 };
                 var nodeDim = Boolean(hoverId && hoverId !== node.id && !(adjacency[hoverId] && adjacency[hoverId][node.id]));
                 var isSelected = Boolean(selected && selected.id === node.id);
+                var placement = labelLayout[node.id];
                 return h("g", {
                   key: node.id,
                   className: "dshi_graphNode",
@@ -1967,7 +2114,18 @@ window.__ModuleLoader__.load({
                       strokeWidth: isSelected ? 2 : 2.5
                     }
                   }),
-                  h("text", { className: "dshi_nodeLabel", x: position.x + nodeRadiusOf(node) + 4, y: position.y + 4 }, node.title.slice(0, 24)));
+                  // 去重叠后的标签：完整标题进 <title>（SVG 原生 tooltip），可见文本
+                  // 是截断后的 text；四锚皆撞的节点（placement 为 null）不渲染标签。
+                  placement && !placement.forced ? h("text",
+                    { className: "dshi_nodeLabel", x: placement.x, y: placement.y, textAnchor: placement.anchor },
+                    h("title", null, node.title), placement.text) : null);
+              }),
+              // hover / 选中节点的标签强制画在最上层：右侧锚点、不参与碰撞判定。
+              normalized.nodes.map(function (node) {
+                var placement = labelLayout[node.id];
+                if (!placement || !placement.forced) return null;
+                return h("text", { key: "label-" + node.id, className: "dshi_nodeLabel", x: placement.x, y: placement.y, textAnchor: placement.anchor },
+                  h("title", null, node.title), placement.text);
               })))))
         : null,
         selected ? h(NodeDetail, { node: selected, nodes: normalized.nodes, edges: normalized.edges, dsh: props.dsh, sessionId: props.sessionId, readOnly: ro, onClose: function () { setSelected(null); }, onSaved: load }) : null);
@@ -1977,6 +2135,14 @@ window.__ModuleLoader__.load({
     var STATE_LABELS = { active: "生效中", archived: "已归档", superseded: "已被替代" };
 
     // spark_read / spark_update 的 links 形状：[{ target, rel }]，target 是另一张卡的 id。
+    // rel 归一：null/undefined/空串（含纯空白）一律归成 "related"——服务端要求
+    // rel 是 1..64 字符串，历史脏数据在读取时就地修好，保存时自然带上合法关系名；
+    // 任何一条连线都不许静默丢掉。
+    function normalizeLinkRel(rel) {
+      var text = rel === undefined || rel === null ? "" : String(rel);
+      text = text.trim();
+      return text === "" ? "related" : text;
+    }
     function cardLinksOf(card) {
       var raw = card && card.links;
       if (!Array.isArray(raw)) return [];
@@ -1984,10 +2150,10 @@ window.__ModuleLoader__.load({
       for (var i = 0; i < raw.length; i++) {
         var item = raw[i];
         if (!item) continue;
-        if (typeof item === "string") { out.push({ target: item, rel: null }); continue; }
+        if (typeof item === "string") { out.push({ target: item, rel: "related" }); continue; }
         var target = String(item.target ?? item.id ?? "");
         if (!target) continue;
-        out.push({ target: target, rel: item.rel === undefined ? null : item.rel });
+        out.push({ target: target, rel: normalizeLinkRel(item.rel) });
       }
       return out;
     }
@@ -2121,7 +2287,8 @@ window.__ModuleLoader__.load({
         var duplicated = false;
         for (var i = 0; i < links.length; i++) if (links[i].target === target) duplicated = true;
         if (duplicated) return;
-        var next = links.concat([{ target: target, rel: linkRel ? String(linkRel) : null }]);
+        // 空关系名不再发 null：留空按 related 落库（服务端要求 rel 是 1..64 字符串）。
+        var next = links.concat([{ target: target, rel: normalizeLinkRel(linkRel) }]);
         setCard(function (prev) {
           var base = prev && typeof prev === "object" ? prev : {};
           return assign({}, base, { links: next });
@@ -2140,11 +2307,19 @@ window.__ModuleLoader__.load({
       };
       var saveLinks = async function () {
         if (!card) return;
+        // 提交前本地校验：rel 去首尾空白后为空填 related；超过 64 个 UTF-16 字
+        // 不发请求，直接给人话错误（服务端要求 rel 是 1..64 字符串）。
+        var checked = [];
+        for (var i = 0; i < links.length; i++) {
+          var rel = normalizeLinkRel(links[i].rel);
+          if (rel.length > 64) { setLinksError(new Error("关系名最多 64 个字")); return; }
+          checked.push({ target: links[i].target, rel: rel });
+        }
         setLinksBusy(true);
         setLinksError(null);
         setLinksOk(null);
         try {
-          var args = { id: node.id, patch: { links: links } };
+          var args = { id: node.id, patch: { links: checked } };
           if (card.revision !== undefined && card.revision !== null) args.expectedRevision = card.revision;
           await props.dsh.call("executeTool", props.sessionId, { name: "spark_update", args: args });
           setLinksOk("连线已保存");
@@ -2247,7 +2422,7 @@ window.__ModuleLoader__.load({
               })),
             h("input", {
               className: "dshi_input",
-              placeholder: "关系名（可空，如 related）",
+              placeholder: "关系名（留空自动记为 related）",
               value: linkRel,
               onChange: function (event) { setLinkRel(event.target.value); }
             }),

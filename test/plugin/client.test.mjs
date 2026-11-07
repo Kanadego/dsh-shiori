@@ -3971,6 +3971,301 @@ test("R8：图谱实体聚类着色——同实体同色、不同实体不同色
 
 
 // ---------------------------------------------------------------------------
+// 0.2.3 实测反馈：图谱标签去重叠 + 手动连线空关系名按 related 落库。
+// ---------------------------------------------------------------------------
+
+// 拥挤夹具：N 个节点链成一串，标题统一较长（估宽 > 120px，必触发截断），
+// forceLayout 归一化后整体挤在 800×380 中央；度数 0..4 交错（半径 10~18）。
+function crowdedGraphPayload(count) {
+  const nodes = [];
+  for (let i = 0; i < count; i++) {
+    nodes.push({
+      id: "spk-" + i,
+      title: "记忆卡片标题" + i + "号是一句比较长的卡片名字",
+      vitality: "ephemeral", state: "active", revision: 1,
+      degree: i % 5,
+    });
+  }
+  const edges = [];
+  for (let i = 0; i < count - 1; i++) edges.push({ from: "spk-" + i, to: "spk-" + (i + 1) });
+  return { nodes, edges };
+}
+
+// 与 client/index.js 的估算口径一致：ASCII 6px、非 ASCII 10px、余量 4px、高 12px、
+// 上限 120px、标签间距 2px、节点圆方框外扩 2px。
+const LBL = { wide: 10, narrow: 6, margin: 4, height: 12, maxWidth: 120, gap: 2, nodePad: 2 };
+function labelWidthOf(text) {
+  let w = LBL.margin;
+  for (let i = 0; i < text.length; i++) w += text.charCodeAt(i) < 0x80 ? LBL.narrow : LBL.wide;
+  return w;
+}
+function truncateLabelTextOf(title) {
+  if (labelWidthOf(title) <= LBL.maxWidth) return title;
+  let kept = "";
+  for (let i = 0; i < title.length; i++) {
+    if (labelWidthOf(title.slice(0, i + 1) + "…") > LBL.maxWidth) break;
+    kept = title.slice(0, i + 1);
+  }
+  return kept + "…";
+}
+function rectsCollide(a, b, gap) {
+  return !(a.x >= b.x + b.w + gap || b.x >= a.x + a.w + gap
+    || a.y >= b.y + b.h + gap || b.y >= a.y + a.h + gap);
+}
+function graphLabels(tree) {
+  return flattenVNode(tree).filter((n) => n.type === "text" && String(n.props.className) === "dshi_nodeLabel");
+}
+// 从渲染树读 text 坐标 / text-anchor / 可见文本 / <title>，复算标签矩形。
+function labelRectOfEl(textEl) {
+  const kids = [].concat(textEl.children);
+  const titleChild = kids.find((c) => c && c.type === "title");
+  const visible = kids.filter((c) => typeof c === "string").join("");
+  const w = labelWidthOf(visible);
+  const anchor = textEl.props.textAnchor || "start";
+  const x = anchor === "end" ? textEl.props.x - w
+    : anchor === "middle" ? textEl.props.x - w / 2 : textEl.props.x;
+  return { titleChild, visible, anchor, rect: { x, y: textEl.props.y - LBL.height / 2, w, h: LBL.height } };
+}
+
+test("025a：图谱标签去重叠——40 节点挤中央：可见标签两两不相交、不压节点圆、超宽截断补省略号、完整标题进 <title>", async () => {
+  const payload = crowdedGraphPayload(40);
+  const titleSet = new Set(payload.nodes.map((n) => n.title));
+  const { rerender } = await mountGraphTab(payload);
+  const tree = rerender();
+  const labels = graphLabels(tree).map(labelRectOfEl);
+  assert.ok(labels.length > 0, "至少渲染了一个标签");
+  const circles = graphCircles(tree);
+  assert.equal(circles.length, 40, "40 个节点全部渲染");
+  const nodeBoxes = circles.map((c) => {
+    const pad = c.props.r + LBL.nodePad;
+    return { x: c.props.cx - pad, y: c.props.cy - pad, w: pad * 2, h: pad * 2 };
+  });
+  // ① 任意两个可见标签矩形不相交（标签之间留 2px 间距）
+  for (let i = 0; i < labels.length; i++) {
+    for (let j = i + 1; j < labels.length; j++) {
+      assert.ok(!rectsCollide(labels[i].rect, labels[j].rect, LBL.gap),
+        `可见标签 ${i} 与 ${j} 不相交`);
+    }
+  }
+  // ② 标签矩形不与任何节点圆（方框近似）相交
+  for (const label of labels) {
+    for (const box of nodeBoxes) {
+      assert.ok(!rectsCollide(label.rect, box, 0), "标签矩形不与节点圆相交");
+    }
+  }
+  // ③ 完整标题进 <title>；可见文本估宽 ≤ 120px；超宽标题截断补「…」
+  for (const label of labels) {
+    assert.ok(label.titleChild, "标签带 <title> 子元素");
+    const fullTitle = [].concat(label.titleChild.children).join("");
+    assert.ok(titleSet.has(fullTitle), "<title> 里是完整标题");
+    assert.ok(labelWidthOf(label.visible) <= LBL.maxWidth, "可见文本估宽 ≤ 120px");
+    if (labelWidthOf(fullTitle) > LBL.maxWidth) {
+      assert.ok(label.visible.endsWith("…"), "超宽标题补省略号");
+      assert.notEqual(label.visible, fullTitle, "确实发生了截断");
+    }
+  }
+});
+
+test("025a：图谱标签去重叠——被隐藏的节点四锚皆撞（逐锚复算碰撞），且排布确定性可复现", async () => {
+  const payload = crowdedGraphPayload(40);
+  const idToTitle = {};
+  for (const node of payload.nodes) idToTitle[node.id] = node.title;
+  const { rerender } = await mountGraphTab(payload);
+  const tree = rerender();
+  const labels = graphLabels(tree).map(labelRectOfEl);
+  const placedRects = labels.map((l) => l.rect);
+  const circles = graphCircles(tree);
+  const nodeBoxes = circles.map((c) => {
+    const pad = c.props.r + LBL.nodePad;
+    return { x: c.props.cx - pad, y: c.props.cy - pad, w: pad * 2, h: pad * 2 };
+  });
+  // 隐藏节点 = 渲染树里找不到对应 <title> 的节点
+  const visibleTitles = new Set(labels.map((l) => [].concat(l.titleChild.children).join("")));
+  const hiddenIds = Object.keys(idToTitle).filter((id) => !visibleTitles.has(idToTitle[id]));
+  assert.ok(hiddenIds.length > 0, `拥挤夹具下有标签被隐藏（实际隐藏 ${hiddenIds.length} 个）`);
+  // 每个隐藏节点：四个锚点逐一复算，都必须撞上某个已放置标签矩形或节点圆方框
+  for (const id of hiddenIds) {
+    const g = graphNodeGs(tree).find((n) => n.props.key === id);
+    const circle = flattenVNode(g).find((n) => n.type === "circle");
+    const cx = circle.props.cx;
+    const cy = circle.props.cy;
+    const r = circle.props.r;
+    const width = labelWidthOf(truncateLabelTextOf(idToTitle[id]));
+    const anchors = [
+      { x: cx + r + 4, y: cy + 4, anchor: "start" },
+      { x: cx - r - 4, y: cy + 4, anchor: "end" },
+      { x: cx, y: cy + r + 14, anchor: "middle" },
+      { x: cx, y: cy - r - 8, anchor: "middle" },
+    ];
+    for (const anchor of anchors) {
+      const x = anchor.anchor === "end" ? anchor.x - width
+        : anchor.anchor === "middle" ? anchor.x - width / 2 : anchor.x;
+      const rect = { x, y: anchor.y - LBL.height / 2, w: width, h: LBL.height };
+      const blocked = placedRects.some((other) => rectsCollide(rect, other, LBL.gap))
+        || nodeBoxes.some((box) => rectsCollide(rect, box, 0));
+      assert.ok(blocked, `隐藏节点 ${id} 的锚点 ${anchor.anchor}@(${anchor.x},${anchor.y}) 确实被撞`);
+    }
+  }
+  // 确定性：同一份数据再开一个独立实例，可见标签（坐标/锚点/文本）完全一致
+  const { rerender: rerender2 } = await mountGraphTab(payload);
+  const again = graphLabels(rerender2()).map(labelRectOfEl)
+    .map((l) => ({ x: l.rect.x, y: l.rect.y, w: l.rect.w, anchor: l.anchor, visible: l.visible }));
+  const first = labels.map((l) => ({ x: l.rect.x, y: l.rect.y, w: l.rect.w, anchor: l.anchor, visible: l.visible }));
+  assert.deepEqual(again, first, "同一份数据两次渲染标签排布完全一致（无随机）");
+});
+
+test("025a：图谱标签去重叠——hover / 选中节点的标签强制存在、固定右侧锚点、画在所有标签之后", async () => {
+  const payload = crowdedGraphPayload(40);
+  const idToTitle = {};
+  for (const node of payload.nodes) idToTitle[node.id] = node.title;
+  const { host, rerender } = await mountGraphTab(payload);
+  // hover spk-0 + 选中 spk-1：两个标签都必须渲染（GraphTab state 下标：graph/error/selected/view/hoverId/search/searchMiss）
+  host.states[4] = "spk-0";
+  host.states[2] = { id: "spk-1", title: idToTitle["spk-1"], vitality: "ephemeral", state: "active", revision: 1 };
+  const tree = rerender();
+  const allLabels = graphLabels(tree);
+  const forcedTitles = new Set([idToTitle["spk-0"], idToTitle["spk-1"]]);
+  const forcedIndexes = [];
+  for (const id of ["spk-0", "spk-1"]) {
+    const forced = allLabels.find((el) => {
+      const parsed = labelRectOfEl(el);
+      return [].concat(parsed.titleChild.children).join("") === idToTitle[id];
+    });
+    assert.ok(forced, `强制标签（${id}）一定存在`);
+    const circle = flattenVNode(graphNodeGs(tree).find((n) => n.props.key === id)).find((n) => n.type === "circle");
+    assert.equal(forced.props.textAnchor, "start", "强制标签固定右侧（start 对齐）");
+    assert.equal(forced.props.x, circle.props.cx + circle.props.r + 4, "强制标签锚点 = x+r+4");
+    assert.equal(forced.props.y, circle.props.cy + 4, "强制标签锚点 y = y+4");
+    forcedIndexes.push(allLabels.indexOf(forced));
+  }
+  // 画在所有标签之后：所有普通（非 hover/选中）标签在扁平渲染树里都排在强制标签之前
+  for (let i = 0; i < allLabels.length; i++) {
+    const parsed = labelRectOfEl(allLabels[i]);
+    const title = [].concat(parsed.titleChild.children).join("");
+    if (forcedTitles.has(title)) continue;
+    for (const fi of forcedIndexes) {
+      assert.ok(i < fi, "普通标签都排在强制标签之前（强制标签画在最上层）");
+    }
+  }
+  // pointer-events:none 由 .dshi_nodeLabel 类保持（内嵌 CSS 未动，类名未换）
+  assert.ok(allLabels.every((el) => String(el.props.className) === "dshi_nodeLabel"), "标签类名保持 dshi_nodeLabel");
+});
+
+test("025a：手动连线空关系名——留空按 related 落库、历史 null/空串读取即归一、超 64 字不发请求", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderGraph = await mountTabById(mod, host, "graph", "GraphTab");
+  const calls = [];
+  const card = {
+    id: "spk-1", revision: 7, title: "主卡", summary: "", content: "正文",
+    triggers: [], entities: [],
+    // 历史脏数据：rel null 与空串各一条
+    links: [{ target: "spk-2", rel: null }, { target: "spk-3", rel: "" }],
+    vitality: "ephemeral", state: "active",
+  };
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (method === "getGraph") {
+        return {
+          nodes: [
+            { id: "spk-1", title: "主卡", vitality: "ephemeral", state: "active", revision: 7 },
+            { id: "spk-2", title: "邻居甲", vitality: "evergreen", state: "active", revision: 1 },
+            { id: "spk-3", title: "邻居乙", vitality: "ephemeral", state: "active", revision: 1 },
+            { id: "spk-4", title: "邻居丙", vitality: "ephemeral", state: "active", revision: 1 },
+          ],
+          edges: [],
+        };
+      }
+      if (payload && payload.name === "spark_read") return Object.assign({}, card);
+      if (payload && payload.name === "spark_update") return { ok: true };
+      return {};
+    },
+  };
+
+  host.states.length = 0;
+  let tree = renderGraph(dsh, "session-A", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  host.runEffects.v = false;
+
+  host.states[2] = { id: "spk-1", title: "主卡", vitality: "ephemeral", state: "active", revision: 7, raw: { id: "spk-1" } };
+  tree = renderGraph(dsh, "session-A");
+  const detail = findComponent(tree, "NodeDetail");
+  assert.ok(detail, "NodeDetail mounted for the selected node");
+
+  // NodeDetail 的 useState 紧接 GraphTab 的 7 个之后（与 R8 用例同一下标口径）
+  host.cursor.v = 7;
+  host.runEffects.v = true;
+  detail.type(detail.props);
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  host.runEffects.v = false;
+  const renderDetail = () => { host.cursor.v = 7; return detail.type(detail.props); };
+
+  // ① 历史 null / 空串连线读取后归一显示 related，两条一条不丢
+  let painted = renderDetail();
+  const relBadges = flattenVNode(painted).filter((n) => n.type === "span"
+    && n.props.className === "dshi_badgeDim dshi_badge" && collectText(n) === "related");
+  assert.equal(relBadges.length, 2, "两条历史脏连线都归一显示 related");
+  assert.equal(flattenVNode(painted).filter((n) => n.type === "button" && collectText(n) === "移除").length, 2,
+    "两条连线一条不丢");
+  const relInput = () => flattenVNode(painted).find((n) => n.type === "input"
+    && String(n.props.placeholder || "") === "关系名（留空自动记为 related）");
+  assert.ok(relInput(), "提示文案改为「关系名（留空自动记为 related）」");
+
+  // ② 留空点「添加连线」→ 本地该条 rel 为 related；保存 → patch.links 无 null/空串
+  // （NodeDetail 的 useState 下标：form/busy/formError/formOk/card/linkTarget/linkRel/…，cursor 7 起 → linkTarget=12、linkRel=13）
+  host.states[12] = "spk-4";
+  host.states[13] = "";
+  painted = renderDetail();
+  findButton(painted, "添加连线").props.onClick();
+  painted = renderDetail();
+  calls.length = 0;
+  findButton(painted, "保存连线").props.onClick();
+  await settle();
+  const update = calls.find((c) => c.payload && c.payload.name === "spark_update");
+  assert.ok(update, "spark_update issued");
+  const sentLinks = update.payload.args.patch.links;
+  assert.equal(sentLinks.length, 3, "三条连线全部提交");
+  assert.deepEqual(sentLinks.map((l) => l.target).sort(), ["spk-2", "spk-3", "spk-4"], "历史两条 + 新增一条都在");
+  for (const link of sentLinks) {
+    assert.equal(link.rel, "related", "每条 rel 都是 related（无 null、无空串）");
+  }
+
+  // ③ 关系名超 64 个 UTF-16 字：不发请求，直接显示人话错误
+  painted = renderDetail();
+  host.states[12] = "spk-4";
+  host.states[13] = "字".repeat(65);
+  painted = renderDetail();
+  findButton(painted, "添加连线").props.onClick();
+  painted = renderDetail();
+  calls.length = 0;
+  findButton(painted, "保存连线").props.onClick();
+  await settle();
+  painted = renderDetail();
+  assert.equal(calls.find((c) => c.payload && c.payload.name === "spark_update"), undefined,
+    "超 64 字不发 spark_update");
+  assert.ok(collectText(painted).includes("关系名最多 64 个字"), "显示人话错误「关系名最多 64 个字」");
+  // 错误只拦这一次提交，不误伤：撤销超长草稿、改成合法关系名后能正常发出
+  findButton(painted, "撤销修改").props.onClick();
+  painted = renderDetail();
+  host.states[12] = "spk-4";
+  host.states[13] = "依赖";
+  painted = renderDetail();
+  findButton(painted, "添加连线").props.onClick();
+  painted = renderDetail();
+  calls.length = 0;
+  findButton(painted, "保存连线").props.onClick();
+  await settle();
+  const retry = calls.find((c) => c.payload && c.payload.name === "spark_update");
+  assert.ok(retry, "改成合法关系名后 spark_update 正常发出");
+  assert.ok(retry.payload.args.patch.links.every((l) => l.rel.length <= 64 && l.rel.length >= 1),
+    "提交的每条 rel 都在 1..64 字内");
+});
+
+
+// ---------------------------------------------------------------------------
 // U5：整理与遗忘页重做——tab 改名 / 稍后再说 / kind 分组折叠 / 筛选搜索 /
 // 删共享 proposal 框（预览直接按候选发骨架）+ 就地预览 / 计划独立成卡。
 // 协议与守卫不变：doReview 仍发 reviewed / dismissed；previewPlan 仍发
