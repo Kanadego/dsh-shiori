@@ -9,8 +9,7 @@
 // 规则：
 // - queueRevision 为非负整数；operationId 沿现校验（1..128 可见 ASCII）；
 //   planId 不透明稳定字符串；planDigest 小写 64 hex；
-// - organize proposal 严格沿用 buildDraft 形状（link / merge-topic / thin-core
-//   三种 kind；thin-core 字段照 queue.buildThinCoreDraft：{kind,before,after}）；
+// - organize proposal 严格沿用 buildDraft 形状（link / merge-topic 两种 kind）；
 // - 所有顶层 payload 闭合拒绝未知键；
 // - Error.code 词表：INVALID_INPUT / NOT_CONFIGURED / UNSUPPORTED /
 //   UNAUTHORIZED / NOT_FOUND / REVISION_CONFLICT / BUDGET_EXCEEDED。
@@ -101,10 +100,10 @@ const planView = {
   properties: {
     planId,
     kind: { enum: ["organize", "forgetting"] },
-    // 真实计划类型（link / merge-topic / thin-core / archive-topic）：kind 恒为
+    // 真实计划类型（link / merge-topic / archive-topic）：kind 恒为
     // 家族名（organize / forgetting），客户端文案按 proposalKind 出。可选字段，
     // 老服务端与 forgetting 预览不带。
-    proposalKind: { enum: ["link", "merge-topic", "thin-core", "archive-topic"] },
+    proposalKind: { enum: ["link", "merge-topic", "archive-topic"] },
     planDigest,
     queueRevision: { oneOf: [queueRevision, { type: "null" }] },
     diff: { type: "array", items: diffEntry },
@@ -170,20 +169,6 @@ const organizeProposal = {
         },
       },
       required: ["kind", "topic"],
-    },
-    {
-      // thin-core proposal：与 queue.buildThinCoreDraft 的 proposal 入参同形
-      // （exact keys {kind, before, after}；before/after 为 core 正文全文，
-      // 允许空串——初始 L1 core 即空文本）。执行器 executeThinCoreRound 首跑
-      // 要求当前 core 正文逐字节等于 before，重放判定 after。
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        kind: { enum: ["thin-core"] },
-        before: { type: "string" },
-        after: { type: "string" },
-      },
-      required: ["kind", "before", "after"],
     },
   ],
 };
@@ -679,7 +664,7 @@ function validateNode(value, spec, where, field) {
 /**
  * 校验管理 payload（wire 层闭包校验；Q 在 RPC 入口调用，P 在 management
  * 入口再调用一次）。通过返回 payload 原引用；失败抛 code=INVALID_INPUT。
- * organize proposal 三种 kind（link / merge-topic / thin-core）全部照
+ * organize proposal 两种 kind（link / merge-topic）全部照
  * schema 校验，无额外早退。
  */
 export function validateManagementPayload(name, payload) {

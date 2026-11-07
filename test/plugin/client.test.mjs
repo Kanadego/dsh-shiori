@@ -637,6 +637,41 @@ function makeStatefulReact() {
   return { react, states, effects, cursor, runEffects };
 }
 
+// ref 感知版 harness：useRef 按（owner, hook 序号）持久化，跨渲染返回同一对象——
+// 真实 React 语义。专供 P1-1 / P1-3 的跨渲染 ref 守卫用例；owner 由测试在调用
+// 组件前设置（host.owner），区分 section 渲染与 tab 渲染的 ref 槽位，避免串槽。
+// states / effects / cursor 语义与 makeStatefulReact 完全一致。
+function makeRefAwareReact() {
+  const states = [];
+  const effects = [];
+  const cursor = { v: 0 };
+  const runEffects = { v: false };
+  const refsByOwner = new Map(); // owner -> refs[]
+  const host = {
+    owner: null,
+    react: {
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      Fragment: "fragment",
+      useState: (initial) => {
+        const i = cursor.v++;
+        if (!(i in states)) states[i] = typeof initial === "function" ? initial() : initial;
+        return [states[i], (v) => { states[i] = typeof v === "function" ? v(states[i]) : v; }];
+      },
+      useEffect: (fn) => { if (runEffects.v) effects.push(fn); },
+      useMemo: (fn) => fn(),
+      useRef: (initial) => {
+        const i = cursor.v++;
+        if (!refsByOwner.has(host.owner)) refsByOwner.set(host.owner, []);
+        const refs = refsByOwner.get(host.owner);
+        if (!(i in refs)) refs[i] = { current: initial };
+        return refs[i];
+      },
+    },
+    states, effects, cursor, runEffects,
+  };
+  return host;
+}
+
 function flattenVNode(node, out = []) {
   if (Array.isArray(node)) { for (const child of node) flattenVNode(child, out); return out; }
   if (!node || typeof node !== "object") return out;
@@ -3135,6 +3170,87 @@ async function mountTabById(mod, host, tabId, tabName) {
   };
 }
 
+// ref 感知版挂载：与 mountTabById 同一路径，但组件调用前后设置 host.owner，
+// 让 tab 的持久 ref 槽位（makeRefAwareReact）与 section 渲染的 ref 槽位分开。
+async function mountTabByIdRefAware(mod, host, tabId, tabName) {
+  let renderSlot = null;
+  await mod.apply({
+    remote: { $mount: async () => () => {} },
+    slots: {
+      inject: (name, fn) => fn(),
+      register: (meta, render) => { renderSlot = render; return () => {}; },
+    },
+  });
+  const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
+  host.states.length = 0;
+  host.states.push(tabId, "session-A", "", null, { mode: "active" });
+  host.cursor.v = 0;
+  host.owner = "section";
+  let sectionTree;
+  try { sectionTree = sectionVNode.type(sectionVNode.props); } finally { host.owner = null; }
+  const tab = flattenVNode(sectionTree).find((n) => typeof n.type === "function" && n.type.name === tabName);
+  assert.ok(tab, tabName + " reached through real slot render");
+  return (dsh, sessionId, options = {}) => {
+    host.cursor.v = 0;
+    host.runEffects.v = Boolean(options.effects);
+    host.owner = tabName;
+    try { return tab.type({ dsh, sessionId }); } finally { host.owner = null; }
+  };
+}
+
+// P1-1（重建轮询串会话）：轮询每轮比对渲染体同步的 sessionId 镜像 ref，卸载
+// cleanup 置停——旧实现比对创建闭包里的 props，切换会话后恒等、永不停止。
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("P1-1：重建轮询——发起后切换会话，旧会话的轮询停止（getStatus 不再增长）", async () => {
+  const host = makeRefAwareReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderStatus = await mountTabByIdRefAware(mod, host, "status", "StatusTab");
+  const statusCalls = [];
+  const pendingStatus = []; // getStatus 挂起队列（手工控制响应时序）
+  const semanticDto = (running) => ({
+    mode: "active", configured: true,
+    occupancy: { l0Chars: 1, l0Budget: 10, l1Chars: 1, l1HardCap: 10 },
+    diagnostics: { semantic: { enabled: true, provider: "local", model: "m", ready: true, rebuild: { running, phase: running ? "running" : "idle" } } },
+  });
+  const dsh = {
+    call: async (method, session, payload) => {
+      if (method === "getStatus") {
+        statusCalls.push(session);
+        return new Promise((resolve) => pendingStatus.push(resolve));
+      }
+      // executeTool（semantic_rebuild）：立即成功
+      return { ok: true };
+    },
+  };
+
+  // 挂载：初始 getStatus 挂起 → 放行（idle），「重建向量」按钮可点
+  host.states.length = 0;
+  host.states.push(null, null, null);
+  let tree = renderStatus(dsh, "session-A", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  host.runEffects.v = false;
+  pendingStatus.shift()(semanticDto(false));
+  await settle();
+  tree = renderStatus(dsh, "session-A");
+  assert.equal(statusCalls.length, 1, "one getStatus from mount load");
+  findButton(tree, "重建向量").props.onClick();
+  await settle();
+
+  // 轮询第 1 轮的 getStatus 挂起中：此刻切换会话（重渲染即更新镜像 ref）
+  assert.equal(statusCalls.length, 2, "poll round 1 issued");
+  tree = renderStatus(dsh, "session-B");
+
+  // 放行第 1 轮（仍 running → 循环继续），等待 1.5s 轮询间隔过后：
+  // 旧闭包比对 ref 发现已切到 session-B → 直接退出，不再发第 2 轮
+  pendingStatus.shift()(semanticDto(true));
+  await sleep(1700);
+  await settle();
+  assert.equal(statusCalls.length, 2, "no further getStatus after session switch");
+  assert.deepEqual(statusCalls, ["session-A", "session-A"], "both calls were for the original session");
+});
+
 test("R8：tab 栏八项冻结顺序（含 F2 闪回命中 / F4 最近变更）", async () => {
   const services = {
     "remote.session": { list: async () => ({ ok: true, value: { items: [{ sessionId: "session-A" }] } }) },
@@ -3355,6 +3471,194 @@ test("U6：L3 主题页搜索过滤（key/title/summary，忽略大小写）+ �
   text = collectText(tree);
   assert.ok(text.includes("没有匹配的主题"), "no-match hint shown");
   assert.ok(!text.includes("这个作用域下还没有主题"), "empty-scope hint not confused with no-match");
+});
+
+// P1-3（详情串卡）：readTopic 的响应晚到时按「发起时的专题是否还是当前专题」丢弃。
+
+test("P1-3：点 A 立刻点 B，A 的详情响应晚到 → 不覆盖 B（串卡守卫）", async () => {
+  const host = makeRefAwareReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderTopics = await mountTabByIdRefAware(mod, host, "topics", "TopicsTab");
+  const calls = [];
+  const pendingReads = new Map(); // topic -> resolve（手工控制响应时序）
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (payload && payload.name === "memory_list_topics") {
+        return { topics: [
+          { key: "t-a", title: "A", summary: "", updated: "2026-11-02T00:00:00.000Z", chars: 3 },
+          { key: "t-b", title: "B", summary: "", updated: "2026-11-01T00:00:00.000Z", chars: 3 },
+        ] };
+      }
+      if (payload && payload.name === "memory_read") {
+        return new Promise((resolve) => { pendingReads.set(payload.args.topic, resolve); });
+      }
+      return {};
+    },
+  };
+  const readCount = (topic) => calls.filter((c) => c.payload && c.payload.name === "memory_read" && c.payload.args.topic === topic).length;
+
+  host.states.length = 0;
+  let tree = renderTopics(dsh, "session-A", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  host.runEffects.v = false;
+  tree = renderTopics(dsh, "session-A");
+  assert.equal(readCount("t-a") + readCount("t-b"), 0, "list only, no reads yet");
+
+  // 点 A（排序 updated-desc：t-a 11-02 在前，第一个「展开」即 t-a）→ 读请求挂起
+  findButton(tree, "展开").props.onClick();
+  assert.equal(readCount("t-a"), 1, "A read issued");
+  tree = renderTopics(dsh, "session-A"); // 重渲染：opened = t-a
+
+  // 立刻点 B（此时只剩 t-b 的「展开」）→ B 的读请求也挂起
+  const expandB = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("展开"));
+  assert.equal(expandB.length, 1, "only t-b still shows 展开");
+  expandB[0].props.onClick();
+  assert.equal(readCount("t-b"), 1, "B read issued");
+  tree = renderTopics(dsh, "session-A"); // 重渲染：opened = t-b
+
+  // A 的响应晚到：opened 已是 t-b → 整包丢弃，detail 不得被 A 覆盖
+  pendingReads.get("t-a")({ topic: "t-a", exists: true, content: "# A 正文", revision: "r-a" });
+  await settle();
+  assert.equal(host.states[3], "t-b", "opened stays B");
+  assert.equal(host.states[4], null, "stale A response discarded, detail not overwritten");
+
+  // B 的响应正常落地
+  pendingReads.get("t-b")({ topic: "t-b", exists: true, content: "# B 正文", revision: "r-b" });
+  await settle();
+  assert.equal(host.states[4] && host.states[4].content, "# B 正文", "B detail lands");
+  assert.equal(readCount("t-a") + readCount("t-b"), 2, "exactly one read per topic");
+});
+
+test("P1-3：detail.topic 与 opened 不一致时点保存 → 不发 memory_rewrite，给中文提示", async () => {
+  const host = makeRefAwareReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderTopics = await mountTabByIdRefAware(mod, host, "topics", "TopicsTab");
+  const calls = [];
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (payload && payload.name === "memory_list_topics") {
+        return { topics: [
+          { key: "t-a", title: "A", summary: "", updated: "2026-11-02T00:00:00.000Z", chars: 3 },
+          { key: "t-b", title: "B", summary: "", updated: "2026-11-01T00:00:00.000Z", chars: 3 },
+        ] };
+      }
+      if (payload && payload.name === "memory_read") {
+        return { topic: payload.args.topic, exists: true, content: "# A 正文", revision: "r-a" };
+      }
+      return {};
+    },
+  };
+
+  // 挂载并展开 t-a，让 detail / 草稿进入「已打开可保存」状态
+  host.states.length = 0;
+  let tree = renderTopics(dsh, "session-A", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  host.runEffects.v = false;
+  tree = renderTopics(dsh, "session-A");
+  findButton(tree, "展开").props.onClick();
+  await settle();
+  tree = renderTopics(dsh, "session-A");
+  findButton(tree, "编辑").props.onClick();
+  tree = renderTopics(dsh, "session-A");
+  const textarea = flattenVNode(tree).find((n) => n.type === "textarea");
+  assert.ok(textarea, "edit box open");
+  textarea.props.onChange({ target: { value: "# A 被改过的草稿" } });
+
+  // 模拟响应期间用户切换了专题：opened 变为 t-b，但 detail 仍是 t-a 的快照
+  host.states[3] = "t-b";
+  tree = renderTopics(dsh, "session-A");
+  findButton(tree, "保存").props.onClick();
+  await settle();
+  assert.equal(calls.filter((c) => c.payload && c.payload.name === "memory_rewrite").length, 0,
+    "no memory_rewrite when detail.topic != opened");
+  assert.equal(calls.filter((c) => c.payload && c.payload.name === "memory_read").length, 1,
+    "no reload triggered by the refused save");
+  tree = renderTopics(dsh, "session-A"); // 重渲染后提示可见
+  assert.ok(String(collectText(tree)).includes("详情已切换，请重新打开该专题再保存"),
+    "Chinese refusal message shown");
+});
+
+// P1-2（六 tab 过期守卫）：load 的响应回来时若会话已切换，整包丢弃。
+
+test("P1-2：TopicsTab 旧会话响应晚到 → 不覆盖新会话数据（会话守卫）", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderTopics = await mountTabById(mod, host, "topics", "TopicsTab");
+  const calls = [];
+  const pendingLists = []; // memory_list_topics 挂起队列（手工控制响应时序）
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (payload && payload.name === "memory_list_topics") {
+        return new Promise((resolve) => pendingLists.push(resolve));
+      }
+      return {};
+    },
+  };
+  const listA = { topics: [{ key: "a-1", title: "A", summary: "", updated: "2026-11-02T00:00:00.000Z", chars: 1 }] };
+  const listB = { topics: [{ key: "b-1", title: "B", summary: "", updated: "2026-11-03T00:00:00.000Z", chars: 2 }] };
+
+  // 会话 A 发起 load（挂起），随即切到会话 B：渲染体同步换绑守卫并发起新 load
+  host.states.length = 0;
+  let tree = renderTopics(dsh, "session-A", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  assert.equal(calls.length, 1, "session-A load issued");
+  tree = renderTopics(dsh, "session-B", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  assert.equal(calls.length, 2, "session-B load issued");
+
+  // A 的响应晚到 → 丢弃；B 的响应正常落地
+  pendingLists[0](listA);
+  await settle();
+  assert.equal(host.states[0], null, "stale session-A response discarded");
+  pendingLists[1](listB);
+  await settle();
+  assert.deepEqual(host.states[0], listB.topics, "session-B data lands");
+  assert.equal(host.states[1], false, "busy closed by the fresh load");
+});
+
+test("P1-2：FlashbacksTab 旧会话响应晚到 → 不覆盖新会话数据（会话守卫）", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderFlashbacks = await mountTabById(mod, host, "flashbacks", "FlashbacksTab");
+  const pendingStatus = []; // getStatus 挂起队列
+  const pendingGraph = [];  // getGraph 挂起队列
+  const dsh = {
+    call: async (method, session, payload) => {
+      if (method === "getStatus") return new Promise((resolve) => pendingStatus.push(resolve));
+      if (method === "getGraph") return new Promise((resolve) => pendingGraph.push(resolve));
+      return {};
+    },
+  };
+  const capsB = { l2: true };
+  const graphB = { nodes: [{ id: "b-1", hitCount: 3, lastHitAt: "2026-11-03T00:00:00.000Z" }], edges: [], deliveryStats: { totalDelivered: 3, uniqueCards: 2, rounds: 2 } };
+
+  // 会话 A 发起 load（getStatus 挂起），随即切到会话 B 并发起新 load
+  host.states.length = 0;
+  let tree = renderFlashbacks(dsh, "session-A", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  tree = renderFlashbacks(dsh, "session-B", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  assert.equal(pendingStatus.length, 2, "two getStatus in flight (A then B)");
+
+  // A 的 getStatus 晚到 → 丢弃（A 的 load 就地返回，A 的 getGraph 永不发出）
+  pendingStatus[0]({ capabilities: { l2: false } });
+  await settle();
+  assert.equal(pendingGraph.length, 0, "stale session-A load never reaches getGraph");
+  assert.equal(host.states[1], null, "stale caps discarded");
+
+  // B 的响应正常落地
+  pendingStatus[1]({ capabilities: capsB });
+  await settle();
+  assert.equal(pendingGraph.length, 1, "only session-B's getGraph issued");
+  assert.deepEqual(host.states[1], capsB, "session-B caps land");
+  pendingGraph[0](graphB);
+  await settle();
+  assert.deepEqual(host.states[0], graphB, "session-B graph lands");
 });
 
 test("R8：卡片详情只编辑 spark 卡片本身——保存只提交改动字段，连线可撤销", async () => {
@@ -4040,7 +4344,7 @@ test("U5b：预览卡 merge-topic——「把 N 张卡合并进主题『X』」+
   assert.ok(rawInfo && Object.prototype.hasOwnProperty.call(rawInfo.props, "open") === false, "原始信息 collapsed by default");
 });
 
-test("U5b：预览卡 thin-core——只写 core 正文长度变化不铺全文，按钮「确认瘦身」danger", async () => {
+test("0.2.3：预览卡 thin-core 已裁撤——不再渲染瘦身标题 / 长度正文 /「确认瘦身」按钮，回落通用确认卡", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
@@ -4056,16 +4360,17 @@ test("U5b：预览卡 thin-core——只写 core 正文长度变化不铺全文�
   host.states.push({ queueRevision: 0, items: [], plans: [] }, null, false, "", { sessionId: "session-A", plan, queueRevision: 0 }, null, { sessionId: "session-A", gen: 0 });
   const tree = renderCandidates(dsh, "session-A");
   const text = collectText(tree);
-  assert.ok(text.includes("core 瘦身"), "title translated to core 瘦身");
-  assert.ok(text.includes("core 正文 12345 → 8900 字"), "body shows before/after lengths");
-  const bodyDiv = flattenVNode(tree).find((n) => n.type === "div" && n.props && n.props.className === "dshi_hint" && collectText(n).includes("core 正文 12345 → 8900 字"));
-  assert.ok(bodyDiv, "length line rendered outside details");
-  assert.equal(collectText(bodyDiv), "core 正文 12345 → 8900 字", "main body line is just the length change — full text not spread");
+  // 0.2.3 裁撤：thin-core 专用文案（标题「core 瘦身」/ 长度正文 / 专用按钮）一律不再出现。
+  assert.ok(!text.includes("core 瘦身"), "no thin-core title");
+  assert.ok(!text.includes("core 正文 12345 → 8900 字"), "no thin-core length body line");
+  assert.ok(!flattenVNode(tree).some((n) => n.type === "button" && n.children.includes("确认瘦身")), "no 确认瘦身 button");
+  // 回落通用确认卡：标题原样透出 kind，正文走 summary 兜底，按钮「确认执行」danger。
+  const confirm = flattenVNode(tree).find((n) => n.type === "button" && n.children.includes("确认执行"));
+  assert.ok(confirm, "generic 确认执行 button");
+  assert.ok(String(confirm.props.className || "").includes("dshi_btnDanger"), "fallback confirm stays danger");
+  assert.ok(text.includes("thin-core plan over 1 source(s)"), "summary fallback keeps some info");
   const rawInfo = flattenVNode(tree).find((n) => n.type === "details" && collectText(n).includes("原始信息"));
   assert.ok(rawInfo && collectText(rawInfo).includes("旧".repeat(50)), "full before text only inside collapsed 原始信息 details");
-  const confirm = flattenVNode(tree).find((n) => n.type === "button" && n.children.includes("确认瘦身"));
-  assert.ok(confirm, "confirm button reads 确认瘦身");
-  assert.ok(String(confirm.props.className || "").includes("dshi_btnDanger"), "thin-core confirm stays danger");
 });
 
 test("U5b：预览卡未知 kind——标题原样显示 kind、正文走 summary 兜底、按钮「确认执行」danger，不崩", async () => {
@@ -4112,7 +4417,7 @@ function mountPreviewPlan(plan) {
   };
 }
 
-test("0.2.3：planKindOf——proposalKind 决定 merge-topic / thin-core 文案；缺失时 kind:organize 不出任何专用文案且不抛错", async () => {
+test("0.2.3：planKindOf——proposalKind 决定 merge-topic 文案；thin-core 已裁撤不出专用文案；缺失时 kind:organize 不出任何专用文案且不抛错", async () => {
   // 断言 1：kind:"organize"+proposalKind:"merge-topic" → 「合并进主题」标题与对应正文
   const merge = await (await mountPreviewPlan({
     kind: "organize", proposalKind: "merge-topic", planId: "plan-M2", planDigest: "digest-M2", queueRevision: 0,
@@ -4129,16 +4434,18 @@ test("0.2.3：planKindOf——proposalKind 决定 merge-topic / thin-core 文案
   const mergeConfirm = flattenVNode(merge.tree).find((n) => n.type === "button" && n.children.includes("确认合并（不可撤销）"));
   assert.ok(mergeConfirm, "merge-topic confirm button label applies via proposalKind");
 
-  // 断言 2：kind:"organize"+proposalKind:"thin-core" → 「core 瘦身」标题与长度正文
+  // 断言 2：kind:"organize"+proposalKind:"thin-core"（0.2.3 已裁撤）→ 不出瘦身标题 /
+  // 长度正文 /「确认瘦身」按钮，回落通用确认卡（summary 兜底、确认执行）。
   const thin = await (await mountPreviewPlan({
     kind: "organize", proposalKind: "thin-core", planId: "plan-T2", planDigest: "digest-T2", queueRevision: 0,
     summary: "thin-core plan over 1 source(s)",
     diff: [{ path: "core", oldText: "旧".repeat(500), newText: "新".repeat(300) }],
   }))();
-  assert.ok(thin.text.includes("core 瘦身"), "proposalKind thin-core title rendered");
-  assert.ok(thin.text.includes("core 正文 500 → 300 字"), "thin-core body shows length change");
-  const thinConfirm = flattenVNode(thin.tree).find((n) => n.type === "button" && n.children.includes("确认瘦身"));
-  assert.ok(thinConfirm, "thin-core confirm button label applies via proposalKind");
+  assert.ok(!thin.text.includes("core 瘦身"), "no thin-core title (kind removed in 0.2.3)");
+  assert.ok(!thin.text.includes("core 正文 500 → 300 字"), "no thin-core length body line");
+  assert.ok(!flattenVNode(thin.tree).some((n) => n.type === "button" && n.children.includes("确认瘦身")), "no 确认瘦身 button");
+  const thinConfirm = flattenVNode(thin.tree).find((n) => n.type === "button" && n.children.includes("确认执行"));
+  assert.ok(thinConfirm, "thin-core falls back to generic 确认执行");
 
   // 断言 3：proposalKind 缺失且 kind:"organize"（旧服务端 / 无 proposal 形状）→
   // 不出任何专用标题 / 正文（回到现状），也不许抛错。只看预览确认卡（dshi_confirm）

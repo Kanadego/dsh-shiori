@@ -980,7 +980,11 @@ function isStaleSourceRef(ref, revisionsById) {
 // buildDraft：候选 + 完整 active records + proposal -> { plan, digest, diff, changedItems }
 // ---------------------------------------------------------------------------
 
-const PLAN_KINDS = new Set(['link', 'merge-topic', 'thin-core', 'archive-topic']);
+const PLAN_KINDS = new Set(['link', 'merge-topic', 'archive-topic']);
+// link 草案 sources 上限：与 executor.mjs 的 LINK_SOURCES_MAX 同值（64）。
+// 本模块按契约只 import node:crypto、不 import 其他槽位模块，故此处同值镜像；
+// 两处的一致性由测试锁定（buildDraft 65 源与执行器 65 源双双拒绝）。
+const LINK_SOURCES_MAX = 64;
 // 镜像冻结 sparks/store.mjs 的 LIMITS（仅用于输入校验，保证草案可被执行器接受）
 const CARD_LIMITS = Object.freeze({
   titleChars: 80, summaryChars: 120, contentChars: 2000,
@@ -1116,7 +1120,7 @@ function validatePlanShape(plan, where = 'plan') {
   if (!isPlainObject(plan)) fail('INVALID_INPUT', `${where} 必须是普通对象`);
   if (plan.version !== 1) fail('INVALID_INPUT', `${where}.version 必须是 1`);
   if (!PLAN_KINDS.has(plan.kind)) {
-    fail('INVALID_INPUT', `${where}.kind 必须是 link/merge-topic/thin-core/archive-topic`);
+    fail('INVALID_INPUT', `${where}.kind 必须是 link/merge-topic/archive-topic`);
   }
   validateScopeIdLocal(plan.scopeId, `${where}.scopeId`);
   const base = ['version', 'scopeId', 'candidateId', 'kind', 'sources'];
@@ -1171,11 +1175,6 @@ function validatePlanShape(plan, where = 'plan') {
   } else if (plan.kind === 'merge-topic') {
     assertExactKeys(plan, [...base, 'topic'], where);
     validatePlanTopic(plan.topic, `${where}.topic`);
-  } else {
-    assertExactKeys(plan, [...base, 'core'], where);
-    assertExactKeys(plan.core, ['before', 'after'], `${where}.core`);
-    checkText(plan.core.before, `${where}.core.before`, { min: 0 });
-    checkText(plan.core.after, `${where}.core.after`, { min: 0 });
   }
   return plan;
 }
@@ -1314,6 +1313,14 @@ function buildLinkDraft(candidate, recordsById, proposal) {
     }
     return { id, revision: record.revision };
   });
+  // P1-1：与执行器同口径（executor.mjs LINK_SOURCES_MAX，同值 64，测试锁定）。
+  // 候选源 ∪ 被改源 ∪ 全部边目标可能超出单轮执行上限；草案层先拒，避免
+  // 用户确认后才在执行器处失败。只加校验，不放宽执行器。
+  if (sources.length > LINK_SOURCES_MAX) {
+    fail('INVALID_INPUT', `plan.sources 达 ${sources.length} 项，超过单轮 ${LINK_SOURCES_MAX} 上限，请拆成多轮整理`, {
+      actual: sources.length, max: LINK_SOURCES_MAX,
+    });
+  }
 
   const plan = {
     version: 1,
@@ -1458,27 +1465,6 @@ export function buildArchiveTopicPlan(input) {
   return { plan, digest: digest(plan), diff, changedItems: 1 };
 }
 
-// --- thin-core 草案 --------------------------------------------------------
-
-function buildThinCoreDraft(candidate, proposal) {
-  assertExactKeys(proposal, ['kind', 'before', 'after'], 'proposal');
-  checkText(proposal.before, 'proposal.before', { min: 0 });
-  checkText(proposal.after, 'proposal.after', { min: 0 });
-  const plan = {
-    version: 1,
-    scopeId: candidate.scopeId,
-    candidateId: candidate.id,
-    kind: 'thin-core',
-    sources: deepClone(candidate.sources),
-    core: { before: proposal.before, after: proposal.after },
-  };
-  // changedItems=1（core 整体替换计 1 项）：此处只出展示草案，K 不读写真实
-  // L1；用户确认后由执行器 executeThinCoreRound 凭 service token CAS 替换
-  // core，删减的旧正文进 core-backups 备份（不做自动下沉 topic）。
-  const diff = [{ path: 'core', oldText: proposal.before, newText: proposal.after }];
-  return { plan, diff, changedItems: 1 };
-}
-
 // ---------------------------------------------------------------------------
 
 /**
@@ -1490,7 +1476,7 @@ function buildThinCoreDraft(candidate, proposal) {
  * @param {object} input
  * @param {object} input.candidate  J 槽形状的候选（id 重算核验）
  * @param {Array}  input.records    完整 active 卡记录（store.listActive 形状）
- * @param {object} input.proposal   {kind:'link'|'merge-topic'|'thin-core', ...}
+ * @param {object} input.proposal   {kind:'link'|'merge-topic', ...}
  * @returns {{plan, digest, diff, changedItems}}
  */
 export function buildDraft(input) {
@@ -1530,21 +1516,20 @@ export function buildDraft(input) {
   assertProtocolJson(proposal, 'proposal');
   if (!isPlainObject(proposal)) fail('INVALID_INPUT', 'proposal 必须是普通对象');
   if (typeof proposal.kind !== 'string' || !PLAN_KINDS.has(proposal.kind)) {
-    fail('INVALID_INPUT', 'proposal.kind 必须是 link/merge-topic/thin-core');
+    fail('INVALID_INPUT', 'proposal.kind 必须是 link/merge-topic');
   }
   if (proposal.kind === 'archive-topic') {
     // archive-topic 不走候选队列草案通道（无候选/无 records），独立构建入口
-    // 见 buildArchiveTopicPlan；此处显式拒绝，避免误入 thin-core 分支报错。
+    // 见 buildArchiveTopicPlan；此处显式拒绝，避免误入其他草案分支报错。
     fail('INVALID_INPUT', 'buildDraft 不接受 archive-topic（专题归档计划请用 buildArchiveTopicPlan 构建）');
   }
 
+  // proposal.kind ∈ {link, merge-topic}（PLAN_KINDS 闭包 + archive-topic 已拒）。
   let built;
   if (proposal.kind === 'link') {
     built = buildLinkDraft(candidate, recordsById, proposal);
-  } else if (proposal.kind === 'merge-topic') {
-    built = buildMergeTopicDraft(candidate, recordsById, proposal);
   } else {
-    built = buildThinCoreDraft(candidate, proposal);
+    built = buildMergeTopicDraft(candidate, recordsById, proposal);
   }
 
   validatePlanShape(built.plan); // 自检：Plan 无未知字段、无 digest/approval/operationId

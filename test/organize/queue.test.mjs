@@ -1,7 +1,7 @@
 // Shiori P3-QUEUE-DIFF · K 槽位测试（node:test，零新增依赖）
 //
 // 覆盖契约 §5 对 K 的全部反例要求：候选tamper、陈旧源、operation先于CAS、
-// 恢复重放、同key异payload、returned alias污染、20/21、合并8..19、全文保全、thin仅草案。
+// 恢复重放、同key异payload、returned alias污染、20/21、合并8..19、全文保全。
 //
 // 注意：本文件用独立实现的 canonical/stable2/digest2 构造候选 id，
 // 与模块内部实现交叉验证 digest 契约（不 import 模块内部函数）。
@@ -796,39 +796,39 @@ test('merge-topic 陈旧源与缺失源：REVISION_CONFLICT / NOT_FOUND', () => 
 });
 
 // ===========================================================================
-// buildDraft · thin-core（仅草案）
+// buildDraft · kind 守卫与 link 草案 sources 上限（0.2.3：thin-core 已裁撤）
 // ===========================================================================
 
-test('thin-core 草案：plan.core、changedItems=1（core 替换）、diff 展示、无执行字段', () => {
+test('buildDraft 收到 kind=thin-core → INVALID_INPUT（thin-core 已整块裁撤，不再有草案通道）', () => {
   const candidate = makeCandidate({ kind: 'isolated', sources: sortedRefs('a'), evidence: {} });
   const records = [makeCard('a')];
-  const draft = buildDraft({
+  expectCode('INVALID_INPUT', () => buildDraft({
     candidate, records,
     proposal: { kind: 'thin-core', before: 'L1 原文', after: 'L1 精简后' },
-  });
-  assert.deepEqual(Object.keys(draft.plan).sort(), ['candidateId', 'core', 'kind', 'scopeId', 'sources', 'version']);
-  assert.deepEqual(draft.plan.core, { before: 'L1 原文', after: 'L1 精简后' });
-  assert.equal(draft.changedItems, 1);
-  assert.deepEqual(draft.diff, [{ path: 'core', oldText: 'L1 原文', newText: 'L1 精简后' }]);
-  assert.equal(draft.digest, digestPlan(draft.plan));
-  assert.ok(!Object.keys(draft.plan).includes('approval'));
-  // K 不读写真实 L1：不触发任何文件/执行动作由源码静态保证（模块零 fs import）
+  }));
+  // 空的 thin-core 形状同样拒收（kind 校验先于字段校验）
+  expectCode('INVALID_INPUT', () => buildDraft({
+    candidate, records, proposal: { kind: 'thin-core' },
+  }));
 });
 
-test('thin-core 输入校验：非字符串正文拒绝；候选源仍需 records 覆盖', () => {
-  const candidate = makeCandidate({ kind: 'isolated', sources: sortedRefs('a'), evidence: {} });
+test('link 草案 sources 超 64 → INVALID_INPUT 提示拆轮（与执行器 LINK_SOURCES_MAX 同口径）', () => {
+  // 候选 60 源，被改源 a 的 after 引入 10 个新目标 → sources = 60 ∪ {a} ∪ 10 = 71 > 64
+  const ids = Array.from({ length: 60 }, (_, i) => `c${String(i).padStart(2, '0')}`);
+  const candidate = makeCandidate({ kind: 'link', sources: sortedRefs(...ids), evidence: {} });
+  const records = ids.map((id) => makeCard(id));
+  const targets = Array.from({ length: 10 }, (_, i) => `t${String(i).padStart(2, '0')}`);
+  for (const t of targets) records.push(makeCard(t));
   expectCode('INVALID_INPUT', () => buildDraft({
-    candidate, records: [makeCard('a')],
-    proposal: { kind: 'thin-core', before: 1, after: 'x' },
+    candidate, records,
+    proposal: { kind: 'link', links: [{ id: 'c00', after: targets.map((t) => ({ target: t, rel: 'r' })) }] },
   }));
-  expectCode('INVALID_INPUT', () => buildDraft({
-    candidate, records: [makeCard('a')],
-    proposal: { kind: 'thin-core', before: 'a', after: 'b', extra: 1 },
-  }));
-  expectCode('NOT_FOUND', () => buildDraft({
-    candidate, records: [],
-    proposal: { kind: 'thin-core', before: 'a', after: 'b' },
-  }));
+  // 边界：总数恰好 64 放行（60 源 ∪ 4 目标 = 64）
+  const ok = buildDraft({
+    candidate, records,
+    proposal: { kind: 'link', links: [{ id: 'c00', after: ['t00', 't01', 't02', 't03'].map((t) => ({ target: t, rel: 'r' })) }] },
+  });
+  assert.equal(ok.plan.sources.length, 64);
 });
 
 // ===========================================================================
@@ -1015,9 +1015,10 @@ test('K-2 对象键孤立代理码元拒绝：evidence 键 \\ud800 即使候选 
   assert.ok(caught instanceof Error, 'enqueue 必须拒绝');
   assert.equal(caught.code, 'INVALID_INPUT');
   assert.ok(caught.message.includes('对象键'), `消息应指出是键的问题：${caught.message}`);
-  // buildDraft 入口同样拒绝
+  // buildDraft 入口同样拒绝（candidate 先于 records/proposal 校验）
   assert.throws(() => buildDraft({
-    candidate, records: [makeCard('a')], proposal: { kind: 'thin-core', before: 'x', after: 'xy' },
+    candidate, records: [makeCard('a')],
+    proposal: { kind: 'link', links: [{ id: 'a', after: [{ target: 'b', rel: 'relates' }] }] },
   }), (err) => err.code === 'INVALID_INPUT' && err.message.includes('对象键'));
 });
 
@@ -1226,7 +1227,7 @@ test('digestPlan/validatePlanShape：接受 archive-topic 形状；形状反例�
   expectCode('INVALID_INPUT', () => digestPlan({ ...deepCopy(built.plan), kind: 'archive' }));
 
   // buildDraft（候选队列草案通道）显式拒绝 archive-topic：独立入口是
-  // buildArchiveTopicPlan，不误入 thin-core 分支
+  // buildArchiveTopicPlan，不误入 link/merge-topic 草案分支
   const { candidate, records } = linkDraftScene();
   expectCode('INVALID_INPUT', () => buildDraft({
     candidate, records, proposal: { kind: 'archive-topic' },

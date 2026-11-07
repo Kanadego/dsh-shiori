@@ -907,6 +907,34 @@ window.__ModuleLoader__.load({
         hint ? h("span", { className: "dshi_hint" }, hint) : null);
     }
 
+    // ── P1-2：tab 级会话守卫（CandidatesTab 现成 mark/isStale 思路的本文件局部
+    // 抽用；不新增全局、不改导出面）────────────────────────────────────────────
+    // 六个数据 tab（Status / Memory / Graph / Topics / Flashbacks / Timeline）的
+    // load 都是异步的：响应回来时若用户已切换会话，旧响应会把别的作用域的数据
+    // 写进当前页。holder 由调用方用 useState 存一个可变对象（跨渲染持久、充当
+    // ref 使用，不占渲染状态语义）；track() 在渲染体里调用（早于任何 load 发起，
+    // 不依赖 effect 是否真的执行），mark() 给本次加载发戳，isStale() 判过期。
+    function makeTabSessionGuard(props, holder) {
+      var track = function () {
+        if (holder.sessionId !== props.sessionId) {
+          holder.sessionId = props.sessionId;
+          holder.gen += 1;
+        }
+      };
+      return {
+        track: track,
+        mark: function () {
+          track();
+          // origin 记闭包自己的 props.sessionId（不是 holder）：旧闭包的 props
+          // 停在旧会话，即使 holder 已 gen+1 也能按 sessionId 判过期。
+          return { sessionId: props.sessionId, gen: holder.gen };
+        },
+        isStale: function (origin) {
+          return holder.sessionId !== origin.sessionId || holder.gen !== origin.gen;
+        },
+      };
+    }
+
     // ── F1b：语义召回只读状态 + 重建向量按钮 ─────────────────────────────
     // 数据源：getStatus.diagnostics.semantic（wire 的 diagnostics 块是
     // additionalProperties:true，服务端纯增量注入；客户端不做结构假设——
@@ -914,7 +942,8 @@ window.__ModuleLoader__.load({
     // 触发通道：executeTool 的保留名 semantic_rebuild（不是宿主工具，服务端
     // dispatchTool 内部拦截；单飞：重建中再点只返回进度快照）。
     // 进度：点击后本地起一个轮询循环（getStatus 每 1.5s），直到 rebuild 不在
-    // running；会话切换 / 组件销毁由 sessionId 比对终止，不依赖 unmount 回调。
+    // running；会话切换由渲染体同步的 sessionId 镜像 ref 比对终止，组件卸载由
+    // 挂载 effect 的 cleanup 置停（P1-1）。
     var SEMANTIC_REBUILD_TOOL = "semantic_rebuild";
     var REBUILD_POLL_MS = 1500;
     var SEMANTIC_PHASE_LABELS = {
@@ -973,11 +1002,32 @@ window.__ModuleLoader__.load({
       var rebuildState = useState(null);
       var rebuildProgress = rebuildState[0];
       var setRebuildProgress = rebuildState[1];
+      // P1-2：本 tab 的会话守卫 holder（新 state 一律追加在既有 state 之后）。
+      var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
+      var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
+      tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
+      // P1-1（重建轮询串会话）：当前 sessionId 的镜像 ref——渲染体同步，轮询每轮
+      // 与发起时的 sid 比对。旧实现比对创建闭包里的 props.sessionId，props 对象
+      // 不随重渲染更新，切换会话后比对恒等、轮询永不停止。pollAliveRef 由挂载
+      // effect 置真、cleanup 置假，组件卸载即停，不依赖会话切换。
+      var sidRef = useRef(props.sessionId);
+      sidRef.current = props.sessionId;
+      var pollAliveRef = useRef(false);
+      useEffect(function () {
+        pollAliveRef.current = true;
+        return function () { pollAliveRef.current = false; };
+      }, []);
       var load = async function () {
+        var origin = tabGuard.mark();
         setError(null);
         try {
-          setStatus(await props.dsh.call("getStatus", props.sessionId, {}));
-        } catch (e) { setStatus(null); if (!reportSessionUnavailable(e, props, setError)) setError(e); }
+          var result = await props.dsh.call("getStatus", props.sessionId, {});
+          if (tabGuard.isStale(origin)) return; // P1-2：会话已切换，丢弃旧响应
+          setStatus(result);
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setStatus(null); if (!reportSessionUnavailable(e, props, setError)) setError(e);
+        }
       };
       useEffect(function () { load(); }, [props.sessionId]);
       var semantic = status && status.diagnostics && typeof status.diagnostics === "object" && !Array.isArray(status.diagnostics)
@@ -986,7 +1036,7 @@ window.__ModuleLoader__.load({
       var rebuildRunning = rebuildProgress !== null && rebuildProgress.running === true;
       // 「重建向量」：后台分批补（服务端每批 20 张、批间让出事件循环），进度
       // 写在 diagnostics.semantic.rebuild，这里轮询读取并原地显示。会话切换
-      // （props.sessionId 变化）即停轮询，不依赖组件卸载回调。
+      // （sidRef 镜像比对）与卸载（pollAliveRef cleanup）都会停轮询（P1-1）。
       var startRebuild = async function () {
         if (!semantic || !semantic.enabled || rebuildRunning) return;
         var sid = props.sessionId;
@@ -999,7 +1049,9 @@ window.__ModuleLoader__.load({
           return;
         }
         for (;;) {
-          if (props.sessionId !== sid) return; // 会话已切换：停止轮询
+          // P1-1：每轮比对镜像 ref（渲染体同步的当前会话）；组件已卸载（cleanup
+          // 置假）同样停轮询。读闭包里的 props 判断不出会话切换，这里必须走 ref。
+          if (!pollAliveRef.current || sidRef.current !== sid) return; // 会话已切换 / 已卸载：停止轮询
           var fresh;
           try {
             fresh = await props.dsh.call("getStatus", sid, {});
@@ -1136,13 +1188,23 @@ window.__ModuleLoader__.load({
       var saveErrorState = useState(null);
       var saveError = saveErrorState[0];
       var setSaveError = saveErrorState[1];
+      // P1-2：本 tab 的会话守卫 holder（新 state 一律追加在既有 state 之后）。
+      var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
+      var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
+      tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
       // F7：只读态（另一实例在写）写按钮置灰 + 页内黄字说明原因。
       var ro = props.readOnly === true;
       var load = async function () {
+        var origin = tabGuard.mark();
         setError(null);
         try {
-          setView(await props.dsh.call("getMemoryView", props.sessionId, {}));
-        } catch (e) { setView(null); if (!reportSessionUnavailable(e, props, setError)) setError(e); }
+          var result = await props.dsh.call("getMemoryView", props.sessionId, {});
+          if (tabGuard.isStale(origin)) return; // P1-2：会话已切换，丢弃旧响应
+          setView(result);
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setView(null); if (!reportSessionUnavailable(e, props, setError)) setError(e);
+        }
       };
       useEffect(function () { load(); }, [props.sessionId]);
       var l0 = view && (view.l0 || view.persona);
@@ -1710,6 +1772,10 @@ window.__ModuleLoader__.load({
       var searchMissState = useState(false);
       var searchMiss = searchMissState[0];
       var setSearchMiss = searchMissState[1];
+      // P1-2：本 tab 的会话守卫 holder（新 state 一律追加在既有 state 之后）。
+      var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
+      var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
+      tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
       var dragRef = useRef(null);
       var wrapRef = useRef(null);
       // F7：只读态（另一实例在写）写按钮置灰；F4：时间线跳转目标（type 必须是 spark）。
@@ -1751,10 +1817,16 @@ window.__ModuleLoader__.load({
         };
       }, [graph]);
       var load = async function () {
+        var origin = tabGuard.mark();
         setError(null);
         try {
-          setGraph(await props.dsh.call("getGraph", props.sessionId, {}));
-        } catch (e) { setGraph(null); if (!reportSessionUnavailable(e, props, setError)) setError(e); }
+          var result = await props.dsh.call("getGraph", props.sessionId, {});
+          if (tabGuard.isStale(origin)) return; // P1-2：会话已切换，丢弃旧响应
+          setGraph(result);
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setGraph(null); if (!reportSessionUnavailable(e, props, setError)) setError(e);
+        }
       };
       useEffect(function () { load(); }, [props.sessionId]);
       var normalized = useMemo(function () { return graph ? normalizeGraph(graph) : { nodes: [], edges: [] }; }, [graph]);
@@ -2304,16 +2376,17 @@ window.__ModuleLoader__.load({
     ];
     var PLAN_STATE_LABELS = { open: "待执行", executed: "已执行", superseded: "已作废" };
     var PLAN_KIND_LABELS = { organize: "整理", forgetting: "遗忘" };
-    // U5b：预览卡标题按计划类型翻成人话（link / merge-topic / thin-core）；
+    // U5b：预览卡标题按计划类型翻成人话（link / merge-topic）；
     // 未知类型原样显示，绝不吞掉、不崩。
     // 0.2.2 归档入口（rework a2）：planView.kind 恒为家族名 "organize"（服务端
     // protocol.mjs enum 只有 organize / forgetting），"archive-topic" 不在 kind enum
     // 里——专题归档卡由渲染处用发起时钉定的 preview.archiveTopic 直接给标题
     // 「专题归档」（方向在正文说明）。
     // 0.2.3 计划类型细分：planView 新增可选 proposalKind（link / merge-topic /
-    // thin-core / archive-topic），真实计划类型从它读；旧服务端不带该字段时回退
+    // archive-topic），真实计划类型从它读；旧服务端不带该字段时回退
     // plan.kind（旧行为）。planKindOf 是唯一取值口，标题 / 正文 / 按钮一律经它。
-    var PLAN_PREVIEW_TITLES = { "link": "连起来", "merge-topic": "合并进主题", "thin-core": "core 瘦身" };
+    // （thin-core 已在 0.2.3 裁掉：标题表 / 正文分支 / 专用按钮一并不再保留。）
+    var PLAN_PREVIEW_TITLES = { "link": "连起来", "merge-topic": "合并进主题" };
     function planKindOf(plan) {
       var proposal = plan && plan.proposalKind !== undefined && plan.proposalKind !== null
         ? String(plan.proposalKind) : "";
@@ -2394,7 +2467,7 @@ window.__ModuleLoader__.load({
         return "proposal 必须是 JSON 对象。";
       }
       if (proposal.kind !== "link" && proposal.kind !== "merge-topic") {
-        return "proposal.kind 必须是 link / merge-topic（当前 " + JSON.stringify(proposal.kind ?? null) + "）。cluster 候选可直接用「合并进主题」自动构造。";
+        return "proposal.kind 只支持 link / merge-topic（thin-core 已在 0.2.3 裁掉；当前 " + JSON.stringify(proposal.kind ?? null) + "）。cluster 候选可直接用「合并进主题」自动构造。";
       }
       if (proposal.kind === "link") {
         var linkExtra = Object.keys(proposal).filter(function (k) { return k !== "kind" && k !== "links"; });
@@ -3107,14 +3180,6 @@ window.__ModuleLoader__.load({
           lines.push("合并后源卡会退休，这一步不可撤销。");
           return lines;
         }
-        if (kind === "thin-core") {
-          if (first !== null) {
-            lines.push("core 正文 " + String((first.oldText) ?? "").length + " → " + String((first.newText) ?? "").length + " 字");
-          } else {
-            lines.push("core 正文将瘦身（长度变化见下方「原始信息」）");
-          }
-          return lines;
-        }
         if (isArchivePreview || kind === "archive-topic") {
           var archiveDir = info.archiveTopic === true;
           var archiveKey = info.topicKey !== undefined && info.topicKey !== null
@@ -3196,7 +3261,6 @@ window.__ModuleLoader__.load({
         var confirmLabel = isArchiveCard ? (preview.archiveTopic === true ? "确认移出索引（可随时恢复）" : "确认恢复")
           : planKind === "link" ? "就这么连起来"
           : planKind === "merge-topic" ? "确认合并（不可撤销）"
-          : planKind === "thin-core" ? "确认瘦身"
           : "确认执行";
         return h("div", { key: key, className: "dshi_itemMerge", style: { minWidth: 0 } },
           h("div", { className: "dshi_confirm", style: { marginLeft: 12 } },
@@ -3336,7 +3400,7 @@ window.__ModuleLoader__.load({
               : h("button", { className: "dshi_btn", disabled: actionsDisabled || businessPlanId === null || superseded, onClick: function () { doPreviewForgetting(businessPlanId); } }, "预览遗忘计划")),
           executed ? h("div", { className: "dshi_hint" }, "该计划已执行：不可再次预览 / 执行；如需再次整理请重新 analyze。")
             : superseded ? h("div", { className: "dshi_hint" }, "该计划已被新预览作废（superseded）：不可再预览 / 执行（服务端会拒绝并报 REVISION_CONFLICT），请使用最新计划。")
-            : (!isForgetting ? h("div", { className: "dshi_hint" }, "organize 计划请从对应候选的「预览 / 合并进主题」流程执行。") : null),
+            : (!isForgetting ? h("div", { className: "dshi_hint" }, "organize 计划请从对应候选的「预览整理计划 / 合并进主题」流程执行。") : null),
           h("details", { className: "dshi_details" },
             h("summary", { className: "dshi_hint" }, "原始数据（JSON）"),
             h("pre", { className: "dshi_pre" }, stableStringify(plan))));
@@ -3486,22 +3550,36 @@ window.__ModuleLoader__.load({
       var sortState = useState("updated-desc");
       var sort = sortState[0];
       var setSort = sortState[1];
+      // P1-2：本 tab 的会话守卫 holder（新 state 一律追加在既有 state 之后）。
+      var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
+      var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
+      tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
       // F7：只读态（另一实例在写）写按钮置灰。
       var ro = props.readOnly === true;
       // F4：时间线跳转目标（面板级 ref 传入；type 必须是 topic）。
       var focusTarget = props.focusTarget && props.focusTarget.type === "topic" ? props.focusTarget : null;
+      // P1-3（详情串卡）：opened 的镜像 ref + 读请求在途序号。ref 在渲染体同步、
+      // openTopic 切换时立即同步（不等下一轮渲染），readTopic 的响应回来时用它
+      // 判断「发起时的专题是否还是当前专题」。
+      var openedRef = useRef(opened);
+      openedRef.current = opened;
+      var detailReqSeqRef = useRef(0);
 
       var load = async function () {
+        var origin = tabGuard.mark();
         setBusy(true);
         setError(null);
         try {
           var result = await props.dsh.call("executeTool", props.sessionId, { name: "memory_list_topics", args: {} });
+          if (tabGuard.isStale(origin)) return; // P1-2：会话已切换，丢弃旧响应
           setTopics(Array.isArray(result && result.topics) ? result.topics : []);
         } catch (e) {
+          if (tabGuard.isStale(origin)) return;
           setTopics(null);
           setError(e);
         } finally {
-          setBusy(false);
+          // 过期请求不动 busy（新一轮 load 已接管 busy 的收尾）
+          if (!tabGuard.isStale(origin)) setBusy(false);
         }
       };
       useEffect(function () { load(); }, [props.sessionId]);
@@ -3523,19 +3601,30 @@ window.__ModuleLoader__.load({
         && !topics.some(function (row) { return String(row && row.key) === focusTarget.id; }));
 
       var readTopic = async function (key) {
+        // P1-3：发请求时记下在途序号；响应回来时若用户已切到别的专题（opened 变了）
+        // 或已有更新的读请求在途，整包丢弃——不 setDetail、不 setDetailError，
+        // 杜绝「点 A 立刻点 B，A 的响应晚到覆盖 B 的详情」。
+        var mySeq = detailReqSeqRef.current + 1;
+        detailReqSeqRef.current = mySeq;
+        var isLatest = function () { return detailReqSeqRef.current === mySeq; };
         setDetailBusy(true);
         setDetailError(null);
         try {
-          setDetail(await props.dsh.call("executeTool", props.sessionId, { name: "memory_read", args: { topic: key } }));
+          var result = await props.dsh.call("executeTool", props.sessionId, { name: "memory_read", args: { topic: key } });
+          if (openedRef.current !== key || !isLatest()) return;
+          setDetail(result);
         } catch (e) {
+          if (openedRef.current !== key || !isLatest()) return;
           setDetail(null);
           setDetailError(e);
         } finally {
-          setDetailBusy(false);
+          // 只有仍是最新一次读请求时才收 busy：过期请求不动 busy，交给在途的最新请求收尾。
+          if (isLatest()) setDetailBusy(false);
         }
       };
       var openTopic = function (key) {
         if (opened === key) {
+          openedRef.current = ""; // P1-3：镜像 ref 立即同步，不等下一轮渲染
           setOpened("");
           setDetail(null);
           setEditing(false);
@@ -3544,6 +3633,7 @@ window.__ModuleLoader__.load({
           setSaveError(null);
           return;
         }
+        openedRef.current = key;
         setOpened(key);
         setDetail(null);
         setDetailError(null);
@@ -3563,7 +3653,15 @@ window.__ModuleLoader__.load({
       var cancelEdit = function () { setEditing(false); setDraft(""); setSaveError(null); };
       var save = async function () {
         if (!detail) return;
-        var key = detail.topic || opened;
+        // P1-3：保存只认 opened 作为写目标。detail 是 memory_read 的响应快照，
+        // 响应期间用户可能已切换专题——detail.topic 与 opened 不一致时直接不写，
+        // 给中文提示，绝不把 A 专题的草稿写进 B 专题；expectedRevision 仍用 detail.revision。
+        var key = opened;
+        var detailTopic = detail.topic !== undefined && detail.topic !== null ? String(detail.topic) : "";
+        if (detailTopic !== "" && detailTopic !== String(key)) {
+          setSaveError("详情已切换，请重新打开该专题再保存");
+          return;
+        }
         setSaveBusy(true);
         setSaveError(null);
         setSaveOk(null);
@@ -4218,15 +4316,29 @@ window.__ModuleLoader__.load({
       var errorState = useState(null);
       var error = errorState[0];
       var setError = errorState[1];
+      // P1-2：本 tab 的会话守卫 holder（新 state 一律追加在既有 state 之后）。
+      var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
+      var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
+      tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
       var load = async function () {
+        var origin = tabGuard.mark();
         setError(null);
         try {
           var status = await props.dsh.call("getStatus", props.sessionId, {});
+          if (tabGuard.isStale(origin)) return; // P1-2：会话已切换，丢弃旧响应
           setCaps(status && status.capabilities && typeof status.capabilities === "object" ? status.capabilities : null);
-        } catch (e) { setCaps(null); if (!reportSessionUnavailable(e, props, setError)) setError(e); }
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setCaps(null); if (!reportSessionUnavailable(e, props, setError)) setError(e);
+        }
         try {
-          setData(await props.dsh.call("getGraph", props.sessionId, {}));
-        } catch (e) { setData(null); if (!reportSessionUnavailable(e, props, setError)) setError(e); }
+          var graph = await props.dsh.call("getGraph", props.sessionId, {});
+          if (tabGuard.isStale(origin)) return;
+          setData(graph);
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setData(null); if (!reportSessionUnavailable(e, props, setError)) setError(e);
+        }
       };
       useEffect(function () { load(); }, [props.sessionId]);
       var nodes = data && Array.isArray(data.nodes) ? data.nodes : [];
@@ -4354,17 +4466,25 @@ window.__ModuleLoader__.load({
       var busyState = useState(false);
       var busy = busyState[0];
       var setBusy = busyState[1];
+      // P1-2：本 tab 的会话守卫 holder（新 state 一律追加在既有 state 之后）。
+      var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
+      var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
+      tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
       var load = async function (nextOffset) {
+        var origin = tabGuard.mark();
         setBusy(true);
         setError(null);
         try {
           var result = await props.dsh.call("getTimeline", props.sessionId, { offset: nextOffset, limit: TIMELINE_PAGE_SIZE });
+          if (tabGuard.isStale(origin)) return; // P1-2：会话已切换，丢弃旧响应
           setPage(result && typeof result === "object" ? result : null);
         } catch (e) {
+          if (tabGuard.isStale(origin)) return;
           setPage(null);
           if (!reportSessionUnavailable(e, props, setError)) setError(e);
         } finally {
-          setBusy(false);
+          // 过期请求不动 busy（新一轮 load 已接管 busy 的收尾）
+          if (!tabGuard.isStale(origin)) setBusy(false);
         }
       };
       useEffect(function () { load(offset); }, [props.sessionId, offset]);

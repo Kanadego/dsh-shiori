@@ -275,8 +275,7 @@ describe('P3-L approval 防线（全部零写）', () => {
     sparkStore.close();
   });
 
-  // thin-core 执行用例移至 executor-thin-core.test.mjs（0.2.2 起可执行，
-  // 不再 UNSUPPORTED 硬拒）。
+  // 0.2.3：thin-core 已整块裁撤，执行器不再接受该 kind（守卫见下方 schema 反例组）。
 });
 
 // ---------------------------------------------------------------------------
@@ -367,6 +366,21 @@ describe('P3-L plan schema 反例', () => {
     const over = { ...plan, links: many };
     await assert.rejects(exec.executeRound(round(over, 'r-l5')), code('INVALID_INPUT'));
     exec.close();
+  });
+
+  it('plan.kind=thin-core → INVALID_INPUT（0.2.3 整块裁撤，执行器不再支持该 kind）', async (t) => {
+    const { exec, sparkStore } = await fixture(t);
+    const thin = {
+      version: 1,
+      scopeId: 'amber',
+      candidateId: 'a'.repeat(64),
+      kind: 'thin-core',
+      sources: [{ id: 'card-a', revision: 1 }],
+      core: { before: '旧正文', after: '新正文' },
+    };
+    await assert.rejects(exec.executeRound(round(thin, 'r-tc')), code('INVALID_INPUT'));
+    exec.close();
+    sparkStore.close();
   });
 });
 

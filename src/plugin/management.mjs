@@ -830,7 +830,6 @@ export function createManagement(deps) {
             scopeId: scope.scopeId,
             authorize,
             budgets: coreBudgetsOf(settings.budgets),
-            stateRoot: settings.stateRoot,
           });
           try {
             result = await executor.executeRound({

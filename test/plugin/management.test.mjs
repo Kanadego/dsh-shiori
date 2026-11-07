@@ -81,29 +81,22 @@ test("protocol：10 个方法全覆盖；闭包拒绝未知键；queueRevision/p
     () => validateManagementPayload("executePlan", { planId: "p", planDigest: "a".repeat(64), operationId: "a1", confirmed: false }),
     (e) => e.code === "INVALID_INPUT",
   );
-  // thin-core 通过校验（照 queue.buildThinCoreDraft 的 {kind,before,after} 形状）。
-  const thinPayload = {
-    kind: "organize", candidateId: "a".repeat(64), expectedQueueRevision: 0, operationId: "a1",
-    proposal: { kind: "thin-core", before: "x", after: "y" },
-  };
-  assert.deepEqual(validateManagementPayload("previewPlan", thinPayload), thinPayload);
-  // thin-core 形状仍受闭包与类型约束：多余键 / 非字符串在 wire 层拒绝；
-  // 缺 before 与 link/merge-topic 的 required 一样由 previewPlan 全链路的
-  // buildDraft assertExactKeys 拦截（validateNode 不递归查 required，既有口径）。
-  assert.throws(
-    () => validateManagementPayload("previewPlan", {
-      kind: "organize", candidateId: "a".repeat(64), expectedQueueRevision: 0, operationId: "a1",
-      proposal: { kind: "thin-core", before: "x", after: "y", core: { before: "x", after: "y" } },
-    }),
-    (e) => e.code === "INVALID_INPUT",
-  );
-  assert.throws(
-    () => validateManagementPayload("previewPlan", {
-      kind: "organize", candidateId: "a".repeat(64), expectedQueueRevision: 0, operationId: "a1",
-      proposal: { kind: "thin-core", before: 1, after: "y" },
-    }),
-    (e) => e.code === "INVALID_INPUT",
-  );
+  // 0.2.3 守卫：协议层 previewPlan 收到 thin-core proposal → 拒收
+  // （thin-core 已整块裁撤，oneOf 不再有该分支，任意形状都进不了协议面）。
+  for (const proposal of [
+    { kind: "thin-core", before: "x", after: "y" },
+    { kind: "thin-core" },
+    { kind: "thin-core", before: 1, after: "y", extra: 1 },
+  ]) {
+    assert.throws(
+      () => validateManagementPayload("previewPlan", {
+        kind: "organize", candidateId: "a".repeat(64), expectedQueueRevision: 0, operationId: "a1",
+        proposal,
+      }),
+      (e) => e.code === "INVALID_INPUT",
+      `thin-core proposal 应被 wire 层拒绝：${JSON.stringify(proposal)}`,
+    );
+  }
   // Error code 词表冻结。
   assert.deepEqual([...MANAGEMENT_ERROR_CODES].sort(), [
     "BUDGET_EXCEEDED", "INVALID_INPUT", "NOT_CONFIGURED", "NOT_FOUND",
@@ -197,7 +190,7 @@ test("organize 全链：analyze 入队（持久）→ review → previewPlan（b
   await controller2.stop();
 });
 
-test("organize：merge-topic 计划仅更新已有 topic（目标缺失明确报错），thin-core 拒绝执行", async (t) => {
+test("organize：merge-topic 计划仅更新已有 topic（目标缺失明确报错）", async (t) => {
   const { controller, trusted } = await setup(t);
   for (let i = 0; i < 9; i++) {
     await controller.management.executeTool(trusted, {
@@ -237,101 +230,8 @@ test("organize：merge-topic 计划仅更新已有 topic（目标缺失明确报
   await controller.stop();
 });
 
-// ── thin-core 全链（协议分支 + stateRoot 备份接线）──────────────────────────
-
-/** 扫 dataRoot 下 scopes/<id> 目录里的 core.md 读磁盘正文（scopeId 由 pinScope 派生，测试直接扫盘）。 */
-async function readCoreBodies(dataRoot) {
-  const scopesDir = path.join(dataRoot, "scopes");
-  const bodies = [];
-  let entries;
-  try {
-    entries = await readdir(scopesDir, { withFileTypes: true });
-  } catch (error) {
-    if (error.code === "ENOENT") return bodies;
-    throw error;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    try {
-      bodies.push(await readFile(path.join(scopesDir, entry.name, "core.md"), "utf8"));
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-  }
-  return bodies;
-}
-
-async function seedNineCards(controller, trusted, tag) {
-  for (let i = 0; i < 9; i++) {
-    await controller.management.executeTool(trusted, {
-      name: "spark_save",
-      args: { title: `TC${i}${tag}`, content: `thin-core 实体 ${i}。`, triggers: [`tc${i}`], entities: ["thin-core 实体"], vitality: "evergreen" },
-    });
-  }
-}
-
-test("organize：previewPlan 接受 thin-core proposal 并返回计划（diff 为 core 整体替换）", async (t) => {
-  const { controller, trusted } = await setup(t);
-  await seedNineCards(controller, trusted, "-pv");
-  const analyzed = await controller.management.analyze(trusted, { kind: "organize", operationId: "an-tc-pv" });
-  assert.ok(analyzed.items.length > 0, "organize analyze must yield candidates");
-  const candidate = analyzed.items[0].candidate;
-  const afterText = "# Core\n\nthin-core 新正文。\n";
-  const preview = await controller.management.previewPlan(trusted, {
-    kind: "organize", candidateId: candidate.id,
-    proposal: { kind: "thin-core", before: "", after: afterText },
-    expectedQueueRevision: analyzed.queueRevision, operationId: "pv-tc",
-  });
-  assert.equal(preview.kind, "organize");
-  assert.equal(preview.proposalKind, "thin-core");
-  assert.match(preview.planDigest, /^[a-f0-9]{64}$/);
-  assert.equal(preview.changedItems, 1);
-  assert.deepEqual(preview.diff, [{ path: "core", oldText: "", newText: afterText }]);
-  // 缺 before：wire 层 required 不递归（既有口径），全链路由 buildDraft
-  // assertExactKeys 拦截（code 仍为 INVALID_INPUT）。
-  await assert.rejects(
-    () => controller.management.previewPlan(trusted, {
-      kind: "organize", candidateId: candidate.id,
-      proposal: { kind: "thin-core", after: afterText },
-      expectedQueueRevision: analyzed.queueRevision, operationId: "pv-tc-missing",
-    }),
-    (e) => e.code === "INVALID_INPUT",
-  );
-  await controller.stop();
-});
-
-test("organize：executePlan 执行 thin-core 后 core 正文等于 after，stateRoot 接线后回执 backup 不 skipped", async (t) => {
-  const { controller, trusted, base } = await setup(t);
-  await seedNineCards(controller, trusted, "-ex");
-  const analyzed = await controller.management.analyze(trusted, { kind: "organize", operationId: "an-tc-ex" });
-  assert.ok(analyzed.items.length > 0, "organize analyze must yield candidates");
-  const candidate = analyzed.items[0].candidate;
-  const afterText = "# Core\n\nthin-core 落盘正文。\n";
-  const preview = await controller.management.previewPlan(trusted, {
-    kind: "organize", candidateId: candidate.id,
-    proposal: { kind: "thin-core", before: "", after: afterText },
-    expectedQueueRevision: analyzed.queueRevision, operationId: "pv-tc-ex",
-  });
-  const executed = await controller.management.executePlan(trusted, {
-    planId: preview.planId, planDigest: preview.planDigest, operationId: "ex-tc-ex", confirmed: true,
-  });
-  assert.equal(executed.result.status, "completed");
-  assert.equal(executed.result.kind, "thin-core");
-  assert.equal(executed.result.changedItems, 1);
-  // management.createOrganizerExecutor 已接线 settings.stateRoot：备份真实落盘，不再 skipped。
-  assert.equal(executed.result.backup.skipped, false);
-  assert.ok(
-    executed.result.backup.path.startsWith(path.join(base, "state", "core-backups")),
-    `backup path 应位于 stateRoot/core-backups（实际 ${executed.result.backup.path}）`,
-  );
-  // core 磁盘正文逐字节等于 plan.core.after。
-  const coreBodies = await readCoreBodies(path.join(base, "data"));
-  assert.ok(
-    coreBodies.includes(afterText),
-    "scopes/*/core.md 磁盘正文应等于 plan.core.after",
-  );
-  await controller.stop();
-});
+// ── 0.2.3：thin-core 全链用例已随整块裁撤删除（协议层拒收守卫见文件头部
+// validateManagementPayload 测试；执行器侧拒收见 test/organize/executor.test.mjs）──
 
 test("listCandidates：候选过期时透传条目 stale 与全量 staleCount（分页不受影响）", async (t) => {
   const { controller, trusted } = await setup(t);
