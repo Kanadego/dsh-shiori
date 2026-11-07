@@ -1168,7 +1168,7 @@ test("archive-topic 全链：previewPlan → executePlan 落盘归档；恢复�
   assert.ok(!rawRestored.includes("archivedAt"), "恢复后 front-matter 不再有 archivedAt 字段");
 });
 
-test("archive-topic：跨 scope 拒绝 INVALID_STATE；P-A 收敛作废其他 open organize 计划（executePlan 硬闸生效）", async (t) => {
+test("archive-topic：跨 scope 拒绝 INVALID_STATE；P2-B3 独立计划族——归档预览不再作废 organize 计划，两计划都可执行", async (t) => {
   const { controller, trusted, base } = await setup(t);
   await controller.management.executeTool(trusted, {
     name: "topic_create", args: { topic: "local-topic", title: "Local", summary: "s" },
@@ -1203,25 +1203,221 @@ test("archive-topic：跨 scope 拒绝 INVALID_STATE；P-A 收敛作废其他 op
   });
   assert.ok(organizePreview.planId);
 
-  // archive-topic 预览（另一专题）→ 旧 organize 计划被作废
+  // P2-B3 后 archive-topic 是独立计划族：归档预览只收敛其它归档计划，
+  // 不再作废 organize 计划（修复前这里会误伤，确认执行报 REVISION_CONFLICT）。
   await controller.management.executeTool(trusted, {
     name: "topic_create", args: { topic: "arch-other", title: "Other", summary: "s" },
   });
   const arPreview = await controller.management.previewPlan(trusted, {
     kind: "archive-topic", topicKey: "arch-other", archive: true, operationId: "pv-ar-sup",
   });
-  await assert.rejects(
-    () => controller.management.executePlan(trusted, {
-      planId: organizePreview.planId, planDigest: organizePreview.planDigest, operationId: "ex-superseded-ar", confirmed: true,
-    }),
-    (e) => e.code === "REVISION_CONFLICT" && /superseded/.test(e.message),
-    "被 archive-topic 预览作废的 organize 计划不可执行",
-  );
+  const listedAfterAr = await controller.management.listCandidates(trusted, {});
+  const organizeRow = listedAfterAr.plans.find((p) => p.planId === organizePreview.planId);
+  assert.ok(organizeRow, "organize plan must be listed");
+  assert.equal(organizeRow.superseded, false, "archive preview must NOT supersede organize plan");
+  assert.equal(organizeRow.kind, "organize");
 
-  // archive 计划本身可执行（未被作废）
+  // organize 计划仍可执行（P2-B3 修复的核心回归点）
+  const executedOrganize = await controller.management.executePlan(trusted, {
+    planId: organizePreview.planId, planDigest: organizePreview.planDigest, operationId: "ex-organize-after-ar", confirmed: true,
+  });
+  assert.equal(executedOrganize.result.status, "completed");
+
+  // archive 计划也可执行（未被作废）
   const executed = await controller.management.executePlan(trusted, {
     planId: arPreview.planId, planDigest: arPreview.planDigest, operationId: "ex-ar-sup", confirmed: true,
   });
   assert.equal(executed.result.status, "completed");
+});
+
+// ── P2-B3：archive-topic 独立计划族 ──────────────────────────────────────────
+
+test("P2-B3：归档预览 → organize analyze 不作废归档计划（仍 open 且可执行）；队列 DTO wire 不漏新 store kind", async (t) => {
+  const { controller, trusted } = await setup(t);
+  for (let i = 0; i < 9; i++) {
+    await controller.management.executeTool(trusted, {
+      name: "spark_save",
+      args: { title: `P2B3-${i}`, content: `共同实体内容 ${i}。`, triggers: [`p2b3-${i}`], entities: ["P2B3实体"], vitality: "evergreen" },
+    });
+  }
+  await controller.management.executeTool(trusted, {
+    name: "topic_create", args: { topic: "p2b3-target", title: "P2B3", summary: "s" },
+  });
+  // 1) 归档预览：store 落新 kind "archive-topic"
+  const arPreview = await controller.management.previewPlan(trusted, {
+    kind: "archive-topic", topicKey: "p2b3-target", archive: true, operationId: "pv-p2b3-1",
+  });
+  // 2) 跑一次 organize analyze（修复前会把归档计划顺手作废 → executePlan 报 REVISION_CONFLICT）
+  const analyzed = await controller.management.analyze(trusted, { kind: "organize", operationId: "an-p2b3-1" });
+  // 队列 DTO（analyze 返回走 queueDto）：wire 不漏新 store kind——映射回 organize 家族
+  const analyzeRow = analyzed.plans.find((p) => p.planId === arPreview.planId);
+  assert.ok(analyzeRow, "archive plan must appear in analyze plans DTO");
+  assert.equal(analyzeRow.kind, "organize", "wire kind 恒为家族名 organize");
+  assert.equal(analyzeRow.superseded, false, "organize analyze must NOT supersede archive plan");
+  assert.ok(!analyzed.plans.some((p) => p.kind === "archive-topic"), "wire must not leak store kind archive-topic");
+  // listCandidates（另一条 plans wire 路径）同样不漏、同样如实标注
+  const listed = await controller.management.listCandidates(trusted, {});
+  const listedRow = listed.plans.find((p) => p.planId === arPreview.planId);
+  assert.ok(listedRow);
+  assert.equal(listedRow.kind, "organize");
+  assert.equal(listedRow.superseded, false);
+  // 3) 归档计划仍可执行
+  const executed = await controller.management.executePlan(trusted, {
+    planId: arPreview.planId, planDigest: arPreview.planDigest, operationId: "ex-p2b3-1", confirmed: true,
+  });
+  assert.equal(executed.result.status, "completed");
+  assert.equal(executed.result.kind, "archive-topic");
+});
+
+test("P2-B3：归档预览收敛同族——后一个归档预览作废前一个 open 归档计划（executePlan 硬闸生效）", async (t) => {
+  const { controller, trusted } = await setup(t);
+  await controller.management.executeTool(trusted, { name: "topic_create", args: { topic: "p2b3-a", title: "A", summary: "s" } });
+  await controller.management.executeTool(trusted, { name: "topic_create", args: { topic: "p2b3-b", title: "B", summary: "s" } });
+  const previewA = await controller.management.previewPlan(trusted, {
+    kind: "archive-topic", topicKey: "p2b3-a", archive: true, operationId: "pv-p2b3-a",
+  });
+  const previewB = await controller.management.previewPlan(trusted, {
+    kind: "archive-topic", topicKey: "p2b3-b", archive: true, operationId: "pv-p2b3-b",
+  });
+  assert.notEqual(previewA.planId, previewB.planId);
+  const listed = await controller.management.listCandidates(trusted, {});
+  const rowA = listed.plans.find((p) => p.planId === previewA.planId);
+  assert.ok(rowA);
+  assert.equal(rowA.superseded, true, "archive preview B must supersede open archive plan A");
+  assert.equal(rowA.kind, "organize");
+  await assert.rejects(
+    () => controller.management.executePlan(trusted, {
+      planId: previewA.planId, planDigest: previewA.planDigest, operationId: "ex-p2b3-a-sup", confirmed: true,
+    }),
+    (e) => e.code === "REVISION_CONFLICT" && /superseded/.test(e.message),
+    "被作废的归档计划不可执行（硬闸不放宽）",
+  );
+  const executedB = await controller.management.executePlan(trusted, {
+    planId: previewB.planId, planDigest: previewB.planDigest, operationId: "ex-p2b3-b", confirmed: true,
+  });
+  assert.equal(executedB.result.status, "completed");
+});
+
+test("P2-B3：organize 预览与归档预览互不作废（正向/反向两个顺序都验）", async (t) => {
+  // 正向：organize 预览 → 归档预览 → organize 计划不被作废，两计划都可执行
+  {
+    const { controller, trusted } = await setup(t);
+    for (let i = 0; i < 9; i++) {
+      await controller.management.executeTool(trusted, {
+        name: "spark_save",
+        args: { title: `F${i}`, content: `共同实体内容 ${i}。`, triggers: [`fwd-${i}`], entities: ["互不实体"], vitality: "evergreen" },
+      });
+    }
+    await controller.management.executeTool(trusted, { name: "topic_create", args: { topic: "p2b3-fwd", title: "F", summary: "s" } });
+    const analyzed = await controller.management.analyze(trusted, { kind: "organize", operationId: "an-p2b3-fwd" });
+    const candidate = analyzed.items[0].candidate;
+    const reviewed = await controller.management.reviewCandidate(trusted, {
+      candidateId: candidate.id, decision: "reviewed", expectedQueueRevision: analyzed.queueRevision, operationId: "rv-p2b3-fwd",
+    });
+    const orgPreview = await controller.management.previewPlan(trusted, {
+      kind: "organize", candidateId: candidate.id, expectedQueueRevision: reviewed.queueRevision, operationId: "pv-p2b3-fwd",
+      proposal: { kind: "link", links: [{ id: candidate.sources[0].id, after: [{ target: candidate.sources[1].id, rel: "相关" }] }] },
+    });
+    const arPreview = await controller.management.previewPlan(trusted, {
+      kind: "archive-topic", topicKey: "p2b3-fwd", archive: true, operationId: "pv-p2b3-fwd-ar",
+    });
+    const listed = await controller.management.listCandidates(trusted, {});
+    assert.equal(listed.plans.find((p) => p.planId === orgPreview.planId)?.superseded, false,
+      "archive preview must not supersede organize plan");
+    assert.equal(listed.plans.find((p) => p.planId === arPreview.planId)?.superseded, false,
+      "organize-family previews must not supersede archive plan");
+    const ex1 = await controller.management.executePlan(trusted, {
+      planId: orgPreview.planId, planDigest: orgPreview.planDigest, operationId: "ex-p2b3-fwd", confirmed: true,
+    });
+    assert.equal(ex1.result.status, "completed");
+    const ex2 = await controller.management.executePlan(trusted, {
+      planId: arPreview.planId, planDigest: arPreview.planDigest, operationId: "ex-p2b3-fwd-ar", confirmed: true,
+    });
+    assert.equal(ex2.result.status, "completed");
+    await controller.stop();
+  }
+  // 反向：归档预览 → organize analyze + organize 预览 → 归档计划不被作废
+  {
+    const { controller, trusted } = await setup(t);
+    for (let i = 0; i < 9; i++) {
+      await controller.management.executeTool(trusted, {
+        name: "spark_save",
+        args: { title: `R${i}`, content: `共同实体内容 ${i}。`, triggers: [`rev-${i}`], entities: ["互不实体"], vitality: "evergreen" },
+      });
+    }
+    await controller.management.executeTool(trusted, { name: "topic_create", args: { topic: "p2b3-rev", title: "R", summary: "s" } });
+    const arPreview = await controller.management.previewPlan(trusted, {
+      kind: "archive-topic", topicKey: "p2b3-rev", archive: true, operationId: "pv-p2b3-rev-ar",
+    });
+    const analyzed = await controller.management.analyze(trusted, { kind: "organize", operationId: "an-p2b3-rev" });
+    const candidate = analyzed.items[0].candidate;
+    const reviewed = await controller.management.reviewCandidate(trusted, {
+      candidateId: candidate.id, decision: "reviewed", expectedQueueRevision: analyzed.queueRevision, operationId: "rv-p2b3-rev",
+    });
+    await controller.management.previewPlan(trusted, {
+      kind: "organize", candidateId: candidate.id, expectedQueueRevision: reviewed.queueRevision, operationId: "pv-p2b3-rev",
+      proposal: { kind: "link", links: [{ id: candidate.sources[0].id, after: [{ target: candidate.sources[1].id, rel: "相关" }] }] },
+    });
+    const listed = await controller.management.listCandidates(trusted, {});
+    assert.equal(listed.plans.find((p) => p.planId === arPreview.planId)?.superseded, false,
+      "organize analyze/preview must not supersede archive plan");
+    const ex = await controller.management.executePlan(trusted, {
+      planId: arPreview.planId, planDigest: arPreview.planDigest, operationId: "ex-p2b3-rev-ar", confirmed: true,
+    });
+    assert.equal(ex.result.status, "completed");
+    await controller.stop();
+  }
+});
+
+test("P2-B3：旧形状兼容（store kind organize + plan.kind archive-topic）——organize analyze 不作废、仍可执行", async (t) => {
+  const { controller, trusted, base } = await setup(t);
+  for (let i = 0; i < 9; i++) {
+    await controller.management.executeTool(trusted, {
+      name: "spark_save",
+      args: { title: `LG${i}`, content: `共同实体内容 ${i}。`, triggers: [`lg-${i}`], entities: ["旧形状实体"], vitality: "evergreen" },
+    });
+  }
+  await controller.management.executeTool(trusted, {
+    name: "topic_create", args: { topic: "p2b3-legacy", title: "Legacy", summary: "s" },
+  });
+  // 用真实归档预览构建合法 plan 内容（expectedRevision 由 service 保证新鲜），
+  // 再以升级前的旧形状（store kind "organize" + plan.kind "archive-topic"）落一份。
+  const realPreview = await controller.management.previewPlan(trusted, {
+    kind: "archive-topic", topicKey: "p2b3-legacy", archive: true, operationId: "pv-p2b3-legacy-real",
+  });
+  const stateStore = createStateStore({ stateRoot: path.join(base, "state") });
+  const entry = await stateStore.planStore.get("amber", realPreview.planId);
+  assert.ok(entry, "real preview plan must be persisted under scope amber");
+  assert.equal(entry.kind, "archive-topic");
+  assert.equal(entry.plan.kind, "archive-topic");
+  const legacyPlanId = `op-${entry.planDigest}-legacy`;
+  await stateStore.planStore.save("amber", legacyPlanId, {
+    kind: "organize",
+    planDigest: entry.planDigest,
+    queueRevision: null,
+    plan: entry.plan,
+    diff: entry.diff,
+    changedItems: entry.changedItems,
+    summary: entry.summary,
+  });
+  // organize analyze（修复前：旧条目被当 organize 计划作废 → executePlan 报 superseded）
+  await controller.management.analyze(trusted, { kind: "organize", operationId: "an-p2b3-legacy" });
+  const listed = await controller.management.listCandidates(trusted, {});
+  const legacyRow = listed.plans.find((p) => p.planId === legacyPlanId);
+  assert.ok(legacyRow, "legacy plan must be listed");
+  assert.equal(legacyRow.superseded, false, "organize analyze must NOT supersede legacy archive entry");
+  // wire 形状：旧条目 store kind 本就是 "organize"，映射后不变（plansToWire
+  // 只做 kind 家族名映射，不补 schema 外字段）
+  assert.equal(legacyRow.kind, "organize");
+  // 仍可执行（执行侧按 plan.kind 分派 organizer executor）
+  const executed = await controller.management.executePlan(trusted, {
+    planId: legacyPlanId, planDigest: entry.planDigest, operationId: "ex-p2b3-legacy", confirmed: true,
+  });
+  assert.equal(executed.result.status, "completed");
+  assert.equal(executed.result.kind, "archive-topic");
+  // 落盘验证：归档真发生了
+  const topicFile = path.join(base, "data", "scopes", "amber", "topics", "p2b3-legacy.md");
+  const raw = await readFile(topicFile, "utf8");
+  assert.match(raw, /archivedAt: "/);
 });
 

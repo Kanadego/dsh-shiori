@@ -187,6 +187,26 @@ export function createManagement(deps) {
   }
 
   /**
+   * planStore.list 投影 → wire 形状（P2-B3）：store kind "archive-topic" 是
+   * 归档计划的独立落库 kind，wire（protocol.mjs planSummary，additionalProperties
+   * :false 的闭形状，kind enum 只有 organize/forgetting）不认识新 store kind——
+   * 仅映射家族名 kind:"organize"，不补任何 schema 外字段（proposalKind 只存在于
+   * previewPlan 的 planView 形状，plans 列表客户端只读 planId/executed/superseded
+   * /summary，加了也不读，反而造成协议面与实现不一致）。
+   *
+   * 旧条目识别：升级前归档计划以 kind:"organize" + plan.kind:"archive-topic"
+   * 落库，但 planStore.list 投影不含 plan.kind（且 list 有 listCandidates /
+   * forgetting analyze / queueDto 三条 wire 路径，不宜为它扩投影）——按 store
+   * kind 判定：旧条目 store kind 本就是 "organize"，映射后形状不变，与本次
+   * 新落库计划在 wire 上同为 organize 家族行。
+   */
+  function plansToWire(plans) {
+    return plans.map((p) => p.kind === "archive-topic"
+      ? { ...p, kind: "organize" }
+      : p);
+  }
+
+  /**
    * 队列 DTO：items 经 organize/queue.mjs 的 listQueue 投影——候选 sources 补
    * 卡片 title（取不到给 null），其余字段原样（只增不改）。records 缺省时
    * 不投影（保持旧形状，供无需标题的内部路径复用）。
@@ -200,7 +220,7 @@ export function createManagement(deps) {
     return {
       queueRevision: snapshot.revision,
       items,
-      plans,
+      plans: plansToWire(plans),
     };
   }
 
@@ -428,7 +448,7 @@ export function createManagement(deps) {
       return {
         queueRevision: snapshot.revision,
         items: page.items,
-        plans: await state.planStore.list(scope.scopeId),
+        plans: plansToWire(await state.planStore.list(scope.scopeId)),
         total: page.total,
         groups: page.groups,
         statusCounts: page.statusCounts,
@@ -585,13 +605,12 @@ export function createManagement(deps) {
         keepPlanId: planId,
         operationId: payload.operationId,
       });
-      const plans = await state.planStore.list(scope.scopeId);
       const queue = await loadQueue(scope.scopeId);
       const dto = await queueDto(scope.scopeId, queue, records);
       return {
         queueRevision: dto.queueRevision,
         items: dto.items,
-        plans,
+        plans: plansToWire(await state.planStore.list(scope.scopeId)),
         analysis: analysisView,
       };
     },
@@ -651,8 +670,9 @@ export function createManagement(deps) {
       if (payload.kind === "archive-topic") {
         // 0.2.2 专题归档/恢复：不依赖候选队列（candidateId 是确定性别名，
         // 不在队列里），直接从 service 读 fresh topic 构建计划，走既有
-        // previewPlan → executePlan 通道（entry.kind 仍是 "organize"，执行
-        // 侧由 organizer executor 按 plan.kind 分派），不另开写接口。
+        // previewPlan → executePlan 通道（P2-B3 起独立落库 kind:"archive-topic"，
+        // executePlan 与 organize 一样走 organizer executor，由其按 plan.kind
+        // 分派），不另开写接口。
         requireModule("organize");
         const resources = await resourcesFor(scope.scopeId, sessionEvidenceFromRpc(trustedContext).agent);
         const fresh = await resources.service.readTopic(payload.topicKey);
@@ -681,7 +701,7 @@ export function createManagement(deps) {
         });
         const planId = `op-${built.digest}`;
         await state.planStore.save(scope.scopeId, planId, {
-          kind: "organize",
+          kind: "archive-topic",
           planDigest: built.digest,
           queueRevision: null,
           plan: built.plan,
@@ -689,11 +709,12 @@ export function createManagement(deps) {
           changedItems: built.changedItems,
           summary: "archive-topic plan over 1 topic",
         });
-        // P-A：计划收敛——与 organize 预览同语义（作废其他仍 open 的 organize
-        // 计划）。payload.operationId 可选（schema required 三键），缺省落
+        // P-A：计划收敛——独立计划族（P2-B3）：只作废其它仍 open 的归档计划
+        // （含升级前以 kind:"organize" 落库的旧归档条目），不动整理预览。
+        // payload.operationId 可选（schema required 三键），缺省落
         // null：supersededWith !== undefined 的 executePlan 硬闸仍生效。
         await state.planStore.supersedeOpen(scope.scopeId, {
-          kind: "organize",
+          kind: "archive-topic",
           keepPlanId: planId,
           operationId: payload.operationId ?? null,
         });
@@ -823,7 +844,9 @@ export function createManagement(deps) {
       const resources = await resourcesFor(scope.scopeId, sessionEvidenceFromRpc(trustedContext).agent);
       let result;
       try {
-        if (entry.kind === "organize") {
+        // P2-B3：archive-topic 独立计划族后，organize 与 archive-topic 两种
+        // store kind 都走 organizer executor（执行器按 plan.kind 分派具体动作）。
+        if (entry.kind === "organize" || entry.kind === "archive-topic") {
           requireModule("organize");
           const executor = await createOrganizerExecutor({
             root: dataRoot,

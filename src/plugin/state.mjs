@@ -584,16 +584,27 @@ export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
      * 返回本次实际作废的 planId 列表。
      */
     async supersedeOpen(scopeId, { kind, keepPlanId, operationId }) {
-      if (kind !== "organize" && kind !== "forgetting") {
-        fail("INVALID_INPUT", `supersedeOpen kind must be organize/forgetting, got ${JSON.stringify(kind)}`, {});
+      if (kind !== "organize" && kind !== "forgetting" && kind !== "archive-topic") {
+        fail("INVALID_INPUT", `supersedeOpen kind must be organize/forgetting/archive-topic, got ${JSON.stringify(kind)}`, {});
       }
       const superseded = [];
       await plansLedger(scopeId).mutate((state) => {
         for (const [planId, entry] of Object.entries(state.plans)) {
           if (planId === keepPlanId) continue;
-          if (entry.kind !== kind) continue;
           if (entry.executed === true) continue;
           if (entry.supersededWith !== undefined) continue;
+          // 旧形状兼容：升级前归档计划以 kind:"organize" + plan.kind
+          // "archive-topic" 落库（新落库的归档计划不再走 kind:"organize"，
+          // 这条规则只为升级前已落库的旧计划）。非 archive-topic 收敛时跳过
+          // 这类旧条目（不作废）——整理分析/整理预览不再顺手作废归档计划；
+          // archive-topic 收敛时除新 kind 外还把它们一并作废。
+          const legacyArchive = entry.kind === "organize" && entry.plan?.kind === "archive-topic";
+          if (kind === "archive-topic") {
+            if (entry.kind !== "archive-topic" && !legacyArchive) continue;
+          } else {
+            if (entry.kind !== kind) continue;
+            if (legacyArchive) continue;
+          }
           entry.supersededWith = operationId;
           entry.supersededAt = new Date().toISOString();
           superseded.push(planId);

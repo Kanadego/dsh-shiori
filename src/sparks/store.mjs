@@ -335,12 +335,10 @@ function validatePatch(patch) {
 const isHex64 = (v) => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
 
 const ORGANIZE_PLAN_VERSION = 1;
-// bind/link 执行路径只接受这两种；thin-core 仅草案，executor 在更早处拒绝，
-// 本层 schema 也按完整形状校验后由调用方决定。
+// bind/link 执行路径只接受这两种。
 const ORGANIZE_PLAN_KEYS = {
   link: new Set(['version', 'scopeId', 'candidateId', 'kind', 'sources', 'links']),
   'merge-topic': new Set(['version', 'scopeId', 'candidateId', 'kind', 'sources', 'topic']),
-  'thin-core': new Set(['version', 'scopeId', 'candidateId', 'kind', 'sources', 'core']),
 };
 // link 的 sources 覆盖被改源 + 全部引用目标（+候选源），真实规模很小；
 // 64 是防滥用的宽松硬上限，不是业务约束。
@@ -418,7 +416,7 @@ function checkPlanLinkPairs(value, field) {
 }
 
 /**
- * organize plan 完整 schema 校验（link / merge-topic / thin-core 三种形状）。
+ * organize plan 完整 schema 校验（link / merge-topic 两种形状）。
  * 返回原 plan 引用（调用方自行克隆隔离）；任何未知字段/越界/乱序一律 INVALID_INPUT。
  */
 function validateOrganizePlan(plan, boundScopeId) {
@@ -426,8 +424,8 @@ function validateOrganizePlan(plan, boundScopeId) {
     throw invalidInput('plan 必须是对象');
   }
   const kind = plan.kind;
-  if (!(kind === 'link' || kind === 'merge-topic' || kind === 'thin-core')) {
-    throw invalidInput('plan.kind 只支持 link / merge-topic / thin-core', { kind });
+  if (!(kind === 'link' || kind === 'merge-topic')) {
+    throw invalidInput('plan.kind 只支持 link / merge-topic', { kind });
   }
   const allowed = ORGANIZE_PLAN_KEYS[kind];
   const present = new Set(Object.keys(plan));
@@ -544,21 +542,6 @@ function validateOrganizePlan(plan, boundScopeId) {
     checkPlanString(t.updated, 'topic.updated', { min: 1 });
     return plan;
   }
-
-  // thin-core：形状校验（仅草案；执行一律拒绝，不进入本 store 的任何写路径）
-  const c = plan.core;
-  if (!isPlainObject(c)) throw invalidInput('plan.core 必须是对象');
-  const cKeys = Object.keys(c);
-  if (cKeys.length !== 2 || !cKeys.every((k) => k === 'before' || k === 'after')) {
-    throw invalidInput('plan.core 只允许恰好 before/after 两个键');
-  }
-  if (typeof c.before !== 'string' || typeof c.after !== 'string') {
-    throw invalidInput('plan.core.before/after 必须是字符串');
-  }
-  assertEncodableUtf8(c.before, 'plan.core.before');
-  assertEncodableUtf8(c.after, 'plan.core.after');
-  checkPlanSources(plan.sources, { min: 1, max: LINK_SOURCES_MAX });
-  return plan;
 }
 
 /** retireMerged 的 topic 指针参数严格校验。 */
@@ -1544,9 +1527,6 @@ export async function openSparkStore({ root, scopeId, lockTimeoutMs = 10_000, re
       }
       validateOperationId(opts.operationId);
       const checked = validateOrganizePlan(plan, scopeId);
-      if (checked.kind === 'thin-core') {
-        throw unsupported('thin-core 仅草案，bindOrganizeRound 不接受（执行一律拒绝）');
-      }
       const planDigest = sha256Buffer(Buffer.from(stableStringify(checked), 'utf8'));
       const at = nowIso();
       return runMutation(

@@ -915,3 +915,24 @@ describe('graph 失效边显式上报（G3）', () => {
     assert.equal(g.filteredEdgeCount, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+describe('organize plan 白名单（0.2.3 裁撤 thin-core 后的清理回归）', () => {
+  it('bindOrganizeRound 传入 kind:"thin-core" → INVALID_INPUT，文案匹配新白名单', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    const plan = {
+      version: 1,
+      scopeId: 'amber',
+      candidateId: 'cand-1',
+      kind: 'thin-core',
+      sources: [],
+      core: { before: '', after: '' },
+    };
+    const err = await assertRejects(
+      store.bindOrganizeRound(plan, { operationId: 'op-thin-core-1' }),
+      'INVALID_INPUT',
+    );
+    assert.match(err.message, /link \/ merge-topic/);
+  });
+});
