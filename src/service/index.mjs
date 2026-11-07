@@ -65,7 +65,9 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
     return encode({ v: 1, rootId, activeScopeId, kind, key: kind === 'topic' ? item.key : null,
       sourceScope, sourceRevision, targetRevision: sourceScope === activeScopeId ? sourceRevision : null,
       generation, issuedAt, projectionHash,
-      meta: kind === 'topic' ? { title: item.title, summary: item.summary, updated: item.updated } : null });
+      // archivedAt 进入 token meta：append/rewrite 等 payload 不带归档字段的写路径
+      // 靠它继承现有归档标记（undefined 在 JSON 编码时省略 = 未归档）。
+      meta: kind === 'topic' ? { title: item.title, summary: item.summary, updated: item.updated, archivedAt: item.archivedAt } : null });
   }
   function parseToken(value, kind, key) {
     const t = decode(value);
@@ -84,6 +86,12 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
     if (kind === 'topic') {
       record(t.meta, 'token metadata');
       text(t.meta.title, 'title'); text(t.meta.summary, 'summary'); text(t.meta.updated, 'updated');
+      // 归档标记可选（旧版 token 无此字段）；有值时必须是非空可解析时间串。
+      if (t.meta.archivedAt !== undefined
+        && (typeof t.meta.archivedAt !== 'string' || !t.meta.archivedAt.length
+          || Number.isNaN(new Date(t.meta.archivedAt).getTime()))) {
+        fail('INVALID_INPUT', 'archivedAt must be a non-empty string parseable by new Date() (e.g. ISO 8601)');
+      }
     }
     return t;
   }
@@ -104,7 +112,8 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
           fail('REVISION_CONFLICT', 'rendered core view changed since read');
         }
       }
-      if (t.kind === 'topic' && item && (item.title !== t.meta.title || item.summary !== t.meta.summary || item.updated !== t.meta.updated)) {
+      if (t.kind === 'topic' && item && (item.title !== t.meta.title || item.summary !== t.meta.summary || item.updated !== t.meta.updated
+        || (item.archivedAt ?? null) !== (t.meta.archivedAt ?? null))) {
         fail('REVISION_CONFLICT', 'topic metadata does not match revision token');
       }
       const target = scope === activeScopeId ? revision : null;
@@ -210,7 +219,17 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
       const base = { kind: c.kind, expectedRevision: token ? token.targetRevision : c.expectedRevision };
       if (c.kind === 'core') return { ...base, text: text(c.text, 'core text') };
       record(c.topic, 'topic metadata'); noScope(c.topic);
-      if (Object.keys(c.topic).some(k => !['title', 'summary', 'updated'].includes(k))) fail('INVALID_INPUT', 'topic metadata accepts title/summary/updated only');
+      if (Object.keys(c.topic).some(k => !['title', 'summary', 'updated', 'archivedAt'].includes(k))) {
+        fail('INVALID_INPUT', 'topic metadata accepts title/summary/updated/archivedAt only');
+      }
+      // archivedAt：undefined/null 合法；字符串必须非空且能被 new Date() 解析。
+      if (c.topic.archivedAt !== undefined && c.topic.archivedAt !== null) {
+        const value = text(c.topic.archivedAt, 'archivedAt');
+        if (!value.length || Number.isNaN(new Date(value).getTime())) {
+          fail('INVALID_INPUT', 'archivedAt must be a non-empty string parseable by new Date() '
+            + '(e.g. ISO 8601 "2026-11-07T00:00:00.000Z"), or null to clear the archive mark');
+        }
+      }
       if (token?.meta.updated === 'legacy-unknown') {
         // 防御分支：legacy 裸 md（缺 front-matter）在 storage 加载时已直接抛错，
         // 正常流程造不出这种 token；保留显式拒绝以防伪造 revision token。
@@ -222,6 +241,11 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
         title: text(c.topic.title ?? token?.meta.title, 'title'),
         summary: text(c.topic.summary ?? token?.meta.summary, 'summary'),
         updated: text(c.topic.updated ?? token?.issuedAt, 'updated'), body: text(c.text, 'topic body'),
+        // 归档语义：payload 未带（undefined）→ 继承 token 里的现有标记（append/rewrite
+        // 不许静默取消归档；创建时无 token → 未归档）；显式 null → 清除（存储层空串 =
+        // 省略该字段）；字符串 → 原样写入归档时间（已在上方校验）。
+        archivedAt: c.topic.archivedAt === undefined ? token?.meta.archivedAt
+          : c.topic.archivedAt === null ? '' : c.topic.archivedAt,
       } };
     });
     const generations = new Set(tokens.map(t => t.generation));

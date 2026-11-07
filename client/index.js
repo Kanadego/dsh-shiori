@@ -1309,8 +1309,8 @@ window.__ModuleLoader__.load({
       // 空状态：说明记忆怎么组织、从哪里开始写第一条、需要先配置什么，不留白。
       var renderEmptyLayer = function (kind, title) {
         var guide = kind === "l0"
-          ? "人设卡（L0）还是空的。记忆按层组织：L0 是每轮对话常驻注入的身份与规则卡，L1 是记忆核心，更细的事实记录在 L2/L3（由记忆工具与候选整理维护）。写第一条：点下方「编辑」，写下这份人设的身份、语气与边界，保存后下一轮对话即生效。开始前请先确认面板处于 active 模式，并在「预算配置」里设置人设卡最大字符数。"
-          : "记忆核心（L1）还是空的。它是长期记忆的正文区，服务端渲染时会自动在正文后附加主题索引，不用手写。写第一条：点下方「编辑」，用一段话记录值得长期记住的事实或偏好，保存即生效。开始前请先确认面板处于 active 模式，并在「预算配置」里设置记忆核心的目标字符数与硬上限。";
+          ? "人设卡（L0）还是空的。记忆按层组织：L0 是每轮对话常驻注入的身份与规则卡，L1 是记忆核心，更细的事实记录在 L2/L3（由记忆工具与候选整理维护）。写第一条：点下方「编辑」，写下这份人设的身份、语气与边界，保存后下一轮对话即生效。开始前请先确认面板处于 active 模式，并在「记忆预算」里设置人设卡最大字符数。"
+          : "记忆核心（L1）还是空的。它是长期记忆的正文区，服务端渲染时会自动在正文后附加主题索引，不用手写。写第一条：点下方「编辑」，用一段话记录值得长期记住的事实或偏好，保存即生效。开始前请先确认面板处于 active 模式，并在「记忆预算」里设置记忆核心的目标字符数与硬上限。";
         return h("div", { className: "dshi_card" },
           h("div", { className: "dshi_row" },
             h("span", { className: "dshi_cardTitle" }, title),
@@ -1371,7 +1371,7 @@ window.__ModuleLoader__.load({
             Bar("人设卡 L0（UTF-16）", l0 && (l0.chars ?? l0.length ?? (l0.text ? l0.text.length : 0)), (budgets.persona && budgets.persona.maxChars) ?? 12000),
             Bar("记忆核心 L1（UTF-16）", l1 && (l1.chars ?? l1.length ?? (l1.text ? l1.text.length : 0)), (budgets.core && budgets.core.targetChars) ?? 8000)),
           renderLayer("l0", "人设卡（L0 persona）", l0,
-            "每轮对话常驻的身份与规则。编辑后保存立即生效；上限由「预算配置」的人设卡最大字符数决定。"),
+            "每轮对话常驻的身份与规则。编辑后保存立即生效；上限由「记忆预算」的人设卡最大字符数决定。"),
           renderLayer("l1", "记忆核心（L1 core）", l1,
             "上方预览是完整渲染结果（正文 + 派生主题索引）；点编辑后文本框里只有磁盘正文，主题索引由服务端自动生成，不用手写。保存带 revision 校验，若别处刚改过会提示冲突，刷新后重试。"),
           h("details", null,
@@ -1857,8 +1857,8 @@ window.__ModuleLoader__.load({
             h("button", { className: "dshi_btn", disabled: !linkTarget || ro, onClick: addLink }, "添加连线"),
             h("button", { className: "dshi_btn dshi_btnPrimary", disabled: linksBusy || !card || ro, onClick: saveLinks }, linksBusy ? "保存中…" : "保存连线"))),
 
-        // 卡片内容：只改 spark 卡片本身。人设卡 / 记忆核心在「记忆 L0/L1」页，
-        // 主题在「L3/topic 记忆管理」页——这里不再混进那四个记忆工具。
+        // 卡片内容：只改 spark 卡片本身。人设卡 / 记忆核心在「记忆内容」页，
+        // 主题在「专题」页——这里不再混进那四个记忆工具。
         h("div", { className: "dshi_card" },
           h("div", { className: "dshi_row" },
             h("span", { className: "dshi_cardTitle" }, "卡片内容"),
@@ -1887,18 +1887,14 @@ window.__ModuleLoader__.load({
                       : null,
                     h("option", { value: "evergreen" }, "长期卡（evergreen）"),
                     h("option", { value: "ephemeral" }, "短期卡（ephemeral）"))),
-                h("div", { className: "dshi_hint" }, "保存走版本校验：别处刚改过这张卡会提示冲突，点「重新读取」再改。人设卡 / 记忆核心在「记忆 L0/L1」页改，主题在「L3/topic 记忆管理」页改。"))));
+                h("div", { className: "dshi_hint" }, "保存走版本校验：别处刚改过这张卡会提示冲突，点「重新读取」再改。人设卡 / 记忆核心在「记忆内容」页改，主题在「专题」页改。"))));
     }
 
     // ── Q-A：cluster 候选「合并进主题」辅助 ──────────────────────────────────
     // revision token：executeTool memory_list_topics / memory_read 返回
     // `shiori-r1.<base64url>.<sha256>`（src/service/index.mjs tokenFor/parseToken）。
-    // legacy 主题只读（updated === "legacy-unknown"，服务端拒 UNSUPPORTED），必须过滤。
-    var LEGACY_TOPIC_UPDATED = "legacy-unknown";
-    function isLegacyTopicRow(row) {
-      if (!row || typeof row !== "object") return true;
-      return String(row.updated) === LEGACY_TOPIC_UPDATED;
-    }
+    // （U6 收尾：legacy 主题概念整体删除——数据层第一批起不再产生 legacy 行，
+    //  isLegacyTopicRow / LEGACY_TOPIC_UPDATED 及各处过滤、提示均为死分支，已清。）
     function topicRevisionPrefix(token) {
       var text = String(token ?? "");
       return text.length > 28 ? text.slice(0, 28) + "…" : text;
@@ -1948,7 +1944,7 @@ window.__ModuleLoader__.load({
         return { code: code, message: "revision 冲突：队列已更新，请点「分析整理候选」重新分析后再试，不要重试旧预览（该计划可能已被执行，或主题 / 队列在此期间被修改）。", detail: detail };
       }
       if (code === "UNSUPPORTED") {
-        return { code: code, message: "服务端不支持该操作（例如 legacy 主题只读，不能作为合并目标）。", detail: detail };
+        return { code: code, message: "服务端不支持该操作。", detail: detail };
       }
       return error;
     }
@@ -2426,7 +2422,7 @@ window.__ModuleLoader__.load({
         props.dsh.call("executeTool", props.sessionId, { name: "memory_list_topics", args: {} }).then(function (result) {
           if (isStale(origin)) return;
           var rows = Array.isArray(result && result.topics) ? result.topics : [];
-          setTopics({ loading: false, error: null, topics: rows.filter(function (t) { return !isLegacyTopicRow(t); }), total: rows.length });
+          setTopics({ loading: false, error: null, topics: rows, total: rows.length });
         }, function (e) {
           if (isStale(origin)) return;
           setTopics({ loading: false, error: candidateActionError(e), topics: [], total: 0 });
@@ -2503,7 +2499,7 @@ window.__ModuleLoader__.load({
         }).then(function (listing) {
           if (isStale(origin)) return;
           var rows = Array.isArray(listing && listing.topics) ? listing.topics : [];
-          var usable = rows.filter(function (t) { return !isLegacyTopicRow(t); });
+          var usable = rows;
           setTopics({ loading: false, error: null, topics: usable, total: rows.length });
           setNewTopic({ topic: "", title: "", summary: "", busy: false, error: null });
           var fresh = usable.find(function (t) { return String(t && t.key) === key; });
@@ -2572,7 +2568,7 @@ window.__ModuleLoader__.load({
             topics && topics.error ? ErrorBox(topics.error) : null,
             topics && !topics.loading && !topics.error ? h("div", { className: "dshi_items" },
               topics.topics.length === 0 ? h("div", { className: "dshi_hint" },
-                "当前 scope 没有可用的非 legacy 主题（legacy 主题只读，服务端拒绝作为合并目标）。请在下方新建主题。")
+                "当前 scope 还没有主题。请在下方新建主题。")
                 : topics.topics.map(function (row) {
                   var key = String(row.key ?? "");
                   return h("div", { key: key, className: "dshi_item" },
@@ -2581,12 +2577,9 @@ window.__ModuleLoader__.load({
                       row.title ? h("span", { className: "dshi_badgeDim dshi_badge" }, String(row.title)) : null,
                       row.updated ? h("span", { className: "dshi_hint" }, String(row.updated)) : null,
                       row.revision ? h("span", { className: "dshi_hint dshi_mono" }, "rev " + topicRevisionPrefix(row.revision)) : null,
-                      // D：legacy 行只读（服务端拒 UNSUPPORTED）——加 title 说明但不禁用按钮；
-                      // loadTopics 通常已过滤 legacy 行，这里保留防御性提示。
                       h("button", {
                         className: "dshi_btn",
                         disabled: busy || ro,
-                        title: isLegacyTopicRow(row) ? "legacy 主题只读，不能作为合并目标" : undefined,
                         onClick: function () { openTopicForMerge(row); }
                       }, "合并到这个主题")));
                 })) : null,
@@ -3001,7 +2994,13 @@ window.__ModuleLoader__.load({
     // ── L3：主题（topic）记忆管理 ────────────────────────────────────────────
     // memory_list_topics 只回元数据（key/title/summary/chars/revision），正文必须
     // memory_read(topic) 单独拿——几十个主题一次性全读会拖慢面板，所以列表默认只显示名字，
-    // 点「展开」才读正文。legacy 主题（updated === "legacy-unknown"）服务端拒写，只读展示。
+    // 点「展开」才读正文。
+    // U6：updated 只取 YYYY-MM-DD 展示（缺失或非日期前缀显示 —）；归档行（archived:true）
+    // 加「已归档」徽章并把名称/摘要调灰弱化。
+    function topicUpdatedDay(row) {
+      var text = String((row && row.updated) ?? "");
+      return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : "";
+    }
     function TopicsTab(props) {
       var listState = useState(null);
       var topics = listState[0];
@@ -3039,6 +3038,14 @@ window.__ModuleLoader__.load({
       var saveOkState = useState(null);
       var saveOk = saveOkState[0];
       var setSaveOk = saveOkState[1];
+      // U6 追加：搜索（key/title/summary 子串，忽略大小写）+ 排序（默认更新时间倒序），
+      // 写法对齐整理页的 filterBar / searchInput（U5，见 CandidatesTab 同名 state）。
+      var searchState = useState("");
+      var search = searchState[0];
+      var setSearch = searchState[1];
+      var sortState = useState("updated-desc");
+      var sort = sortState[0];
+      var setSort = sortState[1];
       // F7：只读态（另一实例在写）写按钮置灰。
       var ro = props.readOnly === true;
       // F4：时间线跳转目标（面板级 ref 传入；type 必须是 topic）。
@@ -3135,33 +3142,86 @@ window.__ModuleLoader__.load({
         }
       };
 
+      // U6：纯前端搜索（key/title/summary 子串，忽略大小写；空串显示全部）+ 排序。
+      // 与整理页 rowVisible / searchQuery 同一写法口径。
+      var searchQuery = String(search ?? "").trim().toLowerCase();
+      var visibleTopics = Array.isArray(topics) ? topics.filter(function (row) {
+        if (!searchQuery) return true;
+        var hay = [row && row.key, row && row.title, row && row.summary]
+          .map(function (v) { return v === undefined || v === null ? "" : String(v); })
+          .join(" ")
+          .toLowerCase();
+        return hay.indexOf(searchQuery) !== -1;
+      }) : topics;
+      if (Array.isArray(visibleTopics)) {
+        // 缺失日期（空串）无论升序降序都排最后；升/降序各写显式比较器，
+        // 不用换参取反——那会把「缺失最后」在降序下翻转成「缺失最先」。
+        var updatedDayOf = topicUpdatedDay;
+        visibleTopics = visibleTopics.slice();
+        if (sort === "updated-asc") visibleTopics.sort(function (a, b) {
+          var da = updatedDayOf(a);
+          var db = updatedDayOf(b);
+          if (!da && !db) return 0;
+          if (!da) return 1;
+          if (!db) return -1;
+          return da < db ? -1 : da > db ? 1 : 0;
+        });
+        else if (sort === "chars-desc") visibleTopics.sort(function (a, b) { return ((b && b.chars) ?? 0) - ((a && a.chars) ?? 0); });
+        else if (sort === "title-asc") visibleTopics.sort(function (a, b) {
+          var ta = String((a && a.title) || (a && a.key) || "");
+          var tb = String((b && b.title) || (b && b.key) || "");
+          return ta.localeCompare(tb, "zh-Hans-CN");
+        });
+        // 默认 updated-desc：更新时间倒序。
+        else visibleTopics.sort(function (a, b) {
+          var da = updatedDayOf(a);
+          var db = updatedDayOf(b);
+          if (!da && !db) return 0;
+          if (!da) return 1;
+          if (!db) return -1;
+          return da < db ? 1 : da > db ? -1 : 0;
+        });
+      }
+      var archivedStyle = { color: "var(--dsw-alias-label-tertiary)" };
+
       return h("div", null,
         h("div", { className: "dshi_row", style: { marginBottom: 8 } },
           h("span", { className: "dshi_cardTitle" }, "L3 主题记忆（topic）"),
           h("button", { className: "dshi_btn", disabled: busy, onClick: load }, busy ? "刷新中…" : "刷新"),
           h("span", { style: { flex: 1 } }),
-          h("span", { className: "dshi_hint" }, topics === null ? "" : "共 " + topics.length + " 个主题")),
+          h("span", { className: "dshi_hint" },
+            topics === null ? "" : (searchQuery ? "显示 " + visibleTopics.length + "/" + topics.length + " 个主题" : "共 " + topics.length + " 个主题"))),
         h("div", { className: "dshi_hint" }, "L3 是跨会话的长期主题记忆，每条按 key 存一个文件。这里列表只显示名字和字数，点「展开」才读正文；编辑是整篇覆盖，保存走版本校验。"),
+        // U6：搜索框 + 排序下拉（默认更新时间倒序），样式复用整理页的 filterBar。
+        h("div", { className: "dshi_filterBar" },
+          h("input", { className: "dshi_input dshi_searchInput", placeholder: "搜索：按 key / 标题 / 摘要", value: search, onChange: function (event) { setSearch(event.target.value); } }),
+          h("select", { className: "dshi_select", value: sort, title: "排序方式", onChange: function (event) { setSort(event.target.value); } },
+            h("option", { value: "updated-desc" }, "更新时间（新→旧）"),
+            h("option", { value: "updated-asc" }, "更新时间（旧→新）"),
+            h("option", { value: "chars-desc" }, "字数（多→少）"),
+            h("option", { value: "title-asc" }, "标题序"))),
         ErrorBox(error),
         focusMiss ? h("div", { className: "dshi_roHint" }, "时间线跳转：主题「" + focusTarget.id + "」不在当前列表（可能已删除或已归档）。") : null,
         ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
         busy && topics === null ? h("div", { className: "dshi_loading" }, "正在读取主题列表…") : null,
         topics !== null && topics.length === 0 ? h("div", { className: "dshi_hint" }, "这个作用域下还没有主题。") : null,
-        topics !== null ? h("div", { className: "dshi_items" }, topics.map(function (row) {
+        topics !== null && topics.length > 0 && visibleTopics.length === 0 ? h("div", { className: "dshi_hint" }, "没有匹配的主题，试试调整搜索词。") : null,
+        topics !== null ? h("div", { className: "dshi_items" }, visibleTopics.map(function (row) {
           var key = String(row.key);
-          var legacy = isLegacyTopicRow(row);
+          var archived = row.archived === true;
           var isOpen = opened === key;
           return h("div", { key: key, className: "dshi_item" },
             h("div", { className: "dshi_itemHead" },
-              h("span", { className: "dshi_cardTitle" }, key),
-              row.title ? h("span", { className: "dshi_hint" }, String(row.title)) : null,
-              legacy ? h("span", { className: "dshi_badge dshi_badgeWarn" }, "legacy 只读") : null,
+              h("span", { className: "dshi_cardTitle", style: archived ? archivedStyle : undefined }, key),
+              row.title ? h("span", { className: "dshi_hint", style: archived ? archivedStyle : undefined }, String(row.title)) : null,
+              archived ? h("span", { className: "dshi_badge dshi_badgeWarn" }, "已归档") : null,
               h("span", { style: { flex: 1 } }),
+              h("span", { className: "dshi_hint", title: "更新时间" }, topicUpdatedDay(row) || "—"),
               h("span", { className: "dshi_mono" }, (row.chars ?? 0) + " 字符"),
               h("button", { className: "dshi_btn", onClick: function () { openTopic(key); } }, isOpen ? "收起" : "展开")),
             isOpen
               ? h("div", null,
-                  row.summary ? h("div", { className: "dshi_hint" }, String(row.summary)) : null,
+                  row.summary ? h("div", { className: "dshi_hint", style: archived ? archivedStyle : undefined }, String(row.summary)) : null,
                   detailBusy ? h("div", { className: "dshi_loading" }, "正在读取正文…") : null,
                   ErrorBox(detailError),
                   detail ? h("div", null,
@@ -3170,13 +3230,11 @@ window.__ModuleLoader__.load({
                       h("span", { className: "dshi_hint" }, (detail.bytes ?? 0) + " 字节"),
                       detail.truncated ? h("span", { className: "dshi_badge dshi_badgeWarn" }, "正文过长，已截断") : null,
                       h("span", { style: { flex: 1 } }),
-                      legacy
-                        ? h("span", { className: "dshi_hint" }, "legacy 主题由旧版写入，服务端拒绝改写")
-                        : (editing
-                          ? h(fragment, null,
-                              h("button", { className: "dshi_btn dshi_btnPrimary", disabled: saveBusy || ro, onClick: save }, saveBusy ? "保存中…" : "保存"),
-                              h("button", { className: "dshi_btn", disabled: saveBusy, onClick: cancelEdit }, "取消"))
-                          : h("button", { className: "dshi_btn", disabled: ro, onClick: beginEdit }, "编辑"))),
+                      editing
+                        ? h(fragment, null,
+                            h("button", { className: "dshi_btn dshi_btnPrimary", disabled: saveBusy || ro, onClick: save }, saveBusy ? "保存中…" : "保存"),
+                            h("button", { className: "dshi_btn", disabled: saveBusy, onClick: cancelEdit }, "取消"))
+                        : h("button", { className: "dshi_btn", disabled: ro, onClick: beginEdit }, "编辑")),
                     saveOk ? h("div", { className: "dshi_ok" }, saveOk) : null,
                     ErrorBox(saveError),
                     editing
@@ -3896,7 +3954,7 @@ window.__ModuleLoader__.load({
           var detail = item && item.detail && typeof item.detail === "object" ? item.detail : null;
           var deduped = Boolean(detail && Array.isArray(detail.dedupedWith) && detail.dedupedWith.length > 0);
           // 跳转仅专题 → 专题 tab、卡片 → 图谱 tab（任务边界）；核心写入没有
-          // 对应 tab，不提供定位，提示去「记忆 L0/L1」页看。
+          // 对应 tab，不提供定位，提示去「记忆内容」页看。
           var jumpable = (type === "topic" || type === "spark") && id !== "" && typeof props.onJump === "function";
           return h("div", { key: String((item && item.at) ?? "") + "-" + index, className: "dshi_item" },
             h("div", { className: "dshi_itemHead" },
@@ -3909,7 +3967,7 @@ window.__ModuleLoader__.load({
                 ? h("button", { className: "dshi_btn", onClick: function () { props.onJump(type, id); } }, "定位")
                 : null),
             h("div", { className: "dshi_hint" },
-              "涉及对象：" + timelineTargetText(target) + (type === "core" ? "（核心记忆在「记忆 L0/L1」页查看）" : "")));
+              "涉及对象：" + timelineTargetText(target) + (type === "core" ? "（核心记忆在「记忆内容」页查看）" : "")));
         })) : null,
         items.length > 0 ? h("div", { className: "dshi_row" },
           h("button", {
@@ -3928,13 +3986,14 @@ window.__ModuleLoader__.load({
     var TABS = [
       { id: "status", label: "状态" },
       { id: "timeline", label: "最近变更" },
-      { id: "memory", label: "记忆 L0/L1" },
-      { id: "graph", label: "图谱" },
+      // U6 改名（GLOSSARY U0 定稿落地）：界面名主位，tab id 与协议不变。
+      { id: "memory", label: "记忆内容" },
+      { id: "graph", label: "闪回图谱" },
       // U5 改名：候选审阅 + 计划执行合称「整理与遗忘」（tab id 仍为 candidates，协议不变）。
       { id: "candidates", label: "整理与遗忘" },
-      { id: "topics", label: "L3/topic 记忆管理" },
+      { id: "topics", label: "专题" },
       { id: "flashbacks", label: "闪回命中" },
-      { id: "budgets", label: "预算配置" }
+      { id: "budgets", label: "记忆预算" }
     ];
 
     // R6 追加：inert / shadow 时数据 tab 一律渲染「未配置」占位——不让用户点进去

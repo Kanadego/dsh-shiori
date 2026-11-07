@@ -9,7 +9,8 @@
 // 规则：
 // - queueRevision 为非负整数；operationId 沿现校验（1..128 可见 ASCII）；
 //   planId 不透明稳定字符串；planDigest 小写 64 hex；
-// - organize proposal 严格沿用 buildDraft 形状；thin-core 明确 UNSUPPORTED；
+// - organize proposal 严格沿用 buildDraft 形状（link / merge-topic / thin-core
+//   三种 kind；thin-core 字段照 queue.buildThinCoreDraft：{kind,before,after}）；
 // - 所有顶层 payload 闭合拒绝未知键；
 // - Error.code 词表：INVALID_INPUT / NOT_CONFIGURED / UNSUPPORTED /
 //   UNAUTHORIZED / NOT_FOUND / REVISION_CONFLICT / BUDGET_EXCEEDED。
@@ -165,6 +166,20 @@ const organizeProposal = {
         },
       },
       required: ["kind", "topic"],
+    },
+    {
+      // thin-core proposal：与 queue.buildThinCoreDraft 的 proposal 入参同形
+      // （exact keys {kind, before, after}；before/after 为 core 正文全文，
+      // 允许空串——初始 L1 core 即空文本）。执行器 executeThinCoreRound 首跑
+      // 要求当前 core 正文逐字节等于 before，重放判定 after。
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        kind: { enum: ["thin-core"] },
+        before: { type: "string" },
+        after: { type: "string" },
+      },
+      required: ["kind", "before", "after"],
     },
   ],
 };
@@ -646,19 +661,14 @@ function validateNode(value, spec, where, field) {
 /**
  * 校验管理 payload（wire 层闭包校验；Q 在 RPC 入口调用，P 在 management
  * 入口再调用一次）。通过返回 payload 原引用；失败抛 code=INVALID_INPUT。
- * thin-core proposal 在此被拒绝（UNSUPPORTED，不以 INVALID_INPUT 冒名）。
+ * organize proposal 三种 kind（link / merge-topic / thin-core）全部照
+ * schema 校验，无额外早退。
  */
 export function validateManagementPayload(name, payload) {
   const method = MANAGEMENT_METHODS[name];
   if (method === undefined) {
     const error = new Error(`unknown management method "${String(name)}"`);
     error.code = "INVALID_INPUT";
-    throw error;
-  }
-  // thin-core 明确 UNSUPPORTED（先于形状匹配，避免被误报 INVALID_INPUT）。
-  if (name === "previewPlan" && payload?.proposal?.kind === "thin-core") {
-    const error = new Error("thin-core proposals are not executable and unsupported by previewPlan");
-    error.code = "UNSUPPORTED";
     throw error;
   }
   const schema = method.inputSchema;
@@ -699,7 +709,6 @@ export function validateManagementPayload(name, payload) {
       }
     }
   }
-  // thin-core 已在上方拦截（UNSUPPORTED）。
   return payload;
 }
 

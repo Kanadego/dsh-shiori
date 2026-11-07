@@ -2180,7 +2180,7 @@ function clusterLoadedStates(sessionId) {
   ];
 }
 
-test("Q-A 回归：cluster 候选渲染「合并进主题」入口；主题列表经 executeTool 拉取且 legacy 主题被过滤", async () => {
+test("Q-A 回归：cluster 候选渲染「合并进主题」入口；主题列表经 executeTool 拉取", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
@@ -2217,7 +2217,8 @@ test("Q-A 回归：cluster 候选渲染「合并进主题」入口；主题列�
   assert.ok(text.includes("合并进主题（候选 cluster-…）"), "merge card open for cluster-A");
   assert.ok(text.includes("t-live"), "non-legacy topic listed with key");
   assert.ok(text.includes("rev shiori-r1.AbCdEf"), "revision prefix shown for topic");
-  assert.ok(!text.includes("t-legacy"), "legacy topic filtered out of the list");
+  // U6：legacy 概念整体删除——updated 异常的行也按普通主题列出，不再过滤。
+  assert.ok(text.includes("t-legacy"), "all topics listed (legacy filtering removed)");
   assert.ok(text.includes("新建主题"), "create-topic section available");
   const listCall = calls.find((c) => c.method === "executeTool" && c.payload.name === "memory_list_topics");
   assert.ok(listCall, "topics fetched via executeTool memory_list_topics");
@@ -2237,11 +2238,10 @@ test("Q-A 回归：新建主题路径以服务端返回的 revision token 构造
       if (method === "listCandidates") return { queueRevision: 5, items: [], plans: [] };
       if (method === "executeTool" && payload.name === "memory_list_topics") {
         listTopicsCount += 1;
-        // 第一次（openMerge）：只有 legacy → 提示需要新建；第二次（创建后）：含新主题
+        // 第一次（openMerge）：无主题 → 提示需要新建；第二次（创建后）：含新主题
         return listTopicsCount === 1
-          ? { topics: [{ key: "t-legacy", title: "旧", summary: "s", updated: "legacy-unknown", revision: "shiori-r1.x.y" }] }
+          ? { topics: [] }
           : { topics: [
-              { key: "t-legacy", title: "旧", summary: "s", updated: "legacy-unknown", revision: "shiori-r1.x.y" },
               { key: "t-new", title: "新主题", summary: "一行摘要", updated: "2026-10-26T15:10:00.000Z", revision: "shiori-r1.Fr3sH.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
             ] };
       }
@@ -2264,7 +2264,7 @@ test("Q-A 回归：新建主题路径以服务端返回的 revision token 构造
   findButton(tree, "合并进主题").props.onClick();
   await flush();
   tree = renderCandidates(dsh, "session-A");
-  assert.ok(collectText(tree).includes("没有可用的非 legacy 主题"), "no usable topic → create hint");
+  assert.ok(collectText(tree).includes("还没有主题"), "no topic → create hint");
 
   // 填新建主题表单（每次 onChange 后重渲染，闭包取最新 state）
   const setInput = (placeholder, value) => {
@@ -2932,7 +2932,7 @@ test("展示引导 T2：选中主题后出现「合并表单（目标 t-live）�
   assert.equal(readCall.payload.args.topic, "t-live");
 });
 
-test("展示引导 T3：legacy 主题行（updated legacy-unknown）的「合并到这个主题」按钮带 title 说明且不禁用", async () => {
+test("展示引导 T3：主题行（合并目标列表）的「合并到这个主题」按钮默认不禁用（legacy 概念已删除）", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
@@ -2944,15 +2944,15 @@ test("展示引导 T3：legacy 主题行（updated legacy-unknown）的「合并
   };
   host.states.length = 0;
   host.states.push(...clusterLoadedStates("session-A"));
-  // 直接注入 topics 状态：loadTopics 会过滤 legacy 行，这里绕过拉取路径验证渲染期的防御性 title。
+  // 直接注入 topics 状态，绕过拉取路径验证渲染期行为。
   host.states[7] = { candidateId: "cluster-A" };
   host.states[8] = { loading: false, error: null, total: 1, topics: [
-    { key: "t-legacy", title: "旧主题", summary: "s", updated: "legacy-unknown", revision: "shiori-r1.OlD.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
+    { key: "t-1", title: "普通主题", summary: "s", updated: "2026-10-26T10:00:00.000Z", revision: "shiori-r1.OlD.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
   ] };
   const tree = renderCandidates(dsh, "session-A", { effects: false });
   const buttons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("合并到这个主题"));
-  assert.equal(buttons.length, 1, "legacy topic row renders its merge button");
-  assert.ok(String(buttons[0].props.title || "").includes("legacy"), "legacy title explains read-only topic");
+  assert.equal(buttons.length, 1, "topic row renders its merge button");
+  assert.equal(buttons[0].props.title, undefined, "no legacy title on merge button (legacy removed)");
   assert.equal(buttons[0].props.disabled, false, "row button is not disabled (choosing is the primary action)");
 });
 
@@ -3145,8 +3145,9 @@ test("R8：tab 栏八项冻结顺序（含 F2 闪回命中 / F4 最近变更）"
   const labels = flattenVNode(tree)
     .filter((n) => n.type === "button" && String((n.props && n.props.className) || "").includes("dshi_tab"))
     .map((n) => [].concat(n.children).join(""));
-  // U5 改口径：第 5 项「候选 / 计划」更名为「整理与遗忘」（tab id 仍为 candidates，顺序不变）。
-  assert.deepEqual(labels, ["状态", "最近变更", "记忆 L0/L1", "图谱", "整理与遗忘", "L3/topic 记忆管理", "闪回命中", "预算配置"]);
+  // U6 改口径：tab 名按 GLOSSARY 第三章目标名落地（记忆内容 / 闪回图谱 / 专题 / 记忆预算），
+  // tab id 与顺序不变。
+  assert.deepEqual(labels, ["状态", "最近变更", "记忆内容", "闪回图谱", "整理与遗忘", "专题", "闪回命中", "记忆预算"]);
   await cleanup();
 });
 
@@ -3192,7 +3193,7 @@ test("R8：L0/L1 标题行的 revision 只显示前缀，完整 token 收进 tit
   await cleanup();
 });
 
-test("R8：L3 主题页默认不读正文，展开才 memory_read；legacy 只读；保存带 expectedRevision", async () => {
+test("R8：L3 主题页默认不读正文，展开才 memory_read；保存带 expectedRevision（U6：legacy 概念已删除，按普通主题渲染）", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderTopics = await mountTabById(mod, host, "topics", "TopicsTab");
@@ -3228,7 +3229,8 @@ test("R8：L3 主题页默认不读正文，展开才 memory_read；legacy 只�
   const text = collectText(tree);
   assert.ok(text.includes("L3 主题记忆（topic）"), "page title");
   assert.ok(text.includes("t-live") && text.includes("t-legacy"), "两个主题都在列表里");
-  assert.ok(text.includes("legacy 只读"), "legacy 行标注只读");
+  // U6：legacy 概念删除——updated === "legacy-unknown" 的行也按普通主题渲染，无只读徽章。
+  assert.ok(!text.includes("legacy 只读"), "no legacy read-only badge (legacy removed)");
   assert.equal(countTool("memory_read"), 0, "列表默认不读正文");
   assert.equal(countTool("memory_list_topics"), 1, "进页只拉一次列表");
 
@@ -3240,12 +3242,12 @@ test("R8：L3 主题页默认不读正文，展开才 memory_read；legacy 只�
   assert.equal(countTool("memory_read"), 1, "只有展开的那一个主题发 memory_read");
   assert.equal(calls.filter((c) => c.payload && c.payload.name === "memory_read")[0].payload.args.topic, "t-live");
 
-  // legacy 展开：给提示，不给编辑按钮
+  // 另一个主题展开：与普通主题完全一致（读正文、给编辑按钮）
   findButton(tree, "展开").props.onClick();
   await settle();
   tree = renderTopics(dsh, "session-A");
-  assert.ok(collectText(tree).includes("legacy 主题由旧版写入，服务端拒绝改写"), "legacy 行给出只读说明");
-  assert.equal(flattenVNode(tree).filter((n) => n.type === "button" && collectText(n) === "编辑").length, 0, "legacy 行没有编辑按钮");
+  assert.ok(collectText(tree).includes("# t-legacy 正文"), "t-legacy 展开读到正文");
+  assert.ok(flattenVNode(tree).filter((n) => n.type === "button" && collectText(n) === "编辑").length === 1, "t-legacy 展开后有编辑按钮");
 
   // 回到活跃主题编辑保存：memory_rewrite 带 expectedRevision
   findButton(tree, "展开").props.onClick();
@@ -3264,6 +3266,95 @@ test("R8：L3 主题页默认不读正文，展开才 memory_read；legacy 只�
   const rewrite = calls.find((c) => c.payload && c.payload.name === "memory_rewrite");
   assert.ok(rewrite, "memory_rewrite issued");
   assert.deepEqual(rewrite.payload.args, { topic: "t-live", content: "# t-live 新正文\n", expectedRevision: topicRevision });
+});
+
+test("U6：L3 主题页搜索过滤（key/title/summary，忽略大小写）+ 排序（更新时间倒序默认 / 字数 / 标题）+ updated 日期 + 已归档徽章置灰", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderTopics = await mountTabById(mod, host, "topics", "TopicsTab");
+  const rows = [
+    { key: "alpha", title: "世界观设定", summary: "大陆与王国", updated: "2026-10-01T08:00:00.000Z", revision: "shiori-r1.a.b", chars: 30 },
+    { key: "beta", title: "人物关系", summary: "ALICE 与 BOB 的约定", updated: "2026-11-05T12:00:00.000Z", revision: "shiori-r1.b.b", chars: 120 },
+    { key: "gamma", title: "旧事", summary: "", updated: "", revision: "shiori-r1.c.b", chars: 200, archived: true },
+    { key: "delta", title: "B计划", summary: "备用线", updated: "2026-09-09T00:00:00.000Z", revision: "shiori-r1.d.b", chars: 80 },
+  ];
+  const dsh = {
+    call: async (method, session, payload) => {
+      if (payload && payload.name === "memory_list_topics") return { topics: rows };
+      if (payload && payload.name === "memory_read") {
+        return { topic: payload.args.topic, exists: true, content: "正文", revision: "shiori-r1.x.y", bytes: 6 };
+      }
+      return {};
+    },
+  };
+  const renderRow = (tree) => flattenVNode(tree)
+    .filter((n) => String((n.props && n.props.className) || "") === "dshi_item");
+  const rowKeys = (tree) => renderRow(tree).map((row) => {
+    const title = flattenVNode(row).find((n) => String((n.props && n.props.className) || "").includes("dshi_cardTitle"));
+    return collectText(title);
+  });
+
+  // 首次渲染跑 effects 让 load() 拉到列表（与 R8 用例同一路径），之后复用状态渲染。
+  host.states.length = 0;
+  let tree = renderTopics(dsh, "session-A", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  host.runEffects.v = false;
+  tree = renderTopics(dsh, "session-A");
+
+  // 列表默认排序：更新时间倒序（beta 11-05 → alpha 10-01 → delta 09-09 → gamma 缺失排最后）
+  let text = collectText(tree);
+  assert.deepEqual(rowKeys(tree), ["beta", "alpha", "delta", "gamma"], "default sort: updated desc, missing date last (缺失日期无论升降序都排最后)");
+  assert.ok(text.includes("2026-11-05") && text.includes("2026-10-01") && text.includes("2026-09-09"), "updated shown as YYYY-MM-DD");
+  assert.ok(!text.includes("2026-11-05T"), "no time-of-day leaked into updated column");
+
+  // 缺失 updated 显示 —
+  const dayCells = flattenVNode(tree).filter((n) => (n.props && n.props.title) === "更新时间");
+  assert.ok(dayCells.some((n) => collectText(n) === "—"), "missing updated renders —");
+
+  // 已归档行：徽章 + 名称/摘要调灰
+  const archivedRows = renderRow(tree).filter((row) => collectText(row).includes("已归档"));
+  assert.equal(archivedRows.length, 1, "archived row carries badge");
+  const archivedTitle = flattenVNode(archivedRows[0]).find((n) => String((n.props && n.props.className) || "").includes("dshi_cardTitle"));
+  assert.ok(archivedTitle.props.style && String(archivedTitle.props.style.color).includes("label-tertiary"), "archived name dimmed");
+
+  // 搜索：key / title / summary 子串，忽略大小写；空串显示全部
+  const searchInput = flattenVNode(tree).find((n) => n.type === "input" && String(n.props.placeholder || "").includes("搜索"));
+  assert.ok(searchInput, "search input rendered");
+  searchInput.props.onChange({ target: { value: "ALICE" } });
+  tree = renderTopics(dsh, "session-A");
+  assert.deepEqual(rowKeys(tree), ["beta"], "search matches summary case-insensitively");
+  assert.ok(collectText(tree).includes("显示 1/4 个主题"), "count reflects filtering");
+  searchInput.props.onChange({ target: { value: "世界" } });
+  tree = renderTopics(dsh, "session-A");
+  assert.deepEqual(rowKeys(tree), ["alpha"], "search matches title");
+  searchInput.props.onChange({ target: { value: "gam" } });
+  tree = renderTopics(dsh, "session-A");
+  assert.deepEqual(rowKeys(tree), ["gamma"], "search matches key");
+  searchInput.props.onChange({ target: { value: "" } });
+  tree = renderTopics(dsh, "session-A");
+  assert.ok(collectText(tree).includes("共 4 个主题"), "empty search shows all");
+
+  // 排序下拉：字数倒序 / 标题序
+  const sortSelect = flattenVNode(tree).find((n) => n.type === "select" && n.props.title === "排序方式");
+  assert.ok(sortSelect, "sort select rendered");
+  const setSort = (value) => {
+    sortSelect.props.onChange({ target: { value } });
+    return rowKeys(renderTopics(dsh, "session-A"));
+  };
+  assert.deepEqual(setSort("chars-desc"), ["gamma", "beta", "delta", "alpha"], "sort by chars desc");
+  // 标题序走 localeCompare("zh-Hans-CN")：Node ≥13 全 ICU 下为稳定拼音序，拉丁字母排 CJK 之后。
+  assert.deepEqual(setSort("title-asc"), ["gamma", "beta", "alpha", "delta"], "sort by title (pinyin collation)");
+  assert.deepEqual(setSort("updated-asc"), ["delta", "alpha", "beta", "gamma"], "sort by updated asc, missing date last");
+  assert.deepEqual(setSort("updated-desc"), ["beta", "alpha", "delta", "gamma"], "back to default sort");
+
+  // 搜索无结果：提示但不把「空作用域」文案混进来
+  const searchInput2 = flattenVNode(renderTopics(dsh, "session-A")).find((n) => n.type === "input" && String(n.props.placeholder || "").includes("搜索"));
+  searchInput2.props.onChange({ target: { value: "不存在的词" } });
+  tree = renderTopics(dsh, "session-A");
+  text = collectText(tree);
+  assert.ok(text.includes("没有匹配的主题"), "no-match hint shown");
+  assert.ok(!text.includes("这个作用域下还没有主题"), "empty-scope hint not confused with no-match");
 });
 
 test("R8：卡片详情只编辑 spark 卡片本身——保存只提交改动字段，连线可撤销", async () => {

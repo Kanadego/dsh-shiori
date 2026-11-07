@@ -381,7 +381,7 @@ test("U4 空状态：L0/L1 缺数据或正文为空时展示引导文案（怎�
   assert.ok(text.includes("还是空的"), "empty-state guide shown for both layers");
   assert.ok(text.includes("记忆按层组织"), "guide explains how memory is organized");
   assert.ok(text.includes("写第一条"), "guide explains where to write the first entry");
-  assert.ok(text.includes("预算配置"), "guide explains what to configure first");
+  assert.ok(text.includes("记忆预算"), "guide explains what to configure first");
   // 空状态仍提供编辑入口
   assert.ok(findButtons(tree, "编辑").length >= 2, "edit entry available in empty state");
   // 顶部两条占用进度条照常渲染（Bar 未被替换/移除）
