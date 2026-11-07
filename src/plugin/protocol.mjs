@@ -101,6 +101,10 @@ const planView = {
   properties: {
     planId,
     kind: { enum: ["organize", "forgetting"] },
+    // 真实计划类型（link / merge-topic / thin-core / archive-topic）：kind 恒为
+    // 家族名（organize / forgetting），客户端文案按 proposalKind 出。可选字段，
+    // 老服务端与 forgetting 预览不带。
+    proposalKind: { enum: ["link", "merge-topic", "thin-core", "archive-topic"] },
     planDigest,
     queueRevision: { oneOf: [queueRevision, { type: "null" }] },
     diff: { type: "array", items: diffEntry },

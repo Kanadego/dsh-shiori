@@ -2304,13 +2304,22 @@ window.__ModuleLoader__.load({
     ];
     var PLAN_STATE_LABELS = { open: "待执行", executed: "已执行", superseded: "已作废" };
     var PLAN_KIND_LABELS = { organize: "整理", forgetting: "遗忘" };
-    // U5b：预览卡标题按 plan.kind（link / merge-topic / thin-core）翻成人话；
-    // 未知 kind 原样显示，绝不吞掉、不崩。
-    // 0.2.2 归档入口（rework a2）：previewPlan 返回的 planView.kind 恒为家族名
-    // "organize"（服务端 protocol.mjs enum 只有 organize / forgetting），不存在
-    // "archive-topic" 这个 kind——专题归档卡不能靠 plan.kind 判定，由渲染处用
-    // 发起时钉定的 preview.archiveTopic 直接给标题「专题归档」（方向在正文说明）。
+    // U5b：预览卡标题按计划类型翻成人话（link / merge-topic / thin-core）；
+    // 未知类型原样显示，绝不吞掉、不崩。
+    // 0.2.2 归档入口（rework a2）：planView.kind 恒为家族名 "organize"（服务端
+    // protocol.mjs enum 只有 organize / forgetting），"archive-topic" 不在 kind enum
+    // 里——专题归档卡由渲染处用发起时钉定的 preview.archiveTopic 直接给标题
+    // 「专题归档」（方向在正文说明）。
+    // 0.2.3 计划类型细分：planView 新增可选 proposalKind（link / merge-topic /
+    // thin-core / archive-topic），真实计划类型从它读；旧服务端不带该字段时回退
+    // plan.kind（旧行为）。planKindOf 是唯一取值口，标题 / 正文 / 按钮一律经它。
     var PLAN_PREVIEW_TITLES = { "link": "连起来", "merge-topic": "合并进主题", "thin-core": "core 瘦身" };
+    function planKindOf(plan) {
+      var proposal = plan && plan.proposalKind !== undefined && plan.proposalKind !== null
+        ? String(plan.proposalKind) : "";
+      if (proposal !== "") return proposal;
+      return plan && plan.kind !== undefined && plan.kind !== null ? String(plan.kind) : "";
+    }
     function planPreviewTitle(kind) {
       var text = String(kind ?? "");
       return PLAN_PREVIEW_TITLES[text] ?? text;
@@ -3047,16 +3056,18 @@ window.__ModuleLoader__.load({
           return null;
         } catch (e) { return null; }
       };
-      // 预览正文按 plan.kind 翻人话；未知 kind 返回空数组（原始 diff 都在「原始信息」里）。
-      // 0.2.2 归档入口（rework a2）：previewPlan 返回的 planView.kind 恒为家族名
-      // "organize"（服务端 enum 无 "archive-topic"），专题归档卡改用第二参 previewInfo
-      // （发起时钉进 preview 状态）里的 archiveTopic 作唯一判据：有钉定即走归档分支，
-      // 方向取 archiveTopic；未钉定（普通 organize 预览）绝不进入该分支。topicKey 同样
-      // 取钉定值，缺失时退化为通用句，绝不抛错。
+      // 预览正文按计划类型翻人话（planKindOf：proposalKind 优先，回退 plan.kind）；
+      // 未知类型返回空数组（原始 diff 都在「原始信息」里）。
+      // 0.2.2 归档入口（rework a2）：planView.kind 恒为家族名 "organize"（服务端
+      // enum 无 "archive-topic"），专题归档卡改用第二参 previewInfo（发起时钉进
+      // preview 状态）里的 archiveTopic 作判据：有钉定即走归档分支。0.2.3 起
+      // proposalKind === "archive-topic" 也算归档；方向永远取 archiveTopic
+      //（未钉定时按 false＝恢复处理）；topicKey 同样取钉定值，缺失时退化为通用句，
+      // 绝不抛错。
       var previewBodyLines = function (plan, previewInfo) {
         var info = previewInfo && typeof previewInfo === "object" ? previewInfo : null;
         var isArchivePreview = Boolean(info && info.archiveTopic !== undefined && info.archiveTopic !== null);
-        var kind = plan && plan.kind !== undefined && plan.kind !== null ? String(plan.kind) : "";
+        var kind = planKindOf(plan);
         var diff = plan && Array.isArray(plan.diff) ? plan.diff : [];
         var first = diff.length > 0 && diff[0] && typeof diff[0] === "object" ? diff[0] : null;
         var lines = [];
@@ -3104,7 +3115,7 @@ window.__ModuleLoader__.load({
           }
           return lines;
         }
-        if (isArchivePreview) {
+        if (isArchivePreview || kind === "archive-topic") {
           var archiveDir = info.archiveTopic === true;
           var archiveKey = info.topicKey !== undefined && info.topicKey !== null
             ? String(info.topicKey)
@@ -3166,7 +3177,7 @@ window.__ModuleLoader__.load({
       var renderPreviewCard = function (key) {
         if (!preview || preview.sessionId !== props.sessionId) return null;
         var plan = preview.plan;
-        var planKind = plan && plan.kind !== undefined && plan.kind !== null ? String(plan.kind) : "";
+        var planKind = planKindOf(plan);
         var planIdText = plan && plan.planId !== undefined && plan.planId !== null ? String(plan.planId) : "";
         var planDigestText = plan && plan.planDigest !== undefined && plan.planDigest !== null ? String(plan.planDigest) : "";
         var bodyLines = previewBodyLines(plan, preview);
@@ -3176,18 +3187,20 @@ window.__ModuleLoader__.load({
           return Boolean(row && (row.executed === true || row.superseded === true));
         })();
         // 0.2.2 归档入口（rework a2）：planView.kind 恒为家族名 "organize"，专题归档卡
-        // 以 preview.archiveTopic 是否被钉定为唯一判据（false 也算钉定——恢复方向）。
-        // 未钉定（普通 organize / forgetting 预览）绝不出现归档文案。归档可逆——移出
+        // 以 preview.archiveTopic 是否被钉定为判据（false 也算钉定——恢复方向）。
+        // 0.2.3 起 proposalKind === "archive-topic" 同样算归档卡。两者都不满足
+        //（普通 organize / forgetting 预览）绝不出现归档文案。归档可逆——移出
         // 方向明示「可随时恢复」，恢复方向短句。
         var isArchivePreview = Boolean(preview && preview.archiveTopic !== undefined && preview.archiveTopic !== null);
-        var confirmLabel = isArchivePreview ? (preview.archiveTopic === true ? "确认移出索引（可随时恢复）" : "确认恢复")
+        var isArchiveCard = isArchivePreview || planKind === "archive-topic";
+        var confirmLabel = isArchiveCard ? (preview.archiveTopic === true ? "确认移出索引（可随时恢复）" : "确认恢复")
           : planKind === "link" ? "就这么连起来"
           : planKind === "merge-topic" ? "确认合并（不可撤销）"
           : planKind === "thin-core" ? "确认瘦身"
           : "确认执行";
         return h("div", { key: key, className: "dshi_itemMerge", style: { minWidth: 0 } },
           h("div", { className: "dshi_confirm", style: { marginLeft: 12 } },
-            h("div", { className: "dshi_cardTitle" }, isArchivePreview ? "专题归档" : planPreviewTitle(planKind)),
+            h("div", { className: "dshi_cardTitle" }, isArchiveCard ? "专题归档" : planPreviewTitle(planKind)),
             bodyLines.map(function (line, index) {
               return h("div", { key: index, className: "dshi_hint" }, line);
             }),

@@ -2250,7 +2250,7 @@ test("Q-A 回归：新建主题路径以服务端返回的 revision token 构造
         return { exists: true, content: "# 旧正文\n", revision: "shiori-r1.R34D.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" };
       }
       if (method === "previewPlan") {
-        return { kind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "ok", diff: [
+        return { kind: "organize", proposalKind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "ok", diff: [
           { path: "topic:t-new", oldText: "# 旧正文\n", newText: "# 旧正文\n\n## 合并记忆：项目X\n" },
           { path: "spark:s1", oldText: "a", newText: "b" },
         ] };
@@ -2341,8 +2341,8 @@ test("Q-A/Q-B 回归：合并与执行的错误路径给出可读中文提示（
     { queueRevision: 0, items: [{ candidate: { id: "cluster-A", kind: "cluster", scopeId: "default", sources: [{ id: "s1", revision: 1 }, { id: "s2", revision: 1 }], evidence: {} }, status: "pending" }], plans: [] },
     // proposal 预填合法 link 形状（NOT_FOUND 阶段要真正发 previewPlan 才能测服务端错误映射）
     null, false, JSON.stringify({ kind: "link", links: [{ id: "s1", after: [{ target: "t-a", rel: null }] }] }),
-    // preview：预置一条 merge-topic 预览（走确认执行错误路径）
-    { sessionId: "session-A", plan: { kind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "", diff: [] }, queueRevision: 0 },
+    // preview：预置一条 merge-topic 预览（走确认执行错误路径；planView 用服务端真实形状 kind:"organize"+proposalKind）
+    { sessionId: "session-A", plan: { kind: "organize", proposalKind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "", diff: [] }, queueRevision: 0 },
     null,
     { sessionId: "session-A", gen: 0 },
     // Q-A 新增 hook：merge / topics / mergeForm / newTopic
@@ -2361,7 +2361,7 @@ test("Q-A/Q-B 回归：合并与执行的错误路径给出可读中文提示（
   assert.ok(text.includes("legacy topics remain read-only"), "original message retained");
 
   // previewPlan 失败已清空 preview：直接预置一条预览（模拟用户此前已成功预览）再执行
-  host.states[4] = { sessionId: "session-A", plan: { kind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "", diff: [] }, queueRevision: 0 };
+  host.states[4] = { sessionId: "session-A", plan: { kind: "organize", proposalKind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "", diff: [] }, queueRevision: 0 };
   tree = renderCandidates(dsh, "session-A");
   // U5b rework：确认按钮按 kind 翻文案——merge-topic → 「确认合并（不可撤销）」（审查授权改）
   findButton(tree, "确认合并（不可撤销）").props.onClick();
@@ -3985,7 +3985,7 @@ test("U5b：预览卡 link——标题「连起来」、正文把『A』关联�
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
   const plan = {
-    kind: "link", planId: "plan-L", planDigest: "digest-L", queueRevision: 0,
+    kind: "organize", proposalKind: "link", planId: "plan-L", planDigest: "digest-L", queueRevision: 0,
     summary: "link plan over 2 source(s)",
     diff: [{ path: "spark:spk-A", oldText: "[]", newText: '[{"target":"spk-B","rel":"related"}]' }],
   };
@@ -4017,7 +4017,7 @@ test("U5b：预览卡 merge-topic——「把 N 张卡合并进主题『X』」+
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
   const plan = {
-    kind: "merge-topic", planId: "plan-M", planDigest: "digest-M", queueRevision: 0,
+    kind: "organize", proposalKind: "merge-topic", planId: "plan-M", planDigest: "digest-M", queueRevision: 0,
     summary: "merge-topic plan over 2 source(s)",
     diff: [
       { path: "topic:topic-x", oldText: "# 主题", newText: "# 主题\n追加" },
@@ -4047,7 +4047,7 @@ test("U5b：预览卡 thin-core——只写 core 正文长度变化不铺全文�
   const longBefore = "旧".repeat(12345);
   const longAfter = "新".repeat(8900);
   const plan = {
-    kind: "thin-core", planId: "plan-T", planDigest: "digest-T", queueRevision: 0,
+    kind: "organize", proposalKind: "thin-core", planId: "plan-T", planDigest: "digest-T", queueRevision: 0,
     summary: "thin-core plan over 1 source(s)",
     diff: [{ path: "core", oldText: longBefore, newText: longAfter }],
   };
@@ -4094,6 +4094,69 @@ test("U5b：预览卡未知 kind——标题原样显示 kind、正文走 summar
   assert.ok(confirm, "unknown kind keeps generic 确认执行 button");
   assert.ok(String(confirm.props.className || "").includes("dshi_btnDanger"), "unknown kind confirm stays danger");
   assert.ok(text.includes("旧") && text.includes("新"), "raw diff still reachable inside 原始信息");
+});
+
+// ── 0.2.3：planView.proposalKind 决定预览卡文案（planKindOf：proposalKind 优先，
+// 回退 plan.kind；旧服务端不带该字段时回到现状）──────────────────────────────
+
+function mountPreviewPlan(plan) {
+  return async () => {
+    const host = makeStatefulReact();
+    const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+    const renderCandidates = await mountCandidates(mod, host);
+    const dsh = { call: async (method) => (method === "listCandidates" ? { queueRevision: 0, items: [], plans: [] } : {}) };
+    host.states.length = 0;
+    host.states.push({ queueRevision: 0, items: [], plans: [] }, null, false, "", { sessionId: "session-A", plan, queueRevision: 0 }, null, { sessionId: "session-A", gen: 0 });
+    const tree = renderCandidates(dsh, "session-A");
+    return { host, tree, text: collectText(tree) };
+  };
+}
+
+test("0.2.3：planKindOf——proposalKind 决定 merge-topic / thin-core 文案；缺失时 kind:organize 不出任何专用文案且不抛错", async () => {
+  // 断言 1：kind:"organize"+proposalKind:"merge-topic" → 「合并进主题」标题与对应正文
+  const merge = await (await mountPreviewPlan({
+    kind: "organize", proposalKind: "merge-topic", planId: "plan-M2", planDigest: "digest-M2", queueRevision: 0,
+    summary: "merge-topic plan over 2 source(s)",
+    diff: [
+      { path: "topic:topic-y", oldText: "# 主题", newText: "# 主题\n追加" },
+      { path: "spark:s-1", oldText: "{}", newText: '{"state":"merged"}' },
+      { path: "spark:s-2", oldText: "{}", newText: '{"state":"merged"}' },
+    ],
+  }))();
+  assert.ok(merge.text.includes("合并进主题"), "proposalKind merge-topic title rendered");
+  assert.ok(merge.text.includes("把 2 张卡合并进主题『topic-y』"), "merge-topic body counts sources and names topic");
+  assert.ok(merge.text.includes("合并后源卡会退休，这一步不可撤销"), "merge-topic retirement warning present");
+  const mergeConfirm = flattenVNode(merge.tree).find((n) => n.type === "button" && n.children.includes("确认合并（不可撤销）"));
+  assert.ok(mergeConfirm, "merge-topic confirm button label applies via proposalKind");
+
+  // 断言 2：kind:"organize"+proposalKind:"thin-core" → 「core 瘦身」标题与长度正文
+  const thin = await (await mountPreviewPlan({
+    kind: "organize", proposalKind: "thin-core", planId: "plan-T2", planDigest: "digest-T2", queueRevision: 0,
+    summary: "thin-core plan over 1 source(s)",
+    diff: [{ path: "core", oldText: "旧".repeat(500), newText: "新".repeat(300) }],
+  }))();
+  assert.ok(thin.text.includes("core 瘦身"), "proposalKind thin-core title rendered");
+  assert.ok(thin.text.includes("core 正文 500 → 300 字"), "thin-core body shows length change");
+  const thinConfirm = flattenVNode(thin.tree).find((n) => n.type === "button" && n.children.includes("确认瘦身"));
+  assert.ok(thinConfirm, "thin-core confirm button label applies via proposalKind");
+
+  // 断言 3：proposalKind 缺失且 kind:"organize"（旧服务端 / 无 proposal 形状）→
+  // 不出任何专用标题 / 正文（回到现状），也不许抛错。只看预览确认卡（dshi_confirm）
+  // 区域——页面固定说明文案里本就含「合并进主题」等词，不能按全文匹配。
+  const legacy = await (await mountPreviewPlan({
+    kind: "organize", planId: "plan-O2", planDigest: "digest-O2", queueRevision: 0,
+    summary: "organize plan over 1 source(s)",
+    diff: [{ path: "spark:s-1", oldText: "旧", newText: "新" }],
+  }))();
+  const legacyCard = flattenVNode(legacy.tree).find((n) => n.type === "div" && n.props && n.props.className === "dshi_confirm");
+  assert.ok(legacyCard, "preview confirm card rendered without throw");
+  const legacyCardText = collectText(legacyCard);
+  assert.ok(!legacyCardText.includes("连起来") && !legacyCardText.includes("合并进主题") && !legacyCardText.includes("core 瘦身") && !legacyCardText.includes("专题归档"),
+    "no specialized title when proposalKind is missing on kind:organize");
+  assert.ok(!legacyCardText.includes("把 2 张卡合并进主题") && !legacyCardText.includes("core 正文") && !legacyCardText.includes("移出 L1 索引") && !legacyCardText.includes("合并后源卡会退休"),
+    "no specialized body lines either");
+  const legacyConfirm = flattenVNode(legacyCard).find((n) => n.type === "button" && n.children.includes("确认执行"));
+  assert.ok(legacyConfirm, "fallback keeps generic 确认执行 button (no throw, old behavior)");
 });
 
 // ── U5-c：孤立卡不提供「预览整理计划」──────────────────────────────────────
@@ -4244,7 +4307,7 @@ test("U5-d：REVISION_CONFLICT 提示指向「分析整理候选」；「刷新�
   host.states.push(
     { queueRevision: 0, items: [], plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
   // 预置一条已成功预览（模拟用户此前已预览过 merge-topic 计划），走确认执行错误路径
-  host.states[4] = { sessionId: "session-A", plan: { kind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "", diff: [] }, queueRevision: 0 };
+  host.states[4] = { sessionId: "session-A", plan: { kind: "organize", proposalKind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "", diff: [] }, queueRevision: 0 };
   let tree = renderCandidates(dsh, "session-A");
   findButton(tree, "确认合并（不可撤销）").props.onClick();
   await flush();

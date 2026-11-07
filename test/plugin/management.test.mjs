@@ -155,6 +155,7 @@ test("organize 全链：analyze 入队（持久）→ review → previewPlan（b
     kind: "organize", candidateId: candidate.id, proposal, expectedQueueRevision: reviewed.queueRevision, operationId: "pv-1",
   });
   assert.equal(preview.kind, "organize");
+  assert.equal(preview.proposalKind, "link");
   assert.match(preview.planDigest, /^[a-f0-9]{64}$/);
   assert.ok(Array.isArray(preview.diff) && preview.diff.length > 0);
 
@@ -227,6 +228,7 @@ test("organize：merge-topic 计划仅更新已有 topic（目标缺失明确报
     expectedQueueRevision: analyzed.queueRevision, operationId: "pv-m",
   });
   assert.equal(preview.kind, "organize");
+  assert.equal(preview.proposalKind, "merge-topic");
   const executed = await controller.management.executePlan(trusted, {
     planId: preview.planId, planDigest: preview.planDigest, operationId: "ex-m", confirmed: true,
   });
@@ -281,6 +283,7 @@ test("organize：previewPlan 接受 thin-core proposal 并返回计划（diff �
     expectedQueueRevision: analyzed.queueRevision, operationId: "pv-tc",
   });
   assert.equal(preview.kind, "organize");
+  assert.equal(preview.proposalKind, "thin-core");
   assert.match(preview.planDigest, /^[a-f0-9]{64}$/);
   assert.equal(preview.changedItems, 1);
   assert.deepEqual(preview.diff, [{ path: "core", oldText: "", newText: afterText }]);
@@ -413,6 +416,8 @@ test("forgetting 全链：90 天 ephemeral 入选（默认 30/240/.25、>=60 天
   const preview = await controller.management.previewPlan(trusted, { kind: "forgetting", planId: planSummary.planId });
   assert.equal(preview.planDigest, planSummary.planDigest);
   assert.equal(preview.changedItems, 1);
+  // forgetting 预览不带 proposalKind（可选字段，缺省即 undefined）。
+  assert.equal(preview.proposalKind, undefined);
 
   const executed = await controller.management.executePlan(trusted, {
     planId: preview.planId, planDigest: preview.planDigest, operationId: "fg-ex-1", confirmed: true,
@@ -1221,6 +1226,7 @@ test("archive-topic 全链：previewPlan → executePlan 落盘归档；恢复�
     kind: "archive-topic", topicKey: "arch-target", archive: true, operationId: "pv-ar-1",
   });
   assert.equal(preview.kind, "organize");
+  assert.equal(preview.proposalKind, "archive-topic");
   assert.match(preview.planDigest, /^[a-f0-9]{64}$/);
   assert.equal(preview.queueRevision, null);
   assert.equal(preview.changedItems, 1);

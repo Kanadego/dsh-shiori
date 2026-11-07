@@ -700,6 +700,7 @@ export function createManagement(deps) {
         return {
           planId,
           kind: "organize",
+          proposalKind: "archive-topic",
           planDigest: built.digest,
           queueRevision: null,
           diff: built.diff,
@@ -745,6 +746,7 @@ export function createManagement(deps) {
       return {
         planId,
         kind: "organize",
+        proposalKind: built.plan.kind,
         planDigest: built.digest,
         queueRevision: snapshot.revision,
         diff: built.diff,
