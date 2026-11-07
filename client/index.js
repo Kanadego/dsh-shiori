@@ -1419,6 +1419,273 @@ window.__ModuleLoader__.load({
       return map;
     }
 
+    // 实体聚类的实体名：取 raw.entities[0]，字符串直接用；对象取 name/id/key。
+    // 拿不到（undefined / 空数组 / 空串）返回 null → 中性色。
+    function entityKeyOf(node) {
+      var entities = node && node.raw && node.raw.entities;
+      if (!Array.isArray(entities) || entities.length === 0) return null;
+      var first = entities[0];
+      var key = first && typeof first === "object" ? (first.name ?? first.id ?? first.key) : first;
+      if (key === undefined || key === null) return null;
+      var text = String(key);
+      return text === "" ? null : text;
+    }
+
+    // FNV-1a 稳定哈希 → 固定 6 色调色板下标。同一实体名永远同色，无随机。
+    // 调色板走 circle 内联 style（reviewer q-1ba8addcbcd85a30：不新增 dshi_* 类名）。
+    var CLUSTER_PALETTE = ["#4c8bf5", "#d29922", "#8250df", "#1a7f37", "#bf3989", "#0969da"];
+    var NEUTRAL_FILL = "var(--dsw-alias-label-secondary,#6b7280)";
+    function clusterIndexOf(text) {
+      var hash = 0x811c9dc5;
+      for (var i = 0; i < text.length; i++) {
+        hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193) >>> 0;
+      }
+      return hash % 6;
+    }
+    function clusterFillOf(node) {
+      var entityKey = entityKeyOf(node);
+      return entityKey === null ? NEUTRAL_FILL : CLUSTER_PALETTE[clusterIndexOf(entityKey)];
+    }
+    // 存续类型描边色：evergreen 绿、ephemeral 蓝、非 active 灰（填充让位给聚类色）。
+    function vitalityStrokeOf(node) {
+      return node.state !== "active" ? "var(--dsw-alias-label-tertiary,#8b93a1)"
+        : node.vitality === "evergreen" ? "var(--dsw-alias-state-success-primary,#1a7f37)"
+        : "var(--dsw-alias-state-business-primary,#3964fe)";
+    }
+
+    // 节点半径按重要度：r = 10 + min(8, 2*degree)，degree 缺失或非数字按 0。
+    function nodeRadiusOf(node) {
+      var raw = node && node.raw;
+      var degree = raw ? Number(raw.degree) : 0;
+      if (!Number.isFinite(degree) || degree < 0) degree = 0;
+      return 10 + Math.min(8, 2 * degree);
+    }
+
+    // 手写 Fruchterman–Reingold 力导向布局（不引依赖、不加构建）。
+    // 初始位置按节点稳定顺序摆到圆上（不用 Math.random，同一份数据两次调用结果完全一致）；
+    // 120 轮迭代：点对斥力 k=sqrt(W*H/n)、边为弹簧、中心回归力，温度从 W/8 线性降到 0，
+    // 位移限幅后夹在 [pad, W-pad] × [pad, H-pad] 内。
+    // 迭代后：包围盒等比归一化到 [2*pad, W-2*pad] × [2*pad, H-2*pad] 并居中（防全图贴边），
+    // 再做 ≤30 轮确定性分离收尾（两两距离拉到 r_i+r_j+6 以上，保证不重合、标签不叠），
+    // 全程坐标保证有限值。（收敛三层修复见 review-rework a1：中心回归 / 归一化 / 分离。）
+    function forceLayout(nodes, edges) {
+      var W = 800;
+      var H = 380;
+      var PAD = 30;
+      var ITERATIONS = 120;
+      var positions = {};
+      var count = nodes.length;
+      if (count === 0) return positions;
+      for (var i = 0; i < count; i++) {
+        var angle = (2 * Math.PI * i) / count - Math.PI / 2;
+        positions[nodes[i].id] = { x: 400 + 260 * Math.cos(angle), y: 190 + 140 * Math.sin(angle) };
+      }
+      if (count === 1) { positions[nodes[0].id] = { x: 400, y: 190 }; return positions; }
+      // 半径预计算：分离收尾按 r_i + r_j + 6 判定
+      var radii = [];
+      for (var r0 = 0; r0 < count; r0++) radii.push(nodeRadiusOf(nodes[r0]));
+      var k = Math.sqrt((W * H) / count);
+      // 边去重：同一对节点的多条边只算一根弹簧，保证布局稳定
+      var pairSeen = {};
+      var springs = [];
+      for (var e = 0; e < edges.length; e++) {
+        var from = edges[e].from;
+        var to = edges[e].to;
+        if (from === to || !positions[from] || !positions[to]) continue;
+        var pair = from < to ? from + "\u0000" + to : to + "\u0000" + from;
+        if (pairSeen[pair]) continue;
+        pairSeen[pair] = true;
+        springs.push({ from: from, to: to });
+      }
+      var disp = {};
+      for (var iter = 0; iter < ITERATIONS; iter++) {
+        var temp = (W / 8) * (1 - iter / ITERATIONS);   // W/8 线性降到 0
+        for (var a = 0; a < count; a++) disp[nodes[a].id] = { x: 0, y: 0 };
+        // 斥力：所有点对
+        for (var u = 0; u < count; u++) {
+          for (var v = u + 1; v < count; v++) {
+            var pu = positions[nodes[u].id];
+            var pv = positions[nodes[v].id];
+            var dx = pu.x - pv.x;
+            var dy = pu.y - pv.y;
+            var dist = Math.sqrt(dx * dx + dy * dy);
+            if (!Number.isFinite(dist) || dist < 0.01) {
+              // 完全重合：给一个确定性的方向（按对下标取奇偶），避免 NaN 与随机
+              dx = (u + v) % 2 === 0 ? 1 : -1;
+              dy = (u * 3 + v * 7) % 2 === 0 ? 1 : -1;
+              dist = 1;
+            }
+            var force = (k * k) / dist;
+            var fx = (dx / dist) * force;
+            var fy = (dy / dist) * force;
+            disp[nodes[u].id].x += fx;
+            disp[nodes[u].id].y += fy;
+            disp[nodes[v].id].x -= fx;
+            disp[nodes[v].id].y -= fy;
+          }
+        }
+        // 引力：边为弹簧
+        for (var s = 0; s < springs.length; s++) {
+          var pf = positions[springs[s].from];
+          var pt = positions[springs[s].to];
+          var sdx = pt.x - pf.x;
+          var sdy = pt.y - pf.y;
+          var sdist = Math.sqrt(sdx * sdx + sdy * sdy);
+          if (!Number.isFinite(sdist) || sdist < 0.01) continue;
+          var attract = (sdist * sdist) / k;
+          var ax = (sdx / sdist) * attract;
+          var ay = (sdy / sdist) * attract;
+          disp[springs[s].from].x += ax;
+          disp[springs[s].from].y += ay;
+          disp[springs[s].to].x -= ax;
+          disp[springs[s].to].y -= ay;
+        }
+        // 中心回归力：把成分往画布中心轻轻拉，避免整图被斥力推到四边后被夹取压成一摞
+        for (var c = 0; c < count; c++) {
+          var cid = nodes[c].id;
+          disp[cid].x += 0.02 * (W / 2 - positions[cid].x);
+          disp[cid].y += 0.02 * (H / 2 - positions[cid].y);
+        }
+        // 限幅位移 + 夹取到画布内
+        for (var b = 0; b < count; b++) {
+          var id = nodes[b].id;
+          var d = disp[id];
+          var len = Math.sqrt(d.x * d.x + d.y * d.y);
+          if (Number.isFinite(len) && len > temp && len > 0) {
+            d.x = (d.x / len) * temp;
+            d.y = (d.y / len) * temp;
+          }
+          var p = positions[id];
+          p.x = Math.min(W - PAD, Math.max(PAD, p.x + (Number.isFinite(d.x) ? d.x : 0)));
+          p.y = Math.min(H - PAD, Math.max(PAD, p.y + (Number.isFinite(d.y) ? d.y : 0)));
+        }
+      }
+      // 迭代后归一化：包围盒等比缩放到 [2*PAD, W-2*PAD] × [2*PAD, H-2*PAD] 并居中，
+      // 消掉「全图贴边」；退化（宽高都为 0 的单点团）直接置画布中心。
+      var minX = Infinity;
+      var minY = Infinity;
+      var maxX = -Infinity;
+      var maxY = -Infinity;
+      for (var n1 = 0; n1 < count; n1++) {
+        var p1 = positions[nodes[n1].id];
+        if (p1.x < minX) minX = p1.x;
+        if (p1.x > maxX) maxX = p1.x;
+        if (p1.y < minY) minY = p1.y;
+        if (p1.y > maxY) maxY = p1.y;
+      }
+      var bw = maxX - minX;
+      var bh = maxY - minY;
+      if (bw === 0 && bh === 0) {
+        for (var z = 0; z < count; z++) {
+          positions[nodes[z].id] = { x: W / 2, y: H / 2 };
+        }
+      } else {
+        var scaleW = bw > 0 ? (W - 4 * PAD) / bw : Infinity;
+        var scaleH = bh > 0 ? (H - 4 * PAD) / bh : Infinity;
+        var scale = Math.min(scaleW, scaleH);
+        var offsetX = bw > 0 ? (W - bw * scale) / 2 : W / 2;
+        var offsetY = bh > 0 ? (H - bh * scale) / 2 : H / 2;
+        for (var n2 = 0; n2 < count; n2++) {
+          var pn = positions[nodes[n2].id];
+          pn.x = bw > 0 ? (pn.x - minX) * scale + offsetX : W / 2;
+          pn.y = bh > 0 ? (pn.y - minY) * scale + offsetY : H / 2;
+        }
+      }
+      // 确定性分离收尾：≤30 轮，把距离 < (r_i + r_j + 6) 的点对沿连线各推一半
+      // （dist≈0 给确定性方向），推完夹回画布。保证两两中心距离 > 6、圆面不叠。
+      // 奇偶轮交替扫描方向（升序/降序都由下标决定，仍无随机），避免同一批最紧
+      // 点对每轮都被后面的推挤侵蚀。
+      var SEPARATION_ROUNDS = 30;
+      for (var round = 0; round < SEPARATION_ROUNDS; round++) {
+        var moved = false;
+        var forward = round % 2 === 0;
+        for (var u2 = 0; u2 < count; u2++) {
+          var ui = forward ? u2 : count - 1 - u2;
+          for (var v2 = ui + 1; v2 < count; v2++) {
+            var qu = positions[nodes[ui].id];
+            var qv = positions[nodes[v2].id];
+            var qx = qu.x - qv.x;
+            var qy = qu.y - qv.y;
+            var qdist = Math.sqrt(qx * qx + qy * qy);
+            var needed = radii[ui] + radii[v2] + 6;
+            if (Number.isFinite(qdist) && qdist >= needed) continue;
+            if (!Number.isFinite(qdist) || qdist < 0.01) {
+              qx = (ui + v2) % 2 === 0 ? 1 : -1;
+              qy = (ui * 3 + v2 * 7) % 2 === 0 ? 1 : -1;
+              qdist = 1;
+            }
+            var push = (needed - qdist) / 2;
+            var ux2 = (qx / qdist) * push;
+            var uy2 = (qy / qdist) * push;
+            qu.x += ux2;
+            qu.y += uy2;
+            qv.x -= ux2;
+            qv.y -= uy2;
+            moved = true;
+          }
+        }
+        for (var c2 = 0; c2 < count; c2++) {
+          var pc = positions[nodes[c2].id];
+          pc.x = Math.min(W - PAD, Math.max(PAD, pc.x));
+          pc.y = Math.min(H - PAD, Math.max(PAD, pc.y));
+        }
+        if (!moved) break;
+      }
+      // 末段兜底：只保「两两距离 > 6」的硬下限。r_i+r_j+6 的间距在超密图（数百节点）
+      // 里几何上放不下，主分离跑完后仍可能有个别点对被挤穿 6——这里用小阈值继续
+      // 纯推挤（固定 ≤30 轮、同款确定性方向与夹取），把下限顶回 6 以上。
+      var FLOOR_ROUNDS = 30;
+      for (var round2 = 0; round2 < FLOOR_ROUNDS; round2++) {
+        var moved2 = false;
+        var forward2 = round2 % 2 === 0;
+        for (var w = 0; w < count; w++) {
+          var wi = forward2 ? w : count - 1 - w;
+          for (var w2 = wi + 1; w2 < count; w2++) {
+            var rw = positions[nodes[wi].id];
+            var rw2 = positions[nodes[w2].id];
+            var wx = rw.x - rw2.x;
+            var wy = rw.y - rw2.y;
+            var wdist = Math.sqrt(wx * wx + wy * wy);
+            if (Number.isFinite(wdist) && wdist >= 7) continue;
+            if (!Number.isFinite(wdist) || wdist < 0.01) {
+              wx = (wi + w2) % 2 === 0 ? 1 : -1;
+              wy = (wi * 3 + w2 * 7) % 2 === 0 ? 1 : -1;
+              wdist = 1;
+            }
+            var wpush = (7 - wdist) / 2;
+            var wdx = (wx / wdist) * wpush;
+            var wdy = (wy / wdist) * wpush;
+            rw.x += wdx;
+            rw.y += wdy;
+            rw2.x -= wdx;
+            rw2.y -= wdy;
+            moved2 = true;
+          }
+        }
+        for (var c3 = 0; c3 < count; c3++) {
+          var pc3 = positions[nodes[c3].id];
+          pc3.x = Math.min(W - PAD, Math.max(PAD, pc3.x));
+          pc3.y = Math.min(H - PAD, Math.max(PAD, pc3.y));
+        }
+        if (!moved2) break;
+      }
+      return positions;
+    }
+
+    // hover 邻居高亮的邻接表：id → 直接邻居 id 集合。
+    function adjacencyOf(normalized) {
+      var adj = {};
+      for (var i = 0; i < normalized.nodes.length; i++) adj[normalized.nodes[i].id] = {};
+      for (var j = 0; j < normalized.edges.length; j++) {
+        var from = normalized.edges[j].from;
+        var to = normalized.edges[j].to;
+        if (from === to || !adj[from] || !adj[to]) continue;
+        adj[from][to] = true;
+        adj[to][from] = true;
+      }
+      return adj;
+    }
+
     function GraphTab(props) {
       var state = useState(null);
       var graph = state[0];
@@ -1432,6 +1699,17 @@ window.__ModuleLoader__.load({
       var viewState = useState({ x: 0, y: 0, k: 1 });
       var view = viewState[0];
       var setView = viewState[1];
+      // hover 邻居高亮：当前悬停的节点 id（离开即置 null）。
+      var hoverState = useState(null);
+      var hoverId = hoverState[0];
+      var setHoverId = hoverState[1];
+      // 搜索定位：输入框文本 + 无匹配提示。
+      var searchState = useState("");
+      var search = searchState[0];
+      var setSearch = searchState[1];
+      var searchMissState = useState(false);
+      var searchMiss = searchMissState[0];
+      var setSearchMiss = searchMissState[1];
       var dragRef = useRef(null);
       var wrapRef = useRef(null);
       // F7：只读态（另一实例在写）写按钮置灰；F4：时间线跳转目标（type 必须是 spark）。
@@ -1480,15 +1758,9 @@ window.__ModuleLoader__.load({
       };
       useEffect(function () { load(); }, [props.sessionId]);
       var normalized = useMemo(function () { return graph ? normalizeGraph(graph) : { nodes: [], edges: [] }; }, [graph]);
-      var layout = useMemo(function () {
-        var positions = {};
-        var count = normalized.nodes.length;
-        for (var i = 0; i < count; i++) {
-          var angle = (2 * Math.PI * i) / Math.max(1, count) - Math.PI / 2;
-          positions[normalized.nodes[i].id] = { x: 400 + 260 * Math.cos(angle), y: 190 + 140 * Math.sin(angle) };
-        }
-        return positions;
-      }, [normalized]);
+      // 力导向布局：normalized 不变就不重算。邻居表只服务 hover 高亮。
+      var layout = useMemo(function () { return forceLayout(normalized.nodes, normalized.edges); }, [normalized]);
+      var adjacency = useMemo(function () { return adjacencyOf(normalized); }, [normalized]);
       // F4 时间线跳转：目标卡在图里 → 选中节点；不在（已删 / 已归档）→ 降级提示，
       // 不报错、不发必然失败的 RPC。deps 带 normalized：图谱刷新到货后重跑。
       // 跳转目标消费一次（consumed 标记，审查 P3①）：同一 seq 只处理一次，用户
@@ -1523,9 +1795,27 @@ window.__ModuleLoader__.load({
       var zoomBy = function (factor) {
         setView({ x: view.x, y: view.y, k: Math.min(3, Math.max(0.3, view.k * factor)) });
       };
+      // 节点类名沿用既有三态（evergreen/ephemeral/非 active/选中），颜色表达改走 circle
+      // 内联 style（聚类填充 + 存续描边，reviewer q-1ba8addcbcd85a30：不新增类名）。
       var nodeClass = function (node) {
         var base = node.state !== "active" ? "dshi_nodeDim" : node.vitality === "evergreen" ? "dshi_nodeEvergreen" : "dshi_nodeEphemeral";
         return base + (selected && selected.id === node.id ? " dshi_nodeSel" : "");
+      };
+      // 搜索定位：忽略大小写匹配 title 与 id，回车选中第一个匹配并把它居中
+      // （换算 view 让节点落在 800×380 中心，缩放保持）；无匹配只提示，不动图。
+      var runSearch = function () {
+        var query = String(search || "").trim().toLowerCase();
+        if (!query) return;
+        var found = null;
+        for (var i = 0; i < normalized.nodes.length; i++) {
+          var node = normalized.nodes[i];
+          if (node.title.toLowerCase().indexOf(query) >= 0 || node.id.toLowerCase().indexOf(query) >= 0) { found = node; break; }
+        }
+        if (!found) { setSearchMiss(true); return; }
+        setSearchMiss(false);
+        setSelected(found);
+        var position = layout[found.id];
+        if (position) setView({ x: 400 - position.x * view.k, y: 190 - position.y * view.k, k: view.k });
       };
       return h("div", { className: "dshi_card" },
         h("div", { className: "dshi_row" },
@@ -1535,15 +1825,27 @@ window.__ModuleLoader__.load({
           h("button", { className: "dshi_btn", onClick: function () { zoomBy(1 / 1.2); } }, "缩小 −"),
           h("button", { className: "dshi_btn", onClick: function () { setView({ x: 0, y: 0, k: 1 }); } }, "复位")),
         h("div", { className: "dshi_legend" },
-          h("span", null, h("i", { className: "dshi_dot", style: { background: "var(--dsw-alias-state-success-primary,#1a7f37)" } }), "evergreen"),
-          h("span", null, h("i", { className: "dshi_dot", style: { background: "var(--dsw-alias-state-business-primary,#3964fe)" } }), "ephemeral"),
-          h("span", null, h("i", { className: "dshi_dot", style: { background: "var(--dsw-alias-label-tertiary,#8b93a1)" } }), "非 active"),
+          h("span", null, h("i", { className: "dshi_dot", style: { background: "transparent", border: "2px solid var(--dsw-alias-state-success-primary,#1a7f37)" } }), "evergreen"),
+          h("span", null, h("i", { className: "dshi_dot", style: { background: "transparent", border: "2px solid var(--dsw-alias-state-business-primary,#3964fe)" } }), "ephemeral"),
+          h("span", null, h("i", { className: "dshi_dot", style: { background: "transparent", border: "2px solid var(--dsw-alias-label-tertiary,#8b93a1)" } }), "非 active"),
+          h("span", { className: "dshi_hint" }, "填充=实体聚类，描边=存续类型"),
           h("span", { className: "dshi_hint" }, "滚轮缩放 / 拖拽平移 / 点击节点查看详情与编辑")),
         ErrorBox(error),
         focusMiss ? h("div", { className: "dshi_roHint" }, "时间线跳转：卡片「" + shortId(focusTarget.id) + "」不在当前图谱（可能已删除或已归档）。") : null,
         ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
         normalized.nodes.length === 0 && !error ? h("div", { className: "dshi_loading" }, graph ? "当前 scope 无 active 卡" : "加载中…") : null,
-        normalized.nodes.length > 0 ? h("div", {
+        normalized.nodes.length > 0 ? h("div", { style: { display: "flex", flexDirection: "column", gap: "8px" } },
+          h("div", { className: "dshi_row" },
+            h("input", {
+              className: "dshi_input",
+              placeholder: "搜索：按标题或 id 定位",
+              value: search,
+              onChange: function (event) { setSearch(event.target.value); setSearchMiss(false); },
+              onKeyDown: function (event) { if (event && event.key === "Enter") runSearch(); }
+            }),
+            h("button", { className: "dshi_btn", onClick: function () { setSearch(""); setSearchMiss(false); } }, "清除"),
+            searchMiss ? h("span", { className: "dshi_hint" }, "没有匹配的卡片") : null),
+          h("div", {
           className: "dshi_graphWrap",
           ref: wrapRef,
           onPointerDown: onPointerDown,
@@ -1557,21 +1859,44 @@ window.__ModuleLoader__.load({
                 var from = layout[edge.from];
                 var to = layout[edge.to];
                 if (!from || !to) return null;
-                return h("line", { key: "e" + index, className: "dshi_edge", x1: from.x, y1: from.y, x2: to.x, y2: to.y });
+                // hover 高亮：高亮集 = 悬停节点 + 直接邻居；两端都在集内的边保持原样，
+                // 其余淡出（内联 opacity + 过渡，reviewer q-1ba8addcbcd85a30）。
+                var inHighlight = function (id) { return id === hoverId || Boolean(adjacency[hoverId] && adjacency[hoverId][id]); };
+                var dimmed = Boolean(hoverId && !(inHighlight(edge.from) && inHighlight(edge.to)));
+                return h("line", {
+                  key: "e" + index,
+                  className: "dshi_edge",
+                  x1: from.x, y1: from.y, x2: to.x, y2: to.y,
+                  style: { opacity: dimmed ? 0.25 : 1, transition: "opacity .15s" }
+                });
               }),
               normalized.nodes.map(function (node) {
                 var position = layout[node.id] || { x: 400, y: 190 };
+                var nodeDim = Boolean(hoverId && hoverId !== node.id && !(adjacency[hoverId] && adjacency[hoverId][node.id]));
+                var isSelected = Boolean(selected && selected.id === node.id);
                 return h("g", {
                   key: node.id,
                   className: "dshi_graphNode",
+                  style: { opacity: nodeDim ? 0.25 : 1, transition: "opacity .15s" },
+                  onPointerEnter: function () { setHoverId(node.id); },
+                  onPointerLeave: function () { setHoverId(null); },
                   onPointerUp: function () {
                     if (dragRef.current && dragRef.current.moved) return;
                     setSelected(node);
                   }
                 },
-                  h("circle", { className: nodeClass(node), cx: position.x, cy: position.y, r: 14 }),
-                  h("text", { className: "dshi_nodeLabel", x: position.x + 18, y: position.y + 4 }, node.title.slice(0, 24)));
-              }))))
+                  h("circle", {
+                    className: nodeClass(node),
+                    cx: position.x, cy: position.y, r: nodeRadiusOf(node),
+                    // 填充=实体聚类（哈希→6 色，无实体中性色）；描边=存续类型，选中时让位红描边
+                    style: {
+                      fill: clusterFillOf(node),
+                      stroke: isSelected ? "var(--dsw-alias-state-error-primary,#f85149)" : vitalityStrokeOf(node),
+                      strokeWidth: isSelected ? 2 : 2.5
+                    }
+                  }),
+                  h("text", { className: "dshi_nodeLabel", x: position.x + nodeRadiusOf(node) + 4, y: position.y + 4 }, node.title.slice(0, 24)));
+              })))))
         : null,
         selected ? h(NodeDetail, { node: selected, nodes: normalized.nodes, edges: normalized.edges, dsh: props.dsh, sessionId: props.sessionId, readOnly: ro, onClose: function () { setSelected(null); }, onSaved: load }) : null);
     }

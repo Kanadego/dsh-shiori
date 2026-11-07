@@ -46,6 +46,30 @@ function nonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
 }
 
+/** 节点 entities 上限：超出截断，供客户端实体聚类着色。 */
+const MAX_NODE_ENTITIES = 4;
+
+/**
+ * 规范化一条记录的 entities（供节点聚类着色）：仅保留字符串且 trim 后非空的
+ * 元素（保留 trim 后的值），按首次出现顺序去重，上限 MAX_NODE_ENTITIES 条截断。
+ * 记录缺失 entities、非数组、元素非法一律不抛错，退化为 []。
+ */
+function normalizeEntities(record) {
+  const raw = record.entities;
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const value = item.trim();
+    if (value.length === 0 || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+    if (out.length === MAX_NODE_ENTITIES) break;
+  }
+  return out;
+}
+
 /**
  * 单条记录是否可进入当前 scope 的默认投影。
  * 必须同时满足：形状可辨（plain record + 非空 string id）、scope 完全相等、
@@ -111,7 +135,9 @@ function normalizeRel(rel) {
  * @param {string} input.scopeId 可信 scope（工厂注入，不由数据决定）
  * @param {Array} input.records 待投影的 public record 数组（可含异 scope/archived 等脏数据）
  * @returns {object} { scopeId, nodes, edges, stats }
- *   nodes: [{ id, title, summary, vitality, revision, degree }]，按 id 稳定排序；
+ *   nodes: [{ id, title, summary, vitality, revision, degree, entities }]，按 id 稳定排序；
+ *     entities 为规范化后的字符串数组（trim 非空、去重保序、上限 4 条，脏数据退化为 []），
+ *     只在 projectGraph 的 nodes 里出现，不进 summary/stats（规模摘要不含身份信息）；
  *   edges: [{ source, target, rel, reciprocal }]，按 (source, target, rel) 稳定排序；
  *   stats: 节点/边规模、vitality 分布与各类丢弃计数。
  */
@@ -162,6 +188,7 @@ export function projectGraph({ scopeId, records } = {}) {
       vitality: labelVitality(record),
       revision: record.revision ?? null,
       degree: 0,
+      entities: normalizeEntities(record),
     }))
     .sort((a, b) => compareStrings(a.id, b.id));
   const nodeById = new Map(nodes.map((n) => [n.id, n]));

@@ -191,11 +191,57 @@ test("vitality labels: evergreen/ephemeral counted, unknown labeled not guessed"
   assert.equal(p.nodes.find((x) => x.id === "u").vitality, "unknown");
 });
 
-test("node payload is metadata only: id/title/summary/vitality/revision/degree", () => {
+test("node payload is metadata only: id/title/summary/vitality/revision/degree/entities", () => {
   const p = projectGraph({ scopeId: SCOPE, records: [mk("a", { revision: 9 })] });
   assert.deepEqual(Object.keys(p.nodes[0]).sort(),
-    ["degree", "id", "revision", "summary", "title", "vitality"]);
+    ["degree", "entities", "id", "revision", "summary", "title", "vitality"]);
   assert.equal(p.nodes[0].revision, 9);
+});
+
+// ── entities 投影（客户端实体聚类着色用）──────────────────────────────────
+
+test("entities are normalized: kept in first-seen order after trim and dedupe", () => {
+  const p = projectGraph({ scopeId: SCOPE, records: [
+    mk("a", { entities: [" alpha", "beta", "alpha", "gamma"] }),
+  ]});
+  assert.deepEqual(p.nodes[0].entities, ["alpha", "beta", "gamma"]);
+});
+
+test("entities are capped at 4 entries after dedupe", () => {
+  const p = projectGraph({ scopeId: SCOPE, records: [
+    mk("a", { entities: ["e1", "e2", "e3", "e4", "e5", "e6"] }),
+  ]});
+  assert.deepEqual(p.nodes[0].entities, ["e1", "e2", "e3", "e4"]);
+});
+
+test("entities filter blank and illegal elements, degrade to [] on missing/non-array", () => {
+  const records = [
+    mk("blank", { entities: ["  ", "", "\t"] }),
+    mk("illegal", { entities: [42, null, {}, true, [], "ok"] }),
+    mk("missing", { entities: undefined }),
+    mk("non-array", { entities: "nope" }),
+  ];
+  const p = projectGraph({ scopeId: SCOPE, records });
+  assert.deepEqual(p.nodes.find((n) => n.id === "blank").entities, []);
+  assert.deepEqual(p.nodes.find((n) => n.id === "illegal").entities, ["ok"]);
+  assert.deepEqual(p.nodes.find((n) => n.id === "missing").entities, []);
+  assert.deepEqual(p.nodes.find((n) => n.id === "non-array").entities, []);
+});
+
+test("entities do not affect degree, edge count, stats or summary shape", () => {
+  const records = [
+    mk("a", { entities: ["x", "y", "z", "w", "v"], links: [{ target: "b" }] }),
+    mk("b", { entities: ["x"] }),
+  ];
+  const p = projectGraph({ scopeId: SCOPE, records });
+  assert.equal(p.stats.nodes, 2);
+  assert.equal(p.stats.edges, 1);
+  assert.equal(p.nodes.find((n) => n.id === "a").degree, 1);
+  assert.equal(p.nodes.find((n) => n.id === "b").degree, 1);
+  // entities 是身份信息，不得泄漏进 stats / summary 输出
+  const statsText = JSON.stringify(p.stats);
+  for (const entity of ["x", "y", "z", "w", "v"]) assert.ok(!statsText.includes(`"${entity}"`));
+  assert.ok(!JSON.stringify(graphSummary(p)).includes("entities"));
 });
 
 test("empty graph yields empty deterministic projection", () => {

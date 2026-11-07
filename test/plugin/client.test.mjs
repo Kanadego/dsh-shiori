@@ -3396,14 +3396,15 @@ test("R8：卡片详情只编辑 spark 卡片本身——保存只提交改动�
   const detail = findComponent(tree, "NodeDetail");
   assert.ok(detail, "NodeDetail mounted for the selected node");
 
-  // NodeDetail 的 useState 紧接 GraphTab 的 4 个之后（graph / error / selected / view）
-  host.cursor.v = 4;
+  // NodeDetail 的 useState 紧接 GraphTab 的 7 个之后
+  // （graph / error / selected / view / hoverId / search / searchMiss——图谱页改版追加后 3 个）
+  host.cursor.v = 7;
   host.runEffects.v = true;
   detail.type(detail.props);
   for (const effect of host.effects.splice(0)) effect();
   await settle();
   host.runEffects.v = false;
-  const renderDetail = () => { host.cursor.v = 4; return detail.type(detail.props); };
+  const renderDetail = () => { host.cursor.v = 7; return detail.type(detail.props); };
 
   let painted = renderDetail();
   let text = collectText(painted);
@@ -3438,6 +3439,230 @@ test("R8：卡片详情只编辑 spark 卡片本身——保存只提交改动�
   assert.equal(collectText(painted).includes("这张卡还没有连线。"), false, "连线恢复");
   assert.equal(flattenVNode(painted).filter((n) => n.type === "button" && collectText(n) === "移除").length, 1, "连线行回到列表里");
   assert.equal(calls.length, 0, "撤销只在本地还原，不发请求");
+});
+
+
+// ---------------------------------------------------------------------------
+// R8 续（图谱页改版）：手写 FR 力导向布局稳定且坐标有限 / 半径按 degree /
+// hover 邻居高亮 / 搜索定位居中 / 实体聚类着色稳定 / 图例文案更新。
+// GraphTab useState 顺序：graph / error / selected / view / hoverId / search /
+// searchMiss（共 7 个）。
+// ---------------------------------------------------------------------------
+
+const GRAPH_TAB_NODES = [
+  { id: "spk-1", title: "苹果卡", vitality: "evergreen", state: "active", revision: 1, degree: 3, entities: ["项目甲"] },
+  { id: "spk-2", title: "香蕉卡", vitality: "ephemeral", state: "active", revision: 1, degree: 0, entities: ["项目甲"] },
+  { id: "spk-3", title: "樱桃卡", vitality: "ephemeral", state: "active", revision: 1, degree: 1, entities: ["项目乙"] },
+  { id: "spk-4", title: "无实体卡", vitality: "ephemeral", state: "active", revision: 1 },
+];
+const GRAPH_TAB_PAYLOAD = { nodes: GRAPH_TAB_NODES, edges: [{ from: "spk-1", to: "spk-2" }] };
+
+// 挂 GraphTab 并跑完 load() effect，返回 rerender（重渲染读最新 state）。
+async function mountGraphTab(payload = GRAPH_TAB_PAYLOAD) {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderGraph = await mountTabById(mod, host, "graph", "GraphTab");
+  const dsh = {
+    call: async (method) => (method === "getGraph" ? payload : {}),
+  };
+  host.states.length = 0;
+  renderGraph(dsh, "session-A", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  host.runEffects.v = false;
+  return {
+    host,
+    rerender: () => renderGraph(dsh, "session-A"),
+  };
+}
+
+function graphNodeGs(tree) {
+  return flattenVNode(tree).filter((n) => n.type === "g" && String(n.props.key || "").startsWith("spk-"));
+}
+
+function graphCircles(tree) {
+  return flattenVNode(tree).filter((n) => n.type === "circle");
+}
+
+test("R8：图谱力导向布局——同一数据两次渲染一致、坐标有限且夹在画布内、孤立节点互不重叠", async () => {
+  const { rerender } = await mountGraphTab();
+  const first = graphCircles(rerender()).map((c) => [c.props.cx, c.props.cy]);
+  assert.equal(first.length, 4, "4 个节点都有位置");
+  for (const [x, y] of first) {
+    assert.ok(Number.isFinite(x) && Number.isFinite(y), "坐标不含 NaN/Infinity");
+    assert.ok(x >= 30 && x <= 770 && y >= 30 && y <= 350, `坐标夹在 [30,770]×[30,350] 内（got ${x},${y}）`);
+  }
+  // 同一份数据再开一个独立实例渲染，布局逐点一致（无 Math.random、顺序稳定）
+  const { rerender: rerender2 } = await mountGraphTab();
+  const second = graphCircles(rerender2()).map((c) => [c.props.cx, c.props.cy]);
+  assert.deepEqual(second, first, "同一份数据两次渲染布局完全一致");
+  // 孤立节点（spk-3 / spk-4 无边）互不重叠、也不与其它点重合
+  for (let i = 0; i < first.length; i++) {
+    for (let j = i + 1; j < first.length; j++) {
+      const dist = Math.hypot(first[i][0] - first[j][0], first[i][1] - first[j][1]);
+      assert.ok(dist > 1, `节点 ${i} 与 ${j} 位置不重合（dist=${dist}）`);
+    }
+  }
+});
+
+test("R8：图谱节点半径按 degree 变化——r = 10 + min(8, 2*degree)，缺失/非数字按 0", async () => {
+  const { rerender } = await mountGraphTab();
+  let tree = rerender();
+  const radii = graphCircles(tree).map((c) => c.props.r).sort((a, b) => a - b);
+  // spk-1 degree 3 → 16；spk-3 degree 1 → 12；spk-2 degree 0 → 10；spk-4 缺失 → 10
+  assert.deepEqual(radii, [10, 10, 12, 16], "半径映射 r = 10 + min(8, 2*degree)");
+  // 标签 x 偏移 = cx + r + 4（不再写死 +18——最大半径 18 时标签会压在圆边上）
+  for (const g of graphNodeGs(tree)) {
+    const circle = flattenVNode(g).find((n) => n.type === "circle");
+    const label = flattenVNode(g).find((n) => n.type === "text");
+    assert.equal(label.props.x, circle.props.cx + circle.props.r + 4, `标签偏移随半径（${g.props.key}）`);
+  }
+  // degree 非数字按 0
+  const { rerender: rerender2 } = await mountGraphTab({
+    nodes: [{ id: "spk-9", title: "坏 degree 卡", vitality: "ephemeral", state: "active", revision: 1, degree: "很多" }],
+    edges: [],
+  });
+  const badRadii = graphCircles(rerender2()).map((c) => c.props.r);
+  assert.deepEqual(badRadii, [10], "degree 非数字按 0 处理");
+});
+
+// 密集图（review-rework a1）：链状图节点多、成分长，最容易出现全贴边 + 完全重合。
+function chainGraphPayload(count) {
+  const nodes = [];
+  for (let i = 0; i < count; i++) {
+    nodes.push({ id: "spk-" + i, title: "链卡" + i, vitality: "ephemeral", state: "active", revision: 1, degree: i === 0 || i === count - 1 ? 1 : 2 });
+  }
+  const edges = [];
+  for (let i = 0; i < count - 1; i++) edges.push({ from: "spk-" + i, to: "spk-" + (i + 1) });
+  return { nodes, edges };
+}
+
+// 密集图通用断言：坐标有限、夹在 [30,770]×[30,350]、两两距离 > 6、
+// 角落边界（x 与 y 同时贴边）的节点不许超过一半。
+function assertDenseLayoutHealthy(tree, count) {
+  const circles = graphCircles(tree);
+  assert.equal(circles.length, count, `${count} 个节点全部渲染`);
+  const pts = circles.map((c) => ({ x: c.props.cx, y: c.props.cy }));
+  let cornerBoundary = 0;
+  for (const p of pts) {
+    assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y), "坐标不含 NaN/Infinity");
+    assert.ok(p.x >= 30 && p.x <= 770 && p.y >= 30 && p.y <= 350, `坐标夹在 [30,770]×[30,350] 内（got ${p.x},${p.y}）`);
+    if ((p.x === 30 || p.x === 770) && (p.y === 30 || p.y === 350)) cornerBoundary++;
+  }
+  assert.ok(cornerBoundary <= Math.floor(count / 2), `不许全贴边（角落边界 ${cornerBoundary}/${count}）`);
+  let minDist = Infinity;
+  for (let i = 0; i < count; i++) {
+    for (let j = i + 1; j < count; j++) {
+      const d = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
+      if (d < minDist) minDist = d;
+      assert.ok(d > 6, `节点 ${i}/${j} 距离 ${d.toFixed(2)} 必须大于 6（不许重合/叠标签）`);
+    }
+  }
+  return minDist;
+}
+
+test("R8：密集图布局——60 节点链不贴边、不重合、两两距离 > 6", async () => {
+  const { rerender } = await mountGraphTab(chainGraphPayload(60));
+  const minDist = assertDenseLayoutHealthy(rerender(), 60);
+  assert.ok(minDist > 6, `最小两两距离 ${minDist.toFixed(2)} > 6`);
+});
+
+test("R8：密集图布局——200 节点链同款断言（中心回归 + 归一化 + 分离收尾三层都到位）", async () => {
+  const { rerender } = await mountGraphTab(chainGraphPayload(200));
+  const minDist = assertDenseLayoutHealthy(rerender(), 200);
+  assert.ok(minDist > 6, `最小两两距离 ${minDist.toFixed(2)} > 6`);
+});
+
+test("R8：图谱 hover 邻居高亮——非邻居节点与无关边淡出（内联 opacity 0.25），离开复原，不影响选中", async () => {
+  const { rerender } = await mountGraphTab();
+  let tree = rerender();
+  // hover spk-1：直接邻居 spk-2；spk-3 / spk-4 淡出；spk1–spk2 的边保持原样
+  graphNodeGs(tree).find((n) => n.props.key === "spk-1").props.onPointerEnter();
+  tree = rerender();
+  const dimmedKeys = graphNodeGs(tree).filter((n) => n.props.style && n.props.style.opacity === 0.25).map((n) => n.props.key);
+  assert.deepEqual(dimmedKeys.sort(), ["spk-3", "spk-4"], "非邻居节点淡出（opacity 0.25）");
+  const keepKeys = graphNodeGs(tree).filter((n) => n.props.style && n.props.style.opacity === 1).map((n) => n.props.key);
+  assert.deepEqual(keepKeys.sort(), ["spk-1", "spk-2"], "悬停节点与直接邻居保持原样");
+  const lines = flattenVNode(tree).filter((n) => n.type === "line");
+  assert.equal(lines.length, 1, "一条边渲染");
+  assert.equal(lines[0].props.style.opacity, 1, "悬停节点与邻居之间的边保持原样");
+  assert.equal(lines[0].props.style.transition, "opacity .15s", "淡出走 opacity 过渡");
+  // 离开复原
+  graphNodeGs(tree).find((n) => n.props.key === "spk-1").props.onPointerLeave();
+  tree = rerender();
+  const allGs = graphNodeGs(tree);
+  assert.ok(allGs.every((n) => n.props.style && n.props.style.opacity === 1), "离开后节点全部复原");
+  assert.ok(flattenVNode(tree).filter((n) => n.type === "line").every((n) => n.props.style.opacity === 1), "离开后边全部复原");
+  // hover 不影响点击选中：onPointerUp 仍走 setSelected
+  graphNodeGs(tree).find((n) => n.props.key === "spk-2").props.onPointerUp();
+  tree = rerender();
+  assert.ok(findComponent(tree, "NodeDetail"), "hover 后点击仍能选中节点开详情");
+});
+
+test("R8：图谱搜索定位——回车选中第一个匹配并居中（缩放保持），无匹配只提示不清图", async () => {
+  const { host, rerender } = await mountGraphTab();
+  let tree = rerender();
+  const searchInput = () => flattenVNode(tree).find((n) => n.type === "input"
+    && String(n.props.placeholder || "") === "搜索：按标题或 id 定位");
+  assert.ok(searchInput(), "搜索输入框渲染，placeholder 按需求文案");
+
+  // 无匹配：提示一句，图不清空、不选中
+  searchInput().props.onChange({ target: { value: "不存在的词" } });
+  tree = rerender();
+  searchInput().props.onKeyDown({ key: "Enter" });
+  tree = rerender();
+  assert.ok(collectText(tree).includes("没有匹配的卡片"), "无匹配给提示");
+  assert.equal(findComponent(tree, "NodeDetail"), undefined, "无匹配不选中");
+  assert.equal(graphCircles(tree).length, 4, "无匹配不清空图");
+
+  // 匹配标题：回车选中第一个匹配，view 让节点落在 800×380 中心，缩放保持
+  searchInput().props.onChange({ target: { value: "樱桃" } });
+  tree = rerender();
+  searchInput().props.onKeyDown({ key: "Enter" });
+  tree = rerender();
+  assert.ok(findComponent(tree, "NodeDetail"), "回车选中第一个匹配并开详情");
+  const view = host.states[3];
+  const target = graphNodeGs(tree).find((n) => n.props.key === "spk-3");
+  const circle = flattenVNode(target).find((n) => n.type === "circle");
+  assert.equal(view.k, 1, "缩放保持");
+  assert.ok(Math.abs(view.x - (400 - circle.props.cx * view.k)) < 1e-9
+    && Math.abs(view.y - (190 - circle.props.cy * view.k)) < 1e-9, "目标节点换算到 800×380 中心");
+
+  // id 匹配忽略大小写
+  searchInput().props.onChange({ target: { value: "SPK-4" } });
+  tree = rerender();
+  searchInput().props.onKeyDown({ key: "Enter" });
+  tree = rerender();
+  assert.ok(findComponent(tree, "NodeDetail"), "id 大小写不敏感匹配");
+
+  // 「清除」清空输入与提示
+  findButton(tree, "清除").props.onClick();
+  tree = rerender();
+  assert.equal(host.states[5], "", "清除清空输入框");
+  assert.ok(!collectText(tree).includes("没有匹配的卡片"), "清除后提示消失");
+});
+
+test("R8：图谱实体聚类着色——同实体同色、不同实体不同色、无实体中性色；图例讲清填充/描边语义", async () => {
+  const { rerender } = await mountGraphTab();
+  const tree = rerender();
+  const circleByKey = {};
+  for (const g of graphNodeGs(tree)) {
+    circleByKey[g.props.key] = flattenVNode(g).find((n) => n.type === "circle");
+  }
+  // 聚类填充走 circle 内联 style.fill：同实体同色、不同实体不同色、无实体中性色
+  const fillOf = (id) => circleByKey[id].props.style.fill;
+  assert.equal(fillOf("spk-1"), fillOf("spk-2"), "同一实体（项目甲）永远同色");
+  assert.notEqual(fillOf("spk-1"), fillOf("spk-3"), "不同实体不同色（项目甲 vs 项目乙）");
+  assert.ok(fillOf("spk-4").includes("--dsw-alias-label-secondary"), "没有 entities 的节点用中性色");
+  // 存续类型改用描边：evergreen 绿描边、ephemeral 蓝描边；既有三态类名继续挂在节点上
+  assert.equal(circleByKey["spk-1"].props.style.stroke, "var(--dsw-alias-state-success-primary,#1a7f37)", "evergreen 绿描边");
+  assert.equal(circleByKey["spk-2"].props.style.stroke, "var(--dsw-alias-state-business-primary,#3964fe)", "ephemeral 蓝描边");
+  assert.ok(String(circleByKey["spk-1"].props.className).includes("dshi_nodeEvergreen"), "dshi_nodeEvergreen 类保持挂载");
+  assert.ok(String(circleByKey["spk-2"].props.className).includes("dshi_nodeEphemeral"), "dshi_nodeEphemeral 类保持挂载");
+  // 图例：三个既有条目保持 + 新语义文案
+  const text = collectText(tree);
+  assert.ok(text.includes("填充=实体聚类，描边=存续类型"), "图例讲清填充=实体聚类、描边=存续类型");
+  assert.ok(text.includes("evergreen") && text.includes("ephemeral") && text.includes("非 active"), "三个既有图例条目保持不变");
 });
 
 
