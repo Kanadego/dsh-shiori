@@ -282,6 +282,6 @@ test("F4 跳转：core 条目不提供「定位」（核心记忆无对应 tab�
   });
   const tree = renderTab({ call: async () => page }, page, { onJump: (type, id) => jumps.push([type, id]) });
   assert.equal(findButtons(tree, "定位").length, 0, "core 条目无定位按钮");
-  assert.ok(collectText(tree).includes("记忆 L0/L1"), "提示核心记忆去「记忆 L0/L1」页查看");
+  assert.ok(collectText(tree).includes("记忆内容"), "提示核心记忆去「记忆内容」页查看");
   assert.equal(jumps.length, 0);
 });
