@@ -4,7 +4,7 @@
 
 - **怎么用**：排查问题先查下面对照表定位到报告与编号，再进报告正文看「位置 / 为什么是问题 / 最小复现 / 修复方向」；报告里的行号是审计当日 grep 过的，动手前先重新核对。
 - **分级口径**：P0 = 丢数据 / 写坏状态 / 安全边界破口；P1 = 功能错误、跨会话状态污染、协议不一致；P2 = 口径 / 一致性 / 性能 / 卫生。
-- **状态说明**：0.2.3 收尾批（thin-core 裁撤 + 服务端/客户端修复单 + 本文档）已合入 main，下表状态即合入后的实际状态。状态列只有三种取值：**已修 / 待修 / 随 thin-core 裁撤消失**。
+- **状态说明**：0.2.3 两批（thin-core 裁撤 + 服务端/客户端修复单；archive-topic 独立计划族 + sparks store 清理）均已合入 main，下表状态即合入后的实际状态。状态列只有三种取值：**已修 / 待修 / 随 thin-core 裁撤消失**。
 
 ## 一、报告索引
 
@@ -40,7 +40,7 @@
 | P2-A7 | A | 死代码 / 仅测试引用导出 7 处 | 待修 | 删除需先与契约核对，报告只记录未动手 |
 | P2-B1 | B | executePlan 在 `markExecuted` 之后的队列收敛若抛错，客户端收到失败回执但计划实际已执行 | 待修 | |
 | P2-B2 | B | previewPlan 的 wire inputSchema 比 buildDraft 宽松（link 的 `rel`、merge-topic 的 `expectedRevision`） | 待修 | |
-| P2-B3 | B | organize analyze 的 `supersedeOpen` 把 archive-topic 计划一并误作废 | 待修 | 0.2.3 从本批撤回：需改 `src/plugin/state.mjs:586-604`，已转后续单（archive-topic 独立计划族） |
+| P2-B3 | B | organize analyze 的 `supersedeOpen` 把 archive-topic 计划一并误作废 | 已修 | 0.2.3 收尾单 ce00894：`src/plugin/state.mjs` 的 `supersedeOpen` 增加 `archive-topic` 白名单并按族收敛（旧形状 `kind:"organize"` + `plan.kind:"archive-topic"` 走兼容判定）；归档计划独立落库 kind，`plansToWire` 只映射回 wire 家族名 `organize` |
 | P2-B4 | B | executor 注释声称「生产 caller 未传 stateRoot，线上一定走 skipped」已过时 | 随 thin-core 裁撤消失 | 该注释描述的是 thin-core 备份链路，随整块裁撤一并移除 |
 | P2-B5 | B | buildDraft 拒绝 archive-topic 的报错文案漏列 archive-topic，与 PLAN_KINDS 不一致 | 已修 | 0.2.3：文案改为与 buildDraft 实际接受集一致（link / merge-topic）；archive-topic 走独立的 buildArchiveTopicPlan，不经 buildDraft |
 | P2-C1 | C | GLOSSARY 第三章 tab 对照表只有 6 行，实际 tab 栏有 8 个 | 待修 | 归入下一批「GLOSSARY 与文案统一」 |
