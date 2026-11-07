@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
-import { createCandidateQueue, buildDraft, digestPlan } from '../../src/organize/queue.mjs';
+import { createCandidateQueue, buildDraft, buildArchiveTopicPlan, digestPlan } from '../../src/organize/queue.mjs';
 
 const SCOPE = 'amber';
 
@@ -1114,4 +1114,121 @@ test('K-3 对照：既有边目标在 records 中则成功，旧边保留并进�
   ];
   assert.deepEqual(entry.after, afterSorted, 'after 为并集按 target 排序');
   assert.equal(draft.changedItems, 1);
+});
+
+// ===========================================================================
+// buildArchiveTopicPlan（0.2.2 专题归档/恢复草案）
+// ===========================================================================
+
+test('buildArchiveTopicPlan：归档/恢复草案形状精确、digest 自洽、diff 口径正确', () => {
+  const built = buildArchiveTopicPlan({
+    scopeId: SCOPE, key: 'dream', expectedRevision: 'tok-1',
+    archivedAt: '2026-11-07T00:00:00.000Z', currentArchivedAt: null,
+  });
+  assert.equal(built.changedItems, 1);
+  assert.equal(built.digest, digestPlan(built.plan), 'digest 与 digestPlan(plan) 自洽');
+  assert.deepEqual(built.plan, {
+    version: 1,
+    scopeId: SCOPE,
+    candidateId: 'archive-topic:dream',
+    kind: 'archive-topic',
+    sources: [],
+    topic: { key: 'dream', expectedRevision: 'tok-1', archivedAt: '2026-11-07T00:00:00.000Z' },
+  });
+  assert.deepEqual(built.diff, [{
+    path: 'topic:dream',
+    oldText: 'archivedAt: (未归档)',
+    newText: 'archivedAt: 2026-11-07T00:00:00.000Z',
+  }]);
+
+  const restore = buildArchiveTopicPlan({
+    scopeId: SCOPE, key: 'dream', expectedRevision: 'tok-2',
+    archivedAt: null, currentArchivedAt: '2026-11-01T00:00:00.000Z',
+  });
+  assert.equal(restore.digest, digestPlan(restore.plan));
+  assert.deepEqual(restore.plan.topic, {
+    key: 'dream', expectedRevision: 'tok-2', archivedAt: null,
+  });
+  assert.deepEqual(restore.diff, [{
+    path: 'topic:dream',
+    oldText: 'archivedAt: 2026-11-01T00:00:00.000Z',
+    newText: 'archivedAt: (未归档)',
+  }]);
+});
+
+test('buildArchiveTopicPlan：同状态拒绝 / 非法时间 / 非法参数 / 未知键拒绝', () => {
+  // 重复恢复（当前未归档，目标也是未归档）
+  expectCode('INVALID_INPUT', () => buildArchiveTopicPlan({
+    scopeId: SCOPE, key: 'dream', expectedRevision: 'tok',
+    archivedAt: null, currentArchivedAt: null,
+  }));
+  // 重复归档（当前已归档，目标也是归档）
+  expectCode('INVALID_INPUT', () => buildArchiveTopicPlan({
+    scopeId: SCOPE, key: 'dream', expectedRevision: 'tok',
+    archivedAt: '2026-11-07T00:00:00.000Z', currentArchivedAt: '2026-11-01T00:00:00.000Z',
+  }));
+  // archivedAt 非 null 时必须能被 Date.parse
+  expectCode('INVALID_INPUT', () => buildArchiveTopicPlan({
+    scopeId: SCOPE, key: 'dream', expectedRevision: 'tok',
+    archivedAt: 'not-a-date', currentArchivedAt: null,
+  }));
+  expectCode('INVALID_INPUT', () => buildArchiveTopicPlan({
+    scopeId: SCOPE, key: 'dream', expectedRevision: 'tok',
+    archivedAt: null, currentArchivedAt: 'nope',
+  }));
+  // expectedRevision 非空字符串
+  expectCode('INVALID_INPUT', () => buildArchiveTopicPlan({
+    scopeId: SCOPE, key: 'dream', expectedRevision: '',
+    archivedAt: null, currentArchivedAt: null,
+  }));
+  // 未知键 / 非法 scopeId / 非法 topic key
+  expectCode('INVALID_INPUT', () => buildArchiveTopicPlan({
+    scopeId: SCOPE, key: 'dream', expectedRevision: 'tok',
+    archivedAt: null, currentArchivedAt: null, extra: 1,
+  }));
+  expectCode('INVALID_INPUT', () => buildArchiveTopicPlan({
+    scopeId: '', key: 'dream', expectedRevision: 'tok',
+    archivedAt: '2026-11-07T00:00:00.000Z', currentArchivedAt: null,
+  }));
+  expectCode('INVALID_INPUT', () => buildArchiveTopicPlan({
+    scopeId: SCOPE, key: 'a/b', expectedRevision: 'tok',
+    archivedAt: '2026-11-07T00:00:00.000Z', currentArchivedAt: null,
+  }));
+});
+
+test('digestPlan/validatePlanShape：接受 archive-topic 形状；形状反例与 buildDraft 通道拒绝', () => {
+  const built = buildArchiveTopicPlan({
+    scopeId: SCOPE, key: 'dream', expectedRevision: 'tok',
+    archivedAt: '2026-11-07T00:00:00.000Z', currentArchivedAt: null,
+  });
+  assert.equal(digestPlan(deepCopy(built.plan)), built.digest, 'digestPlan 接受 archive-topic plan');
+
+  // candidateId 必须是 "archive-topic:<topicKey>"
+  expectCode('INVALID_INPUT', () => digestPlan({ ...deepCopy(built.plan), candidateId: 'archive-topic:other' }));
+  expectCode('INVALID_INPUT', () => digestPlan({ ...deepCopy(built.plan), candidateId: 'a'.repeat(64) }));
+  // sources 必须是空数组
+  expectCode('INVALID_INPUT', () => digestPlan({ ...deepCopy(built.plan), sources: [{ id: 'a', revision: 1 }] }));
+  // topic 恰好三键：多键 / 缺键
+  const fourKeys = deepCopy(built.plan);
+  fourKeys.topic.title = 'x';
+  expectCode('INVALID_INPUT', () => digestPlan(fourKeys));
+  const missing = deepCopy(built.plan);
+  delete missing.topic.archivedAt;
+  expectCode('INVALID_INPUT', () => digestPlan(missing));
+  // archivedAt 非法值
+  expectCode('INVALID_INPUT', () => digestPlan({
+    ...deepCopy(built.plan), topic: { key: 'dream', expectedRevision: 'tok', archivedAt: 'nope' },
+  }));
+  expectCode('INVALID_INPUT', () => digestPlan({
+    ...deepCopy(built.plan), topic: { key: 'dream', expectedRevision: 'tok', archivedAt: 7 },
+  }));
+  // 未知 kind 仍拒绝
+  expectCode('INVALID_INPUT', () => digestPlan({ ...deepCopy(built.plan), kind: 'archive' }));
+
+  // buildDraft（候选队列草案通道）显式拒绝 archive-topic：独立入口是
+  // buildArchiveTopicPlan，不误入 thin-core 分支
+  const { candidate, records } = linkDraftScene();
+  expectCode('INVALID_INPUT', () => buildDraft({
+    candidate, records, proposal: { kind: 'archive-topic' },
+  }));
 });

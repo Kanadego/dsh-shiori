@@ -2306,6 +2306,10 @@ window.__ModuleLoader__.load({
     var PLAN_KIND_LABELS = { organize: "整理", forgetting: "遗忘" };
     // U5b：预览卡标题按 plan.kind（link / merge-topic / thin-core）翻成人话；
     // 未知 kind 原样显示，绝不吞掉、不崩。
+    // 0.2.2 归档入口（rework a2）：previewPlan 返回的 planView.kind 恒为家族名
+    // "organize"（服务端 protocol.mjs enum 只有 organize / forgetting），不存在
+    // "archive-topic" 这个 kind——专题归档卡不能靠 plan.kind 判定，由渲染处用
+    // 发起时钉定的 preview.archiveTopic 直接给标题「专题归档」（方向在正文说明）。
     var PLAN_PREVIEW_TITLES = { "link": "连起来", "merge-topic": "合并进主题", "thin-core": "core 瘦身" };
     function planPreviewTitle(kind) {
       var text = String(kind ?? "");
@@ -2713,6 +2717,24 @@ window.__ModuleLoader__.load({
           setPreview({ sessionId: props.sessionId, plan: result, targetId: String(planId) });
         });
       };
+      // 0.2.2 归档入口：专题行「移出索引 / 恢复到索引」共用 archive-topic 计划
+      // （服务端 previewPlan 新入参 { kind:'archive-topic', topicKey, archive }，返回与
+      // organize 相同的 plan 视图；本组件不发明新 RPC）。预览落既有 preview 状态，
+      // targetId 用 topicKey；方向与 topicKey 随调用钉进 preview（服务端 plan 视图不保证
+      // 回显入参），供确认卡文案与 doExecute 成功后的列表刷新使用。出错走 guardPreview
+      // 既有的 ErrorBox 路径。该调用不涉及候选队列，不带 expectedQueueRevision / operationId。
+      var doArchiveTopicPreview = function (row, archive) {
+        var key = String((row && row.key) ?? "");
+        if (!key) return;
+        var archiveFlag = archive === true;
+        setPreviewError(null);
+        var origin = mark();
+        guardPreview(async function () {
+          var result = await props.dsh.call("previewPlan", props.sessionId, { kind: "archive-topic", topicKey: key, archive: archiveFlag });
+          if (isStale(origin)) return;
+          setPreview({ sessionId: props.sessionId, plan: result, targetId: key, topicKey: key, archiveTopic: archiveFlag });
+        });
+      };
       // R4：确认执行前校验 preview 钉住的来源会话与当前会话一致，不一致拒绝发送
       // RPC（服务端 P 仍须独立校验 trusted session / plan / digest 绑定）。
       // Q-B：preview 同时钉定生成时的 queueRevision——刷新 / analyze 后队列前进，
@@ -2728,12 +2750,24 @@ window.__ModuleLoader__.load({
           return Promise.resolve();
         }
         var plan = preview.plan;
+        // 0.2.2 归档入口（rework a2）：planView.kind 恒为家族名 "organize"，不能用
+        // plan.kind === "archive-topic" 判定；改用发起时钉定的 preview.archiveTopic
+        //（发起入口 doArchiveTopicPreview 无条件钉定，false 也算钉定——恢复方向）。
+        var wasArchivePreview = Boolean(preview.archiveTopic !== undefined && preview.archiveTopic !== null);
         return guard(async function () {
           await props.dsh.call("executePlan", props.sessionId, { planId: plan.planId, planDigest: plan.planDigest, operationId: newId(), confirmed: true });
           // 执行成功：收起合并流程（guard 随后 load() 刷新队列 revision / 候选 / 计划；
           // 图谱与记忆 L1 视图在切到对应 tab 时按会话重新拉取）。
           setMerge(null);
           setMergeForm(null);
+          // 0.2.2 归档入口：专题归档执行成功后专题的 archived 状态已变，重新拉
+          // memory_list_topics 刷新列表，并清掉预览（失败路径不走这里，错误由 guard
+          // 的 catch 经 ErrorBox 展示，预览保留）。普通 organize / forgetting 预览
+          // 不刷新专题列表，行为与既往一致。
+          if (wasArchivePreview) {
+            loadTopics();
+            setPreview(null);
+          }
         });
       };
       var actionsDisabled = busy || !loaded || ro;
@@ -2891,22 +2925,43 @@ window.__ModuleLoader__.load({
                 h("span", { className: "dshi_hint" }, "在合并表单里编辑 after → 点「预览 diff（previewPlan）」→ 在下方确认卡里点「确认执行」。合并后源卡将 retired，不可撤销。"))),
             topics === null || topics.loading ? h("div", { className: "dshi_loading" }, "主题列表加载中…") : null,
             topics && topics.error ? ErrorBox(topics.error) : null,
+            // 0.2.2 归档入口：列表顶部说明——未归档计数 + 移出索引的语义边界
+            //（只影响每轮注入的 L1 索引条目，正文保留、可读可搜；不写死字符数预算）。
+            topics && !topics.loading && !topics.error && topics.topics.length > 0 ? (function () {
+              var unarchivedCount = sortTopicRows(topics.topics).filter(function (row) { return !(row && row.archived === true); }).length;
+              return h("div", { className: "dshi_hint" },
+                "未归档 " + unarchivedCount + " 篇。移出索引只影响每轮注入的 L1 索引条目，正文保留，memory_read(key) 随时可读，memory_search 仍能搜到。");
+            })() : null,
             topics && !topics.loading && !topics.error ? h("div", { className: "dshi_items" },
               topics.topics.length === 0 ? h("div", { className: "dshi_hint" },
                 "当前 scope 还没有主题。请在下方新建主题。")
-                : topics.topics.map(function (row) {
+                : sortTopicRows(topics.topics).map(function (row) {
                   var key = String(row.key ?? "");
+                  // 0.2.2 归档入口：已归档行显示「已归档」徽章 +「恢复到索引」（不再给
+                  // 合并入口）；未归档行保留「合并到这个主题」并新增「移出索引」。
+                  var archived = row.archived === true;
                   return h("div", { key: key, className: "dshi_item" },
                     h("div", { className: "dshi_itemHead" },
                       h("span", { className: "dshi_mono" }, key),
                       row.title ? h("span", { className: "dshi_badgeDim dshi_badge" }, String(row.title)) : null,
+                      archived ? h("span", { className: "dshi_badgeDim dshi_badge" }, "已归档") : null,
                       row.updated ? h("span", { className: "dshi_hint" }, String(row.updated)) : null,
                       row.revision ? h("span", { className: "dshi_hint dshi_mono" }, "rev " + topicRevisionPrefix(row.revision)) : null,
-                      h("button", {
+                      archived ? h("button", {
                         className: "dshi_btn",
                         disabled: busy || ro,
-                        onClick: function () { openTopicForMerge(row); }
-                      }, "合并到这个主题")));
+                        onClick: function () { doArchiveTopicPreview(row, false); }
+                      }, "恢复到索引")
+                        : h("button", {
+                          className: "dshi_btn",
+                          disabled: busy || ro,
+                          onClick: function () { openTopicForMerge(row); }
+                        }, "合并到这个主题"),
+                      archived ? null : h("button", {
+                        className: "dshi_btn",
+                        disabled: busy || ro,
+                        onClick: function () { doArchiveTopicPreview(row, true); }
+                      }, "移出索引")));
                 })) : null,
             // B/C：未选定目标主题时的中性提示（不是错误，不用 ErrorBox / 红色）；选定后换成下一步提示。
             mergeForm ? h("div", { className: "dshi_hint", style: { fontWeight: 600 } },
@@ -2993,7 +3048,14 @@ window.__ModuleLoader__.load({
         } catch (e) { return null; }
       };
       // 预览正文按 plan.kind 翻人话；未知 kind 返回空数组（原始 diff 都在「原始信息」里）。
-      var previewBodyLines = function (plan) {
+      // 0.2.2 归档入口（rework a2）：previewPlan 返回的 planView.kind 恒为家族名
+      // "organize"（服务端 enum 无 "archive-topic"），专题归档卡改用第二参 previewInfo
+      // （发起时钉进 preview 状态）里的 archiveTopic 作唯一判据：有钉定即走归档分支，
+      // 方向取 archiveTopic；未钉定（普通 organize 预览）绝不进入该分支。topicKey 同样
+      // 取钉定值，缺失时退化为通用句，绝不抛错。
+      var previewBodyLines = function (plan, previewInfo) {
+        var info = previewInfo && typeof previewInfo === "object" ? previewInfo : null;
+        var isArchivePreview = Boolean(info && info.archiveTopic !== undefined && info.archiveTopic !== null);
         var kind = plan && plan.kind !== undefined && plan.kind !== null ? String(plan.kind) : "";
         var diff = plan && Array.isArray(plan.diff) ? plan.diff : [];
         var first = diff.length > 0 && diff[0] && typeof diff[0] === "object" ? diff[0] : null;
@@ -3040,6 +3102,18 @@ window.__ModuleLoader__.load({
           } else {
             lines.push("core 正文将瘦身（长度变化见下方「原始信息」）");
           }
+          return lines;
+        }
+        if (isArchivePreview) {
+          var archiveDir = info.archiveTopic === true;
+          var archiveKey = info.topicKey !== undefined && info.topicKey !== null
+            ? String(info.topicKey)
+            : String((plan && plan.topicKey) ?? "");
+          var archiveVerb = archiveDir ? "移出" : "恢复到";
+          lines.push(archiveKey !== ""
+            ? "把专题『" + archiveKey + "』" + archiveVerb + " L1 索引"
+            : "把专题" + archiveVerb + " L1 索引（明细见下方「原始信息」）");
+          lines.push("正文长度不变，随时可读。");
           return lines;
         }
         return lines;
@@ -3095,19 +3169,25 @@ window.__ModuleLoader__.load({
         var planKind = plan && plan.kind !== undefined && plan.kind !== null ? String(plan.kind) : "";
         var planIdText = plan && plan.planId !== undefined && plan.planId !== null ? String(plan.planId) : "";
         var planDigestText = plan && plan.planDigest !== undefined && plan.planDigest !== null ? String(plan.planDigest) : "";
-        var bodyLines = previewBodyLines(plan);
+        var bodyLines = previewBodyLines(plan, preview);
         // Q-B：预览对应的计划若已在 plans 列表里标记 executed / superseded，执行按钮禁用
         var rowLocked = (function () {
           var row = plans.find(function (p) { return String(p && p.planId) === String(plan && plan.planId); });
           return Boolean(row && (row.executed === true || row.superseded === true));
         })();
-        var confirmLabel = planKind === "link" ? "就这么连起来"
+        // 0.2.2 归档入口（rework a2）：planView.kind 恒为家族名 "organize"，专题归档卡
+        // 以 preview.archiveTopic 是否被钉定为唯一判据（false 也算钉定——恢复方向）。
+        // 未钉定（普通 organize / forgetting 预览）绝不出现归档文案。归档可逆——移出
+        // 方向明示「可随时恢复」，恢复方向短句。
+        var isArchivePreview = Boolean(preview && preview.archiveTopic !== undefined && preview.archiveTopic !== null);
+        var confirmLabel = isArchivePreview ? (preview.archiveTopic === true ? "确认移出索引（可随时恢复）" : "确认恢复")
+          : planKind === "link" ? "就这么连起来"
           : planKind === "merge-topic" ? "确认合并（不可撤销）"
           : planKind === "thin-core" ? "确认瘦身"
           : "确认执行";
         return h("div", { key: key, className: "dshi_itemMerge", style: { minWidth: 0 } },
           h("div", { className: "dshi_confirm", style: { marginLeft: 12 } },
-            h("div", { className: "dshi_cardTitle" }, planPreviewTitle(planKind)),
+            h("div", { className: "dshi_cardTitle" }, isArchivePreview ? "专题归档" : planPreviewTitle(planKind)),
             bodyLines.map(function (line, index) {
               return h("div", { key: index, className: "dshi_hint" }, line);
             }),
@@ -3322,6 +3402,28 @@ window.__ModuleLoader__.load({
     // 点「展开」才读正文。
     // U6：updated 只取 YYYY-MM-DD 展示（缺失或非日期前缀显示 —）；归档行（archived:true）
     // 加「已归档」徽章并把名称/摘要调灰弱化。
+    // 0.2.2 归档入口：整理页专题列表排序——未归档在前、已归档整段排最后；组内按
+    // updated 升序（最旧优先，空 / 缺失 updated 排该组末尾），updated 相同按 summary
+    // 长度降序，再按 key（升序）。纯函数、不改入参，行对象形状异常按空值兜底。
+    function compareTopicRows(a, b) {
+      var aArchived = Boolean(a && a.archived === true);
+      var bArchived = Boolean(b && b.archived === true);
+      if (aArchived !== bArchived) return aArchived ? 1 : -1;
+      var aUpdated = a && a.updated !== undefined && a.updated !== null ? String(a.updated) : "";
+      var bUpdated = b && b.updated !== undefined && b.updated !== null ? String(b.updated) : "";
+      if ((aUpdated === "") !== (bUpdated === "")) return aUpdated === "" ? 1 : -1;
+      if (aUpdated !== bUpdated) return aUpdated < bUpdated ? -1 : 1;
+      var aSummaryLen = a && a.summary !== undefined && a.summary !== null ? String(a.summary).length : 0;
+      var bSummaryLen = b && b.summary !== undefined && b.summary !== null ? String(b.summary).length : 0;
+      if (aSummaryLen !== bSummaryLen) return bSummaryLen - aSummaryLen;
+      var aKey = String((a && a.key) ?? "");
+      var bKey = String((b && b.key) ?? "");
+      if (aKey !== bKey) return aKey < bKey ? -1 : 1;
+      return 0;
+    }
+    function sortTopicRows(rows) {
+      return (Array.isArray(rows) ? rows.slice() : []).sort(compareTopicRows);
+    }
     function topicUpdatedDay(row) {
       var text = String((row && row.updated) ?? "");
       return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : "";

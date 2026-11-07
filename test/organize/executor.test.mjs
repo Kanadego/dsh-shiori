@@ -1513,3 +1513,173 @@ describe('P3-L 提案 store：merged 加载校验与保护', () => {
     reopened.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// archive-topic 执行（0.2.2 专题归档/恢复）
+// ---------------------------------------------------------------------------
+
+/** 构造 archive-topic plan（token 由调用方从 service.readTopic 取 fresh）。 */
+function makeArchivePlan(scopeId, topicKey, expectedRevision, archivedAt) {
+  return {
+    version: 1,
+    scopeId,
+    candidateId: `archive-topic:${topicKey}`,
+    kind: 'archive-topic',
+    sources: [],
+    topic: { key: topicKey, expectedRevision, archivedAt },
+  };
+}
+
+describe('P3-L archive-topic 执行（0.2.2）', () => {
+  it('真实落盘归档：front-matter 出现 archivedAt、正文逐字节不变、binding skipped 回执', async (t) => {
+    const root = await makeRoot(t);
+    const { service, sparkStore, fileStore } = await openStores(root);
+    await seedTopic(fileStore, 'dream', '原始正文\n');
+    const item = await service.readTopic('dream');
+    const plan = makeArchivePlan('amber', 'dream', item.revision, '2026-11-07T00:00:00.000Z');
+    const exec = await createOrganizerExecutor({ root, scopeId: 'amber', authorize: grantAll() });
+    const result = await exec.executeRound(round(plan, 'round-ar-1'));
+    assert.equal(result.status, 'completed');
+    assert.equal(result.kind, 'archive-topic');
+    assert.equal(result.changedItems, 1);
+    assert.deepEqual(result.topic, { key: 'dream', archivedAt: '2026-11-07T00:00:00.000Z' });
+    assert.deepEqual(result.binding, { skipped: true, reason: 'archive-topic touches no spark cards' });
+
+    const raw = (await topicBytes(root, 'amber', 'dream')).toString('utf8');
+    assert.ok(raw.includes('archivedAt: "2026-11-07T00:00:00.000Z"'), 'front-matter 出现 archivedAt');
+    assert.ok(raw.endsWith('原始正文\n'), '归档不改正文');
+    const archived = await service.readTopic('dream');
+    assert.equal(archived.archivedAt, '2026-11-07T00:00:00.000Z', 'service 读回归档标记');
+    // 不动 spark 卡：sparks.json 不存在（本测试未建卡）
+    assert.equal(await dbBytes(root), null);
+    exec.close();
+    sparkStore.close();
+  });
+
+  it('恢复：archivedAt null → front-matter 字段消失、读回 undefined', async (t) => {
+    const root = await makeRoot(t);
+    const { service, sparkStore, fileStore } = await openStores(root);
+    await seedTopic(fileStore, 'dream', '原始正文\n');
+    const exec = await createOrganizerExecutor({ root, scopeId: 'amber', authorize: grantAll() });
+
+    const item = await service.readTopic('dream');
+    await exec.executeRound(round(makeArchivePlan('amber', 'dream', item.revision, '2026-11-07T00:00:00.000Z'), 'round-ar-2'));
+    assert.ok((await topicBytes(root, 'amber', 'dream')).toString('utf8').includes('archivedAt:'));
+
+    const archived = await service.readTopic('dream');
+    const restore = makeArchivePlan('amber', 'dream', archived.revision, null);
+    const result = await exec.executeRound(round(restore, 'round-ar-2b'));
+    assert.equal(result.status, 'completed');
+    assert.deepEqual(result.topic, { key: 'dream', archivedAt: null });
+    const raw = (await topicBytes(root, 'amber', 'dream')).toString('utf8');
+    assert.ok(!raw.includes('archivedAt'), '恢复后 front-matter 不再有 archivedAt 字段');
+    assert.ok(raw.endsWith('原始正文\n'), '恢复不改正文');
+    assert.equal((await service.readTopic('dream')).archivedAt, undefined);
+    exec.close();
+    sparkStore.close();
+  });
+
+  it('scope 不一致（global 兜底读到别 scope 专题）→ INVALID_STATE，不落盘', async (t) => {
+    const root = await makeRoot(t);
+    const { service, sparkStore } = await openStores(root);
+    // 专题只存在于 global scope（readTopic 回退链可达，scopeId 为 global）
+    const globalStore = await createFileStore({
+      root, activeScopeId: 'global', config: CONFIG, policy: evaluateMutation, renderL1,
+    });
+    await seedTopic(globalStore, 'shared', '全局正文\n');
+    const item = await service.readTopic('shared');
+    assert.equal(item.scopeId, 'global');
+    const plan = makeArchivePlan('amber', 'shared', item.revision, '2026-11-07T00:00:00.000Z');
+    const exec = await createOrganizerExecutor({ root, scopeId: 'amber', authorize: grantAll() });
+    await assert.rejects(
+      exec.executeRound(round(plan, 'round-ar-3')),
+      (e) => e.code === 'INVALID_STATE' && e.details?.phase === 'topic-precheck'
+        && e.details?.topicScopeId === 'global',
+    );
+    assert.equal(await topicBytes(root, 'amber', 'shared'), null, '本 scope 不落盘');
+    exec.close();
+    sparkStore.close();
+  });
+
+  it('REVISION_CONFLICT：token 陈旧原样抛，附 phase/topicKey/topicSubOperationId', async (t) => {
+    const root = await makeRoot(t);
+    const { service, sparkStore, fileStore } = await openStores(root);
+    await seedTopic(fileStore, 'dream', '原始正文\n');
+    const item = await service.readTopic('dream');
+    // 外部写一次（新 token），让 plan 里的 token 变陈旧
+    await service.mutate({
+      operationId: 'ext-ar-1',
+      changes: [{ kind: 'topic', key: 'dream', expectedRevision: item.revision, topic: { summary: '外部改动' }, text: '原始正文\n' }],
+    });
+    const plan = makeArchivePlan('amber', 'dream', item.revision, '2026-11-07T00:00:00.000Z');
+    const exec = await createOrganizerExecutor({ root, scopeId: 'amber', authorize: grantAll() });
+    await assert.rejects(
+      exec.executeRound(round(plan, 'round-ar-4')),
+      (e) => {
+        assert.equal(e.code, 'REVISION_CONFLICT');
+        assert.equal(e.phase, 'topic-commit');
+        assert.equal(e.topicKey, 'dream');
+        assert.equal(typeof e.topicSubOperationId, 'string');
+        assert.ok(e.topicSubOperationId.startsWith('ar-'), '子 operationId 用 ar 阶段标签派生');
+        return true;
+      },
+    );
+    assert.ok(!(await topicBytes(root, 'amber', 'dream')).toString('utf8').includes('archivedAt:'), '冲突不落盘');
+    exec.close();
+    sparkStore.close();
+  });
+
+  it('同 operationId 重放：journal 幂等早退，topic 字节不变、回执与首次一致（含重启重放）', async (t) => {
+    const root = await makeRoot(t);
+    let first;
+    let plan;
+    {
+      const { service, sparkStore, fileStore } = await openStores(root);
+      await seedTopic(fileStore, 'dream', '原始正文\n');
+      const item = await service.readTopic('dream');
+      plan = makeArchivePlan('amber', 'dream', item.revision, '2026-11-07T00:00:00.000Z');
+      const exec = await createOrganizerExecutor({ root, scopeId: 'amber', authorize: grantAll() });
+      first = await exec.executeRound(round(plan, 'round-ar-5'));
+      const before = await topicBytes(root, 'amber', 'dream');
+      // 同实例重放
+      const replay = await exec.executeRound(round(plan, 'round-ar-5'));
+      assert.deepEqual(replay, first, '重放返回与首次一致的回执');
+      assert.equal(sha(await topicBytes(root, 'amber', 'dream')), sha(before), '同实例重放零写');
+      exec.close();
+      sparkStore.close();
+    }
+    {
+      // 全部 adapter 关闭重开后重放（持久幂等恢复）
+      const { service, sparkStore } = await openStores(root);
+      const exec2 = await createOrganizerExecutor({ root, scopeId: 'amber', authorize: grantAll() });
+      const replay2 = await exec2.executeRound(round(plan, 'round-ar-5'));
+      assert.deepEqual(replay2, first, '重启重放返回首次回执');
+      const finalRaw = (await topicBytes(root, 'amber', 'dream')).toString('utf8');
+      assert.ok(finalRaw.includes('archivedAt: "2026-11-07T00:00:00.000Z"'));
+      exec2.close();
+      sparkStore.close();
+    }
+  });
+
+  it('plan 形状反例：topic 四键 / 缺键 / sources 非空 / archivedAt 非法 / 未知顶层键 全拒绝', async (t) => {
+    const root = await makeRoot(t);
+    const { service, sparkStore, fileStore } = await openStores(root);
+    await seedTopic(fileStore, 'dream', '原始正文\n');
+    const item = await service.readTopic('dream');
+    const exec = await createOrganizerExecutor({ root, scopeId: 'amber', authorize: grantAll() });
+    const base = makeArchivePlan('amber', 'dream', item.revision, '2026-11-07T00:00:00.000Z');
+    const bad = [
+      { ...base, topic: { ...base.topic, title: '多余键' } },
+      { ...base, topic: { key: 'dream', expectedRevision: item.revision } },
+      { ...base, sources: [{ id: 'card-a', revision: 1 }] },
+      { ...base, topic: { key: 'dream', expectedRevision: item.revision, archivedAt: 'nope' } },
+      { ...base, topic: { key: 'dream', expectedRevision: item.revision, archivedAt: 7 } },
+      { ...base, extra: 1 },
+    ];
+    for (const [i, p] of bad.entries()) {
+      await assert.rejects(exec.executeRound(round(p, `round-ar-bad-${i}`)), code('INVALID_INPUT'));
+    }
+    exec.close();
+    sparkStore.close();
+  });
+});

@@ -1,7 +1,7 @@
 // Shiori P3-ORGANIZE · L 槽受审执行器（P3-APPROVED-EXECUTOR）
 //
 // 职责（CONTRACTS §4）：只执行调用方每轮显式提交的单个已批准 plan
-// （link / merge-topic / thin-core），复用既有 createShioriService /
+// （link / merge-topic / thin-core / archive-topic），复用既有 createShioriService /
 // createFileStore / openSparkStore 与它们的锁、CAS、journal、operation 幂等，
 // 不重写 topic 文件、不重写 sparks.json、不新增通用跨 DB 协调 journal。
 //
@@ -60,12 +60,20 @@ const THIN_CORE_BINDING_SKIPPED = {
   reason: 'bindOrganizeRound rejects thin-core plans and thin-core touches no spark cards',
 };
 
+// archive-topic 同样不 bind：不动任何 spark 卡（sources 恒为空数组），跳过
+// bindOrganizeRound 不影响卡账；回执显式记录，不静默。
+const ARCHIVE_TOPIC_BINDING_SKIPPED = {
+  skipped: true,
+  reason: 'archive-topic touches no spark cards',
+};
+
 // plan 每 kind 允许的顶层键（禁止未知字段，digest/approval/operationId
 // 由执行轮另行绑定，不允许出现在 plan 内）。
 const PLAN_KEYS = {
   link: new Set(['version', 'scopeId', 'candidateId', 'kind', 'sources', 'links']),
   'merge-topic': new Set(['version', 'scopeId', 'candidateId', 'kind', 'sources', 'topic']),
   'thin-core': new Set(['version', 'scopeId', 'candidateId', 'kind', 'sources', 'core']),
+  'archive-topic': new Set(['version', 'scopeId', 'candidateId', 'kind', 'sources', 'topic']),
 };
 
 function err(code, message, details) {
@@ -181,8 +189,8 @@ function checkPlanLinkPairs(value, field) {
 function validateRoundPlan(plan, boundScopeId) {
   if (!isPlainObject(plan)) throw err('INVALID_INPUT', 'plan 必须是对象');
   const kind = plan.kind;
-  if (!(kind === 'link' || kind === 'merge-topic' || kind === 'thin-core')) {
-    throw err('INVALID_INPUT', 'plan.kind 只支持 link / merge-topic / thin-core', { kind });
+  if (!(kind === 'link' || kind === 'merge-topic' || kind === 'thin-core' || kind === 'archive-topic')) {
+    throw err('INVALID_INPUT', 'plan.kind 只支持 link / merge-topic / thin-core / archive-topic', { kind });
   }
   const allowed = PLAN_KEYS[kind];
   const present = new Set(Object.keys(plan));
@@ -298,6 +306,31 @@ function validateRoundPlan(plan, boundScopeId) {
       throw err('INVALID_INPUT', 'plan.topic.summary 不得含换行');
     }
     checkPlanString(t.updated, 'topic.updated', { min: 1 });
+    return plan;
+  }
+
+  if (kind === 'archive-topic') {
+    // 本计划不动任何 spark 卡：sources 必须为空数组。
+    checkPlanSources(plan.sources, { min: 0, max: 0 });
+    const t = plan.topic;
+    if (!isPlainObject(t)) throw err('INVALID_INPUT', 'plan.topic 必须是对象');
+    const tKeys = Object.keys(t);
+    if (tKeys.length !== 3
+        || !tKeys.every((k) => ['key', 'expectedRevision', 'archivedAt'].includes(k))) {
+      throw err('INVALID_INPUT', 'plan.topic 只允许恰好 key/expectedRevision/archivedAt 三个键');
+    }
+    if (typeof t.key !== 'string' || t.key.length === 0) {
+      throw err('INVALID_INPUT', 'plan.topic.key 必须是非空字符串（topic key 规则由 service 层校验）');
+    }
+    assertEncodableUtf8(t.key, 'plan.topic.key');
+    checkPlanString(t.expectedRevision, 'topic.expectedRevision', { min: 1, max: 16384 });
+    // archivedAt：null = 恢复；字符串 = 归档（必须能被 Date.parse 解析）。
+    if (t.archivedAt !== null) {
+      checkPlanString(t.archivedAt, 'topic.archivedAt', { min: 1 });
+      if (Number.isNaN(Date.parse(t.archivedAt))) {
+        throw err('INVALID_INPUT', 'plan.topic.archivedAt 必须是 null 或能被 Date.parse 解析的时间串');
+      }
+    }
     return plan;
   }
 
@@ -756,15 +789,72 @@ export async function createOrganizerExecutor(params) {
     };
   }
 
+  /**
+   * archive-topic 执行（0.2.2 专题归档/恢复）：只写 topic front-matter 的
+   * archivedAt 标记（null = 清除恢复），不动任何 spark 卡。与 merge-topic 的
+   * topic 提交同重放语义：凭稳定 ar 子 operationId 走既有 service journal——
+   * storage.commit 的同 operationId 幂等早退严格先于 live token CAS/policy
+   * （checkSources 经 AsyncLocalStorage 延迟到 policy 内，重放不执行），
+   * 因此「本 round 是否提交过」由持久 journal 判定，绝不自己判「已归档就
+   * 跳过」。text 必须带 fresh.body 原样回写（service 的 topic 写入要求正文；
+   * 归档不改正文）。REVISION_CONFLICT 原样抛，附 phase:'topic-commit'、
+   * topicKey、topicSubOperationId。
+   */
+  async function executeArchiveTopicRound({ plan, planDigest, operationId }) {
+    const arSubOperationId = deriveStageOperationId(scopeId, operationId, 'ar');
+
+    // 1) fresh 重读：scope 必须与执行器一致（readTopic 会回退 global scope，
+    //    归档/恢复只针对本 scope 专题）。
+    const fresh = await service.readTopic(plan.topic.key);
+    if (fresh.scopeId !== scopeId) {
+      throw err('INVALID_STATE', `topic "${plan.topic.key}" 的 scope "${fresh.scopeId}" 与执行器 scope 不一致，拒绝归档/恢复`, {
+        phase: 'topic-precheck', topicKey: plan.topic.key, topicScopeId: fresh.scopeId,
+      });
+    }
+
+    // 2) topic 提交（journal 幂等重放见上）；正文原样回写，归档不改正文。
+    try {
+      await service.mutate({
+        operationId: arSubOperationId,
+        changes: [{
+          kind: 'topic',
+          key: plan.topic.key,
+          expectedRevision: plan.topic.expectedRevision,
+          topic: { archivedAt: plan.topic.archivedAt },
+          text: fresh.body,
+        }],
+      });
+    } catch (e) {
+      e.phase = e.phase ?? 'topic-commit';
+      e.topicKey = plan.topic.key;
+      e.topicSubOperationId = arSubOperationId;
+      throw e;
+    }
+
+    return {
+      status: 'completed',
+      operationId,
+      planDigest,
+      kind: 'archive-topic',
+      changedItems: 1,
+      topic: {
+        key: plan.topic.key,
+        archivedAt: plan.topic.archivedAt,
+      },
+      binding: ARCHIVE_TOPIC_BINDING_SKIPPED,
+    };
+  }
+
   return Object.freeze({
-    /**
-     * 执行一轮：一次只接受一个 plan，写入量 <=20（link 每被改源计 1；
-     * merge-topic 每退休源 + topic 计 1；thin-core 替换 L1 core 计 1），
-     * 不得拆子轮绕过。
-     * 失败抛带 code 异常；merge 若 topic 已提交会附 phase/topicCommitted 阶段
-     * 信息，thin-core 失败附 phase/coreCommitted/coreSubOperationId（见
-     * executeThinCoreRound 的重放与备份语义）。
-     */
+      /**
+       * 执行一轮：一次只接受一个 plan，写入量 <=20（link 每被改源计 1；
+       * merge-topic 每退休源 + topic 计 1；thin-core 替换 L1 core 计 1；
+       * archive-topic 改一个专题的归档标记计 1），不得拆子轮绕过。
+       * 失败抛带 code 异常；merge 若 topic 已提交会附 phase/topicCommitted 阶段
+       * 信息，thin-core 失败附 phase/coreCommitted/coreSubOperationId（见
+       * executeThinCoreRound 的重放与备份语义），archive-topic 失败附
+       * phase/topicKey/topicSubOperationId（见 executeArchiveTopicRound）。
+       */
     async executeRound(args) {
       ensureOpen();
       if (!isPlainObject(args)) throw err('INVALID_INPUT', 'executeRound 参数必须是 {plan,approval,operationId} 对象');
@@ -800,8 +890,10 @@ export async function createOrganizerExecutor(params) {
 
       // bind 只针对动卡的 kind（link / merge-topic）；thin-core 不动卡，且
       // sparkStore.bindOrganizeRound 对 thin-core 硬拒——跳过，回执里显式
-      // 记录 binding:{skipped,...}（见 THIN_CORE_BINDING_SKIPPED）。
-      if (plan.kind !== 'thin-core') {
+      // 记录 binding:{skipped,...}（见 THIN_CORE_BINDING_SKIPPED）。archive-topic
+      // 同样不动任何 spark 卡（sources 恒为空数组），bind 一并跳过（见
+      // ARCHIVE_TOPIC_BINDING_SKIPPED）。
+      if (plan.kind !== 'thin-core' && plan.kind !== 'archive-topic') {
         await sparkStore.bindOrganizeRound(plan, {
           operationId: deriveStageOperationId(scopeId, operationId, 'bd'),
         });
@@ -812,6 +904,9 @@ export async function createOrganizerExecutor(params) {
       }
       if (plan.kind === 'merge-topic') {
         return executeMergeRound({ plan, planDigest, operationId, approval });
+      }
+      if (plan.kind === 'archive-topic') {
+        return executeArchiveTopicRound({ plan, planDigest, operationId });
       }
       return executeThinCoreRound({ plan, planDigest, operationId });
     },

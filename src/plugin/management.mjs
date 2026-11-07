@@ -18,7 +18,10 @@
 // - 候选队列持久快照跨重启恢复（queueStore）；plan 账不可变（planStore）。
 
 import { analyzeCandidates } from "../organize/analyze.mjs";
-import { createCandidateQueue, buildDraft as buildOrganizeDraft, buildForgetArchiveDiff, listQueue } from "../organize/queue.mjs";
+import {
+  createCandidateQueue, buildDraft as buildOrganizeDraft, buildArchiveTopicPlan,
+  buildForgetArchiveDiff, listQueue,
+} from "../organize/queue.mjs";
 import { digestPlan as organizeDigestPlan, createOrganizerExecutor } from "../organize/executor.mjs";
 import { analyzeForgetting } from "../forgetting/decay.mjs";
 import { createForgetExecutor } from "../forgetting/executor.mjs";
@@ -613,7 +616,7 @@ export function createManagement(deps) {
       return queueDto(scope.scopeId, queue, records);
     },
 
-    /** 计划预览：organize proposal 走 buildDraft；forgetting 用 planId 取回 analyze 保存的计划。 */
+    /** 计划预览：organize proposal 走 buildDraft；forgetting 用 planId 取回 analyze 保存的计划；archive-topic 由 service fresh topic 现建归档/恢复计划。 */
     async previewPlan(trustedContext, payload) {
       validateManagementPayload("previewPlan", payload);
       requireActiveDataAccess("previewPlan");
@@ -642,6 +645,66 @@ export function createManagement(deps) {
           diff: entry.diff,
           changedItems: entry.changedItems,
           summary: entry.summary,
+        };
+      }
+
+      if (payload.kind === "archive-topic") {
+        // 0.2.2 专题归档/恢复：不依赖候选队列（candidateId 是确定性别名，
+        // 不在队列里），直接从 service 读 fresh topic 构建计划，走既有
+        // previewPlan → executePlan 通道（entry.kind 仍是 "organize"，执行
+        // 侧由 organizer executor 按 plan.kind 分派），不另开写接口。
+        requireModule("organize");
+        const resources = await resourcesFor(scope.scopeId, sessionEvidenceFromRpc(trustedContext).agent);
+        const fresh = await resources.service.readTopic(payload.topicKey);
+        if (fresh.scopeId !== scope.scopeId) {
+          fail("INVALID_STATE", `topic "${payload.topicKey}" belongs to scope "${fresh.scopeId}", not "${scope.scopeId}"`, {
+            topicKey: payload.topicKey,
+            topicScopeId: fresh.scopeId,
+            scopeId: scope.scopeId,
+          });
+        }
+        const currentArchivedAt = fresh.archivedAt ?? null;
+        if ((payload.archive && currentArchivedAt !== null) || (!payload.archive && currentArchivedAt === null)) {
+          fail("INVALID_INPUT", `topic "${payload.topicKey}" is already in the target archive state`, {
+            topicKey: payload.topicKey,
+            archive: payload.archive,
+            currentArchivedAt,
+          });
+        }
+        const target = payload.archive ? nowIso() : null;
+        const built = buildArchiveTopicPlan({
+          scopeId: scope.scopeId,
+          key: payload.topicKey,
+          expectedRevision: fresh.revision,
+          archivedAt: target,
+          currentArchivedAt,
+        });
+        const planId = `op-${built.digest}`;
+        await state.planStore.save(scope.scopeId, planId, {
+          kind: "organize",
+          planDigest: built.digest,
+          queueRevision: null,
+          plan: built.plan,
+          diff: built.diff,
+          changedItems: built.changedItems,
+          summary: "archive-topic plan over 1 topic",
+        });
+        // P-A：计划收敛——与 organize 预览同语义（作废其他仍 open 的 organize
+        // 计划）。payload.operationId 可选（schema required 三键），缺省落
+        // null：supersededWith !== undefined 的 executePlan 硬闸仍生效。
+        await state.planStore.supersedeOpen(scope.scopeId, {
+          kind: "organize",
+          keepPlanId: planId,
+          operationId: payload.operationId ?? null,
+        });
+        return {
+          planId,
+          kind: "organize",
+          planDigest: built.digest,
+          queueRevision: null,
+          diff: built.diff,
+          changedItems: built.changedItems,
+          summary: "archive-topic plan over 1 topic",
         };
       }
 

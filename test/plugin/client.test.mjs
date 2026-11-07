@@ -4362,3 +4362,276 @@ test("U5-e：staleCount 为 0 或缺失时提示条不渲染、行内无徽章�
   assert.equal(flattenVNode(tree).find((n) => n.type === "button" && n.children.includes("重新分析")), undefined,
     "no re-analyze button");
 });
+
+// ---------------------------------------------------------------------------
+// 0.2.2 归档入口（task-ed991a8fb6f08bfc-s2）：整理页专题行「移出索引 / 恢复到索引」。
+// 证据级别：真实 client/index.js 执行 + 有状态 react stub（非浏览器实机）；
+// executeTool / previewPlan / executePlan 均打桩，纯合成数据，不触真实宿主。
+// 契约：previewPlan 入参 { kind:'archive-topic', topicKey, archive }，返回与 organize
+// 相同的 plan 视图；客户端不发明新 RPC。
+// ---------------------------------------------------------------------------
+
+// 专题行查找：专题行是 dshi_item，行头有 dshi_mono span 文本恰为 topic key
+// （候选行的 dshi_mono 是短 id、计划行是 planId，均不会与 key 全等）。
+function topicRowByKey(tree, key) {
+  return flattenVNode(tree).find((n) => {
+    if (n.type !== "div" || String(n.props.className || "") !== "dshi_item") return false;
+    return flattenVNode(n).some((m) => m.type === "span"
+      && String(m.props.className || "").includes("dshi_mono")
+      && collectText(m) === key);
+  });
+}
+
+function rowButtonLabels(row) {
+  return flattenVNode(row)
+    .filter((n) => n.type === "button")
+    .map((n) => collectText(n));
+}
+
+const archiveTopicsFixture = () => [
+  { key: "t-old", title: "旧", summary: "abcdef", updated: "2026-01-01T00:00:00.000Z", revision: "shiori-r1.Old.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
+  { key: "t-new", title: "新", summary: "abcd", updated: "2026-05-01T00:00:00.000Z", revision: "shiori-r1.New.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
+  { key: "t-same-a", title: "A", summary: "longer-summary", updated: "2026-05-01T00:00:00.000Z", revision: "shiori-r1.Sam.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
+  { key: "t-noupd", title: "无时间", summary: "ab", updated: "", revision: "shiori-r1.Nou.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
+  { key: "t-arch", title: "归档", summary: "xyz", updated: "2026-03-01T00:00:00.000Z", revision: "shiori-r1.Arc.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", archived: true },
+];
+
+test("0.2.2 归档入口：专题列表排序（未归档在前按 updated 升序、空 updated 最后、已归档整段靠后）+ 已归档徽章与行按钮布局", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderCandidates = await mountCandidates(mod, host);
+  const calls = [];
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (method === "listCandidates") return clusterLoadedStates("x")[0];
+      if (method === "executeTool" && payload.name === "memory_list_topics") return { topics: archiveTopicsFixture() };
+      return {};
+    },
+  };
+  host.states.length = 0;
+  host.states.push(...clusterLoadedStates("session-A"));
+  let tree = renderCandidates(dsh, "session-A");
+  findButton(tree, "合并进主题").props.onClick();
+  await flush();
+  tree = renderCandidates(dsh, "session-A");
+
+  // 顶部说明：未归档计数 + 语义边界（不写死字符数预算）
+  const text = collectText(tree);
+  assert.ok(text.includes("未归档 4 篇"), "top hint counts unarchived topics");
+  assert.ok(text.includes("移出索引只影响每轮注入的 L1 索引条目，正文保留，memory_read(key) 随时可读，memory_search 仍能搜到"),
+    "top hint explains L1-index-only semantics");
+
+  // 排序：t-old(2026-01-01) → 同 updated 的 t-same-a/t-new（summary 长度降序）→
+  // t-noupd（空 updated 组内垫底）→ 已归档 t-arch 整段最后
+  const order = ["t-old", "t-same-a", "t-new", "t-noupd", "t-arch"].map((k) => text.indexOf(k));
+  assert.ok(order.every((i) => i >= 0), "all topic keys rendered");
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), "topic rows rendered in required order");
+
+  // 已归档徽章：dshi_badgeDim dshi_badge，恰好 1 个
+  const badges = flattenVNode(tree).filter((n) => n.type === "span"
+    && String(n.props.className || "").includes("dshi_badge")
+    && collectText(n) === "已归档");
+  assert.equal(badges.length, 1, "exactly one 已归档 badge");
+  assert.ok(topicRowByKey(tree, "t-arch"), "archived row rendered");
+
+  // 行按钮布局：未归档行 = 合并到这个主题 + 移出索引；已归档行 = 恢复到索引（无合并入口）
+  assert.deepEqual(rowButtonLabels(topicRowByKey(tree, "t-arch")), ["恢复到索引"],
+    "archived row: only 恢复到索引, no merge entry");
+  assert.deepEqual(rowButtonLabels(topicRowByKey(tree, "t-old")), ["合并到这个主题", "移出索引"],
+    "unarchived row: merge entry kept, 移出索引 added");
+  assert.equal(flattenVNode(tree).filter((n) => n.type === "button" && collectText(n) === "移出索引").length, 4,
+    "移出索引 on every unarchived row");
+});
+
+test("0.2.2 归档入口：未归档行「移出索引」发 previewPlan {kind:'archive-topic',topicKey,archive:true}（payload 恰三键、无损），确认卡文案与 executePlan、成功后刷新列表", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderCandidates = await mountCandidates(mod, host);
+  const calls = [];
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (method === "listCandidates") return clusterLoadedStates("x")[0];
+      if (method === "executeTool" && payload.name === "memory_list_topics") {
+        return { topics: [{ key: "t-live", title: "活", summary: "s", updated: "2026-10-26T10:00:00.000Z", revision: "shiori-r1.Liv.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }] };
+      }
+      if (method === "previewPlan") {
+        // 服务端真实 planView 形状（reviewer 打回项 3，src/plugin/management.mjs
+        // archive-topic 分支）：kind 恒为家族名 "organize"，client 靠 preview.archiveTopic
+        // 钉定判定归档卡，不得依赖 plan.kind === "archive-topic"（生产恒为假）。
+        return { kind: "organize", planId: "plan-AT", planDigest: "digest-AT", queueRevision: null, changedItems: 1, summary: "archive-topic plan over 1 topic", diff: [
+          { path: "topic:t-live", oldText: "archivedAt: (未归档)", newText: "archivedAt: 2026-11-07T10:00:00.000Z" },
+        ] };
+      }
+      if (method === "executePlan") return { executed: true };
+      return {};
+    },
+  };
+  host.states.length = 0;
+  host.states.push(...clusterLoadedStates("session-A"));
+  let tree = renderCandidates(dsh, "session-A");
+  findButton(tree, "合并进主题").props.onClick();
+  await flush();
+
+  tree = renderCandidates(dsh, "session-A");
+  const row = topicRowByKey(tree, "t-live");
+  assert.ok(row, "topic row rendered");
+  const removeBtn = flattenVNode(row).find((n) => n.type === "button" && collectText(n) === "移出索引");
+  removeBtn.props.onClick();
+  await flush();
+
+  const previewCall = calls.find((c) => c.method === "previewPlan");
+  assert.ok(previewCall, "previewPlan sent on 移出索引 click");
+  assert.deepEqual(Object.keys(previewCall.payload).sort(), ["archive", "kind", "topicKey"],
+    "archive-topic preview payload has exactly the contract keys");
+  assert.deepEqual(previewCall.payload, { kind: "archive-topic", topicKey: "t-live", archive: true });
+  assert.equal(previewCall.session, "session-A");
+  assert.equal(isRemoteJsonValue(previewCall.payload), true, "archive-topic preview payload lossless");
+
+  // 确认卡（targetId=topicKey 不在候选/计划行中 → 回落底部确认卡）
+  tree = renderCandidates(dsh, "session-A");
+  const cardText = collectText(tree);
+  assert.ok(cardText.includes("专题归档"), "archive-topic card title rendered");
+  assert.ok(cardText.includes("把专题『t-live』移出 L1 索引"), "card body names topic and direction");
+  assert.ok(cardText.includes("正文长度不变，随时可读"), "card body states content untouched");
+  const confirmBtn = findButton(tree, "确认移出索引（可随时恢复）");
+  assert.equal(confirmBtn.props.disabled, false, "confirm enabled for open plan");
+
+  confirmBtn.props.onClick();
+  await flush();
+  const exec = calls.find((c) => c.method === "executePlan");
+  assert.ok(exec, "executePlan sent on confirm");
+  assert.equal(exec.payload.planId, "plan-AT");
+  assert.equal(exec.payload.planDigest, "digest-AT");
+  assert.equal(exec.payload.confirmed, true);
+  // 执行成功：刷新专题列表（memory_list_topics 共两次：openMerge 一次 + 执行后一次）
+  const listCalls = calls.filter((c) => c.method === "executeTool" && c.payload.name === "memory_list_topics");
+  assert.equal(listCalls.length, 2, "topics list refreshed after archive-topic execution");
+});
+
+test("0.2.2 归档入口：已归档行「恢复到索引」发 archive:false，确认卡为「确认恢复」方向", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderCandidates = await mountCandidates(mod, host);
+  const calls = [];
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (method === "listCandidates") return clusterLoadedStates("x")[0];
+      if (method === "executeTool" && payload.name === "memory_list_topics") return { topics: [archiveTopicsFixture()[4]] };
+      if (method === "previewPlan") {
+        // 同上：服务端真实 planView 形状，kind 恒为 "organize"。
+        return { kind: "organize", planId: "plan-AR", planDigest: "digest-AR", queueRevision: null, changedItems: 1, summary: "archive-topic plan over 1 topic", diff: [
+          { path: "topic:t-arch", oldText: "archivedAt: 2026-03-01T00:00:00.000Z", newText: "archivedAt: (未归档)" },
+        ] };
+      }
+      if (method === "executePlan") return { executed: true };
+      return {};
+    },
+  };
+  host.states.length = 0;
+  host.states.push(...clusterLoadedStates("session-A"));
+  let tree = renderCandidates(dsh, "session-A");
+  findButton(tree, "合并进主题").props.onClick();
+  await flush();
+
+  tree = renderCandidates(dsh, "session-A");
+  const row = topicRowByKey(tree, "t-arch");
+  const restoreBtn = flattenVNode(row).find((n) => n.type === "button" && collectText(n) === "恢复到索引");
+  restoreBtn.props.onClick();
+  await flush();
+
+  const previewCall = calls.find((c) => c.method === "previewPlan");
+  assert.ok(previewCall, "previewPlan sent on 恢复到索引 click");
+  assert.deepEqual(previewCall.payload, { kind: "archive-topic", topicKey: "t-arch", archive: false },
+    "restore direction sends archive:false");
+
+  tree = renderCandidates(dsh, "session-A");
+  const cardText = collectText(tree);
+  assert.ok(cardText.includes("把专题『t-arch』恢复到 L1 索引"), "restore direction named in card body");
+  findButton(tree, "确认恢复").props.onClick();
+  await flush();
+  const exec = calls.find((c) => c.method === "executePlan");
+  assert.ok(exec, "executePlan sent on restore confirm");
+  assert.equal(exec.payload.planId, "plan-AR");
+});
+
+test("0.2.2 归档入口：previewPlan 失败走既有 ErrorBox 展示（code 保留 + 中文说明），不渲染确认卡", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderCandidates = await mountCandidates(mod, host);
+  const calls = [];
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (method === "listCandidates") return clusterLoadedStates("x")[0];
+      if (method === "executeTool" && payload.name === "memory_list_topics") {
+        return { topics: [{ key: "t-live", title: "活", summary: "s", updated: "2026-10-26T10:00:00.000Z", revision: "shiori-r1.Liv.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }] };
+      }
+      if (method === "previewPlan") {
+        throw Object.assign(new Error("archive-topic plan refused by server"), { code: "UNSUPPORTED" });
+      }
+      return {};
+    },
+  };
+  host.states.length = 0;
+  host.states.push(...clusterLoadedStates("session-A"));
+  let tree = renderCandidates(dsh, "session-A");
+  findButton(tree, "合并进主题").props.onClick();
+  await flush();
+
+  tree = renderCandidates(dsh, "session-A");
+  const row = topicRowByKey(tree, "t-live");
+  flattenVNode(row).find((n) => n.type === "button" && collectText(n) === "移出索引").props.onClick();
+  await flush();
+  tree = renderCandidates(dsh, "session-A");
+
+  const text = collectText(tree);
+  assert.ok(text.includes("[UNSUPPORTED]"), "original code preserved in ErrorBox");
+  assert.ok(text.includes("服务端不支持该操作"), "UNSUPPORTED explained in Chinese");
+  assert.ok(text.includes("archive-topic plan refused by server"), "original message retained");
+  assert.equal(flattenVNode(tree).find((n) => n.type === "button" && collectText(n) === "确认移出索引（可随时恢复）"), undefined,
+    "no confirm card after failed preview");
+  assert.equal(calls.filter((c) => c.method === "executePlan").length, 0, "executePlan never sent after failed preview");
+});
+
+test("0.2.2 归档入口（rework a2）：普通 organize 预览（preview 未钉 archiveTopic）不出现「专题归档」、确认按钮为「确认执行」、执行后不刷新专题列表", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderCandidates = await mountCandidates(mod, host);
+  const calls = [];
+  // 普通 organize 预览的 planView：与服务端归档预览同 kind（恒 "organize"），
+  // 但 preview 状态里没有 archiveTopic 钉定——client 不得据此显示归档文案。
+  const ordinaryPlanView = { kind: "organize", planId: "plan-ORG", planDigest: "digest-ORG", queueRevision: 7, changedItems: 1, summary: "organize plan", diff: [] };
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      if (method === "listCandidates") return { queueRevision: 7, items: [], plans: [] };
+      if (method === "previewPlan") return ordinaryPlanView;
+      if (method === "executePlan") return { executed: true };
+      return {};
+    },
+  };
+  host.states.length = 0;
+  host.states.push(
+    { queueRevision: 7, items: [], plans: [] },
+    null, false, "",
+    // preview 状态：无 archiveTopic 钉定（普通 organize 预览，如候选行「预览整理计划」产物）
+    { sessionId: "session-A", plan: ordinaryPlanView, queueRevision: 7 },
+    null,
+    { sessionId: "session-A", gen: 0 });
+  let tree = renderCandidates(dsh, "session-A");
+  const text = collectText(tree);
+  assert.ok(!text.includes("专题归档"), "no archive title on ordinary organize preview");
+  assert.ok(!text.includes("移出 L1 索引"), "no archive body line on ordinary organize preview");
+  const confirmBtn = findButton(tree, "确认执行");
+  assert.equal(confirmBtn.props.disabled, false, "ordinary preview confirm enabled with default label");
+
+  confirmBtn.props.onClick();
+  await flush();
+  const exec = calls.find((c) => c.method === "executePlan");
+  assert.ok(exec, "executePlan sent for ordinary organize preview");
+  assert.equal(calls.filter((c) => c.method === "executeTool" && c.payload.name === "memory_list_topics").length, 0,
+    "topics list NOT refreshed after ordinary organize execution");
+});

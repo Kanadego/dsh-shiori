@@ -980,7 +980,7 @@ function isStaleSourceRef(ref, revisionsById) {
 // buildDraft：候选 + 完整 active records + proposal -> { plan, digest, diff, changedItems }
 // ---------------------------------------------------------------------------
 
-const PLAN_KINDS = new Set(['link', 'merge-topic', 'thin-core']);
+const PLAN_KINDS = new Set(['link', 'merge-topic', 'thin-core', 'archive-topic']);
 // 镜像冻结 sparks/store.mjs 的 LIMITS（仅用于输入校验，保证草案可被执行器接受）
 const CARD_LIMITS = Object.freeze({
   titleChars: 80, summaryChars: 120, contentChars: 2000,
@@ -1095,20 +1095,50 @@ function projectRecordForBlock(record) {
   };
 }
 
+/** archive-topic 的 topic 元数据校验（恰好 key/expectedRevision/archivedAt 三键）。 */
+function validateArchiveTopicPlanTopic(topic, where) {
+  assertExactKeys(topic, ['key', 'expectedRevision', 'archivedAt'], where);
+  validateTopicKeyLocal(topic.key, `${where}.key`);
+  checkText(topic.expectedRevision, `${where}.expectedRevision`, { min: 1, max: 16384 });
+  // archivedAt：null = 恢复；字符串 = 归档（必须能被 Date.parse 解析）。
+  if (topic.archivedAt !== null) {
+    checkText(topic.archivedAt, `${where}.archivedAt`, { min: 1 });
+    if (Number.isNaN(Date.parse(topic.archivedAt))) {
+      fail('INVALID_INPUT', `${where}.archivedAt 必须是 null 或能被 Date.parse 解析的时间串`);
+    }
+  }
+  return topic;
+}
+
 /** Plan 结构校验（供 buildDraft 自检与 digestPlan 外部校验共用；纯结构，不查 records）。 */
 function validatePlanShape(plan, where = 'plan') {
   assertProtocolJson(plan, where);
   if (!isPlainObject(plan)) fail('INVALID_INPUT', `${where} 必须是普通对象`);
   if (plan.version !== 1) fail('INVALID_INPUT', `${where}.version 必须是 1`);
   if (!PLAN_KINDS.has(plan.kind)) {
-    fail('INVALID_INPUT', `${where}.kind 必须是 link/merge-topic/thin-core`);
+    fail('INVALID_INPUT', `${where}.kind 必须是 link/merge-topic/thin-core/archive-topic`);
   }
   validateScopeIdLocal(plan.scopeId, `${where}.scopeId`);
+  const base = ['version', 'scopeId', 'candidateId', 'kind', 'sources'];
+  if (plan.kind === 'archive-topic') {
+    // archive-topic 不依赖候选队列：candidateId 是确定性别名，不是 64hex 候选
+    // id；sources 恒为空数组（本计划不动任何 spark 卡）。
+    assertExactKeys(plan, [...base, 'topic'], where);
+    if (!isPlainObject(plan.topic)) fail('INVALID_INPUT', `${where}.topic 必须是普通对象`);
+    if (typeof plan.candidateId !== 'string'
+      || plan.candidateId !== `archive-topic:${plan.topic.key}`) {
+      fail('INVALID_INPUT', `${where}.candidateId 必须是 "archive-topic:<topicKey>"`);
+    }
+    if (!Array.isArray(plan.sources) || plan.sources.length !== 0) {
+      fail('INVALID_INPUT', `${where}.sources 必须是空数组（archive-topic 不动任何 spark 卡）`);
+    }
+    validateArchiveTopicPlanTopic(plan.topic, `${where}.topic`);
+    return plan;
+  }
   if (typeof plan.candidateId !== 'string' || !/^[0-9a-f]{64}$/.test(plan.candidateId)) {
     fail('INVALID_INPUT', `${where}.candidateId 必须是小写 64 位 hex`);
   }
   validateSourceRefs(plan.sources, `${where}.sources`);
-  const base = ['version', 'scopeId', 'candidateId', 'kind', 'sources'];
   if (plan.kind === 'link') {
     assertExactKeys(plan, [...base, 'links'], where);
     if (!Array.isArray(plan.links) || plan.links.length === 0) {
@@ -1366,6 +1396,68 @@ function buildMergeTopicDraft(candidate, recordsById, proposal) {
   return { plan, diff, changedItems: candidate.sources.length + 1 };
 }
 
+// --- archive-topic 草案（0.2.2 专题归档/恢复） ------------------------------
+
+/**
+ * 0.2.2 专题归档/恢复计划草案：不依赖候选队列（candidateId 是确定性别名
+ * "archive-topic:<key>"，不是 64hex 候选 id），不引用任何 spark 卡（sources
+ * 恒为空数组）。archivedAt 为可被 Date.parse 解析的时间串 = 归档；null = 恢复。
+ * expectedRevision 由调用方（management.previewPlan）从 service.readTopic 取
+ * fresh.revision（service 签发的 topic revision token）；currentArchivedAt 为
+ * 当前归档标记（缺省未归档传 null）。目标状态与当前状态一致（重复归档/重复
+ * 恢复）时拒绝（拒绝无变化草案）。
+ *
+ * @param {object} input
+ * @param {string} input.scopeId
+ * @param {string} input.key                     topic key
+ * @param {string} input.expectedRevision        service revision token（非空字符串）
+ * @param {string|null} input.archivedAt         ISO 时间串（归档）或 null（恢复）
+ * @param {string|null} input.currentArchivedAt  当前 archivedAt（null = 未归档）
+ * @returns {{plan, digest, diff, changedItems: 1}}
+ */
+export function buildArchiveTopicPlan(input) {
+  if (!isPlainObject(input)) fail('INVALID_INPUT', 'buildArchiveTopicPlan 参数必须是对象');
+  assertExactKeys(
+    input,
+    ['scopeId', 'key', 'expectedRevision', 'archivedAt', 'currentArchivedAt'],
+    'buildArchiveTopicPlan 参数',
+  );
+  const { scopeId, key, expectedRevision, archivedAt, currentArchivedAt } = input;
+  validateScopeIdLocal(scopeId, 'scopeId');
+  validateTopicKeyLocal(key, 'key');
+  checkText(expectedRevision, 'expectedRevision', { min: 1, max: 16384 });
+  if (archivedAt !== null) {
+    checkText(archivedAt, 'archivedAt', { min: 1 });
+    if (Number.isNaN(Date.parse(archivedAt))) {
+      fail('INVALID_INPUT', 'archivedAt 必须是 null 或能被 Date.parse 解析的 ISO 时间串');
+    }
+  }
+  if (currentArchivedAt !== null) {
+    checkText(currentArchivedAt, 'currentArchivedAt', { min: 1 });
+    if (Number.isNaN(Date.parse(currentArchivedAt))) {
+      fail('INVALID_INPUT', 'currentArchivedAt 必须是 null 或能被 Date.parse 解析的 ISO 时间串');
+    }
+  }
+  if ((archivedAt !== null) === (currentArchivedAt !== null)) {
+    fail('INVALID_INPUT', '专题已在目标状态');
+  }
+  const plan = {
+    version: 1,
+    scopeId,
+    candidateId: `archive-topic:${key}`,
+    kind: 'archive-topic',
+    sources: [],
+    topic: { key, expectedRevision, archivedAt },
+  };
+  const diff = [{
+    path: `topic:${key}`,
+    oldText: `archivedAt: ${currentArchivedAt ?? '(未归档)'}`,
+    newText: `archivedAt: ${archivedAt ?? '(未归档)'}`,
+  }];
+  validatePlanShape(plan); // 自检：Plan 无未知字段、无 digest/approval/operationId
+  return { plan, digest: digest(plan), diff, changedItems: 1 };
+}
+
 // --- thin-core 草案 --------------------------------------------------------
 
 function buildThinCoreDraft(candidate, proposal) {
@@ -1439,6 +1531,11 @@ export function buildDraft(input) {
   if (!isPlainObject(proposal)) fail('INVALID_INPUT', 'proposal 必须是普通对象');
   if (typeof proposal.kind !== 'string' || !PLAN_KINDS.has(proposal.kind)) {
     fail('INVALID_INPUT', 'proposal.kind 必须是 link/merge-topic/thin-core');
+  }
+  if (proposal.kind === 'archive-topic') {
+    // archive-topic 不走候选队列草案通道（无候选/无 records），独立构建入口
+    // 见 buildArchiveTopicPlan；此处显式拒绝，避免误入 thin-core 分支报错。
+    fail('INVALID_INPUT', 'buildDraft 不接受 archive-topic（专题归档计划请用 buildArchiveTopicPlan 构建）');
   }
 
   let built;

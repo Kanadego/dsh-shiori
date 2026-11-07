@@ -498,6 +498,20 @@ export const MANAGEMENT_METHODS = Object.freeze({
           },
           required: ["kind", "planId"],
         },
+        {
+          // 0.2.2 专题归档/恢复：archive:true = 归档，false = 恢复。
+          // 无候选/无队列事务，required 三键；operationId 可选——P-A 作废
+          // 标记（supersedeOpen）用它，缺省落 null，executePlan 硬闸仍生效。
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            kind: { enum: ["archive-topic"] },
+            topicKey: nonEmptyString,
+            archive: { type: "boolean" },
+            operationId,
+          },
+          required: ["kind", "topicKey", "archive"],
+        },
       ],
     },
     outputSchema: planView,

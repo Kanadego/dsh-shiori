@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -1178,5 +1178,144 @@ test("getTimeline：payload 缺省时按空对象处理（不抛裸 TypeError）
   assert.deepEqual(page.items, []);
   assert.equal(page.hasMore, false);
   assert.equal(page.scanLimited, false);
+});
+
+// ── archive-topic 预览（0.2.2 专题归档/恢复）────────────────────────────────
+
+test("protocol：previewPlan 第三变体 archive-topic（required 三键；operationId 可选；未知字段拒绝）", () => {
+  const base = { kind: "archive-topic", topicKey: "arch-target", archive: true };
+  // required 三键：kind/topicKey/archive；operationId 可选（P-A 作废标记用，缺省落 null）
+  assert.deepEqual(validateManagementPayload("previewPlan", base), base);
+  assert.deepEqual(
+    validateManagementPayload("previewPlan", { ...base, operationId: "pv-ar-0" }),
+    { ...base, operationId: "pv-ar-0" },
+  );
+  // 缺任一必填键 / archive 非布尔 / topicKey 空串 / 未知字段
+  assert.throws(() => validateManagementPayload("previewPlan", { kind: "archive-topic", topicKey: "x" }), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => validateManagementPayload("previewPlan", { kind: "archive-topic", archive: true }), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => validateManagementPayload("previewPlan", { topicKey: "x", archive: true }), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => validateManagementPayload("previewPlan", { kind: "archive-topic", topicKey: "x", archive: "yes" }), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => validateManagementPayload("previewPlan", { kind: "archive-topic", topicKey: "", archive: true }), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => validateManagementPayload("previewPlan", { kind: "archive-topic", topicKey: "x", archive: true, rogue: 1 }), (e) => e.code === "INVALID_INPUT");
+});
+
+test("archive-topic 全链：previewPlan → executePlan 落盘归档；恢复后字段消失；同状态 INVALID_INPUT；topic 不存在 NOT_FOUND", async (t) => {
+  const { controller, trusted, base } = await setup(t);
+  await controller.management.executeTool(trusted, {
+    name: "topic_create", args: { topic: "arch-target", title: "Arch Target", summary: "target" },
+  });
+
+  // topic 不存在 → NOT_FOUND
+  await assert.rejects(
+    () => controller.management.previewPlan(trusted, { kind: "archive-topic", topicKey: "nope", archive: true }),
+    (e) => e.code === "NOT_FOUND",
+  );
+  // 未归档时要求恢复 → INVALID_INPUT（已在目标状态）
+  await assert.rejects(
+    () => controller.management.previewPlan(trusted, { kind: "archive-topic", topicKey: "arch-target", archive: false }),
+    (e) => e.code === "INVALID_INPUT",
+  );
+
+  // 预览归档：queueRevision 恒 null（无队列事务）、changedItems 1、summary 固定
+  const preview = await controller.management.previewPlan(trusted, {
+    kind: "archive-topic", topicKey: "arch-target", archive: true, operationId: "pv-ar-1",
+  });
+  assert.equal(preview.kind, "organize");
+  assert.match(preview.planDigest, /^[a-f0-9]{64}$/);
+  assert.equal(preview.queueRevision, null);
+  assert.equal(preview.changedItems, 1);
+  assert.equal(preview.summary, "archive-topic plan over 1 topic");
+  assert.equal(preview.diff.length, 1);
+  assert.equal(preview.diff[0].path, "topic:arch-target");
+  assert.equal(preview.diff[0].oldText, "archivedAt: (未归档)");
+  assert.match(preview.diff[0].newText, /^archivedAt: \d{4}-/);
+
+  // 执行：走 organizer executor（entry.kind "organize"）
+  const executed = await controller.management.executePlan(trusted, {
+    planId: preview.planId, planDigest: preview.planDigest, operationId: "ex-ar-1", confirmed: true,
+  });
+  assert.equal(executed.result.status, "completed");
+  assert.equal(executed.result.kind, "archive-topic");
+  assert.equal(executed.result.changedItems, 1);
+
+  // 真实落盘：front-matter 出现 archivedAt
+  const topicFile = path.join(base, "data", "scopes", "amber", "topics", "arch-target.md");
+  const rawArchived = await readFile(topicFile, "utf8");
+  assert.match(rawArchived, /archivedAt: "/);
+
+  // 已归档再要求归档 → INVALID_INPUT
+  await assert.rejects(
+    () => controller.management.previewPlan(trusted, { kind: "archive-topic", topicKey: "arch-target", archive: true }),
+    (e) => e.code === "INVALID_INPUT",
+  );
+
+  // 预览恢复 → 执行 → front-matter 字段消失
+  const preview2 = await controller.management.previewPlan(trusted, {
+    kind: "archive-topic", topicKey: "arch-target", archive: false, operationId: "pv-ar-2",
+  });
+  assert.equal(preview2.diff[0].oldText.startsWith("archivedAt: 2"), true);
+  assert.equal(preview2.diff[0].newText, "archivedAt: (未归档)");
+  await controller.management.executePlan(trusted, {
+    planId: preview2.planId, planDigest: preview2.planDigest, operationId: "ex-ar-2", confirmed: true,
+  });
+  const rawRestored = await readFile(topicFile, "utf8");
+  assert.ok(!rawRestored.includes("archivedAt"), "恢复后 front-matter 不再有 archivedAt 字段");
+});
+
+test("archive-topic：跨 scope 拒绝 INVALID_STATE；P-A 收敛作废其他 open organize 计划（executePlan 硬闸生效）", async (t) => {
+  const { controller, trusted, base } = await setup(t);
+  await controller.management.executeTool(trusted, {
+    name: "topic_create", args: { topic: "local-topic", title: "Local", summary: "s" },
+  });
+
+  // 跨 scope：global scope 预置一个 topic 文件（readTopic 回退链可达，scopeId 为 global）
+  const globalDir = path.join(base, "data", "scopes", "global", "topics");
+  await mkdir(globalDir, { recursive: true });
+  await writeFile(path.join(globalDir, "shared.md"),
+    '---\nkey: "shared"\ntitle: "Shared"\nsummary: "s"\nupdated: "2026-11-01T00:00:00.000Z"\nscopeId: "global"\n---\n全局正文\n');
+  await assert.rejects(
+    () => controller.management.previewPlan(trusted, { kind: "archive-topic", topicKey: "shared", archive: true }),
+    (e) => e.code === "INVALID_STATE",
+  );
+
+  // P-A 收敛：open 的 organize 计划被 archive-topic 预览作废，执行被硬闸拒绝
+  for (let i = 0; i < 9; i++) {
+    await controller.management.executeTool(trusted, {
+      name: "spark_save",
+      args: { title: `A${i}`, content: `共同实体内容 ${i}。`, triggers: [`a${i}`], entities: ["归档实体"], vitality: "evergreen" },
+    });
+  }
+  const analyzed = await controller.management.analyze(trusted, { kind: "organize", operationId: "an-ar" });
+  const candidate = analyzed.items[0].candidate;
+  const reviewed = await controller.management.reviewCandidate(trusted, {
+    candidateId: candidate.id, decision: "reviewed",
+    expectedQueueRevision: analyzed.queueRevision, operationId: "rv-ar",
+  });
+  const organizePreview = await controller.management.previewPlan(trusted, {
+    kind: "organize", candidateId: candidate.id, expectedQueueRevision: reviewed.queueRevision, operationId: "pv-organize-ar",
+    proposal: { kind: "link", links: [{ id: candidate.sources[0].id, after: [{ target: candidate.sources[1].id, rel: "相关" }] }] },
+  });
+  assert.ok(organizePreview.planId);
+
+  // archive-topic 预览（另一专题）→ 旧 organize 计划被作废
+  await controller.management.executeTool(trusted, {
+    name: "topic_create", args: { topic: "arch-other", title: "Other", summary: "s" },
+  });
+  const arPreview = await controller.management.previewPlan(trusted, {
+    kind: "archive-topic", topicKey: "arch-other", archive: true, operationId: "pv-ar-sup",
+  });
+  await assert.rejects(
+    () => controller.management.executePlan(trusted, {
+      planId: organizePreview.planId, planDigest: organizePreview.planDigest, operationId: "ex-superseded-ar", confirmed: true,
+    }),
+    (e) => e.code === "REVISION_CONFLICT" && /superseded/.test(e.message),
+    "被 archive-topic 预览作废的 organize 计划不可执行",
+  );
+
+  // archive 计划本身可执行（未被作废）
+  const executed = await controller.management.executePlan(trusted, {
+    planId: arPreview.planId, planDigest: arPreview.planDigest, operationId: "ex-ar-sup", confirmed: true,
+  });
+  assert.equal(executed.result.status, "completed");
 });
 
