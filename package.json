@@ -1,6 +1,6 @@
 {
   "name": "dsh-shiori",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "DeepSeek Harness 的分层记忆插件：L0 人设卡常驻、L1 记忆核心+派生索引每轮注入、L2 Spark 卡片按触发词浮回、L3 专题按需展开，配套整理/遗忘与原生 web 面板。",
   "repository": {
     "type": "git",
