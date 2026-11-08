@@ -11,6 +11,7 @@
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import { sha256Buffer, stableStringify, atomicReplace } from './fsutil.mjs';
+import { invalidState, wrapIoError } from './errors.mjs';
 
 export function journalPath(rootReal, operationId) {
   return path.join(rootReal, 'journal', `${operationId}.json`);
@@ -38,11 +39,16 @@ export async function readJournal(rootReal, operationId) {
     return JSON.parse(raw);
   } catch (err) {
     if (err.code === 'ENOENT') return null;
-    // 损坏的 journal 属严重状态：上抛由 recover/调用方决策，不静默跳过
-    const wrapped = new Error(`journal ${operationId} 损坏: ${err.message}`);
-    wrapped.code = 'INVALID_STATE';
-    wrapped.cause = err;
-    throw wrapped;
+    if (err instanceof SyntaxError) {
+      // 损坏的 journal 属严重状态：上抛由 recover/调用方决策，不静默跳过。
+      // 包装为 StorageError（P2-6/A6）：与模块其余错误形状一致，
+      // 按 instanceof StorageError 判定的调用方不会失手。
+      const wrapped = invalidState(`journal ${operationId} 损坏: ${err.message}`, { operationId });
+      wrapped.cause = err;
+      throw wrapped;
+    }
+    // 非 JSON 解析的读取失败（EACCES/EIO 等）按 IO_ERROR 归口（P2-4/A4）
+    throw wrapIoError(`journal/${operationId}.json`, err);
   }
 }
 
@@ -84,7 +90,7 @@ export async function listJournals(rootReal) {
     names = await fsp.readdir(dir);
   } catch (err) {
     if (err.code === 'ENOENT') return [];
-    throw err;
+    throw wrapIoError(`readdir ${dir}`, err);
   }
   const out = [];
   for (const name of names) {

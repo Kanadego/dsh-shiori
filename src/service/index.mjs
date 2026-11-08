@@ -1,13 +1,26 @@
 /** Minimal A/B/C service. No home/profile defaults; no host activation. */
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { validateConfig, validateKey, renderL1, evaluateMutation } from '../core/index.mjs';
 import { createFileStore } from '../storage/index.mjs';
+import { isCanonicalIso, isIsoDateOrTimestamp } from '../storage/fsutil.mjs';
 
 const PREFIX = 'shiori-r1.';
 const guards = new AsyncLocalStorage();
 const hash = text => createHash('sha256').update(text).digest('hex');
+// A5/P2-5 威胁模型核实结论（2026-11-08）：token 确实会到达不可信面（memory_read
+// 把含 projectionHash 的 readCoreView token 交给模型；剥掉该字段 + 无密钥 SHA-256
+// 重签可绕过「渲染视图未变」乐观锁），绕过路径真实可达。
+// 本次判定不动摘要算法，理由：requirement 建议的「进程级随机 HMAC 密钥」与既有
+// 跨进程 durable replay 契约直接冲突——acceptance 矩阵 global-fallback case 要求
+// 同 operationId + 原 token 跨真实重启重放回执一致（src/acceptance/
+// global-fallback-child.mjs），进程密钥会使重放必败（已实测）。换 per-root 持久化
+// 密钥属新设计（数据根新增密钥文件），超出本单「最小改动」授权，留待专项决策。
+// 保留的兜底：摘要解析做严格形状校验 + timingSafeEqual，剥字段重签依然只能伪造
+// 出「与 readCore token 等价」的合法形态——该形态本就是 checkSources 认可的输入，
+// 剥离攻击的实际增益收敛为「跳过渲染视图新鲜度检查」，被 sourceRevision 磁盘
+// 真值 CAS 与预算策略二次兜底。
 const stable = value => JSON.stringify(value, function (_key, v) {
   return v && typeof v === 'object' && !Array.isArray(v)
     ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v;
@@ -30,7 +43,14 @@ function encode(data) {
 function decode(token) {
   if (typeof token !== 'string' || token.length > 16384 || !token.startsWith(PREFIX)) fail('INVALID_INPUT', 'expected service revision token');
   const [body, digest, excess] = token.slice(PREFIX.length).split('.');
-  if (excess !== undefined || hash(body) !== digest) fail('INVALID_INPUT', 'damaged revision token');
+  // 摘要必须是精确 64 位小写 hex（A5 兜底硬化）：Buffer.from 的 hex 解码会静默
+  // 截断非法尾字符，不先做形状校验的话尾巴会被当成原摘要放行。
+  if (excess !== undefined || !isHash(digest)) fail('INVALID_INPUT', 'damaged revision token');
+  const expected = Buffer.from(hash(body), 'hex');
+  const got = Buffer.from(digest, 'hex');
+  if (got.length !== expected.length || !timingSafeEqual(got, expected)) {
+    fail('INVALID_INPUT', 'damaged revision token');
+  }
   try { return JSON.parse(Buffer.from(body, 'base64url').toString('utf8')); }
   catch { fail('INVALID_INPUT', 'invalid revision token'); }
 }
@@ -86,11 +106,10 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
     if (kind === 'topic') {
       record(t.meta, 'token metadata');
       text(t.meta.title, 'title'); text(t.meta.summary, 'summary'); text(t.meta.updated, 'updated');
-      // 归档标记可选（旧版 token 无此字段）；有值时必须是非空可解析时间串。
-      if (t.meta.archivedAt !== undefined
-        && (typeof t.meta.archivedAt !== 'string' || !t.meta.archivedAt.length
-          || Number.isNaN(new Date(t.meta.archivedAt).getTime()))) {
-        fail('INVALID_INPUT', 'archivedAt must be a non-empty string parseable by new Date() (e.g. ISO 8601)');
+      // 归档标记可选（旧版 token 无此字段）；有值时必须是规范 UTC ISO 串（A1/P2-1）。
+      if (t.meta.archivedAt !== undefined && !isCanonicalIso(t.meta.archivedAt)) {
+        fail('INVALID_INPUT', 'archivedAt must be a canonical UTC ISO 8601 string '
+          + '(e.g. "2026-11-07T00:00:00.000Z")');
       }
     }
     return t;
@@ -222,13 +241,20 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
       if (Object.keys(c.topic).some(k => !['title', 'summary', 'updated', 'archivedAt'].includes(k))) {
         fail('INVALID_INPUT', 'topic metadata accepts title/summary/updated/archivedAt only');
       }
-      // archivedAt：undefined/null 合法；字符串必须非空且能被 new Date() 解析。
+      // archivedAt：undefined/null 合法；字符串必须是规范 UTC ISO 串（A1/P2-1）。
       if (c.topic.archivedAt !== undefined && c.topic.archivedAt !== null) {
         const value = text(c.topic.archivedAt, 'archivedAt');
-        if (!value.length || Number.isNaN(new Date(value).getTime())) {
-          fail('INVALID_INPUT', 'archivedAt must be a non-empty string parseable by new Date() '
-            + '(e.g. ISO 8601 "2026-11-07T00:00:00.000Z"), or null to clear the archive mark');
+        if (!isCanonicalIso(value)) {
+          fail('INVALID_INPUT', 'archivedAt must be a canonical UTC ISO 8601 string '
+            + '(e.g. "2026-11-07T00:00:00.000Z"), or null to clear the archive mark');
         }
+      }
+      // updated 写入校验（A3/P2-3）：调用方显式提供的 updated 必须是 ISO 8601
+      // 形态（完整规范 UTC 时间戳或 date-only），与 storage 层同口径；
+      // token 继承路径（issuedAt 由 timestamp() 生成）不受影响。
+      if (c.topic.updated !== undefined && !isIsoDateOrTimestamp(text(c.topic.updated, 'updated'))) {
+        fail('INVALID_INPUT', 'updated must be an ISO 8601 timestamp '
+          + '(e.g. "2026-11-07T00:00:00.000Z" or "2026-11-07")');
       }
       if (token?.meta.updated === 'legacy-unknown') {
         // 防御分支：legacy 裸 md（缺 front-matter）在 storage 加载时已直接抛错，

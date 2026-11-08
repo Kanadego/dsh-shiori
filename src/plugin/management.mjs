@@ -902,7 +902,15 @@ export function createManagement(deps) {
       // 唯一 operationId）。
       // P-A 残留收紧：收敛/保存抛错时 grant 也必须撤销（merge 已落盘但
       // 调用报错——grant 泄漏会放大授权窗口），finally 保证两条路径都撤销。
+      // B1（audit B P2-1）：markExecuted 已落账、执行结果已定，收敛阶段再抛
+      // 错不得翻转回执——把成功伪装成失败会让客户端拿不到执行回执，且重试
+      // 恒撞「already executed」硬闸（幂等判据：planStore.executed 标志先于
+      // 收敛落账，同 planId 重试必被上方 executed 硬闸拒绝，不会二次执行）。
+      // 收敛失败降级为回执内 queueConvergence.applied=false + 可读告警；残留
+      // 失效候选由下一次 organize analyze 的收敛清理，队列正确性不受损
+      // （失效候选只会导致一次注定 REVISION_CONFLICT 的执行，无数据风险）。
       const executedCandidateId = typeof entry.plan?.candidateId === "string" ? entry.plan.candidateId : null;
+      let queueConvergence = { applied: true };
       try {
         const queue = await loadQueue(scope.scopeId);
         const snapshot = queue.snapshot();
@@ -915,6 +923,12 @@ export function createManagement(deps) {
           queue.converge(survivors, { operationId: payload.operationId, expectedRevision: snapshot.revision });
           await state.queueStore.save(scope.scopeId, queue.snapshot());
         }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        queueConvergence = {
+          applied: false,
+          warning: `计划已执行，但执行后的队列收敛失败（失效候选留待下次 analyze 清理）：${reason}`,
+        };
       } finally {
         grant.revoke();
       }
@@ -923,6 +937,7 @@ export function createManagement(deps) {
         planDigest: payload.planDigest,
         operationId: payload.operationId,
         result,
+        queueConvergence,
       };
     },
 

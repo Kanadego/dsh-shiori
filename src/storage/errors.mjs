@@ -33,14 +33,26 @@ export function invalidState(message, details) {
   return new StorageError('INVALID_STATE', message, details);
 }
 
-export function unsupported(message, details) {
-  return new StorageError('UNSUPPORTED', message, details);
-}
-
 export function notFound(message, details) {
   return new StorageError('NOT_FOUND', message, details);
 }
 
 export function lockBusy(message, details) {
   return new StorageError('LOCK_BUSY', message, details);
+}
+
+/** 文件系统层失败（EACCES/EPERM/ENOSPC/ENOTDIR 等）：与 sparks 层 IO_ERROR 约定同形
+ *  （稳定 code + details.ioCode + cause 保留原始 errno），绝不吞错回成功。 */
+export function ioError(message, details) {
+  return new StorageError('IO_ERROR', message, details);
+}
+
+/** 包装底层 fs 错误：保留 cause 与 ioCode，调用方永远拿到带 code 的错误。 */
+export function wrapIoError(where, err) {
+  const wrapped = ioError(
+    `${where}: 文件系统操作失败（${err?.code ?? err?.message ?? 'unknown'}），拒绝静默成功`,
+    { where, ioCode: err?.code ?? null },
+  );
+  wrapped.cause = err;
+  return wrapped;
 }

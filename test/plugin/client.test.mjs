@@ -690,7 +690,9 @@ function collectText(node, out = []) {
 }
 
 // 挂载面板并返回 renderCandidates(dsh, sessionId, { effects })：
-// 每次调用独立渲染 CandidatesTab（cursor 归零，states 承载其 7 个 useState）。
+// 每次调用独立渲染 CandidatesTab（cursor 归零，states 承载其 11 个 useState——
+// C7（审计 P2-7）：原注释写 7 个早已过期；0.3 裁撤整理流程后实际为 11 个，
+// states[4]=preview、states[7]=topics 等下标口径以 client/index.js 声明序为准）。
 async function mountCandidates(mod, host) {
   let renderSlot = null;
   await mod.apply({
@@ -727,7 +729,8 @@ function findButton(tree, label) {
   return button;
 }
 
-// CandidatesTab useState 顺序：data / error / busy / proposal / preview / previewError / guard
+// CandidatesTab useState 顺序（C7 核正，0.3 裁撤整理流程后共 11 个）：
+// data / error / busy / proposal / preview / previewError / guard / topics / titles / filter / search
 // （第 5 轮起 proposal 预填合法 link 形状——默认死值空 links 会被客户端本地校验拦截，
 //   而 R3/R4 测的是 revision 附带与会话守卫语义，需要 previewPlan 真正发出）
 function loadedStates(sessionId) {
@@ -4650,4 +4653,251 @@ test("0.2.2 归档入口（rework a2）：普通 organize 预览（preview 未�
   assert.ok(exec, "executePlan sent for ordinary organize preview");
   assert.equal(calls.filter((c) => c.method === "executeTool" && c.payload.name === "memory_list_topics").length, 0,
     "topics list NOT refreshed after ordinary organize execution");
+});
+
+// ---------------------------------------------------------------------------
+// C 席审计 P2 修复新增用例（task-5174c764c3e1ec9a-s3）：C3 / C4 / C5 / C6 / C8。
+// 只新增，不改任何既有用例；C7 的过期注释修正见 mountCandidates / loadedStates
+// 上方的两处注释。
+// ---------------------------------------------------------------------------
+
+// 与 mountTabById 同一路径，但允许给 tab 注入额外 props（如 onSessionUnavailable）。
+async function mountTabByIdWithProps(mod, host, tabId, tabName) {
+  let renderSlot = null;
+  await mod.apply({
+    remote: { $mount: async () => () => {} },
+    slots: {
+      inject: (name, fn) => fn(),
+      register: (meta, render) => { renderSlot = render; return () => {}; },
+    },
+  });
+  const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
+  host.states.length = 0;
+  host.states.push(tabId, "session-A", "", null, { mode: "active" });
+  host.cursor.v = 0;
+  const sectionTree = sectionVNode.type(sectionVNode.props);
+  const tab = flattenVNode(sectionTree).find((n) => typeof n.type === "function" && n.type.name === tabName);
+  assert.ok(tab, tabName + " reached through real slot render");
+  return (dsh, sessionId, options = {}, extraProps = {}) => {
+    host.cursor.v = 0;
+    host.runEffects.v = Boolean(options.effects);
+    return tab.type({ dsh, sessionId, ...extraProps });
+  };
+}
+
+test("C6：TopicsTab 会话不可用口径统一——writer-held 上报面板层不进 ErrorBox（load / readTopic / save 三处），普通错误照旧 ErrorBox", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderTopics = await mountTabByIdWithProps(mod, host, "topics", "TopicsTab");
+  const unavailable = [];
+  const heldError = { code: "session/writer-held", message: "session held" };
+  const plainError = { code: "boom", message: "boom happened" };
+  let listError = heldError;   // null = 列表成功
+  let failRead = false;
+  let failSave = false;
+  const dsh = {
+    call: async (method, session, payload) => {
+      const name = payload && payload.name;
+      if (name === "memory_list_topics") {
+        if (listError) throw listError;
+        return { topics: [{ key: "t-1", title: "T1", summary: "", updated: "2026-10-26T10:00:00.000Z", revision: "r1", chars: 2, bytes: 4 }] };
+      }
+      if (name === "memory_read") {
+        if (failRead) throw heldError;
+        return { topic: payload.args.topic, exists: true, content: "正文内容", revision: "r1", bytes: 12 };
+      }
+      if (name === "memory_rewrite") {
+        if (failSave) throw heldError;
+        return { ok: true };
+      }
+      return {};
+    },
+  };
+  const extra = { onSessionUnavailable: (e) => unavailable.push(e && e.code) };
+
+  // 1) load 失败：会话级错误上报面板层，tab error 保持 null，无 ErrorBox、原始消息不上屏
+  host.states.length = 0;
+  let tree = renderTopics(dsh, "session-A", { effects: true }, extra);
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  tree = renderTopics(dsh, "session-A", {}, extra);
+  assert.deepEqual(unavailable, ["session/writer-held"], "load 失败上报面板层恰好一次");
+  assert.equal(host.states[2], null, "TopicsTab 的 error 状态保持 null（口径与其它 tab 一致）");
+  assert.equal(findErrorBoxes(tree).length, 0, "无红色 ErrorBox");
+  assert.ok(!collectText(tree).includes("session held"), "原始错误消息不上屏");
+
+  // 2) 普通错误（非会话级）仍进 ErrorBox——统一口径不吞业务错误
+  listError = plainError;
+  findButton(tree, "刷新").props.onClick();
+  await settle();
+  tree = renderTopics(dsh, "session-A", {}, extra);
+  assert.deepEqual(unavailable, ["session/writer-held"], "普通错误不上报面板层");
+  assert.ok(collectText(tree).includes("boom happened"), "普通错误照旧显示");
+  assert.equal(findErrorBoxes(tree).length, 1, "普通错误仍渲染 ErrorBox");
+
+  // 3) 详情读失败：同样先过会话不可用守卫
+  listError = null;
+  findButton(tree, "刷新").props.onClick();
+  await settle();
+  tree = renderTopics(dsh, "session-A", {}, extra);
+  assert.ok(collectText(tree).includes("t-1"), "列表恢复");
+  failRead = true;
+  findButton(tree, "展开").props.onClick();
+  await settle();
+  tree = renderTopics(dsh, "session-A", {}, extra);
+  assert.deepEqual(unavailable, ["session/writer-held", "session/writer-held"], "readTopic 失败上报面板层");
+  assert.equal(host.states[6], null, "detailError 保持 null");
+  assert.equal(findErrorBoxes(tree).length, 0, "详情失败也无 ErrorBox");
+
+  // 4) 保存失败：同口径
+  failRead = false;
+  findButton(tree, "收起").props.onClick();
+  tree = renderTopics(dsh, "session-A", {}, extra);
+  findButton(tree, "展开").props.onClick();
+  await settle();
+  tree = renderTopics(dsh, "session-A", {}, extra);
+  failSave = true;
+  findButton(tree, "编辑").props.onClick();
+  tree = renderTopics(dsh, "session-A", {}, extra);
+  findButton(tree, "保存").props.onClick();
+  await settle();
+  tree = renderTopics(dsh, "session-A", {}, extra);
+  assert.deepEqual(unavailable, ["session/writer-held", "session/writer-held", "session/writer-held"], "save 失败上报面板层");
+  assert.equal(host.states[10], null, "saveError 保持 null");
+  assert.equal(findErrorBoxes(tree).length, 0, "保存失败也无 ErrorBox");
+});
+
+test("C5：错误文案缺字段回落——scope.getSnapshot 抛字符串 / 无 message 对象时不再把 undefined 拼上屏", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderBudgets = await mountTabByIdWithProps(mod, host, "budgets", "BudgetsTab");
+  for (const thrown of ["boom-string", { code: "X" }]) {
+    const dsh = {
+      configScope: () => ({ getSnapshot: () => { throw thrown; } }),
+      call: async () => ({ mode: "active", configured: true }),
+    };
+    host.states.length = 0;
+    renderBudgets(dsh, "session-A", { effects: true });
+    for (const effect of host.effects.splice(0)) effect();
+    await settle();
+    const tree = renderBudgets(dsh, "session-A");
+    const text = collectText(tree);
+    assert.ok(text.includes("读取设置命名空间失败："), "错误分支触发");
+    assert.ok(!text.includes("读取设置命名空间失败：undefined"),
+      `不拼出字面量 undefined（thrown=${JSON.stringify(thrown)}）`);
+  }
+  // 正常对象带 message 时消息照常展示（不改变有 message 场景的行为）
+  const dsh2 = {
+    configScope: () => ({ getSnapshot: () => { throw new Error("命名空间坏了"); } }),
+    call: async () => ({ mode: "active", configured: true }),
+  };
+  host.states.length = 0;
+  renderBudgets(dsh2, "session-A", { effects: true });
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  const tree = renderBudgets(dsh2, "session-A");
+  assert.ok(collectText(tree).includes("读取设置命名空间失败：命名空间坏了"), "有 message 时原样展示");
+});
+
+test("C8：图谱节点键盘可达——Tab 可聚焦、Enter/Space 选中（与 pointer-up 同路径）、可访问名称为完整标题；鼠标交互原样保留", async () => {
+  const { rerender } = await mountGraphTab();
+  let tree = rerender();
+  const node = graphNodeGs(tree).find((n) => n.props.key === "spk-2");
+  assert.ok(node, "节点 g 存在");
+  assert.equal(node.props.tabIndex, 0, "节点可 Tab 聚焦");
+  assert.equal(node.props.role, "button", "role=button 暴露可交互语义");
+  assert.equal(node.props["aria-label"], "香蕉卡", "可访问名称=完整标题（不是截断后的可见标签）");
+  assert.equal(typeof node.props.onPointerEnter, "function", "onPointerEnter 保留");
+  assert.equal(typeof node.props.onPointerLeave, "function", "onPointerLeave 保留");
+  assert.equal(typeof node.props.onPointerUp, "function", "onPointerUp 保留");
+
+  // Enter 选中并打开详情
+  let prevented = false;
+  node.props.onKeyDown({ key: "Enter", preventDefault: () => { prevented = true; } });
+  tree = rerender();
+  assert.ok(findComponent(tree, "NodeDetail"), "Enter 选中并打开 NodeDetail");
+  assert.equal(prevented, true, "Enter 触发选中并 preventDefault（不吃掉滚动）");
+
+  findComponent(tree, "NodeDetail").props.onClose();
+  tree = rerender();
+  assert.equal(findComponent(tree, "NodeDetail"), undefined, "详情已关闭");
+
+  // Space 选中（spk-3）
+  const node3 = graphNodeGs(tree).find((n) => n.props.key === "spk-3");
+  node3.props.onKeyDown({ key: " ", preventDefault: () => {} });
+  tree = rerender();
+  const detail = findComponent(tree, "NodeDetail");
+  assert.ok(detail, "Space 选中并打开 NodeDetail");
+  assert.equal(detail.props.node.id, "spk-3", "选中的是按键目标节点");
+
+  // 其他键不误触发；鼠标 pointer-up 路径不受影响
+  detail.props.onClose();
+  tree = rerender();
+  const node4 = graphNodeGs(tree).find((n) => n.props.key === "spk-4");
+  node4.props.onKeyDown({ key: "a", preventDefault: () => {} });
+  tree = rerender();
+  assert.equal(findComponent(tree, "NodeDetail"), undefined, "非 Enter/Space 不选中");
+  node4.props.onPointerUp();
+  tree = rerender();
+  const detail2 = findComponent(tree, "NodeDetail");
+  assert.ok(detail2 && detail2.props.node.id === "spk-4", "pointer-up 选中路径不受影响");
+});
+
+test("C3：力导向布局节点上限——超过 500 降级为确定性圆形静布（结构断言：坐标落在初始椭圆上）并给出降级提示；200 节点不降级", async () => {
+  const count = 501;   // FORCE_LAYOUT_MAX_NODES(500) + 1，压线触发降级
+  const { rerender } = await mountGraphTab(chainGraphPayload(count));
+  const tree = rerender();
+  const circles = graphCircles(tree);
+  assert.equal(circles.length, count, `${count} 个节点全部渲染`);
+  // 圆形静布 = forceLayout 的初始圆环（x=400+260·cosθ, y=190+140·sinθ）：
+  // 结构上逐点验证 ((x-400)/260)²+((y-190)/140)²≈1，证明没有跑 O(n²) 迭代
+  for (const c of circles) {
+    assert.ok(Number.isFinite(c.props.cx) && Number.isFinite(c.props.cy), "坐标有限");
+    const u = (c.props.cx - 400) / 260;
+    const v = (c.props.cy - 190) / 140;
+    assert.ok(Math.abs(u * u + v * v - 1) < 1e-6,
+      `坐标落在初始椭圆上（圆形静布）：${c.props.cx},${c.props.cy}`);
+    assert.ok(c.props.cx >= 30 && c.props.cx <= 770 && c.props.cy >= 30 && c.props.cy <= 350, "坐标夹在画布内");
+  }
+  assert.ok(collectText(tree).includes("圆形静布"), "超限降级提示如实告知用户");
+  // 降级路径仍确定性：同一份数据两次渲染逐点一致
+  const { rerender: rerender2 } = await mountGraphTab(chainGraphPayload(count));
+  const first = circles.map((c) => [c.props.cx, c.props.cy]);
+  assert.deepEqual(graphCircles(rerender2()).map((c) => [c.props.cx, c.props.cy]), first, "静布两次渲染一致");
+  // 200 节点（既有承诺线）不触发降级：提示不出现，布局质量由既有 R8 用例继续钉住
+  const { rerender: rerender3 } = await mountGraphTab(chainGraphPayload(200));
+  assert.ok(!collectText(rerender3()).includes("圆形静布"), "200 节点不走降级");
+});
+
+test("C4：候选行原始 JSON 按引用记忆化——同一份快照重渲染零次序列化，换新数据（新引用）即重新序列化", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderCandidates = await mountCandidates(mod, host);
+  const payload = {
+    queueRevision: 5,
+    items: [{ candidateId: "c-1", kind: "link", candidate: { id: "c-1", kind: "link", sources: [{ id: "s-a" }, { id: "s-b" }], evidence: "证据文本".repeat(50) } }],
+    plans: [],
+  };
+  const noopDsh = { call: async () => { throw new Error("no rpc expected"); } };
+  // 预置 data（states[0]），渲染一次建立缓存
+  host.states.length = 0;
+  host.states.push(payload, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
+  let tree = renderCandidates(noopDsh, "session-A");
+  assert.ok(collectText(tree).includes("原始数据（JSON）"), "候选行渲染");
+
+  const originalStringify = JSON.stringify;
+  let calls = 0;
+  JSON.stringify = function (...args) { calls += 1; return originalStringify.apply(this, args); };
+  try {
+    tree = renderCandidates(noopDsh, "session-A");   // 同一份 data 快照重渲染
+    assert.equal(calls, 0, `同一份 DTO 快照重渲染零次序列化（实际 ${calls} 次）`);
+    assert.ok(collectText(tree).includes("s-a"), "重渲染内容不变");
+    // 换新对象（新引用）：缓存失效，重新序列化
+    host.states[0] = { queueRevision: 6, items: [{ candidateId: "c-2", kind: "forget", candidate: { id: "c-2", kind: "forget", sources: [] } }], plans: [] };
+    tree = renderCandidates(noopDsh, "session-A");
+    assert.ok(calls > 0, "新引用重新序列化（缓存按失效条件更新）");
+    assert.ok(collectText(tree).includes("c-2"), "新数据渲染");
+  } finally {
+    JSON.stringify = originalStringify;
+  }
 });

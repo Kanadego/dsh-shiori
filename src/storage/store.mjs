@@ -25,11 +25,11 @@ import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 
 import {
-  invalidInput, revisionConflict, budgetRejected, invalidState, notFound,
+  invalidInput, revisionConflict, budgetRejected, invalidState, notFound, wrapIoError,
 } from './errors.mjs';
 import {
   sha256Buffer, readFileOrNull, hashFileOrNull, writeFileSynced,
-  atomicReplace, fsyncDirBestEffort, sleep,
+  atomicReplace, fsyncDirBestEffort, isCanonicalIso, isIsoDateOrTimestamp,
 } from './fsutil.mjs';
 import {
   validateKey, validateScopeId, validateOperationId,
@@ -241,7 +241,7 @@ class FileStore {
         names = await fsp.readdir(dir);
       } catch (err) {
         if (err.code === 'ENOENT') continue;
-        throw err;
+        throw wrapIoError(`readdir ${dir}`, err);
       }
       for (const name of names) {
         if (!name.endsWith('.md')) {
@@ -299,10 +299,12 @@ class FileStore {
           shadow.push({ file, reason: 'summary 含换行（会破坏索引行结构），已跳过' });
           continue;
         }
+        // 归档标记读取降级（P2-2/A2）：手改的 archivedAt 若不是规范 ISO 串，
+        // 不照收成归档时间——按「未归档」处理（字段省略），与写入侧同口径。
         byKey.set(key, {
           key, title: meta.title, summary: meta.summary, scopeId,
           revision, updated: meta.updated, body,
-          ...(meta.archivedAt ? { archivedAt: meta.archivedAt } : {}),
+          ...(isCanonicalIso(meta.archivedAt) ? { archivedAt: meta.archivedAt } : {}),
         });
       }
     }
@@ -357,10 +359,11 @@ class FileStore {
         if (meta.summary.includes('\n') || meta.summary.includes('\r')) {
           throw invalidState(`topic "${key}" 的 summary 含换行（破坏索引行结构）`, { file });
         }
+        // 归档标记读取降级（P2-2/A2）：手改的垃圾串按「未归档」处理，不照收。
         return {
           key, title: meta.title, summary: meta.summary, scopeId,
           revision: sha256Buffer(raw), updated: meta.updated, body,
-          ...(meta.archivedAt ? { archivedAt: meta.archivedAt } : {}),
+          ...(isCanonicalIso(meta.archivedAt) ? { archivedAt: meta.archivedAt } : {}),
         };
       }
       throw notFound(`topic "${key}" 在可见 scope 中不存在`, { key, activeScopeId: this.activeScopeId });
@@ -616,7 +619,11 @@ class FileStore {
 
       // ---- staging + journal(prepared) ----
       const stagingDir = joinUnder(this.rootReal, 'staging', operationId);
-      await fsp.mkdir(stagingDir, { recursive: true });
+      try {
+        await fsp.mkdir(stagingDir, { recursive: true });
+      } catch (err) {
+        throw wrapIoError(`mkdir ${stagingDir}`, err);
+      }
       for (const e of entries) {
         await writeFileSynced(e.stagingFile, e.buffer);
       }
@@ -679,7 +686,11 @@ class FileStore {
       if (this.faultAfter === 'marker') crashNow();
 
       await this.#writeGenerationLocked(journal.generationAfter, operationId);
-      await fsp.rm(stagingDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      try {
+        await fsp.rm(stagingDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      } catch (err) {
+        throw wrapIoError(`rm ${stagingDir}`, err);
+      }
       return journal.result;
     });
   }
@@ -768,10 +779,20 @@ class FileStore {
     if (meta.updated.length === 0) {
       throw invalidInput(`${where} 的 updated 必须为非空字符串`);
     }
-    // 归档标记：非空时必须是可解析的 ISO 时间串（空串 = 取消归档，允许）
+    // updated 写入校验（P2-3/A3）：必须是 ISO 8601 形态（完整规范 UTC 时间戳或
+    // date-only YYYY-MM-DD），拒绝宽松解析放行的英文日期/裸年份/滚动假日期；
+    // date-only 是仓库既有合法形态，须继续接受（见 fsutil.isIsoDateOrTimestamp）。
+    if (!isIsoDateOrTimestamp(meta.updated)) {
+      throw invalidInput(`${where} 的 updated 必须是 ISO 8601 时间串`
+        + `（完整 UTC 如 "2026-11-07T00:00:00.000Z"，或 date-only 如 "2026-11-07"），收到: "${meta.updated.slice(0, 60)}"`);
+    }
+    // 归档标记：非空时必须是规范 ISO 时间串（空串 = 取消归档，允许）。
+    // P2-1/A1：不用 V8 宽松解析（Date.parse 接受英文日期/裸年份/滚动假日期），
+    // 与报错文案承诺的 ISO 8601 保持一致。
     if (meta.archivedAt !== undefined && meta.archivedAt !== ''
-        && Number.isNaN(Date.parse(meta.archivedAt))) {
-      throw invalidInput(`${where} 的 archivedAt 必须是 ISO 时间串，收到: "${meta.archivedAt.slice(0, 60)}"`);
+        && !isCanonicalIso(meta.archivedAt)) {
+      throw invalidInput(`${where} 的 archivedAt 必须是规范 UTC ISO 8601 时间串`
+        + `（如 "2026-11-07T00:00:00.000Z"），收到: "${meta.archivedAt.slice(0, 60)}"`);
     }
     if (meta.key !== key) {
       throw invalidInput(`${where} front-matter key 与 change.key 不一致`, { metaKey: meta.key, key });
@@ -1062,6 +1083,3 @@ class FileStore {
     });
   }
 }
-
-// 便于外部按需小睡（测试辅助不经过此模块，避免污染公共面）
-export { sleep };

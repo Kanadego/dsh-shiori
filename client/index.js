@@ -81,6 +81,7 @@ window.__ModuleLoader__.load({
 ".dshi_graphWrap{border:1px solid var(--dsw-alias-border-l2,#dce2eb);border-radius:10px;overflow:hidden;position:relative;user-select:none;cursor:grab;background:var(--dsw-alias-bg-layer-2,transparent)}" +
 ".dshi_graphSvg{display:block;width:100%;height:380px;touch-action:none}" +
 ".dshi_graphNode{cursor:pointer}" +
+".dshi_graphNode:focus-visible{outline:2px solid var(--dshi-accent,#e5484d);outline-offset:2px}" +
 ".dshi_nodeEvergreen{fill:var(--dsw-alias-state-success-primary,#1a7f37)}" +
 ".dshi_nodeEphemeral{fill:var(--dsw-alias-state-business-primary,#3964fe)}" +
 ".dshi_nodeDim{fill:var(--dsw-alias-label-tertiary,#8b93a1)}" +
@@ -523,6 +524,29 @@ window.__ModuleLoader__.load({
     }
     function stableStringify(value) {
       return JSON.stringify(value, null, 2) ?? "null";
+    }
+    // C4（审计 P2-4）：候选/计划行的「原始数据（JSON）」details 在整表重渲时逐行重跑
+    // JSON.stringify——搜索框逐键输入即对全部候选全量重序列化。这里按数据引用记忆化：
+    // 同一份 DTO 快照渲染多少次都只序列化一次。
+    // 失效条件（等价正确性论证，改动时逐条核对）：
+    // 1. 键是对象引用：服务端每次响应都产生新对象，新数据必然重新序列化；
+    // 2. 面板把 RPC 响应当不可变快照，从不在原地改写 item/plan（改动一律整表重拉，
+    //    生成新对象）——所以「引用相同 ⇒ 内容相同」成立；凡是会被原地改写的对象
+    //    （如 core 编辑区的 pristineLinks 对比）必须继续用 stableStringify，不得换本函数；
+    // 3. WeakMap 弱键随 DTO 对象一起被 GC，缓存不延长快照生命周期；条目数超上限
+    //    整体清空（换队列后旧键本可自然回收，清空只是防极端驻留的兜底）；
+    // 4. 原始值（string/number/boolean/null/undefined）不缓存——序列化本身 O(1)；
+    //    序列化抛错（循环引用等）不缓存、照常向上抛（与 stableStringify 同语义）。
+    var STABLE_STRINGIFY_CACHE_MAX = 512;
+    var stableStringifyCache = typeof WeakMap === "function" ? new WeakMap() : null;
+    function stableStringifyCached(value) {
+      if (stableStringifyCache === null || value === null || typeof value !== "object") return stableStringify(value);
+      var hit = stableStringifyCache.get(value);
+      if (hit !== undefined) return hit;
+      var text = stableStringify(value);
+      if (stableStringifyCache.size >= STABLE_STRINGIFY_CACHE_MAX) stableStringifyCache.clear();
+      stableStringifyCache.set(value, text);
+      return text;
     }
     // Q-C（owner work order）：diagnostics 里 P 本轮会新增 codec/transport 等字段，
     // 未来还可能继续加。状态 tab 必须容错：未知字段照常展示（key: value），值为
@@ -1556,6 +1580,16 @@ window.__ModuleLoader__.load({
     // 迭代后：包围盒等比归一化到 [2*pad, W-2*pad] × [2*pad, H-2*pad] 并居中（防全图贴边），
     // 再做 ≤30 轮确定性分离收尾（两两距离拉到 r_i+r_j+6 以上，保证不重合、标签不叠），
     // 全程坐标保证有限值。（收敛三层修复见 review-rework a1：中心回归 / 归一化 / 分离。）
+    // C3（审计 P2-3）：全流程是 O(n²)（120 轮点对斥力 + ≤60 轮两两分离），节点数无上限
+    // 时大库会在主线程冻结秒级以上。超过上限即降级为「圆形静布」：直接返回初始圆环
+    // 位置（确定性、无迭代、O(n)），GraphTab 顶部给出提示。阈值取 500 的依据：
+    // - 主线程耗时预算：斥力 ≈ 120×n²/2 点对、分离 ≈ ≤60×n²/2 点对。n=500 时合计
+    //   ≈2×10⁷ 次点对计算，主线程一次性开销约 0.1~0.3s，且布局 useMemo 只在图变化时
+    //   重跑一次，可接受；n=1000 时计算量翻 4 倍起，进入秒级冻结区。
+    // - 几何上限：800×380 画布、半径 ≥10 的圆，两两不重叠最多放几百个，超过后
+    //   「不重合、标签不叠」的布局承诺本就放不下，力导向的精度优势失去意义。
+    // - 既有 60/200 节点布局承诺（R8 用例）留有 2.5 倍余量，不受影响。
+    var FORCE_LAYOUT_MAX_NODES = 500;
     function forceLayout(nodes, edges) {
       var W = 800;
       var H = 380;
@@ -1568,6 +1602,8 @@ window.__ModuleLoader__.load({
         var angle = (2 * Math.PI * i) / count - Math.PI / 2;
         positions[nodes[i].id] = { x: 400 + 260 * Math.cos(angle), y: 190 + 140 * Math.sin(angle) };
       }
+      // C3 降级路径：超上限跳过全部 O(n²) 迭代与分离，直接用初始圆环（确定性静布）。
+      if (count > FORCE_LAYOUT_MAX_NODES) return positions;
       if (count === 1) { positions[nodes[0].id] = { x: 400, y: 190 }; return positions; }
       // 半径预计算：分离收尾按 r_i + r_j + 6 判定
       var radii = [];
@@ -2120,6 +2156,9 @@ window.__ModuleLoader__.load({
         focusMiss ? h("div", { className: "dshi_roHint" }, "时间线跳转：卡片「" + shortId(focusTarget.id) + "」不在当前图谱（可能已删除或已归档）。") : null,
         ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
         normalized.nodes.length === 0 && !error ? h("div", { className: "dshi_loading" }, graph ? "当前 scope 无 active 卡" : "加载中…") : null,
+        // C3 降级提示：超上限改用圆形静布（不再跑 O(n²) 力导向），如实告知用户。
+        normalized.nodes.length > FORCE_LAYOUT_MAX_NODES ? h("div", { className: "dshi_hint" },
+          "节点数 " + normalized.nodes.length + " 超过力导向布局上限（" + FORCE_LAYOUT_MAX_NODES + "），已改用圆形静布以保证面板不冻结；要恢复精细布局请缩小 scope 或归档旧卡后刷新。") : null,
         normalized.nodes.length > 0 ? h("div", { style: { display: "flex", flexDirection: "column", gap: "8px" } },
           h("div", { className: "dshi_row" },
             h("input", {
@@ -2165,10 +2204,22 @@ window.__ModuleLoader__.load({
                   key: node.id,
                   className: "dshi_graphNode",
                   style: { opacity: nodeDim ? 0.25 : 1, transition: "opacity .15s" },
+                  // C8（审计 P2-8）：键盘可达——Tab 聚焦、Enter/Space 选中（与 pointer-up
+                  // 同走 setSelected）、role/aria-label 给出可访问名称（完整标题，不取
+                  // 截断后的可见标签）。鼠标交互（pointer 三件套与 hover 语义）不动。
+                  tabIndex: 0,
+                  role: "button",
+                  "aria-label": node.title,
                   onPointerEnter: function () { setHoverId(node.id); },
                   onPointerLeave: function () { setHoverId(null); },
                   onPointerUp: function () {
                     if (dragRef.current && dragRef.current.moved) return;
+                    setSelected(node);
+                  },
+                  onKeyDown: function (event) {
+                    if (!event) return;
+                    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+                    if (typeof event.preventDefault === "function") event.preventDefault();
                     setSelected(node);
                   }
                 },
@@ -3075,9 +3126,10 @@ window.__ModuleLoader__.load({
           candidateReason !== null ? h("div", { className: "dshi_hint" }, "理由：" + candidateReason) : null,
           staleRow ? h("div", { className: "dshi_hint" }, "这条候选绑定的卡片在你上次分析之后被改过") : null,
           // 原始 JSON 默认折叠：details 不写 open，铺满屏幕的长串移出主视线。
+          // C4：item 是服务端快照（不可变），按引用记忆化——搜索/筛选逐键重渲不再重序列化。
           h("details", { className: "dshi_details" },
             h("summary", { className: "dshi_hint" }, "原始数据（JSON）"),
-            h("pre", { className: "dshi_pre" }, stableStringify(item))));
+            h("pre", { className: "dshi_pre" }, stableStringifyCached(item))));
       };
       var renderPlanRow = function (plan, index) {
         // 与候选行同一原则：下标只用作渲染 key，planId 缺失时禁用动作而非发下标。
@@ -3107,7 +3159,7 @@ window.__ModuleLoader__.load({
             : null,
           h("details", { className: "dshi_details" },
             h("summary", { className: "dshi_hint" }, "原始数据（JSON）"),
-            h("pre", { className: "dshi_pre" }, stableStringify(plan))));
+            h("pre", { className: "dshi_pre" }, stableStringifyCached(plan))));   // C4：同候选行，按引用记忆化
         return previewForThisPlan ? [row, renderPreviewCard("preview-" + planId)] : row;
       };
       // 0.3：手动归档入口——原合并卡里的专题列表独立成卡，只保留「移出索引 /
@@ -3301,7 +3353,9 @@ window.__ModuleLoader__.load({
         } catch (e) {
           if (tabGuard.isStale(origin)) return;
           setTopics(null);
-          setError(e);
+          // C6（审计 P2-6）：与其他 tab 统一口径——会话级不可用交面板层缓存
+          // （props.onSessionUnavailable），不重复吃同一条错误、不挂原始 ErrorBox。
+          if (!reportSessionUnavailable(e, props, setError)) setError(e);
         } finally {
           // 过期请求不动 busy（新一轮 load 已接管 busy 的收尾）
           if (!tabGuard.isStale(origin)) setBusy(false);
@@ -3341,7 +3395,8 @@ window.__ModuleLoader__.load({
         } catch (e) {
           if (openedRef.current !== key || !isLatest()) return;
           setDetail(null);
-          setDetailError(e);
+          // C6：详情读失败同样先过会话不可用守卫（口径与 load 一致）。
+          if (!reportSessionUnavailable(e, props, setDetailError)) setDetailError(e);
         } finally {
           // 只有仍是最新一次读请求时才收 busy：过期请求不动 busy，交给在途的最新请求收尾。
           if (isLatest()) setDetailBusy(false);
@@ -3399,7 +3454,8 @@ window.__ModuleLoader__.load({
           await readTopic(key);
           await load();
         } catch (e) {
-          setSaveError(e);
+          // C6：保存失败也统一会话口径——会话级不可用上报面板层缓存，不上挂原始 error。
+          if (!reportSessionUnavailable(e, props, setSaveError)) setSaveError(e);
         } finally {
           setSaveBusy(false);
         }
@@ -3772,7 +3828,10 @@ window.__ModuleLoader__.load({
         try {
           setSnapshot(scope ? scope.getSnapshot() : null);
         } catch (e) {
-          setError({ code: "ui/scope", message: "读取设置命名空间失败：" + (e && e.message) });
+          // C5（审计 P2-5）：第三方 dsh 的 rejection 可能是字符串或无 message 的对象，
+          // 直接拼 e.message 会把字面量 undefined 上屏；回落 String(e)，与本仓既有的
+          // (e && e.message) || String(e) 防御写法同口径。
+          setError({ code: "ui/scope", message: "读取设置命名空间失败：" + ((e && e.message) || String(e)) });
         }
       }, []);
       useEffect(function () {

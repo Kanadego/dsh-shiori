@@ -952,12 +952,17 @@ test("P-A 残留：executePlan 收敛阶段抛错时 grant 随 finally 撤销（
   });
   const trusted = { session: { id: "s-grantleak" }, source: "panel-rpc" };
 
-  // 执行器成功 + markExecuted 落账后，收敛阶段 listActive 抛错 → 调用失败；
-  // finally 必须 revoke grant（修复前 revokes === 0 = 泄漏）。
-  await assert.rejects(
-    () => management.executePlan(trusted, { planId, planDigest, operationId: "ex-leak-1", confirmed: true }),
-    /injected listActive failure/,
+  // B1（audit B P2-1）行为变更：执行器成功 + markExecuted 落账后，收敛阶段
+  // listActive 抛错不再翻转回执——调用按 executed 成功返回，收敛失败以
+  // queueConvergence.applied=false + 可读 warning 上报；finally 仍必须 revoke
+  // grant（revokes === 1）。
+  const executed = await management.executePlan(trusted, { planId, planDigest, operationId: "ex-leak-1", confirmed: true });
+  assert.ok(
+    executed.result.archivedAt && executed.result.operationId === "ex-leak-1",
+    "executor receipt must survive convergence failure",
   );
+  assert.equal(executed.queueConvergence.applied, false);
+  assert.match(executed.queueConvergence.warning, /injected listActive failure/);
   assert.equal(revokes, 1, "grant must be revoked exactly once via finally");
   const entry = await state.planStore.get(scopeId, planId);
   assert.equal(entry.executed, true, "markExecuted happened before convergence (documented semantics)");

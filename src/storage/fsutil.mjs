@@ -6,7 +6,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
-import { invalidInput, invalidState } from './errors.mjs';
+import { invalidInput, invalidState, wrapIoError } from './errors.mjs';
 
 // ignoreBOM:true = 保留 U+FEFF 于输出（默认会把 BOM 剥掉，导致 BOM 检测失效）
 const strictDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -53,13 +53,42 @@ export function sha256Buffer(buf) {
   return createHash('sha256').update(buf).digest('hex');
 }
 
-/** 读取文件字节；不存在返回 null。 */
+/**
+ * 规范 UTC ISO 时间串判定（与 forgetting/decay.mjs 同口径）：
+ * 有限且 new Date(v).toISOString() === v。V8 的 Date.parse 宽松解析
+ * （接受英文日期、裸年份、滚动假日期），不得用作写入/读取校验。
+ */
+export function isCanonicalIso(value) {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) return false;
+  return new Date(ms).toISOString() === value;
+}
+
+/**
+ * ISO 8601 写入口径（updated 元数据用，P2-3/A3）：完整规范 UTC 时间戳，
+ * 或 date-only（YYYY-MM-DD，按 UTC 解析）——date-only 是合法 ISO 8601 日期形态，
+ * 仓库既有数据/夹具在用，必须继续接受。date-only 分支做日历回环校验：
+ * new Date(v + 'T00:00:00.000Z') 必须有限且 toISOString().slice(0,10) 与原串逐字相等，
+ * 不存在的日历日期（"2026-02-30"、"2026-04-31" 这类）被拒。
+ * archivedAt 不用本口径：A1/P2-1 要求完整规范时间戳（new Date(v).toISOString()===v）。
+ */
+export function isIsoDateOrTimestamp(value) {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+  }
+  return isCanonicalIso(value);
+}
+
+/** 读取文件字节；不存在返回 null。非 ENOENT 的 IO 失败包装为 IO_ERROR（A4/P2-4）。 */
 export async function readFileOrNull(filePath) {
   try {
     return await fsp.readFile(filePath);
   } catch (err) {
     if (err.code === 'ENOENT') return null;
-    throw err;
+    throw wrapIoError(`read ${filePath}`, err);
   }
 }
 
@@ -74,15 +103,29 @@ export async function hashFileOrNull(filePath) {
 
 /**
  * 写入并 fsync 单个文件。覆盖已有内容。
+ * open/write/sync 失败包装为 IO_ERROR（A4/P2-4），与 sparks wrapIoError 同约定；
+ * close 失败不掩盖写入主错误，仅在无主错误时同样包装上抛。
  */
 export async function writeFileSynced(filePath, data) {
-  const handle = await fsp.open(filePath, 'w');
+  let handle;
+  try {
+    handle = await fsp.open(filePath, 'w');
+  } catch (err) {
+    throw wrapIoError(`open ${filePath}`, err);
+  }
+  let mainErr;
   try {
     await handle.writeFile(data);
     await handle.sync();
-  } finally {
-    await handle.close();
+  } catch (err) {
+    mainErr = wrapIoError(`write ${filePath}`, err);
   }
+  try {
+    await handle.close();
+  } catch (err) {
+    if (!mainErr) mainErr = wrapIoError(`close ${filePath}`, err);
+  }
+  if (mainErr) throw mainErr;
 }
 
 /**
@@ -96,7 +139,11 @@ export async function atomicReplace(filePath, data) {
   );
   try {
     await writeFileSynced(tmp, data);
-    await fsp.rename(tmp, filePath);
+    try {
+      await fsp.rename(tmp, filePath);
+    } catch (err) {
+      throw wrapIoError(`rename ${filePath}`, err);
+    }
   } finally {
     await fsp.unlink(tmp).catch(() => {});
   }

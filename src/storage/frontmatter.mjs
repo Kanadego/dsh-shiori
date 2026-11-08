@@ -26,7 +26,7 @@
 // - 闭合 --- 之后的全部字节为 body，逐字保留（含 CRLF）。
 
 import { invalidInput, invalidState } from './errors.mjs';
-import { decodeUtf8Strict, hasLoneSurrogate } from './fsutil.mjs';
+import { decodeUtf8Strict, hasLoneSurrogate, isCanonicalIso } from './fsutil.mjs';
 
 const REQUIRED_FIELDS = ['key', 'title', 'summary', 'updated', 'scopeId'];
 const NON_EMPTY_FIELDS = ['key', 'title', 'updated', 'scopeId'];
@@ -65,8 +65,11 @@ export function serializeTopicFile(meta, body) {
     if (hasLoneSurrogate(value)) {
       throw invalidInput('front-matter 字段 "archivedAt" 含孤立代理码元，无法无损写入');
     }
-    if (Number.isNaN(Date.parse(value))) {
-      throw invalidInput(`front-matter 字段 "archivedAt" 必须是 ISO 时间串，收到: "${value.slice(0, 60)}"`);
+    if (!isCanonicalIso(value)) {
+      // P2-1/A1：V8 宽松解析会放行英文日期/裸年份/滚动假日期，与 ISO 8601 承诺不符；
+      // 写入侧统一要求规范 UTC ISO（new Date(v).toISOString()===v）。
+      throw invalidInput(`front-matter 字段 "archivedAt" 必须是规范 UTC ISO 8601 时间串`
+        + `（如 "2026-11-07T00:00:00.000Z"），收到: "${value.slice(0, 60)}"`);
     }
     lines.push(`archivedAt: ${JSON.stringify(value)}`);
     seen.add('archivedAt');

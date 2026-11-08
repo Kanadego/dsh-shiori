@@ -136,9 +136,13 @@ const organizeProposal = {
                   additionalProperties: false,
                   properties: {
                     target: nonEmptyString,
-                    rel: { oneOf: [{ type: "string" }, { type: "null" }] },
+                    // B2（audit B P2-2）：与 buildDraft 同口径（queue.mjs
+                    // assertExactKeys(pair, ['target','rel']) + checkText rel
+                    // 1..CARD_LIMITS.relChars=64）——rel 缺省/null/超限在 wire
+                    // 层即拒（INVALID_INPUT），不再放行草案层必拒的形状。
+                    rel: { type: "string", minLength: 1, maxLength: 64 },
                   },
-                  required: ["target"],
+                  required: ["target", "rel"],
                 },
               },
             },
@@ -158,7 +162,10 @@ const organizeProposal = {
           additionalProperties: false,
           properties: {
             key: nonEmptyString,
-            expectedRevision: { oneOf: [{ type: "string" }, { type: "null" }] },
+            // B2（audit B P2-2）：与 buildDraft 的 validatePlanTopic 同口径
+            // （checkText 1..16384）——expectedRevision 为 null 放行 wire、
+            // 草案层必拒的矛盾消除。
+            expectedRevision: { type: "string", minLength: 1, maxLength: 16384 },
             before: { type: "string" },
             after: { type: "string" },
             title: nonEmptyString,
@@ -526,6 +533,17 @@ export const MANAGEMENT_METHODS = Object.freeze({
         planDigest,
         operationId,
         result: { type: "object", additionalProperties: true },
+        // B1（audit B P2-1）：执行后的队列收敛结果——applied=false 时收敛
+        // 失败但计划已执行（回执不翻转），warning 为可读告警。
+        queueConvergence: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            applied: { type: "boolean" },
+            warning: { type: "string" },
+          },
+          required: ["applied"],
+        },
       },
       required: ["planId", "planDigest", "operationId", "result"],
     },
@@ -640,6 +658,17 @@ function validateNode(value, spec, where, field) {
     for (const [key, sub] of Object.entries(spec.properties ?? {})) {
       if (Object.hasOwn(value, key)) {
         validateNode(value[key], sub, where, field ? `${field}.${key}` : key);
+      }
+    }
+    // B2：required 在嵌套层同样生效（此前只在顶层检查，嵌套 required 是
+    // 死元数据——organize proposal 的 after[].required=['target','rel'] 若
+    // 不在此强制，缺 rel 仍会漏到草案层才被拒）。
+    for (const required of spec.required ?? []) {
+      if (!Object.hasOwn(value, required)) {
+        failInvalid(`${where}${field ? `.${field}` : ""}.${required} is required`, {
+          where,
+          field: field ? `${field}.${required}` : required,
+        });
       }
     }
     return;
