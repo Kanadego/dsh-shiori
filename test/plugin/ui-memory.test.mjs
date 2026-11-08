@@ -413,5 +413,5 @@ test("U4 进度条：占用数值照旧传入 Bar（label/used/limit 形状不�
   assert.ok(bars.length >= 2, "two occupancy bars rendered through Bar");
   const text = collectText(tree);
   assert.ok(text.includes("14 / 12000 UTF-16"), "L0 usage passed to Bar");
-  assert.ok(text.includes("60 / 8000 UTF-16"), "L1 usage passed to Bar");
+  assert.ok(text.includes("60 / 14000 UTF-16"), "L1 usage passed to Bar (0.3 起上限口径同状态页，按硬顶显示)");
 });

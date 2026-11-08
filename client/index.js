@@ -1162,6 +1162,12 @@ window.__ModuleLoader__.load({
         : null);
     }
 
+    // 0.3：记忆占用上限的常量兜底（仅当 DTO 连 hardCap / budget 都没带时才用）。
+    // L1 与状态页同口径按硬顶显示（getStatus occupancy.l1HardCap 的服务端默认
+    // 环境即 14000）；L0 维持人设卡 maxChars 的历史常量。
+    var MEMORY_L1_HARDCAP_FALLBACK = 14000;
+    var MEMORY_L0_BUDGET_FALLBACK = 12000;
+
     function MemoryTab(props) {
       var state = useState(null);
       var view = state[0];
@@ -1210,6 +1216,26 @@ window.__ModuleLoader__.load({
       var l0 = view && (view.l0 || view.persona);
       var l1 = view && (view.l1 || view.core);
       var budgets = (view && view.budgets) || props.budgets || {};
+      // 0.3：占用上限与状态页同源同口径——统一按硬顶显示。getMemoryView DTO
+      // （src/plugin/management.mjs getMemoryView）在 l1 上带 hardCap（=
+      // settings.budgets.core.hardCapChars，与 getStatus occupancy.l1HardCap 同一
+      // 真值）；旧宿主 DTO 缺字段时按 l1.budget → budgets.core.hardCapChars →
+      // 常量兜底。不再用 budgets.core.targetChars（软目标，状态页不显示它，
+      // 之前正是两页 14000 / 8000 对不上的根因）。L0 同理取 l0.budget，不再走
+      // budgets.persona 兜底。
+      var l0BudgetOf = function (layer) {
+        var value = layer && typeof layer === "object" ? layer.budget : undefined;
+        return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : MEMORY_L0_BUDGET_FALLBACK;
+      };
+      var l1HardCapOf = function (layer) {
+        var hardCap = layer && typeof layer === "object" ? layer.hardCap : undefined;
+        if (typeof hardCap === "number" && Number.isFinite(hardCap) && hardCap > 0) return hardCap;
+        var budget = layer && typeof layer === "object" ? layer.budget : undefined;
+        if (typeof budget === "number" && Number.isFinite(budget) && budget > 0) return budget;
+        var core = budgets && budgets.core ? budgets.core : {};
+        if (typeof core.hardCapChars === "number" && Number.isFinite(core.hardCapChars) && core.hardCapChars > 0) return core.hardCapChars;
+        return MEMORY_L1_HARDCAP_FALLBACK;
+      };
 
       // 编辑初值：L1 的 text 是服务端渲染视图（core 正文 + 派生主题索引），整段写回
       // 会把索引固化进 core，必须用 body（磁盘正文）。L0 没有派生部分，照旧用 text。
@@ -1430,8 +1456,8 @@ window.__ModuleLoader__.load({
         okText ? h("div", { className: "dshi_ok" }, okText) : null,
         view ? h(fragment, null,
           h("div", { className: "dshi_grid2" },
-            Bar("人设卡 L0（UTF-16）", l0 && (l0.chars ?? l0.length ?? (l0.text ? l0.text.length : 0)), (budgets.persona && budgets.persona.maxChars) ?? 12000),
-            Bar("记忆核心 L1（UTF-16）", l1 && (l1.chars ?? l1.length ?? (l1.text ? l1.text.length : 0)), (budgets.core && budgets.core.targetChars) ?? 8000)),
+            Bar("人设卡 L0（UTF-16）", l0 && (l0.chars ?? l0.length ?? (l0.text ? l0.text.length : 0)), l0BudgetOf(l0)),
+            Bar("记忆核心 L1（UTF-16）", l1 && (l1.chars ?? l1.length ?? (l1.text ? l1.text.length : 0)), l1HardCapOf(l1))),
           renderLayer("l0", "人设卡（L0 persona）", l0,
             "每轮对话常驻的身份与规则。编辑后保存立即生效；上限由「记忆预算」的人设卡最大字符数决定。"),
           renderLayer("l1", "记忆核心（L1 core）", l1,
@@ -1747,6 +1773,33 @@ window.__ModuleLoader__.load({
     var LABEL_MAX_WIDTH = 120;
     var LABEL_GAP = 2;       // 标签矩形之间至少留 2px 间距
     var LABEL_NODE_PAD = 2;  // 节点圆用 (x±(r+2), y±(r+2)) 方框近似
+    // 0.3：SVG viewBox 尺寸唯一事实来源（GraphTab 的 viewBox 与标签画布判定共用，
+    // 之前 800×380 只写在 viewBox 字符串里，标签排布不知道画布边界，四角标签被裁）。
+    var GRAPH_VIEW_W = 800;
+    var GRAPH_VIEW_H = 380;
+
+    // 标签矩形是否完整落在画布内（viewBox 外的部分会被 SVG 裁掉，等于看不见）。
+    function labelRectInCanvas(rect) {
+      return rect.x >= 0 && rect.y >= 0
+        && rect.x + rect.w <= GRAPH_VIEW_W && rect.y + rect.h <= GRAPH_VIEW_H;
+    }
+    // 把矩形平移钳回画布内（只平移、不缩放：标签最宽 120px / 高 12px，画布
+    // 800×380 装得下，异常入参保守返回 null）。返回新矩形，不改入参。
+    function clampLabelRectToCanvas(rect) {
+      if (rect.w > GRAPH_VIEW_W || rect.h > GRAPH_VIEW_H) return null;
+      var x = Math.min(Math.max(rect.x, 0), GRAPH_VIEW_W - rect.w);
+      var y = Math.min(Math.max(rect.y, 0), GRAPH_VIEW_H - rect.h);
+      if (x === rect.x && y === rect.y) return rect;
+      return { x: x, y: y, w: rect.w, h: rect.h };
+    }
+    // 从（可能被钳回后的）矩形反推文本锚点坐标：与 labelRectOf 的展开方向互逆。
+    function labelAnchorFromRect(rect, anchorKind) {
+      return {
+        x: anchorKind === "end" ? rect.x + rect.w : anchorKind === "middle" ? rect.x + rect.w / 2 : rect.x,
+        y: rect.y + rect.h / 2,
+        anchor: anchorKind
+      };
+    }
 
     function estimateLabelWidth(text) {
       var width = LABEL_MARGIN;
@@ -1837,18 +1890,28 @@ window.__ModuleLoader__.load({
         var width = estimateLabelWidth(text);
         var anchors = labelAnchorsOf(position, radius);
         var chosen = null;
-        for (var a = 0; a < anchors.length; a++) {
+        for (var a = 0; a < anchors.length && chosen === null; a++) {
           var rect = labelRectOf(anchors[a], width);
-          var hit = false;
-          for (var p = 0; p < placedRects.length; p++) {
-            if (rectsCollide(rect, placedRects[p], LABEL_GAP)) { hit = true; break; }
+          // 0.3：画布边界纳入锚点判定——viewBox 外的矩形再干净也看不见。
+          // 每个锚点先试原位（须完整在画布内），不行再试平移钳回画布后的位置；
+          // 两条路都过碰撞检查，「标签两两不相交、不压节点圆」的承诺不变。
+          var candidates = [];
+          if (labelRectInCanvas(rect)) candidates.push({ rect: rect, anchor: anchors[a] });
+          var clamped = clampLabelRectToCanvas(rect);
+          if (clamped !== null && clamped !== rect) candidates.push({ rect: clamped, anchor: labelAnchorFromRect(clamped, anchors[a].anchor) });
+          for (var c = 0; c < candidates.length; c++) {
+            var candRect = candidates[c].rect;
+            var hit = false;
+            for (var p = 0; p < placedRects.length; p++) {
+              if (rectsCollide(candRect, placedRects[p], LABEL_GAP)) { hit = true; break; }
+            }
+            for (var b = 0; !hit && b < nodeBoxes.length; b++) {
+              if (rectsCollide(candRect, nodeBoxes[b], 0)) { hit = true; break; }
+            }
+            if (!hit) { chosen = candidates[c]; break; }
           }
-          for (var b = 0; !hit && b < nodeBoxes.length; b++) {
-            if (rectsCollide(rect, nodeBoxes[b], 0)) { hit = true; break; }
-          }
-          if (!hit) { chosen = { rect: rect, anchor: anchors[a] }; break; }
         }
-        if (!chosen) { placements[id] = null; continue; }   // 四锚皆撞：不渲染该标签
+        if (!chosen) { placements[id] = null; continue; }   // 四锚（含钳回位置）皆撞：不渲染该标签
         placedRects.push(chosen.rect);
         placements[id] = {
           x: chosen.anchor.x, y: chosen.anchor.y, anchor: chosen.anchor.anchor,
@@ -1856,6 +1919,7 @@ window.__ModuleLoader__.load({
         };
       }
       // hover / 选中节点的标签永远画：强制右侧、不参与碰撞判定、渲染在最上层。
+      // 0.3：贴右缘时同样把矩形钳回画布内（只平移），不参与碰撞判定的口径不变。
       for (var j = 0; j < order.length; j++) {
         var node2 = order[j];
         var id2 = String(node2.id);
@@ -1864,9 +1928,13 @@ window.__ModuleLoader__.load({
         if (!position2) { placements[id2] = null; continue; }
         var radius2 = radiusOf(node2);
         var text2 = truncateLabelText(node2.title);
+        var width2 = estimateLabelWidth(text2);
+        var anchor2 = { x: position2.x + radius2 + 4, y: position2.y + 4, anchor: "start" };
+        var rect2 = clampLabelRectToCanvas(labelRectOf(anchor2, width2));
+        var anchorOut = rect2 === null ? anchor2 : labelAnchorFromRect(rect2, "start");
         placements[id2] = {
-          x: position2.x + radius2 + 4, y: position2.y + 4, anchor: "start",
-          text: text2, width: estimateLabelWidth(text2), forced: true
+          x: anchorOut.x, y: anchorOut.y, anchor: "start",
+          text: text2, width: width2, forced: true
         };
       }
       return placements;
@@ -2071,7 +2139,7 @@ window.__ModuleLoader__.load({
           onPointerUp: onPointerUp,
           onPointerLeave: onPointerUp
         },
-          h("svg", { className: "dshi_graphSvg", viewBox: "0 0 800 380" },
+          h("svg", { className: "dshi_graphSvg", viewBox: "0 0 " + GRAPH_VIEW_W + " " + GRAPH_VIEW_H },
             h("g", { transform: "translate(" + view.x + "," + view.y + ") scale(" + view.k + ")" },
               normalized.edges.map(function (edge, index) {
                 var from = layout[edge.from];
@@ -2462,58 +2530,32 @@ window.__ModuleLoader__.load({
                 h("div", { className: "dshi_hint" }, "保存走版本校验：别处刚改过这张卡会提示冲突，点「重新读取」再改。人设卡 / 记忆核心在「记忆内容」页改，主题在「专题」页改。"))));
     }
 
-    // ── Q-A：cluster 候选「合并进主题」辅助 ──────────────────────────────────
+    // ── 遗忘页辅助 ──────────────────────────────────────────────────────────
     // revision token：executeTool memory_list_topics / memory_read 返回
     // `shiori-r1.<base64url>.<sha256>`（src/service/index.mjs tokenFor/parseToken）。
     // （U6 收尾：legacy 主题概念整体删除——数据层第一批起不再产生 legacy 行，
-    //  isLegacyTopicRow / LEGACY_TOPIC_UPDATED 及各处过滤、提示均为死分支，已清。）
+    //  isLegacyTopicRow / LEGACY_TOPIC_UPDATED 及各处过滤、提示均为死分支，已清。
+    //  0.3 起合并流程裁撤：mergeBodyDraft / validateMergeFormLocal /
+    //  validateOrganizeProposalLocal / proposalSkeleton 一并删除。）
     function topicRevisionPrefix(token) {
       var text = String(token ?? "");
       return text.length > 28 ? text.slice(0, 28) + "…" : text;
     }
-    // 合并正文默认草稿：候选 evidence（sharedTerm/field）+ 源卡 id 清单；用户可编辑。
-    // 服务端会在 after 末尾自动追加 shiori-p3-sources 源保全块（queue.mjs buildMergeTopicDraft）。
-    function mergeBodyDraft(candidate) {
-      var evidence = candidate && typeof candidate.evidence === "object" && candidate.evidence ? candidate.evidence : {};
-      var term = typeof evidence.sharedTerm === "string" && evidence.sharedTerm
-        ? evidence.sharedTerm
-        : (typeof evidence.field === "string" && evidence.field ? evidence.field : "合并记忆");
-      var ids = Array.isArray(candidate && candidate.sources)
-        ? candidate.sources.map(function (s) { return String(s && s.id); }).filter(Boolean) : [];
-      return "\n\n## 合并记忆：" + term + "\n\n本节由面板合并流程生成，收录 " + ids.length + " 张关联记忆卡（" + ids.join(", ") + "）。请按需编辑正文。\n";
-    }
-    // 发送前的轻量预检（服务端 buildMergeTopicDraft / validatePlanTopic 仍是权威）：
-    // 只拦 UI 能明确给出人话的常见错误，避免用户吃裸 INVALID_INPUT。
-    function validateMergeFormLocal(form) {
-      if (!form || typeof form !== "object") return "合并表单未初始化。";
-      if (!String(form.key || "")) return "缺少目标主题 key。";
-      if (!String(form.expectedRevision || "")) return "缺少主题 revision token（请重新拉取主题列表）。";
-      if (!String(form.title || "").trim()) return "标题不能为空。";
-      var summary = String(form.summary ?? "");
-      if (summary.includes("\n") || summary.includes("\r")) return "摘要必须单行（不得含换行）。";
-      if (summary.length > 60) return "摘要过长（最多 60 字符，当前 " + summary.length + "）。";
-      var before = String(form.before ?? "");
-      var after = String(form.after ?? "");
-      if (!after.startsWith(before)) return "合并后正文必须保留原正文（append-only）：after 必须以 before 开头。";
-      if (after.length === before.length) return "合并后正文与原正文相同（没有任何变化），服务端会拒绝。";
-      return null;
-    }
     // Q-B：候选/计划脏数据的人话错误（保留原 code 便于排查）。
     // U5：服务端原文不再拼进 message 顶大红字——放 detail 字段，ErrorBox 收进
-    // 默认折叠的 details。映射口径：候选已变化 → 请点「分析整理候选」重新分析；
-    // REVISION_CONFLICT → 队列已更新请重新分析（不要重试旧预览）；NOT_FOUND → 该候选已不存在。
-    // 注意：「刷新」按钮只重读队列快照、不会重新分析，文案一律指向「分析整理候选」。
+    // 默认折叠的 details。0.3 起本页只做遗忘、不再有「分析整理候选」按钮：
+    // 候选操作出错指向「刷新」，计划执行冲突指向计划行的「预览遗忘计划」。
     function candidateActionError(error) {
       var code = error && error.code ? String(error.code) : "";
       var detail = (error && error.message) || String(error);
       if (code === "NOT_FOUND") {
-        return { code: code, message: "该候选已不存在：该候选或计划已过期（源卡可能已被合并 / 归档，或计划已不存在）。请点「分析整理候选」重新分析后再试。", detail: detail };
+        return { code: code, message: "该候选已不存在：该候选或计划已过期（源卡可能已被合并 / 归档，或计划已不存在）。请点「刷新」重新读取后再试。", detail: detail };
       }
       if (code === "INVALID_INPUT") {
-        return { code: code, message: "服务端拒绝了这次操作：候选内容可能已变化，请点「分析整理候选」重新分析后再试；若在高级区手写 proposal，请检查它是否符合协议形状。", detail: detail };
+        return { code: code, message: "服务端拒绝了这次操作：候选内容可能已变化，请点「刷新」重新读取后再试。", detail: detail };
       }
       if (code === "REVISION_CONFLICT") {
-        return { code: code, message: "revision 冲突：队列已更新，请点「分析整理候选」重新分析后再试，不要重试旧预览（该计划可能已被执行，或主题 / 队列在此期间被修改）。", detail: detail };
+        return { code: code, message: "revision 冲突：队列已更新，不要重试旧预览（该计划可能已被执行，或专题 / 队列在此期间被修改）；计划请从行内「预览遗忘计划」重新生成预览后再执行。", detail: detail };
       }
       if (code === "UNSUPPORTED") {
         return { code: code, message: "服务端不支持该操作。", detail: detail };
@@ -2540,19 +2582,12 @@ window.__ModuleLoader__.load({
     // 未知 kind / status 保留原文，绝不吞掉服务端新增的分类。
     var CANDIDATE_KIND_LABELS = { cluster: "集群", isolated: "孤立卡", link: "可建链接" };
     var CANDIDATE_STATUS_LABELS = { pending: "待处理", reviewed: "已阅", dismissed: "已忽略" };
-    // U5：候选分组（渲染顺序即组顺序；kind 缺失 / 未知归入「其他」）与状态筛选条。
-    // 筛选只是前端视图（协议仍发 decision=reviewed / dismissed），「已阅」分组可切回。
+    // U5：状态筛选条（筛选只是前端视图，协议仍发 decision=reviewed / dismissed），
+    // 「已阅」分组可切回。0.3 起 kind 分组随整理三组裁撤，只剩状态筛选。
     var CANDIDATE_FILTERS = [["all", "全部"], ["pending", "待处理"], ["reviewed", "已阅"], ["dismissed", "已忽略"]];
-    var CANDIDATE_KIND_GROUPS = [
-      { kind: "cluster", label: "集群" },
-      { kind: "link", label: "可建链接" },
-      { kind: "isolated", label: "孤立卡" },
-      { kind: "other", label: "其他" }
-    ];
     var PLAN_STATE_LABELS = { open: "待执行", executed: "已执行", superseded: "已作废" };
     var PLAN_KIND_LABELS = { organize: "整理", forgetting: "遗忘" };
-    // U5b：预览卡标题按计划类型翻成人话（link / merge-topic）；
-    // 未知类型原样显示，绝不吞掉、不崩。
+    // U5b：预览卡标题按计划类型翻成人话；未知类型原样显示，绝不吞掉、不崩。
     // 0.2.2 归档入口（rework a2）：planView.kind 恒为家族名 "organize"（服务端
     // protocol.mjs enum 只有 organize / forgetting），"archive-topic" 不在 kind enum
     // 里——专题归档卡由渲染处用发起时钉定的 preview.archiveTopic 直接给标题
@@ -2560,8 +2595,9 @@ window.__ModuleLoader__.load({
     // 0.2.3 计划类型细分：planView 新增可选 proposalKind（link / merge-topic /
     // archive-topic），真实计划类型从它读；旧服务端不带该字段时回退
     // plan.kind（旧行为）。planKindOf 是唯一取值口，标题 / 正文 / 按钮一律经它。
-    // （thin-core 已在 0.2.3 裁掉：标题表 / 正文分支 / 专用按钮一并不再保留。）
-    var PLAN_PREVIEW_TITLES = { "link": "连起来", "merge-topic": "合并进主题" };
+    // （thin-core 已在 0.2.3 裁掉；link / merge-topic 标题随整理流程于 0.3 删除，
+    // 遗忘预览补上人话标题。）
+    var PLAN_PREVIEW_TITLES = { "forgetting": "遗忘归档" };
     function planKindOf(plan) {
       var proposal = plan && plan.proposalKind !== undefined && plan.proposalKind !== null
         ? String(plan.proposalKind) : "";
@@ -2633,84 +2669,8 @@ window.__ModuleLoader__.load({
       var text = String(kind ?? "");
       return PLAN_KIND_LABELS[text] ?? text;
     }
-    // Q-B：preview organize 发送前的本地校验（服务端 protocol.mjs organizeProposal
-    // 仍是权威）：拦下必然失败的死 payload（如空 links），给出中文指引，
-    // 不把注定 INVALID_INPUT 的请求交给服务端。形状按协议 additionalProperties:false
-    // 加严：多余键、rel 类型、link/merge-topic 键集齐全都本地拦下。
-    function validateOrganizeProposalLocal(proposal) {
-      if (!proposal || typeof proposal !== "object" || Array.isArray(proposal)) {
-        return "proposal 必须是 JSON 对象。";
-      }
-      if (proposal.kind !== "link" && proposal.kind !== "merge-topic") {
-        return "proposal.kind 只支持 link / merge-topic（thin-core 已在 0.2.3 裁掉；当前 " + JSON.stringify(proposal.kind ?? null) + "）。cluster 候选可直接用「合并进主题」自动构造。";
-      }
-      if (proposal.kind === "link") {
-        var linkExtra = Object.keys(proposal).filter(function (k) { return k !== "kind" && k !== "links"; });
-        if (linkExtra.length > 0) return "proposal.link 存在多余键：" + linkExtra.join(", ") + "（协议只允许 kind / links）。";
-        if (!Array.isArray(proposal.links) || proposal.links.length === 0) {
-          return "proposal.link.links 至少需要 1 项：请先补 link 项，或改用 cluster 候选的「合并进主题」流程。";
-        }
-        for (var i = 0; i < proposal.links.length; i++) {
-          var link = proposal.links[i];
-          if (!link || typeof link !== "object" || Array.isArray(link)) {
-            return "proposal.links[" + i + "] 必须是对象（{ id, after }）。";
-          }
-          var entryExtra = Object.keys(link).filter(function (k) { return k !== "id" && k !== "after"; });
-          if (entryExtra.length > 0) return "proposal.links[" + i + "] 存在多余键：" + entryExtra.join(", ") + "（协议只允许 id / after）。";
-          if (!String(link.id ?? "")) return "proposal.links[" + i + "].id 不能为空。";
-          if (!Array.isArray(link.after) || link.after.length === 0) {
-            return "proposal.links[" + i + "].after 至少需要 1 项（{ target, rel }）。";
-          }
-          for (var j = 0; j < link.after.length; j++) {
-            var edge = link.after[j];
-            if (!edge || typeof edge !== "object" || Array.isArray(edge)) {
-              return "proposal.links[" + i + "].after[" + j + "] 必须是对象（{ target, rel }）。";
-            }
-            var edgeExtra = Object.keys(edge).filter(function (k) { return k !== "target" && k !== "rel"; });
-            if (edgeExtra.length > 0) return "proposal.links[" + i + "].after[" + j + "] 存在多余键：" + edgeExtra.join(", ") + "（协议只允许 target / rel）。";
-            if (!String(edge.target ?? "")) return "proposal.links[" + i + "].after[" + j + "].target 不能为空。";
-            if (edge.rel !== undefined && edge.rel !== null && typeof edge.rel !== "string") {
-              return "proposal.links[" + i + "].after[" + j + "].rel 必须是字符串或 null。";
-            }
-          }
-        }
-      }
-      if (proposal.kind === "merge-topic") {
-        var topicExtra = Object.keys(proposal).filter(function (k) { return k !== "kind" && k !== "topic"; });
-        if (topicExtra.length > 0) return "proposal.merge-topic 存在多余键：" + topicExtra.join(", ") + "（协议只允许 kind / topic）。";
-        var topic = proposal.topic;
-        if (!topic || typeof topic !== "object" || Array.isArray(topic)) {
-          return "proposal.merge-topic 必须带 topic 对象（7 键：key/expectedRevision/before/after/title/summary/updated）。";
-        }
-        var TOPIC_KEYS = ["key", "expectedRevision", "before", "after", "title", "summary", "updated"];
-        var missing = TOPIC_KEYS.filter(function (k) { return !Object.prototype.hasOwnProperty.call(topic, k); });
-        if (missing.length > 0) return "proposal.topic 缺少键：" + missing.join(", ") + "（7 键缺一不可）。";
-        var topicOnlyExtra = Object.keys(topic).filter(function (k) { return TOPIC_KEYS.indexOf(k) === -1; });
-        if (topicOnlyExtra.length > 0) return "proposal.topic 存在多余键：" + topicOnlyExtra.join(", ") + "。";
-        if (!String(topic.key ?? "")) return "proposal.topic.key 不能为空。";
-        if (!String(topic.title ?? "")) return "proposal.topic.title 不能为空。";
-        if (topic.expectedRevision !== null && typeof topic.expectedRevision !== "string") {
-          return "proposal.topic.expectedRevision 必须是字符串或 null（服务端签发的 token）。";
-        }
-        if (!String(topic.after ?? "").startsWith(String(topic.before ?? ""))) {
-          return "proposal.topic.after 必须保留 before 全文（append-only）。";
-        }
-      }
-      return null;
-    }
-    // B-Q2：按候选 kind 预填可提交的 proposal 骨架（带候选真实源卡 id）。
-    // cluster 候选不预填——merge-topic 需要服务端签发的 revision token，
-    // 文本框手写必然失败，应走「合并进主题」一键流程。
-    function proposalSkeleton(candidate) {
-      var sources = candidate && Array.isArray(candidate.sources) ? candidate.sources : [];
-      // 孤立卡只有一张源卡，没有可连的第二张——second 会退化成占位符
-      // "<另一张卡 id>"，服务端 validateSparkIdLocal 必拒（INVALID_INPUT）。
-      // 少于 2 个源时返回 null，由调用方本地拦截，不发必然失败的 RPC。
-      if (sources.length < 2) return null;
-      var first = sources[0] && sources[0].id ? String(sources[0].id) : "<源卡 id>";
-      var second = sources[1] && sources[1].id ? String(sources[1].id) : "<另一张卡 id>";
-      return JSON.stringify({ kind: "link", links: [{ id: first, after: [{ target: second, rel: "related" }] }] }, null, 2);
-    }
+    // （0.3：validateOrganizeProposalLocal / proposalSkeleton 已随整理流程删除——
+    // organize proposal 的本地校验与骨架生成不再有调用方，协议校验仍以服务端为准。）
 
     function CandidatesTab(props) {
       var state = useState(null);
@@ -2722,8 +2682,9 @@ window.__ModuleLoader__.load({
       var busyState = useState(false);
       var busy = busyState[0];
       var setBusy = busyState[1];
-      // B-Q2：默认留空——必红死值（空 links）等于换个地方红；点「preview organize」
-      // 时按候选 kind 预填可用骨架（带真实源卡 id）或指引走合并流程。
+      // B-Q2 槽位保留：手动 proposal 高级调试区已随整理流程一并裁撤（0.3 只做遗忘），
+      // 此 state 不再读写；下标冻结以维持老测试的 states 布局
+      //（data/error/busy/proposal/preview/previewError/guard）。
       var proposalState = useState("");
       var proposal = proposalState[0];
       var setProposal = proposalState[1];
@@ -2739,46 +2700,24 @@ window.__ModuleLoader__.load({
       // 变化时 gen+1 使一切在途异步结果作废，并清空会话绑定状态。
       var guardState = useState({ sessionId: props.sessionId, gen: 0 });
       var sessionGuard = guardState[0];
-      // ── Q-A：合并进主题流程（新增 hook 全部排在既有 7 个之后，老测试的
-      // states[0..6] 布局不变）──────────────────────────────────────────────
-      // merge：当前走合并流程的候选 { candidateId }；topics：主题列表
-      // { loading, error, topics, total }；mergeForm：合并表单；newTopic：新建主题表单。
-      var mergeState = useState(null);
-      var merge = mergeState[0];
-      var setMerge = mergeState[1];
+      // 0.3：整理流程裁撤后本页只做遗忘。topics 是「专题索引归档（手动）」卡的
+      // 专题列表 { loading, error, topics, total }（取数逻辑沿用原合并流程，
+      // 合并表单 / 新建主题不再存在）。
       var topicsState = useState(null);
       var topics = topicsState[0];
       var setTopics = topicsState[1];
-      var mergeFormState = useState(null);
-      var mergeForm = mergeFormState[0];
-      var setMergeForm = mergeFormState[1];
-      var newTopicState = useState({ topic: "", title: "", summary: "", busy: false, error: null });
-      var newTopic = newTopicState[0];
-      var setNewTopic = newTopicState[1];
       // R7 追加：候选卡片 id → 标题映射（拉不到图谱时保持空对象，行内退化成短 id）。
       var titlesState = useState({});
       var titles = titlesState[0];
       var setTitles = titlesState[1];
-      // ── U5 追加（全部排在既有 hook 之后，老测试的 states[0..6] 布局不变）──────
-      // filter：状态筛选（pending 默认——「稍后再说」后该行立即离开当前分组）；
-      // search：纯前端搜索（标题 / 短 id）；collapsedKinds：kind 分组折叠表
-      // （孤立卡默认折叠；计划卡里已执行/已作废分组用原生 details 折叠，不需要状态）；
-      // advancedOpen / advancedCandidate：高级手动 proposal 调试区（默认折叠）。
+      // U5：filter：状态筛选（pending 默认——「稍后再说」后该行立即离开当前分组）；
+      // search：纯前端搜索（标题 / 短 id）。kind 分组折叠已随整理三组裁撤。
       var filterState = useState("pending");
       var filter = filterState[0];
       var setFilter = filterState[1];
       var searchState = useState("");
       var search = searchState[0];
       var setSearch = searchState[1];
-      var collapsedKindsState = useState({ isolated: true });
-      var collapsedKinds = collapsedKindsState[0];
-      var setCollapsedKinds = collapsedKindsState[1];
-      var advancedOpenState = useState(false);
-      var advancedOpen = advancedOpenState[0];
-      var setAdvancedOpen = advancedOpenState[1];
-      var advancedCandidateState = useState("");
-      var advancedCandidate = advancedCandidateState[0];
-      var setAdvancedCandidate = advancedCandidateState[1];
       // F7：只读态（另一实例在写）——analyze / review / preview / execute 与合并
       // 流程全部置灰（服务端 assertHostWritable 同口径），页内黄字说明原因。
       var ro = props.readOnly === true;
@@ -2799,10 +2738,8 @@ window.__ModuleLoader__.load({
           setPreviewError(null);
           setError(null);
           setBusy(false);
-          // Q-A：合并流程是会话绑定的（主题列表 / 表单 / revision token 都按 scope 解析）
-          setMerge(null);
+          // 专题列表是会话（scope）绑定的：切会话即清，等「专题索引归档」卡重新拉取
           setTopics(null);
-          setMergeForm(null);
         }
       }, [props.sessionId]);
 
@@ -2812,10 +2749,13 @@ window.__ModuleLoader__.load({
       var loaded = queueRevision !== null;
       // DTO 守卫：items / plans 只按数组渲染（对象形态不调 .length/.map）。
       var items = Array.isArray(data && data.items) ? data.items : [];
-      // U5-e：顶层 staleCount（全量口径，不受当前筛选 / 搜索影响）——>0 时顶部
-      // 显示提示条；旧服务端不带回该字段时按 0 处理（提示条不渲染）。
-      var staleCount = data && typeof data.staleCount === "number" ? data.staleCount : 0;
       var plans = Array.isArray(data && data.plans) ? data.plans : [];
+      // 0.3：本页只做遗忘——整理类计划不再展示（「预览整理计划 / 合并进主题」
+      // 入口已裁撤，遗留的 open organize 计划对用户不可执行，收起来不添乱）。
+      var isForgettingPlan = function (p) {
+        return Boolean(p) && (p.kind === undefined || String(p.kind) === "forgetting");
+      };
+      var visiblePlans = plans.filter(isForgettingPlan);
 
       var load = async function () {
         var origin = mark();
@@ -2892,79 +2832,6 @@ window.__ModuleLoader__.load({
           setBusy(false);
         }
       };
-      // U5：行内候选查找（真机 queueDto 与旧扁平形状都兼容，queueItemCandidate 统一入口）。
-      var findCandidateById = function (candidateId) {
-        for (var i = 0; i < items.length; i++) {
-          var c = queueItemCandidate(items[i]);
-          if (c && c.id !== undefined && c.id !== null && String(c.id) === String(candidateId)) return c;
-        }
-        return null;
-      };
-      // U5：发送 organize 预览并就地钉定 targetId——预览确认卡渲染在该候选行正下方
-      // （复用合并卡的就地展开写法），不再依赖底部共享状态。
-      var sendOrganizePreview = function (candidateId, parsed) {
-        setPreviewError(null);
-        var origin = mark();
-        guardPreview(async function () {
-          var result = await props.dsh.call("previewPlan", props.sessionId, withRevision({ kind: "organize", candidateId: candidateId, proposal: parsed, operationId: newId() }));
-          if (isStale(origin)) return;
-          setPreview({ sessionId: props.sessionId, plan: result, queueRevision: queueRevision, targetId: String(candidateId) });
-        });
-      };
-      var doPreviewOrganize = function (candidateId) {
-        // U5 根因修复：底部共享 proposal 文本框已删除。此前它是全局单一 state——
-        // 点 A 行先预填骨架再点 B 行时文本框非空，B 行的 candidateId 配了 A 行的
-        // 骨架 → 服务端校验失败报 INVALID_INPUT。现在点行按钮直接按该候选生成
-        // 骨架并发送 previewPlan，不再需要人编辑 JSON；手写入口收进高级调试区。
-        var candidate = findCandidateById(candidateId);
-        var skeleton = proposalSkeleton(candidate);
-        var parsed = null;
-        try {
-          parsed = skeleton === null ? null : JSON.parse(skeleton);
-        } catch (e) {
-          parsed = null;
-        }
-        // Q-B：死 payload（如骨架异常）在本地拦下，不发必然失败的 RPC。
-        // 孤立卡（单源候选）没有第二张卡可连，骨架为 null——本来就不该有这个入口。
-        var problem;
-        if (skeleton === null) {
-          problem = "这张卡还没有和任何卡相连，没有可预览的整理计划";
-        } else if (parsed === null) {
-          problem = "proposal 骨架生成失败（候选数据异常），请刷新后重试。";
-        } else {
-          problem = validateOrganizeProposalLocal(parsed);
-        }
-        if (problem) {
-          setPreview(null);
-          setPreviewError({ code: "ui/invalid-proposal", message: problem });
-          return;
-        }
-        sendOrganizePreview(candidateId, parsed);
-      };
-      // U5：高级调试区手写 proposal（原 B-Q2 口径：本地校验 → 发送）。
-      var doPreviewManual = function () {
-        var manualId = String(advancedCandidate ?? "").trim();
-        if (!manualId) {
-          setPreview(null);
-          setPreviewError({ code: "ui/invalid-proposal", message: "请先填要预览的候选完整 id（从候选行的 title 或「原始数据」里复制）。" });
-          return;
-        }
-        var parsed;
-        try {
-          parsed = JSON.parse(String(proposal ?? ""));
-        } catch (e) {
-          setPreview(null);
-          setPreviewError({ code: "ui/invalid-json", message: "proposal JSON 解析失败：" + e.message });
-          return;
-        }
-        var problem = validateOrganizeProposalLocal(parsed);
-        if (problem) {
-          setPreview(null);
-          setPreviewError({ code: "ui/invalid-proposal", message: problem });
-          return;
-        }
-        sendOrganizePreview(manualId, parsed);
-      };
       var doPreviewForgetting = function (planId) {
         setPreviewError(null);
         var origin = mark();
@@ -3013,14 +2880,10 @@ window.__ModuleLoader__.load({
         var wasArchivePreview = Boolean(preview.archiveTopic !== undefined && preview.archiveTopic !== null);
         return guard(async function () {
           await props.dsh.call("executePlan", props.sessionId, { planId: plan.planId, planDigest: plan.planDigest, operationId: newId(), confirmed: true });
-          // 执行成功：收起合并流程（guard 随后 load() 刷新队列 revision / 候选 / 计划；
-          // 图谱与记忆 L1 视图在切到对应 tab 时按会话重新拉取）。
-          setMerge(null);
-          setMergeForm(null);
           // 0.2.2 归档入口：专题归档执行成功后专题的 archived 状态已变，重新拉
           // memory_list_topics 刷新列表，并清掉预览（失败路径不走这里，错误由 guard
-          // 的 catch 经 ErrorBox 展示，预览保留）。普通 organize / forgetting 预览
-          // 不刷新专题列表，行为与既往一致。
+          // 的 catch 经 ErrorBox 展示，预览保留）。普通 forgetting 预览不刷新专题
+          // 列表，行为与既往一致。
           if (wasArchivePreview) {
             loadTopics();
             setPreview(null);
@@ -3029,9 +2892,8 @@ window.__ModuleLoader__.load({
       };
       var actionsDisabled = busy || !loaded || ro;
 
-      // ── Q-A：cluster 候选「合并进主题」流程 ────────────────────────────────
-      // 全部 RPC 经 props.dsh.call（ctx.get('remote.shiori')）；会话级失败沿用
-      // reportSessionUnavailable（面板层缓存，不刷 tab 红字）。
+      // ── 专题索引归档（手动）：原合并流程的专题列表取数保留，供「移出索引 /
+      // 恢复到索引」使用；合并表单 / 新建主题不再存在（0.3 起本页只做遗忘）。
       var loadTopics = function () {
         var origin = mark();
         setTopics({ loading: true, error: null, topics: [], total: 0 });
@@ -3044,210 +2906,7 @@ window.__ModuleLoader__.load({
           setTopics({ loading: false, error: candidateActionError(e), topics: [], total: 0 });
         });
       };
-      var openMerge = function (candidateId) {
-        setMerge({ candidateId: String(candidateId) });
-        setMergeForm(null);
-        setPreviewError(null);
-        loadTopics();
-      };
-      var closeMerge = function () {
-        setMerge(null);
-        setMergeForm(null);
-        setNewTopic({ topic: "", title: "", summary: "", busy: false, error: null });
-      };
-      // 选中主题：memory_read 拿当前正文（before）与服务端权威 revision token。
-      // before 绝不传空串——执行端以 plan.topic.after 整体替换正文（executor 锁内
-      // 重读 after 一致性校验），空 before 会截断既有正文。
-      var openTopicForMerge = function (row) {
-        if (!merge) return;
-        var origin = mark();
-        var key = String(row && row.key);
-        setNewTopic({ topic: "", title: "", summary: "", busy: false, error: null });
-        props.dsh.call("executeTool", props.sessionId, { name: "memory_read", args: { topic: key } }).then(function (result) {
-          if (isStale(origin)) return;
-          var before = result && typeof result.content === "string" ? result.content : "";
-          var token = result && typeof result.revision === "string" && result.revision
-            ? result.revision
-            : (row && typeof row.revision === "string" ? row.revision : "");
-          var candidate = null;
-          for (var i = 0; i < items.length; i++) {
-            var c = queueItemCandidate(items[i]);
-            if (c && c.id !== undefined && c.id !== null && String(c.id) === merge.candidateId) {
-              candidate = c;
-              break;
-            }
-          }
-          if (candidate === null) candidate = {};
-          setMergeForm({
-            key: key,
-            expectedRevision: token,
-            tokenSource: result && result.revision ? "memory_read" : "memory_list_topics",
-            before: before,
-            after: before + mergeBodyDraft(candidate),
-            title: String((row && row.title) ?? ""),
-            summary: String((row && row.summary) ?? "").split("\n")[0].slice(0, 60),
-            updated: new Date().toISOString()
-          });
-        }, function (e) {
-          if (isStale(origin)) return;
-          setTopics({ loading: false, error: candidateActionError(e), topics: topics ? topics.topics : [], total: topics ? topics.total : 0 });
-        });
-      };
-      // 新建主题：topic_create 成功后重新 memory_list_topics 取服务端权威 token，
-      // 再自动进入合并表单（不猜 token 形状）。
-      var submitNewTopic = function () {
-        if (!merge) return;
-        var key = String(newTopic.topic || "").trim();
-        var title = String(newTopic.title || "").trim();
-        var summary = String(newTopic.summary || "").trim();
-        if (!key || !title || !summary) {
-          setNewTopic({ topic: newTopic.topic, title: newTopic.title, summary: newTopic.summary, busy: false, error: { code: "ui/invalid-topic", message: "key / 标题 / 摘要 都必填。" } });
-          return;
-        }
-        if (summary.includes("\n") || summary.includes("\r") || summary.length > 60) {
-          setNewTopic({ topic: newTopic.topic, title: newTopic.title, summary: newTopic.summary, busy: false, error: { code: "ui/invalid-topic", message: "摘要必须单行且不超过 60 字符。" } });
-          return;
-        }
-        var origin = mark();
-        setNewTopic({ topic: key, title: title, summary: summary, busy: true, error: null });
-        props.dsh.call("executeTool", props.sessionId, { name: "topic_create", args: { topic: key, title: title, summary: summary, operationId: newId() } }).then(function () {
-          return props.dsh.call("executeTool", props.sessionId, { name: "memory_list_topics", args: {} });
-        }).then(function (listing) {
-          if (isStale(origin)) return;
-          var rows = Array.isArray(listing && listing.topics) ? listing.topics : [];
-          var usable = rows;
-          setTopics({ loading: false, error: null, topics: usable, total: rows.length });
-          setNewTopic({ topic: "", title: "", summary: "", busy: false, error: null });
-          var fresh = usable.find(function (t) { return String(t && t.key) === key; });
-          if (!fresh) {
-            setNewTopic({ topic: key, title: title, summary: summary, busy: false, error: { code: "shiori/ui-topic-missing", message: "主题已创建，但未能在主题列表中找到它（" + key + "）；请刷新主题列表后手动选择。" } });
-            return;
-          }
-          openTopicForMerge(fresh);
-        }, function (e) {
-          if (isStale(origin)) return;
-          setNewTopic({ topic: key, title: title, summary: summary, busy: false, error: candidateActionError(e) });
-        });
-      };
-      // 合并预览：自动构造 merge-topic proposal（7 键），带 candidateId +
-      // expectedQueueRevision + operationId 走 previewPlan；diff 由既有 preview 卡渲染。
-      var doMergePreview = function () {
-        if (!merge || !mergeForm) return;
-        var form = mergeForm;
-        var problem = validateMergeFormLocal(form);
-        if (problem) {
-          setPreview(null);
-          setPreviewError({ code: "ui/invalid-proposal", message: problem });
-          return;
-        }
-        setPreviewError(null);
-        var origin = mark();
-        guardPreview(async function () {
-          var proposal = { kind: "merge-topic", topic: { key: form.key, expectedRevision: form.expectedRevision, before: form.before, after: form.after, title: form.title, summary: form.summary, updated: form.updated } };
-          var result = await props.dsh.call("previewPlan", props.sessionId, withRevision({ kind: "organize", candidateId: merge.candidateId, proposal: proposal, operationId: newId() }));
-          if (isStale(origin)) return;
-          setPreview({ sessionId: props.sessionId, plan: result, queueRevision: queueRevision });
-        });
-      };
-      var updateMergeForm = function (patch) {
-        setMergeForm(mergeForm ? assign({}, mergeForm, patch) : mergeForm);
-      };
-      var updateNewTopic = function (patch) {
-        setNewTopic(assign({}, newTopic, patch));
-      };
-      // Q-A 合并卡渲染器：内容 / 三步状态机与原实现逐行一致，仅把卡片从「候选卡之后」
-      // 搬到被点击候选行的正下方（同一 dshi_items 容器内就地展开），避免按钮在列表中间、
-      // 控件在页面底部。候选 id 只显示前 8 位，完整 id 放 title。
-      var renderMergeCard = function (candidateId) {
-        var fullId = String(candidateId);
-        var shortId = fullId.slice(0, 8) + "…";
-        return h("div", { key: "merge-" + fullId, className: "dshi_itemMerge", style: { minWidth: 0 } },
-          h("div", { className: "dshi_card", style: { marginLeft: 12 } },
-            h("div", { className: "dshi_row" },
-              h("span", { className: "dshi_cardTitle", title: "候选完整 id：" + fullId }, "合并进主题（候选 " + shortId + "）"),
-              h("button", { className: "dshi_btn", disabled: topics !== null && topics.loading, onClick: loadTopics }, "刷新主题"),
-              h("button", { className: "dshi_btn", onClick: closeMerge }, "收起")),
-            // 步骤引导（纯展示）：① 选目标主题 → ② 载入 before/token 出合并表单 → ③ after → 预览 diff → 确认执行。
-            // mergeForm 为空时 ① 标「进行中」（主色 badge），其余 dim；不改任何 RPC / 状态机逻辑。
-            h("div", { className: "dshi_hint" }, "合并流程（3 步，按当前进度高亮）："),
-            h("div", { className: "dshi_items" },
-              h("div", { className: "dshi_row" },
-                h("span", { className: mergeForm ? "dshi_badgeDim dshi_badge" : "dshi_badge" }, mergeForm ? "① 已完成" : "① 进行中"),
-                h("span", { className: "dshi_hint" }, "选择目标主题：点主题列表某行的「合并到这个主题」，或在下方新建主题后点「创建并选择」。")),
-              h("div", { className: "dshi_row" },
-                h("span", { className: "dshi_badgeDim dshi_badge" }, mergeForm ? "② 已完成" : "② 待完成"),
-                h("span", { className: "dshi_hint" }, "选定后自动载入 before 正文与 revision token，并出现「合并表单」。")),
-              h("div", { className: "dshi_row" },
-                h("span", { className: "dshi_badgeDim dshi_badge" }, mergeForm ? "③ 下一步" : "③ 待完成"),
-                h("span", { className: "dshi_hint" }, "在合并表单里编辑 after → 点「预览 diff（previewPlan）」→ 在下方确认卡里点「确认执行」。合并后源卡将 retired，不可撤销。"))),
-            topics === null || topics.loading ? h("div", { className: "dshi_loading" }, "主题列表加载中…") : null,
-            topics && topics.error ? ErrorBox(topics.error) : null,
-            // 0.2.2 归档入口：列表顶部说明——未归档计数 + 移出索引的语义边界
-            //（只影响每轮注入的 L1 索引条目，正文保留、可读可搜；不写死字符数预算）。
-            topics && !topics.loading && !topics.error && topics.topics.length > 0 ? (function () {
-              var unarchivedCount = sortTopicRows(topics.topics).filter(function (row) { return !(row && row.archived === true); }).length;
-              return h("div", { className: "dshi_hint" },
-                "未归档 " + unarchivedCount + " 篇。移出索引只影响每轮注入的 L1 索引条目，正文保留，memory_read(key) 随时可读，memory_search 仍能搜到。");
-            })() : null,
-            topics && !topics.loading && !topics.error ? h("div", { className: "dshi_items" },
-              topics.topics.length === 0 ? h("div", { className: "dshi_hint" },
-                "当前 scope 还没有主题。请在下方新建主题。")
-                : sortTopicRows(topics.topics).map(function (row) {
-                  var key = String(row.key ?? "");
-                  // 0.2.2 归档入口：已归档行显示「已归档」徽章 +「恢复到索引」（不再给
-                  // 合并入口）；未归档行保留「合并到这个主题」并新增「移出索引」。
-                  var archived = row.archived === true;
-                  return h("div", { key: key, className: "dshi_item" },
-                    h("div", { className: "dshi_itemHead" },
-                      h("span", { className: "dshi_mono" }, key),
-                      row.title ? h("span", { className: "dshi_badgeDim dshi_badge" }, String(row.title)) : null,
-                      archived ? h("span", { className: "dshi_badgeDim dshi_badge" }, "已归档") : null,
-                      row.updated ? h("span", { className: "dshi_hint" }, String(row.updated)) : null,
-                      row.revision ? h("span", { className: "dshi_hint dshi_mono" }, "rev " + topicRevisionPrefix(row.revision)) : null,
-                      archived ? h("button", {
-                        className: "dshi_btn",
-                        disabled: busy || ro,
-                        onClick: function () { doArchiveTopicPreview(row, false); }
-                      }, "恢复到索引")
-                        : h("button", {
-                          className: "dshi_btn",
-                          disabled: busy || ro,
-                          onClick: function () { openTopicForMerge(row); }
-                        }, "合并到这个主题"),
-                      archived ? null : h("button", {
-                        className: "dshi_btn",
-                        disabled: busy || ro,
-                        onClick: function () { doArchiveTopicPreview(row, true); }
-                      }, "移出索引")));
-                })) : null,
-            // B/C：未选定目标主题时的中性提示（不是错误，不用 ErrorBox / 红色）；选定后换成下一步提示。
-            mergeForm ? h("div", { className: "dshi_hint", style: { fontWeight: 600 } },
-              "已在合并表单中：编辑 after 后点「预览 diff（previewPlan）」，再在下方确认卡里确认执行。")
-              : h("div", { className: "dshi_hint", style: { fontWeight: 600 } },
-                "还没有选择目标主题：先点上方某行「合并到这个主题」，或在下方新建主题并点「创建并选择」。选定之后才会出现「合并表单」和「预览 diff」按钮。"),
-            h("div", { className: "dshi_cardTitle", style: { marginTop: 6 } }, "或新建主题"),
-            newTopic.error ? ErrorBox(newTopic.error) : null,
-            h("div", { className: "dshi_row" },
-              h("input", { className: "dshi_input", placeholder: "key（安全文件名，core 保留）", value: newTopic.topic, onChange: function (event) { updateNewTopic({ topic: event.target.value }); } }),
-              h("input", { className: "dshi_input", placeholder: "标题", value: newTopic.title, onChange: function (event) { updateNewTopic({ title: event.target.value }); } }),
-              h("input", { className: "dshi_input", placeholder: "单行摘要（≤60 字符）", value: newTopic.summary, onChange: function (event) { updateNewTopic({ summary: event.target.value }); } }),
-              h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy || newTopic.busy || ro, onClick: submitNewTopic }, newTopic.busy ? "创建中…" : "创建并选择")),
-            mergeForm ? h("div", null,
-              h("div", { className: "dshi_itemHead", style: { marginTop: 6 } },
-                h("span", { className: "dshi_cardTitle" }, "合并表单（目标 " + mergeForm.key + "）"),
-                h("span", { className: "dshi_hint dshi_mono" }, "token(" + mergeForm.tokenSource + ") " + topicRevisionPrefix(mergeForm.expectedRevision))),
-              h("div", { className: "dshi_hint" }, "before（" + mergeForm.before.length + " 字符，服务端按 append-only 校验 after 必须保留它）已载入；源保全块由服务端自动追加。"),
-              h("label", { className: "dshi_label" }, "标题",
-                h("input", { className: "dshi_input", value: mergeForm.title, onChange: function (event) { updateMergeForm({ title: event.target.value }); } })),
-              h("label", { className: "dshi_label" }, "单行摘要（≤60 字符）",
-                h("input", { className: "dshi_input", value: mergeForm.summary, onChange: function (event) { updateMergeForm({ summary: event.target.value }); } })),
-              h("label", { className: "dshi_label" }, "合并后正文（after，可编辑；必须保留 before 全文）",
-                h("textarea", { className: "dshi_textarea", value: mergeForm.after, onChange: function (event) { updateMergeForm({ after: event.target.value }); } })),
-              h("div", { className: "dshi_row" },
-                h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy || ro, onClick: doMergePreview }, "预览 diff（previewPlan）"))) : null
-          ));
-      };
-      // ── U5：筛选 / 搜索 / kind 分组 / 就地预览（纯前端推导，协议与守卫不变）───
+      // ── U5：筛选 / 搜索 / 就地预览（纯前端推导，协议与守卫不变）───
       // 候选人话标题：集群说共享词 + 卡数，链接说「A ↔ B」，孤立卡直接给源卡标题；
       // 都没有时退化成短 id（titles 拉不到图谱时为空对象）。
       var candidateTitleOf = function (candidate) {
@@ -3267,43 +2926,6 @@ window.__ModuleLoader__.load({
         if (sourceTitles.length > 1) return sourceTitles.join("、");
         return null;
       };
-      // ── U5b：预览卡正文翻人话（纯展示，协议与守卫不动）─────────────────────
-      // 展示名：优先 titles 里的卡标题，拉不到退化成短 id。
-      var displayIdOf = function (id) {
-        var text = String(id ?? "");
-        return titles[text] || shortId(text);
-      };
-      // link diff 的 newText / oldText 是 after / before 边表 JSON（{target,rel}[]），
-      // 新增边 = after 里 before 没有的那一条；解析失败 / 形状不对返回 null，由调用方走兜底句。
-      var parseLinkEdgeFromDiff = function (entry) {
-        try {
-          var after = JSON.parse(String((entry && entry.newText) ?? ""));
-          if (!Array.isArray(after)) return null;
-          var before = [];
-          try {
-            var parsedBefore = JSON.parse(String((entry && entry.oldText) ?? ""));
-            if (Array.isArray(parsedBefore)) before = parsedBefore;
-          } catch (e2) { before = []; }
-          var edgeKey = function (l) {
-            var rel = l && l.rel !== undefined && l.rel !== null ? String(l.rel) : "";
-            return String((l && l.target) ?? "") + "\u0000" + rel;
-          };
-          var beforeKeys = new Set(before.map(edgeKey));
-          for (var i = 0; i < after.length; i++) {
-            var edge = after[i];
-            if (!edge || typeof edge !== "object" || edge.target === undefined || edge.target === null) continue;
-            if (!beforeKeys.has(edgeKey(edge))) return { target: String(edge.target), rel: edge.rel === undefined ? null : edge.rel };
-          }
-          // 没有可识别的新增边：退回第一条可读边（previewPlan 已拒绝零新增草案，正常到不了）。
-          for (var j = 0; j < after.length; j++) {
-            var fallback = after[j];
-            if (fallback && typeof fallback === "object" && fallback.target !== undefined && fallback.target !== null) {
-              return { target: String(fallback.target), rel: fallback.rel === undefined ? null : fallback.rel };
-            }
-          }
-          return null;
-        } catch (e) { return null; }
-      };
       // 预览正文按计划类型翻人话（planKindOf：proposalKind 优先，回退 plan.kind）；
       // 未知类型返回空数组（原始 diff 都在「原始信息」里）。
       // 0.2.2 归档入口（rework a2）：planView.kind 恒为家族名 "organize"（服务端
@@ -3311,50 +2933,12 @@ window.__ModuleLoader__.load({
       // preview 状态）里的 archiveTopic 作判据：有钉定即走归档分支。0.2.3 起
       // proposalKind === "archive-topic" 也算归档；方向永远取 archiveTopic
       //（未钉定时按 false＝恢复处理）；topicKey 同样取钉定值，缺失时退化为通用句，
-      // 绝不抛错。
+      // 绝不抛错。0.3 起本页只做遗忘：link / merge-topic 的人话分支随整理流程裁撤。
       var previewBodyLines = function (plan, previewInfo) {
         var info = previewInfo && typeof previewInfo === "object" ? previewInfo : null;
         var isArchivePreview = Boolean(info && info.archiveTopic !== undefined && info.archiveTopic !== null);
         var kind = planKindOf(plan);
-        var diff = plan && Array.isArray(plan.diff) ? plan.diff : [];
-        var first = diff.length > 0 && diff[0] && typeof diff[0] === "object" ? diff[0] : null;
         var lines = [];
-        if (kind === "link") {
-          var sourceId = first && typeof first.path === "string" && first.path.indexOf("spark:") === 0
-            ? first.path.slice("spark:".length) : null;
-          var edge = first !== null ? parseLinkEdgeFromDiff(first) : null;
-          if (sourceId !== null && sourceId !== "" && edge !== null) {
-            var relText = edge.rel === null || edge.rel === "related" ? "相关" : String(edge.rel);
-            lines.push("把『" + displayIdOf(sourceId) + "』关联到『" + displayIdOf(edge.target) + "』");
-            lines.push("关系：" + relText);
-          } else {
-            lines.push("给两张卡新增一条连线（明细见下方「原始信息」）");
-          }
-          lines.push("执行后两张卡的内容都不变，只多一条连线；连错了到卡片详情里删掉这条连线即可。");
-          return lines;
-        }
-        if (kind === "merge-topic") {
-          var topicKey = null;
-          for (var k = 0; k < diff.length; k++) {
-            var entryPath = diff[k] && typeof diff[k].path === "string" ? diff[k].path : "";
-            if (entryPath.indexOf("topic:") === 0) { topicKey = entryPath.slice("topic:".length); break; }
-          }
-          var sparkCount = diff.filter(function (entry) {
-            return entry && typeof entry.path === "string" && entry.path.indexOf("spark:") === 0;
-          }).length;
-          if (sparkCount === 0 && plan && typeof plan.changedItems === "number" && plan.changedItems > 0) {
-            sparkCount = plan.changedItems - 1;
-          }
-          if (topicKey !== null && topicKey !== "") {
-            lines.push(sparkCount > 0
-              ? "把 " + sparkCount + " 张卡合并进主题『" + topicKey + "』"
-              : "把源卡合并进主题『" + topicKey + "』");
-          } else {
-            lines.push("把源卡合并进一个主题（明细见下方「原始信息」）");
-          }
-          lines.push("合并后源卡会退休，这一步不可撤销。");
-          return lines;
-        }
         if (isArchivePreview || kind === "archive-topic") {
           var archiveDir = info.archiveTopic === true;
           var archiveKey = info.topicKey !== undefined && info.topicKey !== null
@@ -3365,6 +2949,11 @@ window.__ModuleLoader__.load({
             ? "把专题『" + archiveKey + "』" + archiveVerb + " L1 索引"
             : "把专题" + archiveVerb + " L1 索引（明细见下方「原始信息」）");
           lines.push("正文长度不变，随时可读。");
+          return lines;
+        }
+        // forgetting 预览：要归档哪些卡在「原始信息」的 diff 里逐张可见。
+        if (kind === "forgetting") {
+          lines.push("按衰减分数把旧卡归档（每张卡的明细见下方「原始信息」）。");
           return lines;
         }
         return lines;
@@ -3387,21 +2976,13 @@ window.__ModuleLoader__.load({
         var status = statusOfItem(item);
         if (status === "pending" || status === "reviewed" || status === "dismissed") statusCounts[status] += 1;
       });
-      var toggleKindGroup = function (kind) {
-        var next = assign({}, collapsedKinds);
-        next[kind] = !(next[kind] === true);
-        setCollapsedKinds(next);
-      };
-      // 预览钉定的目标（候选 id 或计划 id）：有 targetId 且目标行可见 → 就地展开在
-      // 该行正下方；targetId 缺失（旧状态 / 手动注入）或目标行已消失 → 回落到底部卡。
+      // 预览钉定的目标（计划 id）：有 targetId 且目标计划行可见 → 就地展开在
+      // 该行正下方；targetId 缺失（旧状态 / 专题归档）或目标行已消失 → 回落到底部卡。
       var previewTargetId = preview && preview.targetId !== undefined && preview.targetId !== null
         ? String(preview.targetId) : null;
       var previewTargetVisible = false;
       if (previewTargetId !== null) {
-        previewTargetVisible = items.some(function (item) {
-          var c = queueItemCandidate(item);
-          return c && c.id !== undefined && c.id !== null && String(c.id) === previewTargetId;
-        }) || plans.some(function (p) {
+        previewTargetVisible = visiblePlans.some(function (p) {
           var pid = p && p.planId !== undefined && p.planId !== null
             ? String(p.planId)
             : (p && p.id !== undefined && p.id !== null ? String(p.id) : null);
@@ -3434,8 +3015,6 @@ window.__ModuleLoader__.load({
         var isArchivePreview = Boolean(preview && preview.archiveTopic !== undefined && preview.archiveTopic !== null);
         var isArchiveCard = isArchivePreview || planKind === "archive-topic";
         var confirmLabel = isArchiveCard ? (preview.archiveTopic === true ? "确认移出索引（可随时恢复）" : "确认恢复")
-          : planKind === "link" ? "就这么连起来"
-          : planKind === "merge-topic" ? "确认合并（不可撤销）"
           : "确认执行";
         return h("div", { key: key, className: "dshi_itemMerge", style: { minWidth: 0 } },
           h("div", { className: "dshi_confirm", style: { marginLeft: 12 } },
@@ -3462,7 +3041,7 @@ window.__ModuleLoader__.load({
               })) : h("div", { className: "dshi_hint" }, "（无 diff 条目）")),
             h("div", { className: "dshi_row" },
               h("button", {
-                className: planKind === "link" ? "dshi_btn dshi_btnPrimary" : "dshi_btn dshi_btnDanger",
+                className: "dshi_btn dshi_btnDanger",
                 disabled: busy || ro || rowLocked,
                 onClick: doExecute
               }, confirmLabel),
@@ -3472,24 +3051,17 @@ window.__ModuleLoader__.load({
         var businessId = candidate && candidate.id !== undefined && candidate.id !== null
           ? String(candidate.id) : null;
         var key = businessId !== null ? businessId : String(index);
-        var isCluster = candidate ? String(candidate.kind ?? "") === "cluster" : false;
-        // 孤立卡只有一张源卡，没有可连的第二张——「预览整理计划」必然失败
-        // （骨架占位符被服务端拒），入口不渲染，只保留「稍后再说」「忽略」。
-        var isIsolated = candidate ? String(candidate.kind ?? "") === "isolated" : false;
         var rowDisabled = actionsDisabled || businessId === null;
-        var mergeForThisRow = Boolean(merge) && businessId !== null && String(merge.candidateId) === businessId;
-        var previewForThisRow = previewTargetId !== null && businessId !== null && previewTargetId === businessId;
         var candidateTitle = candidateTitleOf(candidate);
         // U5b：标题下「理由」小字——evidence 缺失 / 形状不对 / 未知 kind 时为 null，
         // 不渲染该行（行本身绝不消失），不抛错。
         var candidateReason = candidateReasonOf(candidate);
         // U5-e：过期候选就地标注——队列是快照，源卡在面板外被改动后 revision 前进，
         // 服务端在队列 item 上投影 stale 布尔（旧扁平形状兼容读 candidate.stale）。
-        // stale 行置灰「预览整理计划」与「合并进主题」（两条入口最后都走 previewPlan
-        // 的 revision 校验，必然失败）；「稍后再说」「忽略」只改 status 不校验
-        // revision，保持可用。
+        // 「稍后再说」「忽略」只改 status 不校验 revision，保持可用。
         var staleRow = item.stale === true || Boolean(candidate && candidate.stale === true);
-        var row = h("div", { key: key, className: "dshi_item" },
+        // 0.3：整理流程裁撤后行内只剩审阅动作（协议仍发 decision=reviewed / dismissed）。
+        return h("div", { key: key, className: "dshi_item" },
           h("div", { className: "dshi_itemHead" },
             h("span", null, candidateTitle || "（未识别的卡片）"),
             h("span", { className: "dshi_mono" }, businessId !== null ? shortId(businessId) : "（缺少 candidate.id）"),
@@ -3499,55 +3071,13 @@ window.__ModuleLoader__.load({
             // U5 改名：「稍后再说」（协议仍发 decision=reviewed）——只是收起来，
             // 不删除任何记忆；点击后该行立即离开「待处理」分组，可在「已阅」分组切回来。
             h("button", { className: "dshi_btn", disabled: rowDisabled, title: "只是收起来，不会删除任何记忆", onClick: function () { doReview(businessId, "reviewed"); } }, "稍后再说"),
-            h("button", { className: "dshi_btn", disabled: rowDisabled, title: "把候选状态置为 dismissed", onClick: function () { doReview(businessId, "dismissed"); } }, "忽略"),
-            isIsolated ? null : h("button", {
-              className: "dshi_btn",
-              disabled: rowDisabled || staleRow,
-              title: staleRow ? "这条候选绑定的卡片在你上次分析之后被改过，重新分析后才能预览" : undefined,
-              onClick: function () { doPreviewOrganize(businessId); }
-            }, "预览整理计划"),
-            // Q-A：cluster 候选一键进入「合并进主题」流程（选/建主题 → 自动 proposal
-            // → preview diff → 确认执行），不再要求手写 proposal JSON。
-            // U5-e（rework a1）：合并流程最后同样走 previewPlan 的 revision 校验，
-            // stale 行一并置灰（否则过期 cluster 从这个后门还是吃到同一颗冲突）。
-            isCluster ? h("button", {
-              className: "dshi_btn dshi_btnPrimary",
-              disabled: rowDisabled || staleRow,
-              title: staleRow ? "这条候选绑定的卡片在你上次分析之后被改过，重新分析后才能合并" : undefined,
-              onClick: function () { openMerge(businessId); }
-            }, "合并进主题") : null),
+            h("button", { className: "dshi_btn", disabled: rowDisabled, title: "把候选状态置为 dismissed", onClick: function () { doReview(businessId, "dismissed"); } }, "忽略")),
           candidateReason !== null ? h("div", { className: "dshi_hint" }, "理由：" + candidateReason) : null,
-          staleRow ? h("div", { className: "dshi_hint" }, "这条候选绑定的卡片在你上次分析之后被改过，重新分析后才能用") : null,
+          staleRow ? h("div", { className: "dshi_hint" }, "这条候选绑定的卡片在你上次分析之后被改过") : null,
           // 原始 JSON 默认折叠：details 不写 open，铺满屏幕的长串移出主视线。
           h("details", { className: "dshi_details" },
             h("summary", { className: "dshi_hint" }, "原始数据（JSON）"),
             h("pre", { className: "dshi_pre" }, stableStringify(item))));
-        var extra = [];
-        if (mergeForThisRow) extra.push(renderMergeCard(businessId));
-        if (previewForThisRow) extra.push(renderPreviewCard("preview-" + key));
-        return extra.length > 0 ? [row].concat(extra) : row;
-      };
-      var renderKindGroup = function (group) {
-        var rows = [];
-        items.forEach(function (item, index) {
-          var candidate = queueItemCandidate(item);
-          var kindKey = candidate && candidate.kind ? String(candidate.kind) : "other";
-          // U5：「其他」组兜底收下一切未知 kind（服务端未来新增分类时行不消失，
-          // 徽章保留原文）；三个已知组仍用严格相等。
-          if (group.kind === "other") {
-            if (kindKey === "cluster" || kindKey === "link" || kindKey === "isolated") return;
-          } else if (kindKey !== group.kind) {
-            return;
-          }
-          if (!rowVisible(item, candidate)) return;
-          rows.push(renderCandidateRow(item, index, candidate));
-        });
-        var collapsed = collapsedKinds[group.kind] === true;
-        return h("div", { key: group.kind, className: "dshi_kindGroup" },
-          h("button", { type: "button", className: "dshi_groupHead", title: collapsed ? "展开" : "收起", onClick: function () { toggleKindGroup(group.kind); } },
-            h("span", null, (collapsed ? "▸ " : "▾ ") + group.label),
-            h("span", { className: "dshi_groupCount" }, "（" + rows.length + "）")),
-          collapsed || rows.length === 0 ? null : h("div", { className: "dshi_items" }, rows));
       };
       var renderPlanRow = function (plan, index) {
         // 与候选行同一原则：下标只用作渲染 key，planId 缺失时禁用动作而非发下标。
@@ -3561,7 +3091,6 @@ window.__ModuleLoader__.load({
         var executed = plan.executed === true;
         var superseded = plan.superseded === true;
         var executedWith = plan.executedWith ?? plan.operationId;
-        var isForgetting = plan.kind === undefined || String(plan.kind) === "forgetting";
         var previewForThisPlan = previewTargetId !== null && businessPlanId !== null && previewTargetId === businessPlanId;
         var row = h("div", { key: planId, className: "dshi_item" },
           h("div", { className: "dshi_itemHead" },
@@ -3571,72 +3100,93 @@ window.__ModuleLoader__.load({
               : superseded ? h("span", { className: "dshi_badge dshi_badgeWarn" }, planStateLabel("superseded"))
               : h("span", { className: "dshi_badgeDim dshi_badge" }, planStateLabel("open")),
             executedWith !== undefined && executedWith !== null ? h("span", { className: "dshi_hint dshi_mono" }, "op " + String(executedWith)) : null,
-            executed || !isForgetting ? null
+            executed ? null
               : h("button", { className: "dshi_btn", disabled: actionsDisabled || businessPlanId === null || superseded, onClick: function () { doPreviewForgetting(businessPlanId); } }, "预览遗忘计划")),
-          executed ? h("div", { className: "dshi_hint" }, "该计划已执行：不可再次预览 / 执行；如需再次整理请重新 analyze。")
+          executed ? h("div", { className: "dshi_hint" }, "该计划已执行：不可再次预览 / 执行；要再次遗忘请重新「分析遗忘候选」。")
             : superseded ? h("div", { className: "dshi_hint" }, "该计划已被新预览作废（superseded）：不可再预览 / 执行（服务端会拒绝并报 REVISION_CONFLICT），请使用最新计划。")
-            : (!isForgetting ? h("div", { className: "dshi_hint" }, "organize 计划请从对应候选的「预览整理计划 / 合并进主题」流程执行。") : null),
+            : null,
           h("details", { className: "dshi_details" },
             h("summary", { className: "dshi_hint" }, "原始数据（JSON）"),
             h("pre", { className: "dshi_pre" }, stableStringify(plan))));
         return previewForThisPlan ? [row, renderPreviewCard("preview-" + planId)] : row;
       };
+      // 0.3：手动归档入口——原合并卡里的专题列表独立成卡，只保留「移出索引 /
+      // 恢复到索引」（0.2.2 归档入口，previewPlan kind=archive-topic，协议不变）。
+      var renderArchiveTopicRow = function (row) {
+        var key = String(row.key ?? "");
+        var archived = row.archived === true;
+        return h("div", { key: key, className: "dshi_item" },
+          h("div", { className: "dshi_itemHead" },
+            h("span", { className: "dshi_mono" }, key),
+            row.title ? h("span", { className: "dshi_badgeDim dshi_badge" }, String(row.title)) : null,
+            archived ? h("span", { className: "dshi_badgeDim dshi_badge" }, "已归档") : null,
+            row.updated ? h("span", { className: "dshi_hint" }, String(row.updated)) : null,
+            row.revision ? h("span", { className: "dshi_hint dshi_mono" }, "rev " + topicRevisionPrefix(row.revision)) : null,
+            archived ? h("button", {
+              className: "dshi_btn",
+              disabled: busy || ro,
+              onClick: function () { doArchiveTopicPreview(row, false); }
+            }, "恢复到索引")
+              : h("button", {
+                className: "dshi_btn",
+                disabled: busy || ro,
+                onClick: function () { doArchiveTopicPreview(row, true); }
+              }, "移出索引")));
+      };
       // U5：open 计划直接列出；executed / superseded 收进默认折叠的分组（数量在组头）。
-      var activePlans = plans.filter(function (p) { return !(p && (p.executed === true || p.superseded === true)); });
-      var archivedPlans = plans.filter(function (p) { return Boolean(p && (p.executed === true || p.superseded === true)); });
+      var activePlans = visiblePlans.filter(function (p) { return !(p && (p.executed === true || p.superseded === true)); });
+      var archivedPlans = visiblePlans.filter(function (p) { return Boolean(p && (p.executed === true || p.superseded === true)); });
+      // 筛选 / 搜索后的可见候选行（0.3 起 Flat 列表，不再按 kind 分组折叠）。
+      var visibleRows = [];
+      items.forEach(function (item, index) {
+        var candidate = queueItemCandidate(item);
+        if (!rowVisible(item, candidate)) return;
+        visibleRows.push(renderCandidateRow(item, index, candidate));
+      });
       return h("div", null,
         h("div", { className: "dshi_row", style: { marginBottom: 8 } },
-          h("span", { className: "dshi_cardTitle" }, "整理 / 遗忘：候选审阅与执行"),
-          h("button", { className: "dshi_btn", title: "只重新读取队列快照，不会重新分析；要重新分析请点「分析整理候选」", onClick: load, disabled: busy }, "刷新"),
-          h("button", { className: "dshi_btn", title: "找出该合并进主题、该建链接、该单独成卡的卡（只读分析，不改数据）", onClick: function () { doAnalyze("organize"); }, disabled: actionsDisabled }, "分析整理候选"),
-          h("button", { className: "dshi_btn", title: "按衰减分数找出该归档的旧卡（只读分析）", onClick: function () { doAnalyze("forgetting"); }, disabled: actionsDisabled }, "分析遗忘候选"),
+          h("span", { className: "dshi_cardTitle" }, "遗忘：候选审阅与执行"),
+          h("button", { className: "dshi_btn", title: "只重新读取队列快照与计划列表，不会重新分析；要重新分析请点「分析遗忘候选」", onClick: load, disabled: busy }, "刷新"),
+          h("button", { className: "dshi_btn", title: "按衰减分数找出该归档的旧卡（只读分析，不改数据）", onClick: function () { doAnalyze("forgetting"); }, disabled: actionsDisabled }, "分析遗忘候选"),
           loaded ? h("span", { className: "dshi_badgeDim dshi_badge" }, "queueRevision " + queueRevision) : null),
-        // U5-e：过期候选顶部提示条——staleCount 是全量口径（不随筛选 / 搜索变化），
-        // 当前视图里没有可见的过期行时仍然显示。「重新分析」复用 doAnalyze("organize")
-        // （与「分析整理候选」同一路径），不新造 RPC。
-        staleCount > 0 ? h("div", { className: "dshi_staleBar" },
-          h("span", null, "有 " + staleCount + " 条候选在你的卡片被改动之后过期了，重新分析后才会更新"),
-          h("button", {
-            className: "dshi_staleBarBtn",
-            title: "重新分析整理候选，过期候选会随之更新",
-            disabled: actionsDisabled,
-            onClick: function () { doAnalyze("organize"); }
-          }, "重新分析")) : null,
         ErrorBox(error),
         ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
         data ? h(fragment, null,
           h("div", { className: "dshi_card" },
           h("div", { className: "dshi_cardTitle" }, "候选（" + items.length + "）"),
-          h("div", { className: "dshi_hint" }, "候选由「分析整理候选 / 分析遗忘候选」生成：集群（≥8 张共享实体或触发词的卡）可「合并进主题」，可建链接的候选可「预览整理计划」，孤立卡没有可连的第二张卡，只能「稍后再说」或「忽略」。"),
-          // U5：筛选条（状态 chips，含各分组计数）+ 纯前端搜索框（按标题或短 id 过滤）。
+          h("div", { className: "dshi_hint" }, "候选是之前「整理分析」留下的待审条目（遗忘分析不产生候选，结果直接进下方计划）。每行可「稍后再说」（只是收起来，不删除任何记忆）或「忽略」。"),
+          // U5：筛选条（状态 chips，含计数）+ 纯前端搜索框（按标题或短 id 过滤）。
           h("div", { className: "dshi_filterBar" },
             CANDIDATE_FILTERS.map(function (f) {
               return h("button", { key: f[0], className: "dshi_filterChip" + (filter === f[0] ? " dshi_filterChipOn" : ""), onClick: function () { setFilter(f[0]); } }, f[1] + "（" + statusCounts[f[0]] + "）");
             }),
             h("input", { className: "dshi_input dshi_searchInput", placeholder: "搜索：按标题或短 id 过滤", value: search, onChange: function (event) { setSearch(event.target.value); } })),
-          // U5：按 kind 分组折叠（组头显示数量，点组头展开 / 收起；孤立卡默认折叠）。
-          items.length === 0 ? h("div", { className: "dshi_hint" }, "（空）") : CANDIDATE_KIND_GROUPS.map(function (group) {
-            return renderKindGroup(group);
-          }),
-          // U5：底部共享 proposal 文本框已删除（INVALID_INPUT 根因）；调试用手写入口
-          // 收进默认折叠的高级区。
-          h("div", { className: "dshi_advanced" },
-            h("button", { type: "button", className: "dshi_groupHead", onClick: function () { setAdvancedOpen(!advancedOpen); } }, (advancedOpen ? "▾ " : "▸ ") + "高级：手动编辑 proposal"),
-            advancedOpen ? h("div", { className: "dshi_fieldRow" },
-              h("div", { className: "dshi_hint" }, "调试用：正常流程请点候选行「预览整理计划」（自动按该候选生成骨架并发送 previewPlan，不需要手写 JSON）。"),
-              h("label", { className: "dshi_label" }, "候选 id（完整 id，从候选行 title 或「原始数据」里复制）",
-                h("input", { className: "dshi_input", value: advancedCandidate, onChange: function (event) { setAdvancedCandidate(event.target.value); } })),
-              h("label", { className: "dshi_label" }, "proposal（buildDraft 形状，服务端严格校验；留空不发送）",
-                h("textarea", { className: "dshi_textarea", value: proposal, placeholder: "留空＝未填写（不发送）。按协议手写 link / merge-topic 形状。", onChange: function (event) { setProposal(event.target.value); } })),
-              h("div", { className: "dshi_row" },
-                h("button", { className: "dshi_btn", disabled: busy || ro || !loaded, onClick: doPreviewManual }, "发送预览（手动 proposal）"))) : null)),
-          // U5：计划列表独立成卡（不再挤在候选卡底部）；已执行 / 已作废默认折叠。
+          items.length === 0 || visibleRows.length === 0 ? h("div", { className: "dshi_hint" }, "（空）") : h("div", { className: "dshi_items" }, visibleRows)),
+          // 0.3：手动归档入口（原在「合并进主题」卡里，独立成卡；连线编辑不在这里，
+          // 在闪回图谱点节点打开的卡片详情里）。
           h("div", { className: "dshi_card" },
-          h("div", { className: "dshi_cardTitle" }, "计划（" + plans.length + "）"),
-          h("div", { className: "dshi_hint" }, "计划＝预览（previewPlan）生成的待执行变更，含 diff 与 planDigest；确认执行后标为「已执行」，被新预览作废的标为「已作废」。整理类计划请从对应候选的「预览整理计划 / 合并进主题」发起，遗忘类计划可用行内「预览遗忘计划」。"),
-          plans.length === 0 ? h("div", { className: "dshi_hint" }, "（空）") : null,
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_cardTitle" }, "专题索引归档（手动）"),
+            h("button", { className: "dshi_btn", disabled: busy || ro, onClick: loadTopics }, topics !== null && topics.loading ? "刷新中…" : "载入 / 刷新专题")),
+          h("div", { className: "dshi_hint" }, "移出索引只影响每轮注入的 L1 索引条目，正文保留，memory_read(key) 随时可读，memory_search 仍能搜到；恢复到索引随时可逆。"),
+          topics === null ? h("div", { className: "dshi_hint" }, "点「载入 / 刷新专题」列出当前 scope 的专题。") : null,
+          topics !== null && topics.loading ? h("div", { className: "dshi_loading" }, "主题列表加载中…") : null,
+          topics && topics.error ? ErrorBox(topics.error) : null,
+          topics && !topics.loading && !topics.error ? (topics.topics.length === 0
+            ? h("div", { className: "dshi_hint" }, "当前 scope 还没有专题。")
+            : (function () {
+              var unarchivedCount = sortTopicRows(topics.topics).filter(function (row) { return !(row && row.archived === true); }).length;
+              return h("div", { className: "dshi_items" },
+                h("div", { className: "dshi_hint" }, "未归档 " + unarchivedCount + " 篇。"),
+                sortTopicRows(topics.topics).map(renderArchiveTopicRow));
+            })()) : null),
+          // 计划列表独立成卡（只含遗忘计划）；已执行 / 已作废默认折叠。
+          h("div", { className: "dshi_card" },
+          h("div", { className: "dshi_cardTitle" }, "计划（" + visiblePlans.length + "）"),
+          h("div", { className: "dshi_hint" }, "计划＝预览（previewPlan）生成的待执行变更，含 diff 与 planDigest；确认执行后标为「已执行」，被新预览作废的标为「已作废」。遗忘计划由「分析遗忘候选」生成，行内「预览遗忘计划」后于确认卡执行。"),
+          visiblePlans.length === 0 ? h("div", { className: "dshi_hint" }, "（空）") : null,
           activePlans.length > 0 ? h("div", { className: "dshi_items" }, activePlans.map(renderPlanRow)) : null,
-          // U5：已执行 / 已作废默认折叠——原生 details（不写 open），行仍在 DOM 里，
+          // 已执行 / 已作废默认折叠——原生 details（不写 open），行仍在 DOM 里，
           // 点开即可切回来查看；组头带数量。
           archivedPlans.length > 0 ? h("details", { className: "dshi_details" },
             h("summary", { className: "dshi_groupHead" },
@@ -4592,12 +4142,12 @@ window.__ModuleLoader__.load({
     // ── F4：最近变更（getTimeline 时间线）────────────────────────────────
     // wire 不收 scope 入参：列表恒展示服务端按可信 scope 返回的条目（含 scope
     // 标签），前端不做跨 scope 过滤——要做得扩 wire，本期不做。
-    // 分页每页 100 条；hasMore=false 时禁用「下一页」。
+    // 分页每页 20 条（0.3 起：100 条一页太长，翻页找近期变更更直接）；hasMore=false 时禁用「下一页」。
     // scanLimited 提示里的 N 用下方 TIMELINE_SCAN_LIMIT：它是服务端
     // src/timeline/index.mjs TIMELINE_JOURNAL_SCAN_LIMIT（=4000）的手工同步副本
     //（审查 P3②；wire 不返回该值，前端拿不到真值只能落常数）。数据层一旦调整
     // 这个常量，必须同步改这里，否则「只扫描了最近 N 个文件」的数字会撒谎。
-    var TIMELINE_PAGE_SIZE = 100;
+    var TIMELINE_PAGE_SIZE = 20;
     // 同步副本：与 src/timeline/index.mjs 的 TIMELINE_JOURNAL_SCAN_LIMIT（4000）一致。
     var TIMELINE_SCAN_LIMIT = 4000;
     var TIMELINE_ACTION_LABELS = {
@@ -4725,7 +4275,8 @@ window.__ModuleLoader__.load({
       { id: "memory", label: "记忆内容" },
       { id: "graph", label: "闪回图谱" },
       // U5 改名：候选审阅 + 计划执行合称「整理与遗忘」（tab id 仍为 candidates，协议不变）。
-      { id: "candidates", label: "整理与遗忘" },
+      // 0.3 收敛：整理流程裁撤，本页只做遗忘，tab 名同步只讲遗忘。
+      { id: "candidates", label: "遗忘" },
       { id: "topics", label: "专题" },
       { id: "flashbacks", label: "闪回命中" },
       { id: "budgets", label: "记忆预算" }

@@ -242,19 +242,21 @@ async function mountCandidatesTab() {
   return { render };
 }
 
-test("F7 置灰：只读态候选页「分析」按钮禁用（与服务端 assertHostWritable 同口径）", async () => {
+test("F7 置灰：只读态候选页「分析遗忘候选」按钮禁用（与服务端 assertHostWritable 同口径）", async () => {
   const { render } = await mountCandidatesTab();
   const roTree = render(true);
-  for (const label of ["分析整理候选", "分析遗忘候选"]) {
+  // 0.3：整理入口（分析整理候选）裁撤，唯一 analyze 入口是「分析遗忘候选」
+  for (const label of ["分析遗忘候选"]) {
     const button = findButtons(roTree, label)[0];
     assert.ok(button, label + " 按钮在");
     assert.equal(button.props.disabled, true, label + " 只读态禁用");
   }
   assert.ok(collectText(roTree).includes("写操作已停用"), "页内说明置灰原因");
   const normalTree = render(undefined);
-  for (const label of ["分析整理候选", "分析遗忘候选"]) {
+  for (const label of ["分析遗忘候选"]) {
     assert.notEqual(findButtons(normalTree, label)[0].props.disabled, true, label + " 可写态可用");
   }
+  assert.equal(findButtons(roTree, "分析整理候选").length, 0, "removed organize analyze button absent");
 });
 
 // ---------------------------------------------------------------------------

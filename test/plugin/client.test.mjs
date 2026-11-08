@@ -734,7 +734,10 @@ function loadedStates(sessionId) {
   return [
     // 真实形状补正（review a1 打回项 1）：link 候选必是两卡配对，扁平 candidateId 形状保留，
     // 但 sources 必须给足 2 张——单源候选会被 proposalSkeleton 本地拦截，previewPlan 发不出。
-    { queueRevision: 0, items: [{ candidateId: "candidate-A", kind: "link", sources: [{ id: "s-a" }, { id: "s-b" }] }], plans: [] },
+    // 0.3：organize 预览入口裁撤后，previewPlan 无损 / R4 在途预览改走遗忘计划行内预览，
+    // 故 fixture 带一条 open 的 forgetting 计划。
+    { queueRevision: 0, items: [{ candidateId: "candidate-A", kind: "link", sources: [{ id: "s-a" }, { id: "s-b" }] }],
+      plans: [{ planId: "fp-A", kind: "forgetting", planDigest: "digest-fp", queueRevision: null, changedItems: 1, summary: "archive 1 ephemeral card(s)", createdAt: "2026-11-01T00:00:00.000Z", executed: false, superseded: false }] },
     null, false, JSON.stringify({ kind: "link", links: [{ id: "s1", after: [{ target: "t-a", rel: null }] }] }), null, null,
     { sessionId, gen: 0 },
   ];
@@ -754,10 +757,10 @@ test("R3 回归：数据未加载时不发送 expectedQueueRevision，payload �
   };
   host.states.length = 0; // 未加载：data=null
   let tree = renderCandidates(dsh, "session-A");
-  // 未加载：写动作按钮必须禁用
-  assert.equal(findButton(tree, "分析整理候选").props.disabled, true, "analyze disabled before load");
+  // 未加载：写动作按钮必须禁用（0.3 整理流程裁撤后唯一的 analyze 入口是「分析遗忘候选」）
+  assert.equal(findButton(tree, "分析遗忘候选").props.disabled, true, "analyze disabled before load");
   // 即便被直接触发（无障碍/脚本场景），payload 也不得含 undefined 值字段
-  findButton(tree, "分析整理候选").props.onClick();
+  findButton(tree, "分析遗忘候选").props.onClick();
   await flush();
   const analyze = calls.find((c) => c.method === "analyze");
   assert.ok(analyze, "analyze call issued");
@@ -773,8 +776,9 @@ test("R3 回归：数据已加载时 expectedQueueRevision 以数值附带，pre
   const calls = [];
   let previewResolve;
   // 真实形状补正（review a1 打回项 1 延伸）：analyze 的真实响应是 queueDto（setData 整包
-  // 替换），stub 返回 {} 会把队列冲空、候选消失；listCandidates 同步给两卡配对的 link 候选。
-  const analyzeQueueDto = { queueRevision: 0, items: [{ candidateId: "candidate-A", kind: "link", sources: [{ id: "s-a" }, { id: "s-b" }] }], plans: [] };
+  // 替换），stub 返回 {} 会把队列冲空、候选消失；listCandidates 同步给两卡配对的 link 候选
+  // 与 forgetting 计划（0.3：previewPlan 无损改走遗忘计划行内预览，analyze 整包替换后仍要在场）。
+  const analyzeQueueDto = { queueRevision: 0, items: [{ candidateId: "candidate-A", kind: "link", sources: [{ id: "s-a" }, { id: "s-b" }] }], plans: loadedStates("x")[0].plans };
   const dsh = {
     call: async (method, session, payload) => {
       calls.push({ method, session, payload });
@@ -787,21 +791,23 @@ test("R3 回归：数据已加载时 expectedQueueRevision 以数值附带，pre
   host.states.length = 0;
   host.states.push(...loadedStates("session-A"));
   let tree = renderCandidates(dsh, "session-A");
-  assert.equal(findButton(tree, "分析整理候选").props.disabled, false, "analyze enabled after load");
-  findButton(tree, "分析整理候选").props.onClick();
+  assert.equal(findButton(tree, "分析遗忘候选").props.disabled, false, "analyze enabled after load");
+  findButton(tree, "分析遗忘候选").props.onClick();
   await flush();
   const analyze = calls.find((c) => c.method === "analyze");
   assert.equal(analyze.payload.expectedQueueRevision, 0, "loaded revision attached as number");
   assert.equal(isRemoteJsonValue(analyze.payload), true);
 
+  // 0.3：organize 预览（预览整理计划）已裁撤；previewPlan 无损改走遗忘计划行内预览
+  //（doPreviewForgetting 不带 expectedQueueRevision——它不改队列，凭 planDigest 校验）。
   calls.length = 0;
   tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "预览整理计划").props.onClick();
+  findButton(tree, "预览遗忘计划").props.onClick();
   assert.ok(previewResolve, "previewPlan in flight");
-  previewResolve({ kind: "organize", planId: "plan-A", planDigest: "digest-A", summary: "ok", diff: [] });
+  previewResolve({ kind: "forgetting", planId: "fp-A", planDigest: "digest-fp", summary: "ok", diff: [] });
   await flush();
   const preview = calls.find((c) => c.method === "previewPlan");
-  assert.equal(preview.payload.expectedQueueRevision, 0);
+  assert.equal(preview.payload.kind, "forgetting");
   assert.equal(isRemoteJsonValue(preview.payload), true, "previewPlan payload lossless");
 });
 
@@ -819,11 +825,12 @@ test("R4 回归：A 会话在途预览在切到 B 会话后完成——不得渲
       return {};
     },
   };
-  // 会话 A：已加载，点击 preview organize（在途挂起）
+  // 会话 A：已加载，点击「预览遗忘计划」（在途挂起；0.3 organize 预览入口裁撤后
+  // previewPlan 的会话守卫语义改由遗忘计划行内预览承载）
   host.states.length = 0;
   host.states.push(...loadedStates("session-A"));
   let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "预览整理计划").props.onClick();
+  findButton(tree, "预览遗忘计划").props.onClick();
   assert.ok(previewResolve, "previewPlan for session-A in flight");
 
   // 切到会话 B：渲染并运行 effects（同一 guard 对象，会话守卫清状态 + load）
@@ -832,7 +839,7 @@ test("R4 回归：A 会话在途预览在切到 B 会话后完成——不得渲
   await flush();
 
   // A 的预览此刻才完成：必须被代际守卫丢弃
-  previewResolve({ kind: "organize", planId: "plan-A", planDigest: "digest-A", summary: "preview A", diff: [] });
+  previewResolve({ kind: "forgetting", planId: "fp-A", planDigest: "digest-fp", summary: "preview A", diff: [] });
   await flush();
 
   tree = renderCandidates(dsh, "session-B");
@@ -2215,7 +2222,9 @@ function clusterLoadedStates(sessionId) {
   ];
 }
 
-test("Q-A 回归：cluster 候选渲染「合并进主题」入口；主题列表经 executeTool 拉取", async () => {
+
+
+test("Q-B 回归：遗忘计划预览与执行的错误路径给出可读中文提示（UNSUPPORTED / REVISION_CONFLICT / NOT_FOUND），原 code 保留", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
@@ -2223,144 +2232,9 @@ test("Q-A 回归：cluster 候选渲染「合并进主题」入口；主题列�
   const dsh = {
     call: async (method, session, payload) => {
       calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 5, items: [], plans: [] };
-      if (method === "executeTool" && payload.name === "memory_list_topics") {
-        return { topics: [
-          { key: "t-live", title: "活主题", summary: "s", updated: "2026-10-26T10:00:00.000Z", revision: "shiori-r1.AbCdEf.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
-          { key: "t-legacy", title: "旧主题", summary: "s", updated: "legacy-unknown", revision: "shiori-r1.OlD.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
-        ] };
+      if (method === "listCandidates") {
+        return { queueRevision: 0, items: [], plans: [{ planId: "fp-1", kind: "forgetting", planDigest: "d", executed: false, superseded: false }] };
       }
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(...clusterLoadedStates("session-A"));
-  let tree = renderCandidates(dsh, "session-A", { effects: false });
-  // 行头显示的是 item.candidate.id（真机嵌套 DTO），不是数组下标
-  const rowText = collectText(tree);
-  assert.ok(rowText.includes("cluster-A") && rowText.includes("link-B"), "candidate.id rendered as row id");
-  assert.ok(!/(^|\n)0(\n|$)/.test(rowText.split("候选（")[1]?.split("计划（")[0] ?? ""), "no bare index as row id");
-  // 入口只出现在 cluster 候选行（link-B 没有）
-  const mergeButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("合并进主题"));
-  assert.equal(mergeButtons.length, 1, "merge entry rendered once (cluster candidate only)");
-  assert.equal(mergeButtons[0].props.disabled, false, "merge entry enabled after load");
-
-  mergeButtons[0].props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(text.includes("合并进主题（候选 cluster-…）"), "merge card open for cluster-A");
-  assert.ok(text.includes("t-live"), "non-legacy topic listed with key");
-  assert.ok(text.includes("rev shiori-r1.AbCdEf"), "revision prefix shown for topic");
-  // U6：legacy 概念整体删除——updated 异常的行也按普通主题列出，不再过滤。
-  assert.ok(text.includes("t-legacy"), "all topics listed (legacy filtering removed)");
-  assert.ok(text.includes("新建主题"), "create-topic section available");
-  const listCall = calls.find((c) => c.method === "executeTool" && c.payload.name === "memory_list_topics");
-  assert.ok(listCall, "topics fetched via executeTool memory_list_topics");
-  assert.deepEqual(listCall.payload.args, {}, "memory_list_topics called with empty args");
-  assert.equal(listCall.session, "session-A");
-});
-
-test("Q-A 回归：新建主题路径以服务端返回的 revision token 构造 proposal；previewPlan 携带 candidateId 与 expectedQueueRevision；diff 被渲染", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  let listTopicsCount = 0;
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 5, items: [], plans: [] };
-      if (method === "executeTool" && payload.name === "memory_list_topics") {
-        listTopicsCount += 1;
-        // 第一次（openMerge）：无主题 → 提示需要新建；第二次（创建后）：含新主题
-        return listTopicsCount === 1
-          ? { topics: [] }
-          : { topics: [
-              { key: "t-new", title: "新主题", summary: "一行摘要", updated: "2026-10-26T15:10:00.000Z", revision: "shiori-r1.Fr3sH.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
-            ] };
-      }
-      if (method === "executeTool" && payload.name === "topic_create") return { created: true, topic: payload.args.topic };
-      if (method === "executeTool" && payload.name === "memory_read") {
-        return { exists: true, content: "# 旧正文\n", revision: "shiori-r1.R34D.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" };
-      }
-      if (method === "previewPlan") {
-        return { kind: "organize", proposalKind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "ok", diff: [
-          { path: "topic:t-new", oldText: "# 旧正文\n", newText: "# 旧正文\n\n## 合并记忆：项目X\n" },
-          { path: "spark:s1", oldText: "a", newText: "b" },
-        ] };
-      }
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(...clusterLoadedStates("session-A"));
-  let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "合并进主题").props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  assert.ok(collectText(tree).includes("还没有主题"), "no topic → create hint");
-
-  // 填新建主题表单（每次 onChange 后重渲染，闭包取最新 state）
-  const setInput = (placeholder, value) => {
-    tree = renderCandidates(dsh, "session-A");
-    const input = flattenVNode(tree).find((n) => n.type === "input" && n.props.placeholder === placeholder);
-    assert.ok(input, `input "${placeholder}" present`);
-    input.props.onChange({ target: { value } });
-  };
-  setInput("key（安全文件名，core 保留）", "t-new");
-  setInput("标题", "新主题");
-  setInput("单行摘要（≤60 字符）", "一行摘要");
-  tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "创建并选择").props.onClick();
-  await flush();
-
-  tree = renderCandidates(dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(text.includes("合并表单（目标 t-new）"), "merge form opened for created topic");
-  assert.ok(text.includes("token(memory_read)"), "token sourced from server read");
-
-  // 预览 diff
-  tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "预览 diff（previewPlan）").props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  const previewCall = calls.find((c) => c.method === "previewPlan");
-  assert.ok(previewCall, "previewPlan sent");
-  assert.equal(previewCall.payload.kind, "organize");
-  assert.equal(previewCall.payload.candidateId, "cluster-A");
-  assert.equal(previewCall.payload.expectedQueueRevision, 5, "queue revision attached");
-  assert.equal(typeof previewCall.payload.operationId, "string");
-  assert.equal(previewCall.payload.proposal.kind, "merge-topic");
-  assert.equal(previewCall.payload.proposal.topic.key, "t-new");
-  assert.equal(previewCall.payload.proposal.topic.expectedRevision,
-    "shiori-r1.R34D.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "server-issued token carried into proposal");
-  assert.equal(previewCall.payload.proposal.topic.before, "# 旧正文\n", "before loaded from memory_read (never empty)");
-  assert.ok(previewCall.payload.proposal.topic.after.startsWith(previewCall.payload.proposal.topic.before), "after keeps before (append-only)");
-  assert.equal(previewCall.payload.proposal.topic.title, "新主题");
-  assert.ok(isRemoteJsonValue(previewCall.payload), "merge preview payload lossless");
-  const previewText = collectText(tree);
-  assert.ok(previewText.includes("topic:t-new"), "diff entry path rendered");
-  assert.ok(previewText.includes("spark:s1"), "spark diff entry rendered");
-  assert.ok(previewText.includes("plan-M") && previewText.includes("digest-M"), "planId/digest rendered");
-  // topic_create 请求形状
-  const createCall = calls.find((c) => c.method === "executeTool" && c.payload.name === "topic_create");
-  assert.equal(createCall.payload.args.topic, "t-new");
-  assert.equal(createCall.payload.args.summary, "一行摘要");
-  assert.equal(typeof createCall.payload.args.operationId, "string");
-});
-
-test("Q-A/Q-B 回归：合并与执行的错误路径给出可读中文提示（UNSUPPORTED / REVISION_CONFLICT / NOT_FOUND），原 code 保留", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const TOKEN = "shiori-r1.T0k.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 0, items: [], plans: [] };
       if (method === "previewPlan") {
         throw Object.assign(new Error("legacy topics remain read-only"), { code: "UNSUPPORTED" });
       }
@@ -2372,22 +2246,13 @@ test("Q-A/Q-B 回归：合并与执行的错误路径给出可读中文提示（
   };
   host.states.length = 0;
   host.states.push(
-    // merge 卡片改为「就地展开」：只有队列里存在被点击的那一行时才渲染，故这里必须真给一条 cluster 候选
-    { queueRevision: 0, items: [{ candidate: { id: "cluster-A", kind: "cluster", scopeId: "default", sources: [{ id: "s1", revision: 1 }, { id: "s2", revision: 1 }], evidence: {} }, status: "pending" }], plans: [] },
-    // proposal 预填合法 link 形状（NOT_FOUND 阶段要真正发 previewPlan 才能测服务端错误映射）
-    null, false, JSON.stringify({ kind: "link", links: [{ id: "s1", after: [{ target: "t-a", rel: null }] }] }),
-    // preview：预置一条 merge-topic 预览（走确认执行错误路径；planView 用服务端真实形状 kind:"organize"+proposalKind）
-    { sessionId: "session-A", plan: { kind: "organize", proposalKind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "", diff: [] }, queueRevision: 0 },
-    null,
-    { sessionId: "session-A", gen: 0 },
-    // Q-A 新增 hook：merge / topics / mergeForm / newTopic
-    { candidateId: "cluster-A" },
-    { loading: false, error: null, topics: [{ key: "t-live", title: "T", summary: "s", updated: "2026-10-26T00:00:00.000Z", revision: TOKEN }], total: 1 },
-    { key: "t-live", expectedRevision: TOKEN, tokenSource: "memory_read", before: "# 旧正文\n", after: "# 旧正文\n\n追加\n", title: "T", summary: "s", updated: "2026-10-26T00:00:00.000Z" },
-    { topic: "", title: "", summary: "", busy: false, error: null });
+    { queueRevision: 0, items: [], plans: [{ planId: "fp-1", kind: "forgetting", planDigest: "d", executed: false, superseded: false }] },
+    null, false, "", null, null,
+    { sessionId: "session-A", gen: 0 });
 
+  // UNSUPPORTED：遗忘计划行内「预览遗忘计划」触达服务端错误映射
   let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "预览 diff（previewPlan）").props.onClick();
+  findButton(tree, "预览遗忘计划").props.onClick();
   await flush();
   tree = renderCandidates(dsh, "session-A");
   let text = collectText(tree);
@@ -2395,11 +2260,10 @@ test("Q-A/Q-B 回归：合并与执行的错误路径给出可读中文提示（
   assert.ok(text.includes("不支持该操作"), "UNSUPPORTED explained in Chinese");
   assert.ok(text.includes("legacy topics remain read-only"), "original message retained");
 
-  // previewPlan 失败已清空 preview：直接预置一条预览（模拟用户此前已成功预览）再执行
-  host.states[4] = { sessionId: "session-A", plan: { kind: "organize", proposalKind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "", diff: [] }, queueRevision: 0 };
+  // REVISION_CONFLICT：预置一条已成功预览（模拟用户此前已预览过），走确认执行错误路径
+  host.states[4] = { sessionId: "session-A", plan: { kind: "forgetting", planId: "fp-1", planDigest: "digest-F", summary: "", diff: [] } };
   tree = renderCandidates(dsh, "session-A");
-  // U5b rework：确认按钮按 kind 翻文案——merge-topic → 「确认合并（不可撤销）」（审查授权改）
-  findButton(tree, "确认合并（不可撤销）").props.onClick();
+  findButton(tree, "确认执行").props.onClick();
   await flush();
   tree = renderCandidates(dsh, "session-A");
   text = collectText(tree);
@@ -2407,25 +2271,24 @@ test("Q-A/Q-B 回归：合并与执行的错误路径给出可读中文提示（
   assert.ok(text.includes("plan already executed"), "original message retained");
   assert.equal(calls.filter((c) => c.method === "executePlan").length, 1, "executePlan attempted once");
 
-  // NOT_FOUND：过期候选的 preview organize（guard 已把 data 刷成空列表，补一条候选）
+  // NOT_FOUND：过期的遗忘计划预览（guard 已把 data 刷成空列表，补一条计划）
   calls.length = 0;
-  // 真实形状补正（review a1 打回项 4）：两卡配对的 link 候选才能发出 previewPlan 触达服务端 NOT_FOUND。
-  host.states[0] = { queueRevision: 0, items: [{ candidateId: "cand-1", kind: "link", sources: [{ id: "s-a" }, { id: "s-b" }] }], plans: [] };
+  host.states[0] = { queueRevision: 0, items: [], plans: [{ planId: "fp-gone", kind: "forgetting", planDigest: "d2", executed: false, superseded: false }] };
   const boomDsh = {
     call: async (method, session, payload) => {
       calls.push({ method, session, payload });
       if (method === "listCandidates") return { queueRevision: 0, items: [], plans: [] };
-      if (method === "previewPlan") throw Object.assign(new Error("candidate sources missing"), { code: "NOT_FOUND" });
+      if (method === "previewPlan") throw Object.assign(new Error("plan no longer open"), { code: "NOT_FOUND" });
       return {};
     },
   };
   tree = renderCandidates(boomDsh, "session-A");
-  findButton(tree, "预览整理计划").props.onClick();
+  findButton(tree, "预览遗忘计划").props.onClick();
   await flush();
   tree = renderCandidates(boomDsh, "session-A");
   text = collectText(tree);
   assert.ok(text.includes("[NOT_FOUND]"), "NOT_FOUND code preserved");
-  assert.ok(text.includes("该候选或计划已过期") && text.includes("重新分析"), "stale-candidate guidance shown");
+  assert.ok(text.includes("该候选或计划已过期") && text.includes("点「刷新」重新读取"), "stale guidance points to 刷新 (0.3 无再分析入口)");
 });
 
 test("Q-B 回归：队列 revision 前进后旧 preview 拒绝执行（executePlan 零调用）；revision 一致时正常执行", async () => {
@@ -2480,7 +2343,6 @@ test("Q-B 回归：plans 列表区分 open/executed/superseded——executed 与
     { planId: "plan-open", kind: "forgetting", planDigest: "d1", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-10-27T00:00:00.000Z", executed: false, superseded: false },
     { planId: "plan-done", kind: "forgetting", planDigest: "d2", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-10-27T00:01:00.000Z", executed: true, superseded: false },
     { planId: "plan-sup", kind: "forgetting", planDigest: "d4", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-10-27T00:02:00.000Z", executed: false, superseded: true },
-    { planId: "plan-merge", kind: "merge-topic", planDigest: "d3", queueRevision: 0, changedItems: 2, summary: "s", createdAt: "2026-10-27T00:03:00.000Z", executed: false, superseded: false },
   ];
   const dsh = {
     call: async (method, session, payload) => {
@@ -2509,7 +2371,7 @@ test("Q-B 回归：plans 列表区分 open/executed/superseded——executed 与
   assert.ok(!text.includes("op op-9"), "no fake operationId: real DTO has no executedWith");
   assert.ok(text.includes("该计划已执行：不可再次预览 / 执行"), "executed row hint");
   assert.ok(text.includes("该计划已被新预览作废（superseded）"), "superseded row hint");
-  assert.ok(text.includes("organize 计划请从对应候选"), "organize-kind plan hint");
+  // 0.3：整理类计划卡裁撤——kind=organize/merge-topic 的计划不再渲染（上面夹具已只含 forgetting）
   // preview forgetting：open 行可用；superseded 行渲染但禁用（点了也不发）；executed 行不渲染
   const previewButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("预览遗忘计划"));
   assert.equal(previewButtons.length, 2, "open + superseded forgetting rows render the button");
@@ -2560,7 +2422,7 @@ test("Q-C 回归：diagnostics 新字段容错——codec/transport 等未知字
 // 夹具一律用宿主真实 queueDto 形状 { candidate: {id,kind,scopeId,sources,evidence}, status }。
 // ---------------------------------------------------------------------------
 
-test("Q-A 回归（真实 queueDto）：reviewed / dismissed / preview organize 三按钮发出的 candidateId 均为 item.candidate.id，不退化为数组下标", async () => {
+test("Q-A 回归（真实 queueDto）：reviewed / dismissed 两按钮发出的 candidateId 均为 item.candidate.id，不退化为数组下标", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
@@ -2569,42 +2431,32 @@ test("Q-A 回归（真实 queueDto）：reviewed / dismissed / preview organize 
     call: async (method, session, payload) => {
       calls.push({ method, session, payload });
       if (method === "listCandidates") return { queueRevision: 5, items: clusterLoadedStates("x")[0].items, plans: [] };
-      if (method === "previewPlan") return { kind: "organize", planId: "plan-L", planDigest: "digest-L", summary: "", diff: [] };
       return {};
     },
   };
   host.states.length = 0;
-  // U5 起点行按钮直接按候选生成骨架发送（旧注释：预填合法 link 形状再发送——已删除）。
-  // states[3] 保留旧 fixture 值，正好用于兜底：发出的 proposal 不得来自这份陈旧内容。
   host.states.push(...clusterLoadedStates("session-A"));
-  host.states[3] = JSON.stringify({ kind: "link", links: [{ id: "s1", after: [{ target: "t-a", rel: null }] }] });
   let tree = renderCandidates(dsh, "session-A");
   const buttonsOf = (label) => flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes(label));
 
-  // 第一行 cluster-A：三按钮都发 candidate.id
-  // U5 改口径：旧断言取「标记已阅」按钮（已改名「稍后再说」，契约 decision=reviewed 不变）；
-  // 「预览整理计划」改为点一次直接发送（旧共享文本框已删除，无零调用前置）。
+  // 第一行 cluster-A：审阅按钮发 candidate.id（0.3：preview organize 按钮随整理流程裁撤）
   buttonsOf("稍后再说")[0].props.onClick();
   buttonsOf("忽略")[0].props.onClick();
-  buttonsOf("预览整理计划")[0].props.onClick();
   await flush();
   const reviewed = calls.find((c) => c.method === "reviewCandidate" && c.payload.decision === "reviewed");
   const dismissed = calls.find((c) => c.method === "reviewCandidate" && c.payload.decision === "dismissed");
-  const preview = calls.find((c) => c.method === "previewPlan");
-  assert.ok(reviewed && dismissed && preview, "three actions issued");
+  assert.ok(reviewed && dismissed, "review actions issued");
   assert.equal(reviewed.payload.candidateId, "cluster-A", "reviewed sends candidate.id");
   assert.equal(dismissed.payload.candidateId, "cluster-A", "dismissed sends candidate.id");
-  assert.equal(preview.payload.candidateId, "cluster-A", "preview organize sends candidate.id");
 
   // 第二行 link-B：同样发 candidate.id
   calls.length = 0;
   tree = renderCandidates(dsh, "session-A");
-  const linkButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("预览整理计划"));
-  linkButtons[1].props.onClick();
+  buttonsOf("稍后再说")[1].props.onClick();
   await flush();
-  const linkPreview = calls.find((c) => c.method === "previewPlan");
-  assert.ok(linkPreview, "link row preview issued");
-  assert.equal(linkPreview.payload.candidateId, "link-B", "link row sends candidate.id (not index 1)");
+  const linkReview = calls.find((c) => c.method === "reviewCandidate");
+  assert.ok(linkReview, "link row review issued");
+  assert.equal(linkReview.payload.candidateId, "link-B", "link row sends candidate.id (not index 1)");
 
   // 兜底断言：任何发出去的 candidateId 都不是纯下标
   const sentIds = calls.filter((c) => c.payload && c.payload.candidateId !== undefined).map((c) => c.payload.candidateId);
@@ -2654,47 +2506,6 @@ test("Q-A 回归：旧扁平形状兼容——candidateId 仍被读取；缺业�
     "no index ever sent as candidateId");
 });
 
-test("U5 回归（原 Q-B）：点一次「预览整理计划」即按该候选生成骨架发送——candidateId 用嵌套 id，proposal 来自候选 sources 而非陈旧共享文本", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  // 真实形状补正（review a1 打回项 5）：link 候选两卡配对，补第二张源卡（断言不动，
-  // links[0].id 仍是 s3、after 非空由真实 target s4 满足而非占位符）。
-  const nestedItems = [{ candidate: { id: "link-B", kind: "link", scopeId: "default", sources: [{ id: "s3", revision: 1 }, { id: "s4", revision: 1 }], evidence: {} }, status: "pending" }];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 0, items: nestedItems, plans: [] };
-      if (method === "previewPlan") return { kind: "organize", planId: "plan-L", planDigest: "digest-L", summary: "", diff: [] };
-      return {};
-    },
-  };
-  host.states.length = 0;
-  // states[3] 保留一份「陈旧共享文本框内容」（旧 B-Q2 时代的死值/手写残留）：
-  // U5 已删除共享文本框，点行预览必须完全忽略它，改按候选 sources 现生成骨架。
-  host.states.push(
-    { queueRevision: 0, items: nestedItems, plans: [] },
-    null, false, JSON.stringify({ kind: "link", links: [{ id: "stale", after: [{ target: "stale-target", rel: "related" }] }] }), null, null,
-    { sessionId: "session-A", gen: 0 });
-  let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "预览整理计划").props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  // 旧断言「死 proposal 零调用」场景已不存在（共享文本框删除）；契约内核改为：
-  // 一次点击 → 恰好一次 previewPlan，proposal 来自该候选 sources，绝不携带陈旧内容。
-  const previews = calls.filter((c) => c.method === "previewPlan");
-  assert.equal(previews.length, 1, "exactly one previewPlan sent on a single click");
-  const preview = previews[0];
-  assert.equal(preview.payload.candidateId, "link-B", "nested candidate.id sent");
-  assert.equal(preview.payload.proposal.kind, "link");
-  assert.ok(Array.isArray(preview.payload.proposal.links) && preview.payload.proposal.links.length > 0,
-    "links non-empty");
-  assert.equal(preview.payload.proposal.links[0].id, "s3", "links[0].id comes from the candidate's own sources");
-  assert.equal(preview.payload.proposal.links.some((l) => l.id === "stale" || (l.after || []).some((e) => e.target === "stale-target")), false,
-    "stale shared-textbox content is never reused");
-  assert.ok(isRemoteJsonValue(preview.payload), "payload lossless per isRemoteJsonValue");
-});
 
 // ---------------------------------------------------------------------------
 // 第 6 轮返工回归（owner a5 复核 r-5f0dd70f：B-Q3 details 遮断 / B-Q2 死默认值 /
@@ -2802,96 +2613,7 @@ test("B-Q3 回归：rpc-stopped 出口 details 为对象且携带 method；INVAL
     "INVALID_INPUT violations reachable on the client after JSON round-trip");
 });
 
-test("U5 回归（原 B-Q2）：link / cluster 行点一次「预览整理计划」即按各自 sources 生成骨架发送，共享 proposal 文本框不再读写", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const nestedItems = [
-    { candidate: { id: "link-B", kind: "link", scopeId: "default", sources: [{ id: "spk-3", revision: 1 }, { id: "spk-4", revision: 1 }], evidence: {} }, status: "pending" },
-    { candidate: { id: "cluster-A", kind: "cluster", scopeId: "default", sources: [{ id: "spk-1", revision: 1 }, { id: "spk-2", revision: 1 }], evidence: { field: "entities", sharedTerm: "项目X" } }, status: "pending" },
-  ];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 0, items: nestedItems, plans: [] };
-      if (method === "previewPlan") return { kind: "organize", planId: "plan-L", planDigest: "digest-L", summary: "", diff: [] };
-      return {};
-    },
-  };
-  host.states.length = 0;
-  // proposal 状态保留（states[3]）但共享文本框已删除：点行预览不再读它，也不写它。
-  host.states.push(
-    { queueRevision: 0, items: nestedItems, plans: [] },
-    null, false, "", null, null,
-    { sessionId: "session-A", gen: 0 });
-  let tree = renderCandidates(dsh, "session-A");
-  // U5：kind 分组后 flatten 序 = 组顺序（cluster → link），故 [0] 是 cluster 行、[1] 是 link 行。
-  const previewButtons = () => flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("预览整理计划"));
 
-  // link 候选：点一次 → 直接按该候选 sources 生成骨架并发送（旧两步「预填→再点」已合并为一步）；
-  // 共享 proposal 文本框不再被写入（states[3] 保持空串）。
-  previewButtons()[1].props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  const linkPreviews = calls.filter((c) => c.method === "previewPlan");
-  assert.equal(linkPreviews.length, 1, "skeleton sent on first click (no editing step)");
-  assert.deepEqual(linkPreviews[0].payload.proposal.links, [{ id: "spk-3", after: [{ target: "spk-4", rel: "related" }] }],
-    "skeleton uses the candidate's real source ids");
-  assert.equal(linkPreviews[0].payload.candidateId, "link-B", "link row sends its own candidate.id");
-  assert.equal(host.states[3], "", "shared proposal textbox state no longer written by row preview");
-
-  // cluster 候选：点一次 → 同样按 sources 生成 link 骨架发送（旧「指引走合并进主题、零 RPC」
-  // 不再成立；「合并进主题」入口的存在性由 Q-A/展示引导用例覆盖，不在此重复）。
-  calls.length = 0;
-  tree = renderCandidates(dsh, "session-A");
-  previewButtons()[0].props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  const clusterPreviews = calls.filter((c) => c.method === "previewPlan");
-  assert.equal(clusterPreviews.length, 1, "cluster row preview sends one previewPlan");
-  assert.equal(clusterPreviews[0].payload.candidateId, "cluster-A", "cluster row sends its own candidate.id");
-  assert.deepEqual(clusterPreviews[0].payload.proposal.links, [{ id: "spk-1", after: [{ target: "spk-2", rel: "related" }] }],
-    "cluster skeleton built from its own sources");
-});
-
-test("U5 回归（原 B-Q2）：手写 proposal 的多余键 / rel 类型错误被本地校验拦下（高级区发送，previewPlan 零调用，中文点名多余键）", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const nestedItems = [{ candidate: { id: "link-B", kind: "link", scopeId: "default", sources: [{ id: "spk-3", revision: 1 }], evidence: {} }, status: "pending" }];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 0, items: nestedItems, plans: [] };
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(
-    { queueRevision: 0, items: nestedItems, plans: [] },
-    null, false, JSON.stringify({ kind: "link", links: [{ id: "spk-3", after: [{ target: "t1", rel: 3 }], note: "多余键" }] }),
-    null, null,
-    { sessionId: "session-A", gen: 0 });
-  let tree = renderCandidates(dsh, "session-A");
-  // U5：手写入口移到「高级：手动编辑 proposal」区（默认折叠）——点组头展开，
-  // 填候选 id 后点「发送预览（手动 proposal）」走本地校验（协议校验逻辑与旧 B-Q2 一致）。
-  const advHead = flattenVNode(tree).find((n) => n.type === "button" && String(n.props.className || "").includes("dshi_groupHead") && collectText(n).includes("高级：手动编辑 proposal"));
-  assert.ok(advHead, "advanced section header present");
-  advHead.props.onClick();
-  tree = renderCandidates(dsh, "session-A");
-  const advInput = flattenVNode(tree).find((n) => n.type === "input" && String(n.props.className || "") === "dshi_input");
-  assert.ok(advInput, "advanced candidate id input present");
-  advInput.props.onChange({ target: { value: "link-B" } });
-  tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "发送预览（手动 proposal）").props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  assert.equal(calls.filter((c) => c.method === "previewPlan").length, 0, "malformed proposal never sent");
-  const text = collectText(tree);
-  assert.ok(text.includes("存在多余键") && text.includes("note"), "extra key named in Chinese");
-});
 
 // ---------------------------------------------------------------------------
 // 展示层步骤引导（merge 卡片）：未选目标主题 → ① 进行中 + 中性提示；选定 → 合并表单/预览按钮
@@ -2915,131 +2637,13 @@ function mergeTopicsDsh(calls) {
   };
 }
 
-test("展示引导 T1：合并卡未选目标主题时显示 ① 进行中步骤与「还没有选择目标主题」中性提示，且无合并表单/预览按钮", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const dsh = mergeTopicsDsh(calls);
-  host.states.length = 0;
-  host.states.push(...clusterLoadedStates("session-A"));
-  let tree = renderCandidates(dsh, "session-A", { effects: false });
-  findButton(tree, "合并进主题").props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(text.includes("合并流程（3 步"), "numbered step guidance rendered");
-  assert.ok(text.includes("① 进行中"), "step 1 marked in progress while no target topic");
-  assert.ok(text.includes("② 待完成") && text.includes("③ 待完成"), "later steps dim / pending");
-  assert.ok(text.includes("还没有选择目标主题"), "explicit neutral hint about missing target topic");
-  assert.ok(text.includes("选定之后才会出现「合并表单」和「预览 diff」按钮"), "hint explains what appears after choosing");
-  assert.ok(!text.includes("合并表单（目标"), "no merge form heading before choosing a topic");
-  const previewButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("预览 diff（previewPlan）"));
-  assert.equal(previewButtons.length, 0, "no preview diff button before choosing a topic");
-  const errorBoxes = flattenVNode(tree).filter((n) => n.type === "div" && n.props && typeof n.props.className === "string" && n.props.className.includes("dshi_error"));
-  assert.equal(errorBoxes.length, 0, "neutral hint is not an error box");
-});
 
-test("展示引导 T2：选中主题后出现「合并表单（目标 t-live）」与预览按钮，未选提示消失、步骤推进到 ③", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const dsh = mergeTopicsDsh(calls);
-  host.states.length = 0;
-  host.states.push(...clusterLoadedStates("session-A"));
-  let tree = renderCandidates(dsh, "session-A", { effects: false });
-  findButton(tree, "合并进主题").props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "合并到这个主题").props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(text.includes("合并表单（目标 t-live）"), "merge form appears for chosen topic");
-  const previewButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("预览 diff（previewPlan）"));
-  assert.equal(previewButtons.length, 1, "preview diff button rendered once in merge form");
-  assert.ok(!text.includes("还没有选择目标主题"), "missing-target hint gone after choosing");
-  assert.ok(text.includes("已在合并表单中"), "next-step hint replaces the missing-target hint");
-  assert.ok(text.includes("① 已完成") && text.includes("③ 下一步"), "steps advance after target chosen");
-  const readCall = calls.find((c) => c.method === "executeTool" && c.payload.name === "memory_read");
-  assert.ok(readCall, "topic content fetched via memory_read");
-  assert.equal(readCall.payload.args.topic, "t-live");
-});
 
-test("展示引导 T3：主题行（合并目标列表）的「合并到这个主题」按钮默认不禁用（legacy 概念已删除）", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const dsh = {
-    call: async (method) => {
-      if (method === "listCandidates") return { queueRevision: 5, items: [], plans: [] };
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(...clusterLoadedStates("session-A"));
-  // 直接注入 topics 状态，绕过拉取路径验证渲染期行为。
-  host.states[7] = { candidateId: "cluster-A" };
-  host.states[8] = { loading: false, error: null, total: 1, topics: [
-    { key: "t-1", title: "普通主题", summary: "s", updated: "2026-10-26T10:00:00.000Z", revision: "shiori-r1.OlD.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
-  ] };
-  const tree = renderCandidates(dsh, "session-A", { effects: false });
-  const buttons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("合并到这个主题"));
-  assert.equal(buttons.length, 1, "topic row renders its merge button");
-  assert.equal(buttons[0].props.title, undefined, "no legacy title on merge button (legacy removed)");
-  assert.equal(buttons[0].props.disabled, false, "row button is not disabled (choosing is the primary action)");
-});
 
 // ---------------------------------------------------------------------------
 // 第 7 轮：候选面板布局与中文文案（就地展开合并卡 / 按钮徽章中文化 / 原始 JSON 折叠）
 // ---------------------------------------------------------------------------
 
-test("第 7 轮：合并卡就地展开——紧贴被点击的候选行，第二行在其后，中间不夹其他区块", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 5, items: clusterLoadedStates("x")[0].items, plans: [] };
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(...clusterLoadedStates("session-A"));
-  host.states[7] = null; // merge 未激活
-  let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "合并进主题").props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-
-  const nodes = flattenVNode(tree);
-  // U5 改口径：候选行现按 kind 分组，合并卡的契约内核不变——「紧贴被点行、不与其他区块相夹」。
-  // 被点的 cluster-A 行在「集群」组的 dshi_items 容器里，直接子节点应恰为 [候选行, 合并卡]；
-  // link-B 行在「可建链接」组的独立容器里，不得夹进合并卡。
-  const containers = nodes.filter((n) => n.type === "div" && n.props && n.props.className === "dshi_items");
-  const clusterContainer = containers.find((n) => collectText(n).includes("cluster-A"));
-  assert.ok(clusterContainer, "cluster group container present");
-  const direct = [];
-  (function push(k) {
-    if (Array.isArray(k)) { for (const c of k) push(c); return; }
-    if (k && typeof k === "object") direct.push(k);
-  })(clusterContainer.children);
-  assert.equal(direct.length, 2, "clicked row's group container holds exactly 1 row + 1 inline merge card");
-  assert.equal(direct[0].props.className, "dshi_item", "first child is candidate row 1");
-  assert.equal(direct[1].props.className, "dshi_itemMerge", "merge card is the immediate sibling of the clicked row");
-  const inlineCard = flattenVNode(direct[1]).find((n) => n.type === "div" && n.props.className === "dshi_card");
-  assert.ok(inlineCard, "merge card keeps dshi_card styling");
-  const linkContainer = containers.find((n) => collectText(n).includes("link-B"));
-  assert.ok(linkContainer && !collectText(linkContainer).includes("合并进主题（候选"), "other rows live in their own group, merge card not interleaved");
-  const text = collectText(tree);
-  assert.ok(text.includes("合并进主题（候选 cluster-…）"), "short candidate id in title");
-  const titleSpan = flattenVNode(direct[1]).find((n) => n.type === "span" && String(n.props.title || "").includes("cluster-A"));
-  assert.ok(titleSpan, "full candidate id kept in title attribute");
-  assert.ok(text.indexOf("合并进主题（候选") > text.indexOf("cluster-A"), "merge card renders below the clicked row header");
-});
 
 test("第 7 轮：按钮与徽章中文化——页面不再出现英文旧文案，点「稍后再说」仍发 status=reviewed", async () => {
   const host = makeStatefulReact();
@@ -3073,20 +2677,25 @@ test("第 7 轮：按钮与徽章中文化——页面不再出现英文旧文�
     assert.ok(!buttonLabels.includes(stale), `no English button label "${stale}"`);
   }
   // U5 改口径：「标记已阅」改名「稍后再说」（协议仍发 decision=reviewed，见下方断言）。
-  for (const label of ["分析整理候选", "分析遗忘候选", "稍后再说", "忽略", "预览整理计划", "合并进主题"]) {
+  // 0.3 收敛：整理入口按钮（分析整理候选 / 预览整理计划 / 合并进主题）随整理流程裁撤。
+  for (const label of ["分析遗忘候选", "稍后再说", "忽略"]) {
     assert.ok(buttonLabels.includes(label), `Chinese button "${label}" present`);
+  }
+  for (const removed of ["分析整理候选", "预览整理计划", "合并进主题"]) {
+    assert.ok(!buttonLabels.includes(removed), `removed organize button "${removed}" absent`);
   }
   const text = collectText(tree);
   assert.ok(text.includes("候选（2）"), "candidate card title localized");
-  assert.ok(text.includes("集群") && text.includes("待处理"), "kind/status badges localized");
+  assert.ok(text.includes("待处理"), "status badges localized");
   const staleBadges = nodes.filter((n) => n.type === "span" && ["open", "executed", "superseded"].includes(String(collectText(n))));
   assert.equal(staleBadges.length, 0, "no English plan badges rendered");
-  // 计划行 kind 徽章：organize / forgetting → 整理 / 遗忘（plan.kind 协议值本身不变）
+  // 计划行 kind 徽章：forgetting → 遗忘（plan.kind 协议值本身不变；0.3 起 organize
+  // 计划卡被过滤，夹具里的 plan-o 不再渲染，页面不出「整理」徽章）
   const planKindBadges = nodes
     .filter((n) => n.type === "span" && String(n.props.className || "").includes("dshi_badge"))
     .map((n) => collectText(n));
-  assert.ok(planKindBadges.includes("整理"), "organize plan badge localized (整理)");
   assert.ok(planKindBadges.includes("遗忘"), "forgetting plan badge localized (遗忘)");
+  assert.ok(!planKindBadges.includes("整理"), "organize plan card filtered out (整理 badge absent)");
   assert.ok(!planKindBadges.includes("organize") && !planKindBadges.includes("forgetting"), "no English plan kind badges");
 
   // 协议值不变：按钮中文、payload 仍发 reviewed / dismissed（U5 起按钮文案为「稍后再说」）
@@ -3109,7 +2718,7 @@ test("第 7 轮：原始 JSON 默认折叠——候选行与计划行都用 deta
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
   const planRows = [
-    { planId: "plan-open", kind: "organize", planDigest: "d1", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-10-27T00:00:00.000Z", executed: false, superseded: false },
+    { planId: "plan-open", kind: "forgetting", planDigest: "d1", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-10-27T00:00:00.000Z", executed: false, superseded: false },
   ];
   const dsh = {
     call: async (method, session, payload) => {
@@ -3138,7 +2747,7 @@ test("第 7 轮：原始 JSON 默认折叠——候选行与计划行都用 deta
   const text = collectText(tree);
   assert.ok(text.includes("计划（1）"), "plans title localized");
   assert.ok(text.includes("计划＝预览（previewPlan）"), "plans hint rendered");
-  assert.ok(text.includes("候选由「分析整理候选 / 分析遗忘候选」生成"), "candidates hint rendered");
+  assert.ok(text.includes("候选是之前「整理分析」留下的待审条目"), "candidates hint rendered (0.3 只做遗忘口径)");
 });
 
 // ── 第 8 轮：面板第二轮反馈 ────────────────────────────────────────────────
@@ -3263,7 +2872,7 @@ test("R8：tab 栏八项冻结顺序（含 F2 闪回命中 / F4 最近变更）"
     .map((n) => [].concat(n.children).join(""));
   // U6 改口径：tab 名按 GLOSSARY 第三章目标名落地（记忆内容 / 闪回图谱 / 专题 / 记忆预算），
   // tab id 与顺序不变。
-  assert.deepEqual(labels, ["状态", "最近变更", "记忆内容", "闪回图谱", "整理与遗忘", "专题", "闪回命中", "记忆预算"]);
+  assert.deepEqual(labels, ["状态", "最近变更", "记忆内容", "闪回图谱", "遗忘", "专题", "闪回命中", "记忆预算"]);
   await cleanup();
 });
 
@@ -4097,13 +3706,27 @@ test("025a：图谱标签去重叠——被隐藏的节点四锚皆撞（逐锚�
       { x: cx, y: cy + r + 14, anchor: "middle" },
       { x: cx, y: cy - r - 8, anchor: "middle" },
     ];
+    // 0.3 起画布边界纳入锚点判定（与 client/index.js labelLayoutOf 同口径复算）：
+    // 每个锚点先试原位（矩形须完整落在 800×380 viewBox 内且不撞），再试平移钳回
+    // 画布后的位置（不撞即用）；两条路都失败才隐藏。被隐藏的节点因此逐锚复算
+    // 「原位不可用（出画布或被撞）且钳回后仍被撞」。
+    const inCanvas = (rc) => rc.x >= 0 && rc.y >= 0 && rc.x + rc.w <= 800 && rc.y + rc.h <= 380;
+    const clampToCanvas = (rc) => ({
+      x: Math.min(Math.max(rc.x, 0), 800 - rc.w),
+      y: Math.min(Math.max(rc.y, 0), 380 - rc.h),
+      w: rc.w, h: rc.h,
+    });
+    const collides = (rc) => placedRects.some((other) => rectsCollide(rc, other, LBL.gap))
+      || nodeBoxes.some((box) => rectsCollide(rc, box, 0));
     for (const anchor of anchors) {
       const x = anchor.anchor === "end" ? anchor.x - width
         : anchor.anchor === "middle" ? anchor.x - width / 2 : anchor.x;
       const rect = { x, y: anchor.y - LBL.height / 2, w: width, h: LBL.height };
-      const blocked = placedRects.some((other) => rectsCollide(rect, other, LBL.gap))
-        || nodeBoxes.some((box) => rectsCollide(rect, box, 0));
-      assert.ok(blocked, `隐藏节点 ${id} 的锚点 ${anchor.anchor}@(${anchor.x},${anchor.y}) 确实被撞`);
+      const rawBlocked = !inCanvas(rect) || collides(rect);
+      const clamped = clampToCanvas(rect);
+      const clampedBlocked = collides(clamped);
+      assert.ok(rawBlocked && clampedBlocked,
+        `隐藏节点 ${id} 的锚点 ${anchor.anchor}@(${anchor.x},${anchor.y}) 原位（含出画布判定）与钳回画布后确实都被撞`);
     }
   }
   // 确定性：同一份数据再开一个独立实例，可见标签（坐标/锚点/文本）完全一致
@@ -4272,7 +3895,7 @@ test("025a：手动连线空关系名——留空按 related 落库、历史 nul
 // kind + candidateId + proposal + operationId + expectedQueueRevision。
 // ---------------------------------------------------------------------------
 
-test("U5：tab 改名「整理与遗忘」，行按钮「稍后再说」带不删除 tooltip，协议仍发 decision=reviewed", async () => {
+test("U5/0.3：tab 名只讲遗忘，行按钮「稍后再说」带不删除 tooltip，协议仍发 decision=reviewed", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   let renderSlot = null;
@@ -4291,7 +3914,8 @@ test("U5：tab 改名「整理与遗忘」，行按钮「稍后再说」带不�
   const tabLabels = flattenVNode(sectionTree)
     .filter((n) => n.type === "button" && String((n.props && n.props.className) || "").includes("dshi_tab"))
     .map((n) => [].concat(n.children).join(""));
-  assert.ok(tabLabels.includes("整理与遗忘"), "tab renamed to 整理与遗忘");
+  assert.ok(tabLabels.includes("遗忘"), "tab label is 遗忘 (0.3 只做遗忘)");
+  assert.ok(!tabLabels.includes("整理与遗忘"), "old tab label 整理与遗忘 gone");
   assert.ok(!tabLabels.includes("候选 / 计划"), "old tab label 候选 / 计划 gone");
 
   const calls = [];
@@ -4321,40 +3945,8 @@ test("U5：tab 改名「整理与遗忘」，行按钮「稍后再说」带不�
   assert.equal(reviewed.payload.candidateId, "cluster-A", "candidate.id still sent");
 });
 
-test("U5：候选按 kind 分组折叠，组头显示数量，孤立卡默认折叠、点组头展开再收起", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const items = [
-    { candidate: { id: "cluster-A", kind: "cluster", scopeId: "default", sources: [{ id: "s1" }, { id: "s2" }], evidence: { field: "entities", sharedTerm: "项目X" } }, status: "pending" },
-    { candidate: { id: "link-B", kind: "link", scopeId: "default", sources: [{ id: "s3" }], evidence: {} }, status: "pending" },
-    { candidate: { id: "iso-C", kind: "isolated", scopeId: "default", sources: [{ id: "s4" }], evidence: {} }, status: "pending" },
-  ];
-  const dsh = {
-    call: async (method) => (method === "listCandidates" ? { queueRevision: 5, items, plans: [] } : {}),
-  };
-  host.states.length = 0;
-  host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  let tree = renderCandidates(dsh, "session-A");
-  const groupHeads = (t) => flattenVNode(t).filter((n) => n.type === "button" && String(n.props.className || "").includes("dshi_groupHead"));
-  let text = collectText(tree);
-  assert.ok(text.includes("集群（1）") && text.includes("可建链接（1）") && text.includes("孤立卡（1）"),
-    "group headers show per-kind counts");
-  assert.ok(text.includes("cluster-A"), "cluster group expanded by default (row rendered)");
-  assert.ok(text.includes("link-B"), "link group expanded by default (row rendered)");
-  assert.equal(text.includes("iso-C"), false, "isolated group collapsed by default (row not rendered)");
-  const isolatedHead = groupHeads(tree).find((n) => collectText(n).includes("孤立卡"));
-  assert.ok(isolatedHead, "isolated group header present");
-  isolatedHead.props.onClick();
-  tree = renderCandidates(dsh, "session-A");
-  assert.ok(collectText(tree).includes("iso-C"), "isolated row appears after expanding its group");
-  const headAgain = groupHeads(tree).find((n) => collectText(n).includes("孤立卡"));
-  headAgain.props.onClick();
-  tree = renderCandidates(dsh, "session-A");
-  assert.equal(collectText(tree).includes("iso-C"), false, "isolated row hidden again after collapsing");
-});
 
-test("U5：未知 kind 的候选兜底渲染进「其他」组（组头计数包含它），绝不静默消失", async () => {
+test("U5/0.3：未知 kind 与缺 kind 的候选兜底渲染（kind 分组已裁撤，行在平铺列表中绝不静默消失）", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
@@ -4369,68 +3961,11 @@ test("U5：未知 kind 的候选兜底渲染进「其他」组（组头计数包
   host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
   const tree = renderCandidates(dsh, "session-A");
   const text = collectText(tree);
-  assert.ok(text.includes("其他（2）"), "other group header counts unknown-kind rows");
+  assert.ok(!text.includes("其他（"), "no kind group headers anymore (0.3 flat list)");
   assert.ok(text.includes("fut-1") && text.includes("no-kind"), "unknown-kind and kind-less rows are both rendered");
   assert.ok(text.includes("future-kind"), "unknown kind badge keeps the raw value (never swallowed)");
 });
 
-test("U5：点行「预览整理计划」直接按该候选生成骨架并发送 previewPlan，确认卡就地展开在该行正下方", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const items = [
-    { candidate: { id: "cluster-A", kind: "cluster", scopeId: "default", sources: [{ id: "s1" }, { id: "s2" }], evidence: {} }, status: "pending" },
-    { candidate: { id: "link-B", kind: "link", scopeId: "default", sources: [{ id: "spk-3", revision: 1 }, { id: "spk-4", revision: 1 }], evidence: {} }, status: "pending" },
-  ];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 5, items, plans: [] };
-      if (method === "previewPlan") return { kind: "organize", planId: "plan-L", planDigest: "digest-L", summary: "s", diff: [{ path: "cards/s-1", oldText: "旧文", newText: "新文" }] };
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  let tree = renderCandidates(dsh, "session-A");
-  const linkRowPreview = flattenVNode(tree)
-    .filter((n) => n.type === "button" && n.children.includes("预览整理计划"))[1];
-  linkRowPreview.props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  const preview = calls.find((c) => c.method === "previewPlan");
-  assert.ok(preview, "previewPlan issued on first click (no manual editing needed)");
-  assert.equal(preview.payload.kind, "organize", "protocol kind stays organize");
-  assert.equal(preview.payload.candidateId, "link-B", "candidateId from the clicked row");
-  assert.deepEqual(preview.payload.proposal, { kind: "link", links: [{ id: "spk-3", after: [{ target: "spk-4", rel: "related" }] }] },
-    "skeleton built from this candidate's own sources (no cross-row contamination)");
-  assert.equal(typeof preview.payload.operationId, "string", "operationId present");
-  assert.equal(preview.payload.expectedQueueRevision, 5, "queue revision guard attached");
-
-  const containers = flattenVNode(tree).filter((n) => n.type === "div" && n.props && n.props.className === "dshi_items");
-  const linkContainer = containers.find((n) => collectText(n).includes("spk-3"));
-  assert.ok(linkContainer, "link group container found");
-  const direct = [];
-  (function push(k) {
-    if (Array.isArray(k)) { for (const c of k) push(c); return; }
-    if (k && typeof k === "object") direct.push(k);
-  })(linkContainer.children);
-  assert.equal(direct.length, 2, "container holds exactly 1 row + 1 inline preview card");
-  assert.equal(direct[0].props.className, "dshi_item", "first child is the candidate row");
-  assert.equal(direct[1].props.className, "dshi_itemMerge", "preview card is the immediate sibling of the clicked row");
-  const inlineText = collectText(direct[1]);
-  // U5b rework：该用例 previewPlan 桩返回 kind:"organize"（服务端 organize DTO 恒为
-  // "organize"，非 link 计划），预览卡按未知 kind 走「确认执行」；取消断言保持不变。
-  assert.ok(inlineText.includes("确认执行") && inlineText.includes("取消"), "confirm/cancel rendered inline");
-  const diffBox = flattenVNode(direct[1]).find((n) => n.type === "div" && n.props && n.props.className === "dshi_diffBox");
-  assert.ok(diffBox, "diff box (min 240px, scrollable) present");
-  assert.ok(inlineText.includes("旧文") && inlineText.includes("新文"), "diff old/new rendered");
-
-  findButton(direct[1], "取消").props.onClick();
-  tree = renderCandidates(dsh, "session-A");
-  assert.equal(collectText(tree).includes("确认执行（不可撤销）"), false, "preview dismissed by 取消");
-});
 
 test("U5：筛选（全部/待处理/已阅/已忽略，chip 带计数）与搜索框按短 id 过滤，均为纯前端", async () => {
   const host = makeStatefulReact();
@@ -4521,13 +4056,7 @@ function mountCandidatesWithItems(items) {
   };
 }
 
-function expandIsolatedGroup(tree) {
-  const head = flattenVNode(tree)
-    .filter((n) => n.type === "button" && String(n.props.className || "").includes("dshi_groupHead"))
-    .find((n) => collectText(n).includes("孤立卡"));
-  assert.ok(head, "isolated group header present");
-  head.props.onClick();
-}
+// （0.3：expandIsolatedGroup 辅助已随 kind 分组裁撤删除，孤立卡行平铺渲染、直接断言。）
 
 test("U5b：候选行理由小字——link 并列实体/触发词、cluster 报数点名、isolated 补退休连线数", async () => {
   const items = [
@@ -4536,9 +4065,8 @@ test("U5b：候选行理由小字——link 并列实体/触发词、cluster 报
     { candidate: { id: "iso-1", kind: "isolated", scopeId: "default", sources: [{ id: "s9" }], evidence: { inDegree: 0, outDegree: 0, ignoredRetiredTargets: ["t-1", "t-2"] } }, status: "pending" },
   ];
   const make = await mountCandidatesWithItems(items)();
+  // 0.3：无分组折叠，行直接平铺可见
   let tree = make.renderCandidates(make.dsh, "session-A");
-  expandIsolatedGroup(tree);
-  tree = make.renderCandidates(make.dsh, "session-A");
   const text = collectText(tree);
   assert.ok(text.includes("理由：两张卡都提到实体「小樱」；都带触发词「早上去学校」"),
     "link reason joins entities and triggers");
@@ -4569,75 +4097,15 @@ test("U5b：evidence 缺失 / 形状不对 / 未知 kind → 不出理由行，�
     { candidate: { id: "fut-1", kind: "future-kind", scopeId: "default", sources: [{ id: "s8" }], evidence: { sharedEntities: ["x"] } }, status: "pending" },
   ];
   const make = await mountCandidatesWithItems(items)();
+  // 0.3：无分组折叠，行直接平铺可见
   let tree = make.renderCandidates(make.dsh, "session-A");
-  // 孤立卡组默认折叠：点组头展开，确认该行的行本体（而非理由行）仍在
-  expandIsolatedGroup(tree);
-  tree = make.renderCandidates(make.dsh, "session-A");
   const text = collectText(tree);
   assert.equal(text.includes("理由："), false, "no reason line rendered for missing/malformed/unknown evidence");
   assert.ok(text.includes("cluster-plain") && text.includes("link-bad") && text.includes("no-evidence") && text.includes("fut-1"),
     "all rows still rendered — reason must not swallow the row");
 });
 
-test("U5b：预览卡 link——标题「连起来」、正文把『A』关联到『B』+ 关系相关 + 安心话，按钮「就这么连起来」非 danger，原始信息默认折叠", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const plan = {
-    kind: "organize", proposalKind: "link", planId: "plan-L", planDigest: "digest-L", queueRevision: 0,
-    summary: "link plan over 2 source(s)",
-    diff: [{ path: "spark:spk-A", oldText: "[]", newText: '[{"target":"spk-B","rel":"related"}]' }],
-  };
-  const dsh = { call: async (method) => (method === "listCandidates" ? { queueRevision: 0, items: [], plans: [] } : {}) };
-  host.states.length = 0;
-  host.states.push({ queueRevision: 0, items: [], plans: [] }, null, false, "", { sessionId: "session-A", plan, queueRevision: 0 }, null, { sessionId: "session-A", gen: 0 });
-  const tree = renderCandidates(dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(text.includes("连起来"), "title translated to 连起来");
-  assert.equal(text.includes("PlanView 预览"), false, "old jargon title gone");
-  assert.ok(text.includes("把『spk-A』关联到『spk-B』"), "body names source and target");
-  assert.ok(text.includes("关系：相关"), "rel shown as 相关");
-  assert.ok(text.includes("执行后两张卡的内容都不变，只多一条连线；连错了到卡片详情里删掉这条连线即可"), "reassurance sentence present");
-  const confirm = flattenVNode(tree).find((n) => n.type === "button" && n.children.includes("就这么连起来"));
-  assert.ok(confirm, "confirm button reads 就这么连起来");
-  assert.ok(String(confirm.props.className || "").includes("dshi_btnPrimary") && !String(confirm.props.className || "").includes("dshi_btnDanger"),
-    "link confirm is primary, not danger red");
-  assert.ok(flattenVNode(tree).some((n) => n.type === "button" && n.children.includes("取消")), "cancel button present");
-  const rawInfo = flattenVNode(tree).find((n) => n.type === "details" && collectText(n).includes("原始信息"));
-  assert.ok(rawInfo, "原始信息 details present");
-  assert.equal(Object.prototype.hasOwnProperty.call(rawInfo.props, "open"), false, "原始信息 collapsed by default");
-  const rawText = collectText(rawInfo);
-  assert.ok(rawText.includes("planId plan-L") && rawText.includes("planDigest digest-L"), "planId/planDigest tucked into details");
-  assert.ok(rawText.includes('[{"target":"spk-B","rel":"related"}]'), "raw diff JSON stays inside collapsed details");
-});
 
-test("U5b：预览卡 merge-topic——「把 N 张卡合并进主题『X』」+ 退休提示，按钮「确认合并（不可撤销）」danger", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const plan = {
-    kind: "organize", proposalKind: "merge-topic", planId: "plan-M", planDigest: "digest-M", queueRevision: 0,
-    summary: "merge-topic plan over 2 source(s)",
-    diff: [
-      { path: "topic:topic-x", oldText: "# 主题", newText: "# 主题\n追加" },
-      { path: "spark:s-1", oldText: "{}", newText: '{"state":"merged"}' },
-      { path: "spark:s-2", oldText: "{}", newText: '{"state":"merged"}' },
-    ],
-  };
-  const dsh = { call: async (method) => (method === "listCandidates" ? { queueRevision: 0, items: [], plans: [] } : {}) };
-  host.states.length = 0;
-  host.states.push({ queueRevision: 0, items: [], plans: [] }, null, false, "", { sessionId: "session-A", plan, queueRevision: 0 }, null, { sessionId: "session-A", gen: 0 });
-  const tree = renderCandidates(dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(text.includes("合并进主题"), "title translated to 合并进主题");
-  assert.ok(text.includes("把 2 张卡合并进主题『topic-x』"), "body counts source cards and names the topic");
-  assert.ok(text.includes("合并后源卡会退休，这一步不可撤销"), "retirement warning present");
-  const confirm = flattenVNode(tree).find((n) => n.type === "button" && n.children.includes("确认合并（不可撤销）"));
-  assert.ok(confirm, "confirm button reads 确认合并（不可撤销）");
-  assert.ok(String(confirm.props.className || "").includes("dshi_btnDanger"), "merge confirm stays danger");
-  const rawInfo = flattenVNode(tree).find((n) => n.type === "details" && collectText(n).includes("原始信息"));
-  assert.ok(rawInfo && Object.prototype.hasOwnProperty.call(rawInfo.props, "open") === false, "原始信息 collapsed by default");
-});
 
 test("0.2.3：预览卡 thin-core 已裁撤——不再渲染瘦身标题 / 长度正文 /「确认瘦身」按钮，回落通用确认卡", async () => {
   const host = makeStatefulReact();
@@ -4712,8 +4180,9 @@ function mountPreviewPlan(plan) {
   };
 }
 
-test("0.2.3：planKindOf——proposalKind 决定 merge-topic 文案；thin-core 已裁撤不出专用文案；缺失时 kind:organize 不出任何专用文案且不抛错", async () => {
-  // 断言 1：kind:"organize"+proposalKind:"merge-topic" → 「合并进主题」标题与对应正文
+test("0.2.3/0.3：planKindOf——proposalKind 仍决定取值；thin-core 已裁撤不出专用文案；缺失时 kind:organize 不出任何专用文案且不抛错（merge-topic 文案随整理流程删除）", async () => {
+  // 断言 1：kind:"organize"+proposalKind:"merge-topic"（整理流程 0.3 裁撤）→
+  // 不再出「合并进主题」专用标题 / 正文 / 确认按钮，回落通用确认卡。
   const merge = await (await mountPreviewPlan({
     kind: "organize", proposalKind: "merge-topic", planId: "plan-M2", planDigest: "digest-M2", queueRevision: 0,
     summary: "merge-topic plan over 2 source(s)",
@@ -4723,11 +4192,13 @@ test("0.2.3：planKindOf——proposalKind 决定 merge-topic 文案；thin-core
       { path: "spark:s-2", oldText: "{}", newText: '{"state":"merged"}' },
     ],
   }))();
-  assert.ok(merge.text.includes("合并进主题"), "proposalKind merge-topic title rendered");
-  assert.ok(merge.text.includes("把 2 张卡合并进主题『topic-y』"), "merge-topic body counts sources and names topic");
-  assert.ok(merge.text.includes("合并后源卡会退休，这一步不可撤销"), "merge-topic retirement warning present");
-  const mergeConfirm = flattenVNode(merge.tree).find((n) => n.type === "button" && n.children.includes("确认合并（不可撤销）"));
-  assert.ok(mergeConfirm, "merge-topic confirm button label applies via proposalKind");
+  const mergeCard = flattenVNode(merge.tree).find((n) => n.type === "div" && n.props && n.props.className === "dshi_confirm");
+  assert.ok(mergeCard, "preview confirm card rendered without throw");
+  const mergeCardText = collectText(mergeCard);
+  assert.ok(!mergeCardText.includes("把 2 张卡合并进主题"), "merge-topic body line removed with the organize flow");
+  assert.ok(!mergeCardText.includes("合并后源卡会退休，这一步不可撤销"), "merge-topic retirement warning removed");
+  assert.ok(!flattenVNode(mergeCard).some((n) => n.type === "button" && n.children.includes("确认合并（不可撤销）")),
+    "merge-topic confirm button removed; falls back to generic");
 
   // 断言 2：kind:"organize"+proposalKind:"thin-core"（0.2.3 已裁撤）→ 不出瘦身标题 /
   // 长度正文 /「确认瘦身」按钮，回落通用确认卡（summary 兜底、确认执行）。
@@ -4774,7 +4245,7 @@ function previewButtonsIn(node) {
   return flattenVNode(node).filter((n) => n.type === "button" && n.children.includes("预览整理计划"));
 }
 
-test("U5-c：孤立卡候选行不出现「预览整理计划」按钮（集群/可建链接行仍出现）", async () => {
+test("U5-c/0.3：候选行（含孤立卡）一律没有「预览整理计划」入口，行动作只剩 稍后再说 + 忽略", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
@@ -4788,29 +4259,24 @@ test("U5-c：孤立卡候选行不出现「预览整理计划」按钮（集群/
   };
   host.states.length = 0;
   host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  let tree = renderCandidates(dsh, "session-A");
-  // 孤立卡组默认折叠：先点组头展开
-  const groupHeads = (t) => flattenVNode(t).filter((n) => n.type === "button" && String(n.props.className || "").includes("dshi_groupHead"));
-  const isolatedHead = groupHeads(tree).find((n) => collectText(n).includes("孤立卡"));
-  assert.ok(isolatedHead, "isolated group header present");
-  isolatedHead.props.onClick();
-  tree = renderCandidates(dsh, "session-A");
-  assert.ok(candidateRowsOf(tree).some((row) => collectText(row).includes("iso-C")), "isolated row rendered after expanding");
+  const tree = renderCandidates(dsh, "session-A");
 
   const rows = candidateRowsOf(tree);
   const clusterRow = rows.find((row) => collectText(row).includes("cluster-A"));
   const linkRow = rows.find((row) => collectText(row).includes("link-B"));
   const isoRow = rows.find((row) => collectText(row).includes("iso-C"));
   assert.ok(clusterRow && linkRow && isoRow, "all three kind rows rendered");
-  assert.equal(previewButtonsIn(clusterRow).length, 1, "cluster row keeps 预览整理计划");
-  assert.equal(previewButtonsIn(linkRow).length, 1, "link row keeps 预览整理计划");
+  assert.equal(previewButtonsIn(clusterRow).length, 0, "cluster row has no 预览整理计划 (removed in 0.3)");
+  assert.equal(previewButtonsIn(linkRow).length, 0, "link row has no 预览整理计划 (removed in 0.3)");
   assert.equal(previewButtonsIn(isoRow).length, 0, "isolated row has no 预览整理计划 entry");
-  // 孤立卡行只保留原有两个动作，行本身不消失
-  const isoButtonLabels = flattenVNode(isoRow).filter((n) => n.type === "button" && !String(n.props.className || "").includes("dshi_groupHead")).map((n) => n.children.join(""));
-  assert.deepEqual(isoButtonLabels, ["稍后再说", "忽略"], "isolated row keeps exactly 稍后再说 + 忽略");
+  // 每行只保留审阅动作，行本身一个不少
+  for (const row of [clusterRow, linkRow, isoRow]) {
+    const labels = flattenVNode(row).filter((n) => n.type === "button").map((n) => n.children.join(""));
+    assert.deepEqual(labels, ["稍后再说", "忽略"], "row keeps exactly 稍后再说 + 忽略");
+  }
 });
 
-test("U5-c：候选区提示语与 0.2.1 行为一致（孤立卡不提内置预览）", async () => {
+test("U5-c/0.3：候选区提示语只讲遗忘口径（遗留整理候选可审阅，不再提预览/合并入口）", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
@@ -4826,73 +4292,17 @@ test("U5-c：候选区提示语与 0.2.1 行为一致（孤立卡不提内置预
   host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
   const tree = renderCandidates(dsh, "session-A");
   const text = collectText(tree);
-  assert.ok(text.includes("孤立卡没有可连的第二张卡"), "hint states isolated cards have no second card to link");
-  assert.equal(text.includes("孤立卡只能用内置预览"), false, "stale 0.2.0 hint about built-in preview removed");
+  assert.ok(text.includes("候选是之前「整理分析」留下的待审条目"), "hint states legacy organize candidates stay reviewable");
+  assert.ok(text.includes("稍后再说"), "review actions still explained");
+  assert.equal(text.includes("可「合并进主题」"), false, "old merge entry hint gone");
+  assert.equal(text.includes("可「预览整理计划」"), false, "old organize preview hint gone");
 });
 
-test("U5-c：proposalSkeleton 对单源候选返回 null（经 doPreviewOrganize 定点错误消息观测，非通用骨架失败文案）", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const items = [
-    { candidate: { id: "link-single", kind: "link", scopeId: "default", sources: [{ id: "s-only" }], evidence: {} }, status: "pending" },
-  ];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 5, items, plans: [] };
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  let tree = renderCandidates(dsh, "session-A");
-  // kind=link 单源候选：入口仍在（入口隐藏只针对 isolated），点它走骨架生成路径
-  findButton(tree, "预览整理计划").props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  const text = collectText(tree);
-  // 定点文案只在 skeleton === null 分支出现——JSON.parse 失败会走通用文案，
-  // 占位符骨架（旧行为）会通过本地校验直接发 previewPlan。三者在文案上可区分。
-  assert.ok(text.includes("这张卡还没有和任何卡相连，没有可预览的整理计划"),
-    "null skeleton surfaces the dedicated message");
-  assert.equal(text.includes("proposal 骨架生成失败"), false,
-    "generic skeleton-failure message not used (proves skeleton === null, not a JSON.parse failure)");
-  assert.equal(calls.some((c) => c.method === "previewPlan"), false, "no previewPlan issued");
-});
 
-test("U5-c：doPreviewOrganize 在单源候选下不发 previewPlan RPC（本地拦截，零出网）", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const items = [
-    { candidate: { id: "link-single", kind: "link", scopeId: "default", sources: [{ id: "s-only" }], evidence: {} }, status: "pending" },
-  ];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 5, items, plans: [] };
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  let tree = renderCandidates(dsh, "session-A");
-  const callsBefore = calls.length;
-  findButton(tree, "预览整理计划").props.onClick();
-  await flush();
-  assert.equal(calls.length, callsBefore, "clicking 预览整理计划 on a single-source candidate sends zero RPC");
-  assert.equal(calls.some((c) => c.method === "previewPlan"), false, "previewPlan never issued");
-  tree = renderCandidates(dsh, "session-A");
-  assert.ok(collectText(tree).includes("这张卡还没有和任何卡相连，没有可预览的整理计划"),
-    "dedicated local error message rendered");
-});
 
-// U5-d：错误文案必须指向真正管用的「分析整理候选」按钮（「刷新」只重读队列快照、不会重新分析）；
-// 「刷新」按钮补 title 说明，避免 REVISION_CONFLICT 时把用户往死路上引。
-test("U5-d：REVISION_CONFLICT 提示指向「分析整理候选」；「刷新」按钮 title 说明只重读快照", async () => {
+// U5-d（0.3 更新）：错误文案不再指向已删除的「分析整理候选」——候选操作指向「刷新」，
+// 计划执行冲突指向计划行的「预览遗忘计划」；「刷新」按钮 title 说明只重读快照。
+test("U5-d/0.3：REVISION_CONFLICT 提示指向行内「预览遗忘计划」；「刷新」按钮 title 说明只重读快照", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderCandidates = await mountCandidates(mod, host);
@@ -4908,18 +4318,17 @@ test("U5-d：REVISION_CONFLICT 提示指向「分析整理候选」；「刷新�
   host.states.length = 0;
   host.states.push(
     { queueRevision: 0, items: [], plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  // 预置一条已成功预览（模拟用户此前已预览过 merge-topic 计划），走确认执行错误路径
-  host.states[4] = { sessionId: "session-A", plan: { kind: "organize", proposalKind: "merge-topic", planId: "plan-M", planDigest: "digest-M", summary: "", diff: [] }, queueRevision: 0 };
+  // 预置一条已成功预览（模拟用户此前已预览过遗忘计划），走确认执行错误路径
+  host.states[4] = { sessionId: "session-A", plan: { kind: "forgetting", planId: "plan-F", planDigest: "digest-F", summary: "", diff: [] }, queueRevision: 0 };
   let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "确认合并（不可撤销）").props.onClick();
+  findButton(tree, "确认执行").props.onClick();
   await flush();
   tree = renderCandidates(dsh, "session-A");
   const text = collectText(tree);
   assert.ok(text.includes("revision 冲突"), "REVISION_CONFLICT explained in Chinese");
-  assert.ok(text.includes("请点「分析整理候选」重新分析后再试"), "guidance points to the working button");
+  assert.ok(text.includes("预览遗忘计划"), "guidance points to the working entry (重新生成预览)");
   assert.ok(text.includes("不要重试旧预览"), "do-not-retry-stale-preview warning retained");
-  assert.ok(!text.includes("请刷新后重新分析") && !text.includes("请刷新后重新预览"),
-    "misleading refresh wording removed");
+  assert.ok(!text.includes("分析整理候选"), "removed organize button never referenced");
   assert.ok(text.includes("plan already executed"), "original message retained");
 
   // 「刷新」按钮：title 必须说明它只重读队列快照、不会重新分析
@@ -4934,7 +4343,7 @@ test("U5-d：REVISION_CONFLICT 提示指向「分析整理候选」；「刷新�
 // U5-e：过期候选就地标注（行内「卡片已改」徽章 + 预览按钮置灰）与顶部重新分析入口。
 // ---------------------------------------------------------------------------
 
-test("U5-e：stale 候选渲染「卡片已改」徽章 + 理由小字，「预览整理计划」「合并进主题」置灰，「稍后再说」「忽略」仍可用", async () => {
+test("U5-e/0.3：stale 候选渲染「卡片已改」徽章 + 理由小字，「稍后再说」「忽略」仍可用（整理预览/合并入口已裁撤）", async () => {
   const items = [
     { candidate: { id: "link-stale", kind: "link", scopeId: "default", sources: [{ id: "a-1" }, { id: "b-2" }], evidence: { sharedEntities: ["小樱"] } }, status: "pending", stale: true },
     { candidate: { id: "link-fresh", kind: "link", scopeId: "default", sources: [{ id: "c-1" }, { id: "d-2" }], evidence: { sharedEntities: ["小兰"] } }, status: "pending" },
@@ -4945,88 +4354,26 @@ test("U5-e：stale 候选渲染「卡片已改」徽章 + 理由小字，「预�
   const tree = make.renderCandidates(make.dsh, "session-A");
   const text = collectText(tree);
   assert.ok(text.includes("卡片已改"), "stale badge text rendered");
-  assert.ok(text.includes("这条候选绑定的卡片在你上次分析之后被改过，重新分析后才能用"),
+  assert.ok(text.includes("这条候选绑定的卡片在你上次分析之后被改过"),
     "stale reason line rendered");
   // 过期行徽章类名存在；未过期行不出现
   const badges = flattenVNode(tree).filter((n) => String(n.props.className || "").includes("dshi_badgeStale"));
   assert.equal(badges.length, 2, "one stale badge per stale row");
-  // 「预览整理计划」按行区分：stale 行置灰（title 写明原因），fresh 行可用
-  // （link 与 cluster 行都有预览入口，只有 isolated 没有）
-  const previewButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("预览整理计划"));
-  assert.equal(previewButtons.length, 4, "all non-isolated rows expose the preview entry");
-  const stalePreview = previewButtons.filter((b) => b.props.disabled === true);
-  const freshPreview = previewButtons.filter((b) => b.props.disabled === false);
-  assert.ok(stalePreview.length === 2 && freshPreview.length === 2, "preview disabled exactly on the stale rows");
-  assert.ok(stalePreview.every((b) => String(b.props.title || "").includes("重新分析")),
-    "disabled preview title explains why");
-  // rework a1：「合并进主题」stale 同样置灰（合并流程最后也走 previewPlan 的 revision 校验）
-  const mergeButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("合并进主题"));
-  assert.equal(mergeButtons.length, 2, "both cluster rows expose the merge entry");
-  const staleMerge = mergeButtons.find((b) => b.props.disabled === true);
-  const freshMerge = mergeButtons.find((b) => b.props.disabled === false);
-  assert.ok(staleMerge && freshMerge, "merge disabled exactly on the stale cluster row");
-  assert.equal(staleMerge.props.disabled, true, "stale cluster merge button disabled");
-  assert.ok(String(staleMerge.props.title || "").includes("重新分析"), "disabled merge title explains why");
-  assert.equal(freshMerge.props.disabled, false, "fresh cluster merge button stays enabled");
-  // 「稍后再说」「忽略」不受 stale 影响（只改 status，不校验 revision）
-  assert.equal(findButton(tree, "稍后再说").props.disabled, false, "review button stays enabled");
-  assert.equal(findButton(tree, "忽略").props.disabled, false, "dismiss button stays enabled");
+  // 0.3：「预览整理计划」「合并进主题」已随整理流程裁撤，页面不再出现
+  assert.equal(flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("预览整理计划")).length, 0,
+    "organize preview entry removed");
+  assert.equal(flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("合并进主题")).length, 0,
+    "merge entry removed");
+  // 「稍后再说」「忽略」不受 stale 影响（只改 status，不校验 revision），每行各一对
+  const reviewButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("稍后再说"));
+  const dismissButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("忽略"));
+  assert.equal(reviewButtons.length, 4, "every row keeps a review action");
+  assert.equal(dismissButtons.length, 4, "every row keeps a dismiss action");
+  assert.ok(reviewButtons.every((b) => b.props.disabled === false), "review buttons stay enabled on stale rows");
+  assert.ok(dismissButtons.every((b) => b.props.disabled === false), "dismiss buttons stay enabled on stale rows");
 });
 
-test("U5-e：staleCount > 0 时顶部提示条出现，点「重新分析」复用 analyze(kind=organize)", async () => {
-  const items = [
-    { candidate: { id: "link-stale", kind: "link", scopeId: "default", sources: [{ id: "a-1" }, { id: "b-2" }] }, status: "pending", stale: true },
-  ];
-  const queueDto = { queueRevision: 5, staleCount: 1, items, plans: [] };
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates" || method === "analyze") return queueDto;
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(queueDto, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  const tree = renderCandidates(dsh, "session-A");
-  const bar = flattenVNode(tree).find((n) => String(n.props.className || "") === "dshi_staleBar");
-  assert.ok(bar, "stale bar rendered when staleCount > 0");
-  assert.ok(collectText(bar).includes("1 条候选"), "bar text carries the count");
-  const reanalyze = findButton(tree, "重新分析");
-  assert.equal(reanalyze.props.disabled, false, "re-analyze enabled after load");
-  reanalyze.props.onClick();
-  await flush();
-  const analyze = calls.find((c) => c.method === "analyze");
-  assert.ok(analyze, "re-analyze issues an analyze call");
-  assert.equal(analyze.payload.kind, "organize", "reuses the organize analyze path");
-  assert.equal(analyze.payload.expectedQueueRevision, 5, "revision token attached like the manual entry");
-});
 
-test("U5-e：staleCount 为 0 或缺失时提示条不渲染、行内无徽章（向后兼容旧服务端）", async () => {
-  // 情形一：staleCount 明确为 0
-  const zeroDto = { queueRevision: 5, staleCount: 0, items: [{ candidate: { id: "link-1", kind: "link", scopeId: "default", sources: [{ id: "a-1" }, { id: "b-2" }] }, status: "pending" }], plans: [] };
-  const makeZero = await mountCandidatesWithItems(zeroDto.items)();
-  makeZero.host.states[0] = zeroDto;
-  let tree = makeZero.renderCandidates(makeZero.dsh, "session-A");
-  assert.equal(flattenVNode(tree).find((n) => String(n.props.className || "") === "dshi_staleBar"), undefined,
-    "no stale bar when staleCount = 0");
-  assert.equal(collectText(tree).includes("卡片已改"), false, "no stale badge when staleCount = 0");
-  assert.equal(findButton(tree, "预览整理计划").props.disabled, false, "preview stays enabled");
-
-  // 情形二：旧服务端不带回 staleCount / stale 字段
-  const legacyDto = { queueRevision: 5, items: zeroDto.items, plans: [] };
-  const makeLegacy = await mountCandidatesWithItems(legacyDto.items)();
-  makeLegacy.host.states[0] = legacyDto;
-  tree = makeLegacy.renderCandidates(makeLegacy.dsh, "session-A");
-  assert.equal(flattenVNode(tree).find((n) => String(n.props.className || "") === "dshi_staleBar"), undefined,
-    "no stale bar when staleCount missing");
-  assert.equal(collectText(tree).includes("卡片已改"), false, "no stale badge when stale missing");
-  assert.equal(flattenVNode(tree).find((n) => n.type === "button" && n.children.includes("重新分析")), undefined,
-    "no re-analyze button");
-});
 
 // ---------------------------------------------------------------------------
 // 0.2.2 归档入口（task-ed991a8fb6f08bfc-s2）：整理页专题行「移出索引 / 恢复到索引」。
@@ -5077,7 +4424,8 @@ test("0.2.2 归档入口：专题列表排序（未归档在前按 updated 升�
   host.states.length = 0;
   host.states.push(...clusterLoadedStates("session-A"));
   let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "合并进主题").props.onClick();
+  // 0.3：归档入口从合并卡迁到独立「专题索引归档（手动）」卡——点「载入 / 刷新专题」拉列表
+  findButton(tree, "载入 / 刷新专题").props.onClick();
   await flush();
   tree = renderCandidates(dsh, "session-A");
 
@@ -5100,11 +4448,11 @@ test("0.2.2 归档入口：专题列表排序（未归档在前按 updated 升�
   assert.equal(badges.length, 1, "exactly one 已归档 badge");
   assert.ok(topicRowByKey(tree, "t-arch"), "archived row rendered");
 
-  // 行按钮布局：未归档行 = 合并到这个主题 + 移出索引；已归档行 = 恢复到索引（无合并入口）
+  // 行按钮布局（0.3）：未归档行 = 移出索引（合并入口已随整理流程裁撤）；已归档行 = 恢复到索引
   assert.deepEqual(rowButtonLabels(topicRowByKey(tree, "t-arch")), ["恢复到索引"],
-    "archived row: only 恢复到索引, no merge entry");
-  assert.deepEqual(rowButtonLabels(topicRowByKey(tree, "t-old")), ["合并到这个主题", "移出索引"],
-    "unarchived row: merge entry kept, 移出索引 added");
+    "archived row: only 恢复到索引");
+  assert.deepEqual(rowButtonLabels(topicRowByKey(tree, "t-old")), ["移出索引"],
+    "unarchived row: only 移出索引");
   assert.equal(flattenVNode(tree).filter((n) => n.type === "button" && collectText(n) === "移出索引").length, 4,
     "移出索引 on every unarchived row");
 });
@@ -5136,7 +4484,8 @@ test("0.2.2 归档入口：未归档行「移出索引」发 previewPlan {kind:'
   host.states.length = 0;
   host.states.push(...clusterLoadedStates("session-A"));
   let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "合并进主题").props.onClick();
+  // 0.3：入口改走「专题索引归档（手动）」卡
+  findButton(tree, "载入 / 刷新专题").props.onClick();
   await flush();
 
   tree = renderCandidates(dsh, "session-A");
@@ -5198,7 +4547,8 @@ test("0.2.2 归档入口：已归档行「恢复到索引」发 archive:false，
   host.states.length = 0;
   host.states.push(...clusterLoadedStates("session-A"));
   let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "合并进主题").props.onClick();
+  // 0.3：入口改走「专题索引归档（手动）」卡
+  findButton(tree, "载入 / 刷新专题").props.onClick();
   await flush();
 
   tree = renderCandidates(dsh, "session-A");
@@ -5243,7 +4593,8 @@ test("0.2.2 归档入口：previewPlan 失败走既有 ErrorBox 展示（code �
   host.states.length = 0;
   host.states.push(...clusterLoadedStates("session-A"));
   let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "合并进主题").props.onClick();
+  // 0.3：入口改走「专题索引归档（手动）」卡
+  findButton(tree, "载入 / 刷新专题").props.onClick();
   await flush();
 
   tree = renderCandidates(dsh, "session-A");

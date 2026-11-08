@@ -194,7 +194,7 @@ test("F4 分页：hasMore=false 时「下一页」禁用；首页「上一页」
   assert.ok(prev && prev.props.disabled === true, "首页 → 上一页禁用");
 });
 
-test("F4 分页：hasMore=true 时「下一页」可点，点击后以 offset=100 请求下一页", async () => {
+test("F4 分页：hasMore=true 时「下一页」可点，点击后以 offset=20 请求下一页（0.3 每页 100 → 20）", async () => {
   const { host, renderTab, runTabEffects } = await mountTimelineTab();
   const calls = [];
   const dsh = {
@@ -212,7 +212,7 @@ test("F4 分页：hasMore=true 时「下一页」可点，点击后以 offset=10
   tree = renderTab(dsh, pageDto({ items: [timelineItem()], hasMore: false }));
   await runTabEffects(); // effect 手动驱动 load(offset)
   await flush();
-  assert.deepEqual(calls, [{ offset: 100, limit: 100 }], "下一页以 offset=100（每页 100 条）请求");
+  assert.deepEqual(calls, [{ offset: 20, limit: 20 }], "下一页以 offset=20（每页 20 条）请求");
   const next2 = findButtons(tree, "下一页")[0];
   assert.ok(next2 && next2.props.disabled === true, "末页禁用下一页");
 });
