@@ -21,6 +21,8 @@ export const SPARK_INLINE_MAX_CHARS = 100;
 export const SPARK_DEFAULT_MAX_CHARS = 600;
 // 块间分隔符，计入 600 预算。
 const BLOCK_SEPARATOR = "\n---\n";
+// 整包横幅：提示模型这是记忆卡而不是用户发言，只加一次、计入预算。
+const SPARK_BANNER = "【记忆卡·非用户发言】\n";
 const DELIVERY_KIND = "spark-attachment";
 
 // ---------------------------------------------------------------------------
@@ -135,7 +137,7 @@ export function buildSparkAttachment({
     let placed = false;
     for (const body of options) {
       const block = renderBlock(card, body);
-      const extra = blocks.length === 0 ? block.length : BLOCK_SEPARATOR.length + block.length;
+      const extra = (blocks.length === 0 ? SPARK_BANNER.length : BLOCK_SEPARATOR.length) + block.length;
       if (chars + extra <= maxChars) {
         blocks.push(block);
         chars += extra;
@@ -149,7 +151,7 @@ export function buildSparkAttachment({
     }
   }
 
-  const text = blocks.join(BLOCK_SEPARATOR);
+  const text = blocks.length === 0 ? "" : SPARK_BANNER + blocks.join(BLOCK_SEPARATOR);
   return {
     kind: DELIVERY_KIND,
     scopeId,

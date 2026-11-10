@@ -71,6 +71,15 @@ test("五张短卡（正文 ≤100）全部装下且最终文本 ≤600 UTF-16",
   assert.ok(d.text.includes("---"));
 });
 
+test("整包只加一条横幅：两张卡时以【记忆卡·非用户发言】开头且只出现一次", () => {
+  const seeds = ["s1", "s2"].map((id) => seedItem(card({ id, content: "短正文" })));
+  const d = build({ match: match({ seeds }) });
+  assert.equal(d.delivered.length, 2);
+  assert.ok(d.text.startsWith("【记忆卡·非用户发言】\n"));
+  assert.equal(d.text.split("【记忆卡·非用户发言】").length - 1, 1);
+  assert.equal(d.text.length, d.chars);
+});
+
 test("正文 >100 只带 summary + id，不泄露长正文", () => {
   const long = "长".repeat(150);
   const seeds = [seedItem(card({ id: "big", content: long, summary: "短摘要" }))];
@@ -83,9 +92,9 @@ test("预算装不下时先降级为摘要；摘要也装不下则整卡跳过�
   const content = "这是一句完整的短正文，必须整体出现。"; // ≤100，可带出
   const summary = "这是更短的摘要。";
   const c = card({ id: "c1", content, summary });
-  // 预算只够 summary 块（头部约 18 字 + 摘要 8 字）：content 块约 37 字
-  // 装不下 → 降级为 summary，完整出现。
-  const d = build({ match: match({ seeds: [seedItem(c)] }), maxChars: 30 });
+  // 预算只够横幅 + summary 块（横幅 12 字 + 摘要块 27 字 = 39 字）：
+  // content 块 49 字装不下 → 降级为 summary，完整出现。
+  const d = build({ match: match({ seeds: [seedItem(c)] }), maxChars: 40 });
   assert.deepEqual(d.delivered.map((x) => x.id), ["c1"]);
   assert.ok(d.text.includes(summary));
   assert.ok(!d.text.includes(content));
@@ -111,9 +120,9 @@ test("种子优先于关联占用预算；被挤掉的关联记为 budget drop",
   const rel2 = card({ id: "r2", content: "q".repeat(100) });
   const d = build({
     match: match({ seeds: [seedItem(bigSeed)], related: [seedItem(rel1), seedItem(rel2)] }),
-    // 单个正文块约 120 字；130 预算下种子装下后，关联的正文块与降级
-    // 摘要块（约 26 字含分隔符）都装不下，只能整卡挤掉。
-    maxChars: 130,
+    // 横幅 12 字 + 种子正文块 120 字 = 132 字装得下（140 预算）；关联的
+    // 正文块（加分隔符后 256 字）与降级摘要块（加分隔符后 158 字）都装不下。
+    maxChars: 140,
   });
   assert.deepEqual(d.delivered.map((x) => x.id), ["big"]);
   assert.deepEqual(d.dropped, [{ id: "r1", reason: "budget" }, { id: "r2", reason: "budget" }]);
@@ -188,8 +197,10 @@ test("预算挤掉的卡不出现在 accepted=true 的 seen 写入中", () => {
   const big = card({ id: "big", content: "z".repeat(100) });
   const rel = card({ id: "r1", content: "r".repeat(100) });
   const delivery = build({
+    // 横幅 12 字 + 种子正文块 120 字 = 132 字装得下；关联卡降级摘要后仍需
+    // 158 字，被挤出预算，故不写 seen/hit。
     match: match({ seeds: [seedItem(big)], related: [seedItem(rel)] }),
-    maxChars: 130,
+    maxChars: 140,
   });
   assert.deepEqual(delivery.dropped.map((x) => x.id), ["r1"]);
   const committed = commitDelivery({ delivery, accepted: true });
