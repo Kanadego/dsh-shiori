@@ -315,6 +315,49 @@ test("pid 存活但心跳老化的座位不回收，只标 stale：卡住的先�
   assert.equal(seat.status().writable, false);
 });
 
+test("pid 存活但心跳超过接管窗口：判为 pid 复用，回收座位并记入 recentTakeovers", async (t) => {
+  const root = await tempDataRoot(t, "seat-takeover");
+  const registry = createSeatRegistry({
+    dataRoot: root,
+    heartbeatMs: 10,
+    staleMs: 20,
+    takeoverMs: 200,
+    instanceId: "takeover-local",
+  });
+  t.after(() => registry.withdraw());
+  await registry.announce();
+
+  // 模拟「宿主被 kill -9、pid 被无关进程复用」：pid 指着活着的本进程，
+  // 但座位心跳停在接管窗口之外。
+  const ghost = path.join(registry.dir, `${process.pid}-ghost-foreign.json`);
+  await fsp.writeFile(ghost, JSON.stringify({
+    pid: process.pid,
+    instanceId: "ghost-foreign",
+    startedAt: registry.startedAt - 5000,
+    heartbeatAt: Date.now() - 5000,
+  }), "utf8");
+  const old = new Date(Date.now() - 5000);
+  await fsp.utimes(ghost, old, old);
+
+  const evaluation = await registry.evaluate();
+  assert.equal(evaluation.held, false, "号码被复用的幽灵座位不该继续占写权");
+  assert.equal(await pathExists(ghost), false, "超过接管窗口的座位必须被回收");
+
+  const takeovers = registry.status().recentTakeovers;
+  assert.equal(takeovers.length, 1, "接管要留痕供诊断");
+  assert.equal(takeovers[0].pid, process.pid);
+  assert.equal(takeovers[0].instanceId, "ghost-foreign");
+  assert.ok(takeovers[0].heartbeatAgeMs > 200);
+  assert.equal(registry.status().takeoverMs, 200);
+});
+
+test("接管窗口必须大于老化窗口", () => {
+  assert.throws(
+    () => createSeatRegistry({ dataRoot: path.parse(process.cwd()).root, staleMs: 6000, takeoverMs: 6000 }),
+    /takeover window must be greater than the stale window/,
+  );
+});
+
 test("pid 已退出的座位立刻回收，不占写权", async (t) => {
   const root = await tempDataRoot(t, "seat-dead");
   const { seat } = await localSeat(root);

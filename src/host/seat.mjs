@@ -17,6 +17,11 @@
 // - mtime 超过 staleMs 只说明这个宿主卡住了，不能当成它死了：仍是先来的那个，
 //   继续占着写权（标记 stale 供诊断）。删掉活 pid 的座位会让它下一拍「座位丢了→
 //   重新占座」，于是两个宿主各写各的——这就是双写窗口的根因；
+// - 但 pid 存活也可能是号码被系统复用了（宿主被 kill -9，pid 给了无关进程）：这种
+//   座位 mtime 永停、isPidAlive 恒真，永远回收不掉，而且恒为「最先来」，此后所有新
+//   宿主永久只读。所以再加一层长阈值接管——心跳停超过 takeoverMs（默认 60s，远大于
+//   staleMs）就判为 pid 复用，删座位重占，并把这次接管记进 status().recentTakeovers。
+//   卡住的真宿主醒来时按新占座重来（见 reclaimSeat），自动降为后来者，不会双写；
 // - 只有「更早启动」的活座位才把本宿主翻成只读。同一毫秒启动时按 instanceId
 //   字典序决胜——严格全序，不可能两边同时只读、也不会两边都可写。
 //
@@ -35,6 +40,9 @@ import { createReadonlyGuard } from "./readonly-guard.mjs";
 export const SEAT_DIR_NAME = ".shiori-seats";
 export const SEAT_HEARTBEAT_MS = 2000;
 export const SEAT_STALE_MS = 6000;
+// pid 存活但心跳停了这么久，基本是 pid 被复用（宿主早死了）：超过就回收座位。
+// 必须远大于 staleMs——卡住几秒的真宿主还会醒来，不能把它当死的。
+export const SEAT_TAKEOVER_MS = 60_000;
 // 恢复可写也要连续 miss 两个心跳：一次 readdir 抖动不该让后启动的宿主抢到写权。
 export const SEAT_RELEASE_MS = 4000;
 // 命中即只读（0）：启动时立刻判一次，后启动的宿主不要先可写几秒再翻。
@@ -81,6 +89,8 @@ async function unlinkQuiet(file) {
  * @param {string} opts.dataRoot 记忆数据根（绝对路径；座位目录建在它下面）
  * @param {number} [opts.heartbeatMs] 心跳间隔（默认 2000）
  * @param {number} [opts.staleMs] 老化窗口（默认 6000，必须大于 heartbeatMs）
+ * @param {number} [opts.takeoverMs] 接管窗口（默认 60000，必须大于 staleMs）：
+ *   活 pid + 心跳停超过这个窗口 = 判为 pid 复用，回收座位
  * @param {string} [opts.instanceId] 本宿主身份（默认 randomUUID；测试可注入）
  * @param {number} [opts.startedAt] 启动时刻（默认 Date.now；测试可注入以造出先/后）
  */
@@ -88,6 +98,7 @@ export function createSeatRegistry({
   dataRoot,
   heartbeatMs = SEAT_HEARTBEAT_MS,
   staleMs = SEAT_STALE_MS,
+  takeoverMs = SEAT_TAKEOVER_MS,
   instanceId = randomUUID(),
   startedAt: initialStartedAt = Date.now(),
 } = {}) {
@@ -100,6 +111,10 @@ export function createSeatRegistry({
   if (!Number.isFinite(staleMs) || staleMs <= heartbeatMs) {
     // staleMs ≤ 心跳间隔时自家座位会被别的宿主当成死的，判据失效。
     throw new TypeError("Seat stale window must be greater than the heartbeat interval");
+  }
+  if (!Number.isFinite(takeoverMs) || takeoverMs <= staleMs) {
+    // 接管窗口不大于老化窗口时，卡住的真宿主还没醒就要被当死的，判据失准。
+    throw new TypeError("Seat takeover window must be greater than the stale window");
   }
   if (typeof instanceId !== "string" || instanceId.length === 0) {
     throw new TypeError("Invalid seat instanceId");
@@ -121,6 +136,20 @@ export function createSeatRegistry({
   let heartbeats = 0;
   let lastHeartbeatAt = null;
   let timer = null;
+  // 最近若干次接管（pid 复用的自愈）：诊断要能看出「谁被当幽灵删了」，只留尾部。
+  const TAKEOVER_LOG_LIMIT = 20;
+  const recentTakeovers = [];
+
+  function noteTakeover(seat, ageMs) {
+    recentTakeovers.push({
+      pid: seat.pid,
+      instanceId: seat.instanceId,
+      startedAt: seat.startedAt,
+      heartbeatAgeMs: ageMs,
+      at: Date.now(),
+    });
+    if (recentTakeovers.length > TAKEOVER_LOG_LIMIT) recentTakeovers.shift();
+  }
 
   async function writeSeat() {
     const payload = JSON.stringify({
@@ -205,7 +234,15 @@ export function createSeatRegistry({
           await unlinkQuiet(file);
           continue;
         }
-        alive.push({ ...seat, stale: nowMs - seat.mtimeMs > staleMs });
+        // 但心跳停到接管窗口之外就不是「卡住」了：pid 被复用（宿主已死、号码给了
+        // 无关进程）。这种座位永远等不到它自己退出，只能删掉重占；真宿主若还活着，
+        // 醒来发现座位没了会按新占座重来，自动降为后来者，所以不会双写。
+        const heartbeatAgeMs = nowMs - seat.mtimeMs;
+        if (heartbeatAgeMs > takeoverMs) {
+          if (await unlinkQuiet(file)) noteTakeover(seat, heartbeatAgeMs);
+          continue;
+        }
+        alive.push({ ...seat, stale: heartbeatAgeMs > staleMs });
       } catch {
         // 单个条目不可读（权限 / 正在被删）不阻塞整体判定。
       }
@@ -372,9 +409,12 @@ export function createSeatRegistry({
       degraded,
       heartbeatMs,
       staleMs,
+      takeoverMs,
       heartbeats,
       lastHeartbeatAt,
       lastError,
+      /** 最近被当作 pid 复用回收掉的座位（tail，最多 20 条）。 */
+      recentTakeovers: recentTakeovers.map((entry) => ({ ...entry })),
     };
   }
 
@@ -409,7 +449,7 @@ export function createSeatProbe({ registry } = {}) {
  *
  * @param {object} opts
  * @param {string} opts.dataRoot 记忆数据根（绝对路径）
- * @param {number} [opts.heartbeatMs] / [opts.staleMs] / [opts.releaseMs] 判据参数
+ * @param {number} [opts.heartbeatMs] / [opts.staleMs] / [opts.takeoverMs] / [opts.releaseMs] 判据参数
  * @param {number} [opts.intervalMs] 判定轮询间隔（默认等于心跳间隔）
  * @param {() => number} [opts.now] 时钟注入（测试）
  * @returns {Promise<{registry, guard, degraded, status, stop}>}
@@ -418,13 +458,14 @@ export async function createSeatGuard({
   dataRoot,
   heartbeatMs = SEAT_HEARTBEAT_MS,
   staleMs = SEAT_STALE_MS,
+  takeoverMs = SEAT_TAKEOVER_MS,
   releaseMs = SEAT_RELEASE_MS,
   intervalMs,
   now,
   instanceId,
   startedAt,
 } = {}) {
-  const registry = createSeatRegistry({ dataRoot, heartbeatMs, staleMs, instanceId, startedAt });
+  const registry = createSeatRegistry({ dataRoot, heartbeatMs, staleMs, takeoverMs, instanceId, startedAt });
   const guard = createReadonlyGuard({
     probe: createSeatProbe({ registry }),
     intervalMs: intervalMs ?? heartbeatMs,
