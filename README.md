@@ -51,6 +51,7 @@ dsh plugin --profile web add dsh-shiori
 | 想看什么 | 去哪里 |
 | --- | --- |
 | **AI Agent 专属速查（16 个工具调用规范、Scope 规则、测试命令与代码红线）** | **[AGENTS.md](AGENTS.md)** |
+| 开发者架构设计、双根磁盘布局、参数与错误码全量字典 | **[DESIGN.md](DESIGN.md)** |
 | 完整配置项、面板 8 个 Tab 详解、16 个工具签名、常见报错排查 | **[docs/USAGE-GUIDE.md](docs/USAGE-GUIDE.md)** |
 | 安装、首次配置、升级与卸载步骤 | **[docs/plugin/INSTALL.md](docs/plugin/INSTALL.md)** |
 | 面板 RPC 通道、授权边界与宿主降级行为 | **[docs/plugin/client.md](docs/plugin/client.md)** |

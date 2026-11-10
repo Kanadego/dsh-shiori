@@ -12,7 +12,6 @@ dist/
 assets/
 
 # 内部过程文档（不入库）
-/DESIGN.md
 /HANDOFF.md
 /HANDOFF-P5-ARCHIVE.md
 /INTEGRATION-*.md
