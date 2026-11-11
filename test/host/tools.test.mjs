@@ -304,3 +304,28 @@ test("R6：topic_append 显式拒绝 core 别名；正常 topic 分支不受影�
   assert.ok((await service.readTopic("proj-x")).body.includes("内容"));
   await bridge.stop();
 });
+
+test("core 正文自带派生索引一律拒绝：core_write / memory_rewrite / memory_append", async () => {
+  const { host, service, bridge } = await activeBridge();
+  const core = await service.readCore();
+  const tainted = "正常正文。\n\n## 主题记忆索引 / Topic memory index\n- proj-x [amber] — 排障手册";
+  await assert.rejects(
+    () => host.tools.get("core_write").execute({ content: tainted, expectedRevision: core.revision }),
+    (e) => isCodedError(e) && e.code === "INVALID_INPUT" && /derived topic index/.test(e.message),
+  );
+  await assert.rejects(
+    () => host.tools.get("memory_rewrite").execute({ content: tainted }),
+    (e) => isCodedError(e) && e.code === "INVALID_INPUT" && /derived topic index/.test(e.message),
+  );
+  await assert.rejects(
+    () => host.tools.get("memory_append").execute({ section: "夹索引", content: tainted }),
+    (e) => isCodedError(e) && e.code === "INVALID_INPUT" && /derived topic index/.test(e.message),
+  );
+  assert.equal(service.mutateLog.length, 0, "拒绝时不得有任何写入");
+  // 干净正文照常写；topic 正文不受这条限制（只有 core 渲染时拼索引）
+  await host.tools.get("core_write").execute({ content: "干净的正文。", expectedRevision: core.revision });
+  assert.equal((await service.readCore()).text, "干净的正文。");
+  await host.tools.get("memory_append").execute({ section: "记录", content: tainted, topic: "proj-x" });
+  assert.ok((await service.readTopic("proj-x")).body.includes("主题记忆索引"));
+  await bridge.stop();
+});

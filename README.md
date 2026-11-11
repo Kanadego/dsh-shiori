@@ -27,8 +27,8 @@ dsh plugin --profile web add dsh-shiori
   config:
     mode: active
     allowActive: true
-    dataRoot: 'D:/your-path/shiori-data'   # 记忆数据根目录（Markdown + JSON 明文）
-    stateRoot: 'D:/your-path/shiori-state' # 运行状态与投递账根目录
+    dataRoot: '/absolute/path/to/shiori-data'   # 记忆数据根目录（Markdown + JSON 明文）
+    stateRoot: '/absolute/path/to/shiori-state' # 运行状态与投递账根目录
 ```
 
 ## 一张表看懂记忆分层
@@ -61,6 +61,10 @@ dsh plugin --profile web add dsh-shiori
 
 <details open>
 <summary><b>v0.3.x</b></summary>
+
+### v0.3.1 · 2026-11-11（修复核心正文误存派生索引）
+
+- **核心正文不再重复累积索引**：写入核心的正文若夹带读取时拼出的主题索引，现在会被拒绝并提示只传正文；三个写入入口口径一致。
 
 ### v0.3.0 · 2026-11-08（专题归档 / 图谱改版 / core 写入收敛）
 

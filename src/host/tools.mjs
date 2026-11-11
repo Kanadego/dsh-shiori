@@ -22,6 +22,19 @@ import { INVALID_INPUT, UNSUPPORTED } from "./errors.mjs";
 import { TOOL_OUTPUT_SCHEMAS, renderToolOutput } from "../plugin/tool-schemas.mjs";
 import { assertNotHostLocked, validateReadonlyGuard } from "./readonly-guard.mjs";
 
+/** 派生索引标题（= src/core/render.mjs 的 INDEX_HEADER）。正文与索引在读取时拼接，正文里不得自带。 */
+const DERIVED_INDEX_HEADER = "## 主题记忆索引";
+
+/** core 正文禁止自带派生索引：否则读取渲染时会再拼一份，索引重复。 */
+function rejectDerivedIndex(content, toolName) {
+  if (typeof content === "string" && content.includes(DERIVED_INDEX_HEADER)) {
+    throw INVALID_INPUT(
+      `${toolName}: core body must not contain the derived topic index (found "${DERIVED_INDEX_HEADER}"); pass only the body, the index is generated on read`,
+      { header: DERIVED_INDEX_HEADER },
+    );
+  }
+}
+
 /** 宿主 system 的 section 名（与 soul-md 的 soul:persona/soul:memory 不同名，便于唯一写者判定）。 */
 export const SECTION_PERSONA = "shiori:persona";
 export const SECTION_CORE = "shiori:core";
@@ -311,6 +324,7 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
         const topic = resolveTopicArg(optionalString(a, "topic")); // core / core.md / 空 → core 路径
         const operationId = typeof a.operationId === "string" && a.operationId.length > 0 ? a.operationId : randomUUID();
         if (topic === null) {
+          rejectDerivedIndex(content, "memory_append");
           const current = await readDiskCore();
           const candidate = appendBlock(current.text ?? "", section, content, clock());
           const result = await service.mutate({
@@ -352,6 +366,7 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
         const topic = resolveTopicArg(optionalString(a, "topic")); // core / core.md / 空 → core 路径
         const operationId = typeof a.operationId === "string" && a.operationId.length > 0 ? a.operationId : randomUUID();
         if (topic === null) {
+          rejectDerivedIndex(content, "memory_rewrite");
           const current = await readDiskCore();
           const result = await service.mutate({
             operationId,
@@ -399,6 +414,7 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
         if (section !== undefined && section.length > 0) {
           throw UNSUPPORTED("core_write(section) is not supported in P0; rewrite the whole body instead", { section });
         }
+        rejectDerivedIndex(content, "core_write");
         if (!("expectedRevision" in a)) {
           throw INVALID_INPUT("core_write requires explicit expectedRevision (string, or null for first creation)", {});
         }

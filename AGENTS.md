@@ -1,6 +1,6 @@
 # AGENTS.md — dsh-shiori
 
-> Quick-reference guide for AI coding agents working in or operating `dsh-shiori` (v0.3.0).
+> Quick-reference guide for AI coding agents working in or operating `dsh-shiori` (v0.3.1).
 > For user-facing quickstart see `README.md`; for full usage and install details see `docs/USAGE-GUIDE.md` and `docs/plugin/INSTALL.md`.
 
 ---
