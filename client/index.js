@@ -6706,7 +6706,7 @@ var personaScopeTarget = personaScopeExplicit
                     : "所有工作区共用的默认人设卡")),
               // 有候选 → 下拉直接点选（末尾留一个「自定义」出口，选中换手输框）；
               // 没候选 → 直接手输。早前纯 select 只有一张卡时把手输锁死（实机反馈
-              // 「ctrl+a 输 momo 立刻被回弹」），datalist 又没有可点的下拉感，两头都
+              // 「ctrl+a 输入预设名立刻被回弹」），datalist 又没有可点的下拉感，两头都
               // 不满足。这个形态两种都能走。
               defaultPersonaCustom
                 ? h("input", {

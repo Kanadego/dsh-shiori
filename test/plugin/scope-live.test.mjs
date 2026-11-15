@@ -44,8 +44,8 @@ test("liveSettingsForScope：引用里的最新值覆盖装配期快照", () => 
   const defaultRef = volatileRef("amber");
   const settings = settingsWith({ defaultPersona: defaultRef }, { defaultPersona: "amber" });
   assert.equal(liveSettingsForScope(settings).defaultPersona, "amber");
-  defaultRef.set("momo");
-  assert.equal(liveSettingsForScope(settings).defaultPersona, "momo");
+  defaultRef.set("engine");
+  assert.equal(liveSettingsForScope(settings).defaultPersona, "engine");
 });
 
 test("pinScope：切卡后同一会话的下一次调用立即换 scope（无需重启）", () => {
@@ -53,10 +53,10 @@ test("pinScope：切卡后同一会话的下一次调用立即换 scope（无需
   const settings = settingsWith({ defaultPersona: defaultRef }, { defaultPersona: "amber" });
   const before = pinScope({ settings, sessionId: "s-live", generation: 1, source: "tool-exec" });
   assert.equal(before.scopeId, "amber");
-  defaultRef.set("momo");
+  defaultRef.set("engine");
   const after = pinScope({ settings, sessionId: "s-live", generation: 1, source: "tool-exec" });
-  assert.equal(after.scopeId, "momo");
-  assert.equal(after.persona, "momo");
+  assert.equal(after.scopeId, "engine");
+  assert.equal(after.persona, "engine");
 });
 
 test("pinScope：sessionPersonas 热值优先于 defaultPersona；workspace 走最长前缀", () => {

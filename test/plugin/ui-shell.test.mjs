@@ -1072,7 +1072,7 @@ test("S4 切卡：成功后 refreshToken 自增，MemoryTab 重取 getMemoryView
     const tokenBefore = before.props.refreshToken;
     personaButton(tree).props.onClick();
     tree = render();
-    flattenVNode(personaRow(tree)).find((n) => n.type === "input").props.onChange({ target: { value: "momo" } });
+    flattenVNode(personaRow(tree)).find((n) => n.type === "input").props.onChange({ target: { value: "engine" } });
     tree = render();
     findButton(personaRow(tree), "切换").props.onClick();
     await flush(20);
