@@ -210,19 +210,18 @@ test("semantic 段默认值正确（provider=none，零依赖零网络）", () =
   assert.ok(Object.isFrozen(settings.semantic));
   // Schemastery schema 缺省同样给出该形状（宿主 settings UI 依赖它）。
   const parsed = Config({});
-  assert.equal(parsed.semantic.provider, "none");
-  assert.equal(parsed.semantic.local.model, "Xenova/bge-small-zh-v1.5");
-  assert.equal(parsed.semantic.local.dims, 512);
-  assert.equal(parsed.semantic.local.dtype, "fp32");
+  // semantic 整块打了 volatile（面板「保存模型目录」要热写 cacheDir 的代价），
+  // Config 解析产物是 cosmokit 引用对象，先解包再断言形状。
+  const parsedSemantic = typeof parsed.semantic.get === "function" ? parsed.semantic.get() : parsed.semantic;
+  assert.equal(parsedSemantic.provider, "none");
+  assert.equal(parsedSemantic.local.model, "Xenova/bge-small-zh-v1.5");
+  assert.equal(parsedSemantic.local.dims, 512);
+  assert.equal(parsedSemantic.local.dtype, "fp32");
   // cacheDir 空串契约：由 controller.semanticProviderConfig() 解析成 <stateRoot>/semantic/models。
-  // 0.4 面板「保存模型目录」热写起 cacheDir 打了 volatile，Config 解析产物是 cosmokit
-  // 引用对象，按 get() 取值（普通字符串输入仍原样）。
-  const cacheDirRef = parsed.semantic.local.cacheDir;
-  assert.equal(typeof cacheDirRef.get, "function");
-  assert.equal(cacheDirRef.get(), "");
-  assert.equal(parsed.semantic.local.mirror, "https://hf-mirror.com/");
-  assert.equal(parsed.semantic.api.endpoint, null);
-  assert.equal(parsed.semantic.api.keyRef, null);
+  assert.equal(parsedSemantic.local.cacheDir, "");
+  assert.equal(parsedSemantic.local.mirror, "https://hf-mirror.com/");
+  assert.equal(parsedSemantic.api.endpoint, null);
+  assert.equal(parsedSemantic.api.keyRef, null);
 });
 
 test("semantic 段：合法值通过、未知键与非法 provider 拒绝", () => {

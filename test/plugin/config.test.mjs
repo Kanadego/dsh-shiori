@@ -130,22 +130,21 @@ function isVolatilePath(schema, path) {
   return child !== undefined && isVolatilePath(child, rest);
 }
 
-test("Config schema：sessionPersonas / workspacePersonas / semantic.local.cacheDir 标记为 volatile（面板热写路径放行）", () => {
+test("Config schema：sessionPersonas / workspacePersonas / semantic 标记为 volatile（面板热写路径放行）", () => {
   // 真机缺陷：面板三处写入被宿主拒绝——dsh-settings write():
-  // Config field "sessionPersonas" is not volatile（workspacePersonas 与
-  // semantic.local.cacheDir 同款）。
+  // Config field "sessionPersonas" is not volatile（workspacePersonas 同款）。
+  // 「保存模型目录」写 semantic.local.cacheDir 时，宿主 validatePaths 遍历的是合并后
+  // 的整个 semantic 对象（provider/model/dims 都在里面），叶子单独标 volatile 仍会被
+  // "Config field semantic.provider is not volatile" 挡下，所以 semantic 整块标记。
   for (const path of [["sessionPersonas"], ["workspacePersonas"], ["semantic", "local", "cacheDir"]]) {
     assert.equal(isVolatilePath(Config, path), true, `写入路径 ${path.join(".")} 必须命中 volatile`);
   }
   assert.equal(Config.dict.sessionPersonas.meta.volatile, true);
   assert.equal(Config.dict.workspacePersonas.meta.volatile, true);
-  assert.equal(Config.dict.semantic.dict.local.dict.cacheDir.meta.volatile, true);
-  // 最小面：只放开写入目标，相邻字段仍不可热写（整体 volatile 会把它们一起放开）。
-  assert.notEqual(Config.dict.semantic.meta.volatile, true);
-  assert.notEqual(Config.dict.semantic.dict.local.meta.volatile, true);
-  assert.equal(isVolatilePath(Config, ["semantic", "provider"]), false);
-  assert.equal(isVolatilePath(Config, ["semantic", "local", "model"]), false);
-  assert.equal(isVolatilePath(Config, ["semantic", "local", "dims"]), false);
+  assert.equal(Config.dict.semantic.meta.volatile, true);
+  // 落盘根仍不可热写：这两个字段改了要重新装配才有意义。
+  assert.equal(isVolatilePath(Config, ["dataRoot"]), false);
+  assert.equal(isVolatilePath(Config, ["stateRoot"]), false);
 });
 
 test("Config schema 序列化为 JSON Schema 形状且接受显式 null 与完整样例", () => {

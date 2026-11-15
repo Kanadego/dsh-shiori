@@ -211,11 +211,10 @@ export const Config = z.object({
       dims: z.natural().default(512).description("向量维度"),
       dtype: z.union([z.const("fp32"), z.const("fp16"), z.const("q8")]).default("fp32")
         .description("ONNX 推理精度：fp32=精度基线（91MB）；fp16=折中；q8=最小最快（23MB，短文本 p95 约 4ms）"),
-      // volatile：面板「保存模型目录」写 ["semantic","local","cacheDir"]。按最小面在叶子
-      // 节点标记——宿主 isVolatilePath 命中最近的 volatile 祖先即放行，嵌套固定路径
-      // 是 schemastery 允许的（validateVolatileSchema 只拒「volatile 套 volatile」），
-      // 因此不必把整个 semantic.local 变成 volatile 整块。
-      cacheDir: z.string().default("").volatile().description("模型缓存目录；空字符串表示用 <dataRoot>/models（0.4-S5 起模型跟业务数据走，升级插件、重装包都不用重下；宿主热提交，不重载插件）"),
+      // cacheDir 的热写权限来自外层 semantic 整块 volatile：宿主 write() 的 validatePaths
+      // 会遍历合并后的整个 semantic（provider/model/dims 等未标字段都在里面），叶子
+      // 单独标记会被 "Config field semantic.provider is not volatile" 挡下。
+      cacheDir: z.string().default("").description("模型缓存目录；空字符串表示用 <dataRoot>/models（0.4-S5 起模型跟业务数据走，升级插件、重装包都不用重下；宿主热提交，不重载插件）"),
       mirror: z.string().default("https://hf-mirror.com/").description("HuggingFace 镜像地址（国内直连 huggingface.co 一般不可达）"),
     }).default({ model: "Xenova/bge-small-zh-v1.5", dims: 512, dtype: "fp32", cacheDir: "", mirror: "https://hf-mirror.com/" }),
     minSimilarity: z.number().default(0.55)
@@ -224,7 +223,7 @@ export const Config = z.object({
       endpoint: nullableString().default(null).description("外部 embedding 接口地址；null=未配置"),
       keyRef: nullableString().default(null).description("密钥引用名（不存明文密钥）；null=未配置"),
     }).default({ endpoint: null, keyRef: null }),
-  }).default(clone(DEFAULT_SEMANTIC)).description("语义召回接口预留（F1 方案 C）：本期只定契约，不实现召回"),
+  }).default(clone(DEFAULT_SEMANTIC)).volatile().description("语义召回接口预留（F1 方案 C）：本期只定契约，不实现召回；整块 volatile 让面板「保存模型目录」可热写"),
   l2: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }).description("L2 闪回自动投递开关"),
   organize: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }).description("整理（候选/计划/执行）开关"),
   forgetting: z.object({
@@ -635,7 +634,8 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
   const l2 = normalizeSwitch(raw.l2, "l2");
   const organize = normalizeSwitch(raw.organize, "organize");
   const forgetting = normalizeForgetting(raw.forgetting);
-  const semantic = normalizeSemantic(raw.semantic);
+  // semantic 整块打了 volatile：宿主交过来的是 cosmokit 引用对象，先解包再校验。
+  const semantic = normalizeSemantic(unwrapVolatile(raw.semantic));
 
   return deepFreeze({
     mode,
