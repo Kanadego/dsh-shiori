@@ -202,7 +202,7 @@ function styleTextOf(fake) {
 // a) sticky 壳条
 // ---------------------------------------------------------------------------
 
-test("U8 壳层：工作区/会话选择器与 tab 栏包进 sticky 壳条，CSS 声明存在", async () => {
+test("U8 壳层：选择器行与 tab 栏包进壳条、壳条不吸顶（S2-4 取消遮挡）；工作区默认卡进选择器行（S2-3）", async () => {
   const fake = makeFakeDocument();
   const previousDocument = globalThis.document;
   globalThis.document = fake.doc;
@@ -219,9 +219,26 @@ test("U8 壳层：工作区/会话选择器与 tab 栏包进 sticky 壳条，CSS
     assert.equal(tabs.length, 8, "tab 栏在壳条内");
     // 提示行不粘：壳条外仍有 hint 容器位（壳条本身不包含 dshi_hint 提示行）。
     assert.equal(flattenVNode(sticky).filter((n) => n.type === "div" && n.props.className === "dshi_hint").length, 0, "提示行不进壳条");
+    // S2-3：选择器统一进一条水平行（选工作区 / 选会话 / 记忆卡 / 工作区默认卡 同容器）。
+    const selectorRow = inside.find((n) => n.type === "div" && n.props["data-role"] === "selector-row");
+    assert.ok(selectorRow, "壳条内有 .dshi_selectorRow 选择器行");
+    const rowInside = flattenVNode(selectorRow);
+    assert.ok(rowInside.some((n) => n.type === "input" && n.props.placeholder === "session id"), "会话选择器在选择器行内");
+    assert.ok(rowInside.some((n) => n.type === "button" && n.props["data-role"] === "persona-card-btn"), "记忆卡按钮在选择器行内");
+    assert.ok(rowInside.some((n) => n.props && n.props["data-role"] === "default-persona"), "工作区默认卡控件在选择器行内");
     const css = styleTextOf(fake);
-    assert.ok(css.includes(".dshi_sticky{position:sticky;top:0;"), "sticky CSS 声明存在（position:sticky + top）");
-    assert.ok(css.includes("z-index:30"), "壳条带层叠顺序");
+    // S2-4：壳条整体不吸顶——不再有 position:sticky/top/z-index 遮挡组合。
+    assert.ok(css.includes(".dshi_sticky{display:flex;flex-direction:column;"),
+      "壳条保留布局块样式（不吸顶）");
+    assert.equal(css.includes(".dshi_sticky{position:sticky"), false,
+      "壳条不再 position:sticky（取消吸顶遮挡）");
+    assert.equal(css.includes("z-index:30"), false, "壳条不再占用层叠顺序");
+    // S2-3：水平行 + 窄屏换行 + 控件等高（修「记忆卡：amber」与下拉错位）。
+    assert.ok(css.includes(".dshi_selectorRow{display:flex;align-items:flex-end;"), "选择器行 flex 水平排列");
+    assert.ok(css.includes(".dshi_selectorRow{display:flex;align-items:flex-end;gap:var(--dshi-space-sm);flex-wrap:wrap}"),
+      "窄屏换行（flex-wrap:wrap）");
+    assert.ok(css.includes(".dshi_selectorRow .dshi_btn,.dshi_selectorRow .dshi_input,.dshi_selectorRow .dshi_select{height:28px;"),
+      "选择器行控件统一 28px 高度（基线对齐）");
     await cleanup();
   } finally {
     globalThis.document = previousDocument;
@@ -641,7 +658,7 @@ test("S2 门控：main 槽位抛错或缺失时不得注册 sidebar.panellist（
   }
 });
 
-test("S2 样式：全屏容器 scope class 与侧边栏图标 CSS 声明存在（max-width/padding 覆盖窄卡片默认值）", async () => {
+test("S2 样式：全屏容器 scope class 与侧边栏图标 CSS 声明存在（max-width/padding 覆盖窄卡片默认值；S2-4 上下留白）", async () => {
   const fake = makeFakeDocument();
   const previousDocument = globalThis.document;
   globalThis.document = fake.doc;
@@ -653,16 +670,15 @@ test("S2 样式：全屏容器 scope class 与侧边栏图标 CSS 声明存在�
     // dsh-email workbench 模板 w-page[data-main=true] 的口径），内容随宿主宽度
     // 收缩（1440 与 900 宽都不横向溢出的样式保证）。
     assert.ok(css.includes(".dshi_rootMain{box-sizing:border-box;max-width:none;width:100%;height:100%;"), "全屏容器显式 border-box（根元素不吃 .dshi_root * 重置，100% 宽高叠 padding 不再溢出）");
+    // S2-4：底部补 max(28px, bottom-clearance)（侧边栏入口打开时首尾不再被裁）。
     assert.ok(
-      css.includes("padding:calc(24px + var(--dsh-frame-top-clearance,0px)) 28px 0 max(28px,var(--dsh-frame-leading-clearance,0px))"),
-      "全屏容器 padding 覆盖（frame clearance 口径）",
+      css.includes("padding:calc(24px + var(--dsh-frame-top-clearance,0px)) 28px max(28px,var(--dsh-frame-bottom-clearance,0px)) max(28px,var(--dsh-frame-leading-clearance,0px))"),
+      "全屏容器上下左右留白（frame clearance 口径 + 底部留白）",
     );
     assert.ok(css.includes("overflow:auto}"), "全屏容器自滚动");
-    // workbench 下 sticky 壳条让出宿主框架顶部留白（评审 attempt-1 顺带项）。
-    assert.ok(
-      css.includes(".dshi_rootMain .dshi_sticky{top:calc(24px + var(--dsh-frame-top-clearance,0px))}"),
-      "workbench 下 sticky 壳条 top 含 frame clearance",
-    );
+    // S2-4：壳条整体不吸顶后，让出框架顶部的 sticky 覆盖规则不再存在。
+    assert.equal(css.includes(".dshi_rootMain .dshi_sticky"), false,
+      "不再有 workbench sticky top 覆盖规则（壳条已不吸顶）");
     // 侧边栏图标样式。
     assert.ok(css.includes(".dshi_sideIcon{display:block}"), "侧边栏图标 scope class 声明存在");
     // 详情页窄卡片默认值未被改动。
@@ -952,6 +968,80 @@ test("S4 切卡兜底：空卡名拒绝（不发 mutate）；清除专属卡=per
       path: ["sessionPersonas"],
       value: [{ sessionId: "session-A", persona: null }],
     }], "清卡=该条目 persona 写成 null，条目不从数组删除");
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// S2-2/S2-3：工作区默认卡（壳条选择器区）。getStatus.personas 非空 → 下拉；
+// 空/缺失 → 手填输入框回退。保存仍是 defaultPersona 单键 read-modify-write。
+// ---------------------------------------------------------------------------
+
+const defaultPersonaControl = (tree) =>
+  flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "default-persona") || null;
+
+test("S2-3 工作区默认卡：personas 非空 → 下拉列出卡名，回显当前值，保存只 set defaultPersona 单键", async () => {
+  const calls = [];
+  const mutations = [];
+  const scope = makeScopeForPersona({
+    mode: "active", allowActive: true, defaultPersona: "amber",
+    sessionPersonas: [{ sessionId: "session-A", persona: "amber" }],
+  }, mutations);
+  const { render, cleanup } = await mountSectionStateful(
+    s4PanelPreset({ modeStatus: { mode: "active", scope: "amber", personas: ["amber", "beta", "gamma"] } }),
+    { calls, scope },
+  );
+  try {
+    let tree = render();
+    const control = defaultPersonaControl(tree);
+    assert.ok(control, "选择器行渲染工作区默认卡控件");
+    const select = flattenVNode(control).find((n) => n.type === "select" && n.props["data-role"] === "default-persona-select");
+    assert.ok(select, "有卡列表时渲染下拉");
+    assert.equal(select.props.value, "amber", "回显当前 defaultPersona");
+    const options = flattenVNode(select).filter((n) => n.type === "option").map((n) => collectText(n));
+    assert.deepEqual(options, ["amber", "beta", "gamma"], "选项来自 getStatus.personas");
+    // 保存默认卡：单键 set，其余配置键不动。
+    select.props.onChange({ target: { value: "beta" } });
+    tree = render();
+    findButton(tree, "保存默认卡").props.onClick();
+    await flush(20);
+    tree = render();
+    assert.equal(mutations.length, 1, "保存默认卡恰好一次 mutate");
+    assert.deepEqual(mutations[0].ops, [{ op: "set", path: ["defaultPersona"], value: "beta" }],
+      "只 set defaultPersona 单键");
+    assert.ok(collectText(tree).includes("工作区默认卡已保存为「beta」"), "成功提示可见");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("S2-3 工作区默认卡：personas 为空 → 手填输入框回退（不锁死），保存仍走单键写入", async () => {
+  const calls = [];
+  const mutations = [];
+  const scope = makeScopeForPersona({
+    mode: "active", allowActive: true, defaultPersona: "amber",
+    sessionPersonas: [],
+  }, mutations);
+  const { render, cleanup } = await mountSectionStateful(
+    s4PanelPreset({ modeStatus: { mode: "active", scope: "amber", personas: [] } }),
+    { calls, scope },
+  );
+  try {
+    let tree = render();
+    const control = defaultPersonaControl(tree);
+    assert.ok(control, "工作区默认卡控件照常渲染");
+    assert.equal(flattenVNode(control).some((n) => n.type === "select"), false, "空列表不渲染下拉");
+    const input = flattenVNode(control).find((n) => n.type === "input");
+    assert.ok(input, "回退到手填输入框");
+    assert.equal(input.props.value, "amber", "回显当前 defaultPersona");
+    input.props.onChange({ target: { value: "delta" } });
+    tree = render();
+    findButton(tree, "保存默认卡").props.onClick();
+    await flush(20);
+    assert.equal(mutations.length, 1, "回退路径保存一次 mutate");
+    assert.deepEqual(mutations[0].ops, [{ op: "set", path: ["defaultPersona"], value: "delta" }],
+      "回退路径同样只 set defaultPersona");
   } finally {
     await cleanup();
   }

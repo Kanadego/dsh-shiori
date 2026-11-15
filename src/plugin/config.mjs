@@ -173,14 +173,20 @@ export function coreBudgetsOf(budgets) {
   return { ...budgets, core };
 }
 
+// volatile 的语义边界（0.4-S1 起 mode / allowActive / defaultPersona 同 budgets 处理）：
+// 打 .volatile() 只解决「宿主 settings 通道允许写入该字段」（dsh-settings 的
+// write() 对非 volatile 路径直接报 Config field "..." is not volatile）。它不改变
+// 挂载策略——mode / allowActive 决定下一次装配是否进 active（由宿主装配时读配置
+// 决定），defaultPersona 决定默认选卡；写入后值只落进宿主配置层，插件实例内的
+// settings 是装配期冻结的快照，真正切换仍须重启 DSH 重新装配。
 /** 原生 Schemastery Config：宿主 settings UI 与 Cordis 装配使用的静态 schema。 */
 export const Config = z.object({
-  mode: z.union([z.const("shadow"), z.const("active")]).default("shadow").description("shadow 只读影子（默认，不写业务数据）；active 显式启用完整工具与写入"),
-  allowActive: z.boolean().default(false).description("显式允许 active；mode=active 时必须为 true"),
+  mode: z.union([z.const("shadow"), z.const("active")]).default("shadow").volatile().description("shadow 只读影子（默认，不写业务数据）；active 显式启用完整工具与写入"),
+  allowActive: z.boolean().default(false).volatile().description("显式允许 active；mode=active 时必须为 true"),
   dataRoot: nullableString().default(null).description("业务数据根目录（绝对路径）；缺省（null）时插件加载阶段自动解析为 <DSH_HOME>/shiori-data 并自动创建目录（DSH_HOME 取环境变量 DSH_HOME，未设置时为 ~/.dsh）"),
   stateRoot: nullableString().default(null).description("运行状态根目录（绝对路径），与 dataRoot 互不嵌套；缺省（null）时自动解析为 <DSH_HOME>/shiori-state 并自动创建目录（DSH_HOME 取环境变量 DSH_HOME，未设置时为 ~/.dsh）"),
   ownerId: z.string().default("local").description("可信部署配置的单用户 owner 标识；模型不可传"),
-  defaultPersona: personaChoice().description("默认人设卡名；null=global memory / 无默认卡"),
+  defaultPersona: personaChoice().volatile().description("默认人设卡名；null=global memory / 无默认卡"),
   sessionPersonas: z.array(z.object({
     sessionId: z.string().description("宿主会话 id"),
     persona: personaChoice().description("该会话的人设卡；null=global"),
@@ -552,9 +558,14 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
     if (!TOP_LEVEL_KEYS.has(key)) fail(`config has unknown top-level property "${key}"`);
   }
 
-  const mode = raw.mode === undefined ? "shadow" : raw.mode;
+  // 三个 volatile 字段（mode / allowActive / defaultPersona）在宿主侧是 cosmokit
+  // 引用对象，与 budgets 同款解包；解包后必须是普通 string / boolean / null，
+  // 下游 scope.mjs / controller.mjs / management.mjs 只认普通值。
+  const modeRaw = unwrapVolatile(raw.mode);
+  const mode = modeRaw === undefined ? "shadow" : modeRaw;
   if (mode !== "shadow" && mode !== "active") fail(`mode must be "shadow" or "active", got ${String(mode)}`);
-  const allowActive = raw.allowActive === undefined ? false : requireBoolean(raw.allowActive, "allowActive");
+  const allowActiveRaw = unwrapVolatile(raw.allowActive);
+  const allowActive = allowActiveRaw === undefined ? false : requireBoolean(allowActiveRaw, "allowActive");
 
   let dataRoot = normalizeRoot(raw.dataRoot, "dataRoot");
   let stateRoot = normalizeRoot(raw.stateRoot, "stateRoot");
@@ -601,7 +612,8 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
   }
 
   const ownerId = raw.ownerId === undefined ? "local" : requireNonEmptyString(raw.ownerId, "ownerId");
-  const defaultPersona = raw.defaultPersona === undefined ? null : requirePersona(raw.defaultPersona, "defaultPersona");
+  const defaultPersonaRaw = unwrapVolatile(raw.defaultPersona);
+  const defaultPersona = defaultPersonaRaw === undefined ? null : requirePersona(defaultPersonaRaw, "defaultPersona");
   const sessionPersonas = raw.sessionPersonas === undefined
     ? []
     : requireMappingList(raw.sessionPersonas, "sessionPersonas", sessionMapping);

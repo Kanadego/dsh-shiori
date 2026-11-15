@@ -71,6 +71,7 @@ window.__ModuleLoader__.load({
 ".dshi_label{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);display:flex;flex-direction:column;gap:3px}" +
 ".dshi_error{font-size:12px;color:var(--dsw-alias-state-error-primary,#f85149);border:1px solid var(--dsw-alias-state-error-primary,#f85149);border-radius:8px;padding:6px 10px;word-break:break-all}" +
 ".dshi_ok{font-size:12px;color:var(--dsw-alias-state-success-primary,#1a7f37);border:1px solid var(--dsw-alias-state-success-primary,#1a7f37);border-radius:8px;padding:6px 10px;word-break:break-all}" +
+".dshi_warn{font-size:12px;color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:8px;padding:6px 10px;word-break:break-all;background:rgba(180,83,9,.08)}" +
 ".dshi_loading{font-size:12px;color:var(--dsw-alias-label-tertiary)}" +
 ".dshi_pre{margin:0;font-family:ui-monospace,Consolas,monospace;font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;border:1px solid var(--dsw-alias-border-l2,#dce2eb);border-radius:8px;padding:8px 10px;background:var(--dsw-alias-bg-layer-2,transparent)}" +
 ".dshi_bar{height:8px;border-radius:4px;border:1px solid var(--dsw-alias-border-l2,#dce2eb);overflow:hidden;background:var(--dsw-alias-bg-layer-2,transparent)}" +
@@ -140,10 +141,14 @@ window.__ModuleLoader__.load({
     ".dshi_memEditor{min-height:320px}" +
     ".dshi_empty{font-size:var(--dshi-font-sm);color:var(--dshi-text-dim);border:1px dashed var(--dsw-alias-border-l2,#dce2eb);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm) var(--dshi-space);line-height:1.7}" +
     ".dshi_conflict{font-size:var(--dshi-font-sm);color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}" +
-    // U8 壳层：sticky 壳条（选择器 + tab 栏随滚动固定）、tab 内联 SVG 图标（CSS mask，
-    // 不动按钮 DOM 形状）、toast 三态与需重启横幅（挂在 body 上，不在 .dshi_root 内，
-    // 故 token 在 .dshi_toasts/.dshi_restartBanner 上单独桥接一份）。
-".dshi_sticky{position:sticky;top:0;z-index:30;display:flex;flex-direction:column;gap:12px;background:var(--dshi-bg-card);border-bottom:var(--dshi-stroke);padding-bottom:var(--dshi-space-sm);box-shadow:0 8px 20px -14px rgba(15,23,42,.45)}" +
+    // U8 壳层：壳条（选择器 + tab 栏）、tab 内联 SVG 图标（CSS mask，不动按钮 DOM 形状）、
+    // toast 三态与需重启横幅（挂在 body 上，不在 .dshi_root 内，故 token 在
+    // .dshi_toasts/.dshi_restartBanner 上单独桥接一份）。
+    // S2-4：壳条整体不吸顶（去掉 position:sticky/top/z-index/投影）。理由：面板自身滚动
+    // 容器（.dshi_rootMain overflow:auto）与侧边栏入口的宿主滚动容器嵌套，sticky 只能相对
+    // 最近滚动祖先生效，实际表现为壳条悬浮压住下方卡片与 tab 内容（遮挡），且侧边栏入口
+    // 顶部被裁时 top 偏移算不准；壳条合并为单行选择器后高度已降，固定收益小于遮挡代价。
+".dshi_sticky{display:flex;flex-direction:column;gap:12px;background:var(--dshi-bg-card);border-bottom:var(--dshi-stroke);padding-bottom:var(--dshi-space-sm)}" +
 ".dshi_tabIco::before{content:\"\";display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1px;background-color:currentColor;-webkit-mask:var(--dshi-tab-ico) center/contain no-repeat;mask:var(--dshi-tab-ico) center/contain no-repeat}" +
 ".dshi_tabIco-status{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M1 8h3l2-5 4 10 2-5h3%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}" +
 ".dshi_tabIco-memory{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 1l6 3-6 3-6-3z%27/%3E%3Cpath d=%27M2 8l6 3 6-3M2 12l6 3 6-3%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}" +
@@ -199,12 +204,20 @@ window.__ModuleLoader__.load({
 ".dshi_migration{border:1px solid var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm);display:flex;flex-direction:column;gap:var(--dshi-space-xs)}" +
 ".dshi_personaRow{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap}" +
 ".dshi_personaName{display:inline-block;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}" +
-    // S2 侧边栏 main 槽位全屏容器（与 client/shiori.css 末尾三条规则逐字一致，
+    // S2-3：壳条顶部选择器行——「选工作区」「选会话」「工作区默认卡」同一水平行，窄屏换行。
+    // flex-end 让各控件底边（输入框底）对齐；控件统一 28px 高度，修「记忆卡：amber」
+    // 按钮与下拉高低不齐、基线错位。
+".dshi_selectorRow{display:flex;align-items:flex-end;gap:var(--dshi-space-sm);flex-wrap:wrap}" +
+".dshi_selectorRow .dshi_btn,.dshi_selectorRow .dshi_input,.dshi_selectorRow .dshi_select{height:28px;box-sizing:border-box}" +
+".dshi_selectorRow .dshi_btn{padding-top:0;padding-bottom:0}" +
+    // S2 侧边栏 main 槽位全屏容器（与 client/shiori.css 末尾两条规则逐字一致，
     // client.test.mjs 压缩比对）：仅 props.workbench 时追加，详情页窄卡片不回归；
     // box-sizing:border-box 显式写（根元素不吃 .dshi_root * 通配重置，content-box
-    // 下 100% 宽高叠 padding 会溢出），sticky 壳条 top 让出宿主框架留白。
-".dshi_rootMain{box-sizing:border-box;max-width:none;width:100%;height:100%;min-height:0;padding:calc(24px + var(--dsh-frame-top-clearance,0px)) 28px 0 max(28px,var(--dsh-frame-leading-clearance,0px));overflow:auto}" +
-".dshi_rootMain .dshi_sticky{top:calc(24px + var(--dsh-frame-top-clearance,0px))}" +
+    // 下 100% 宽高叠 padding 会溢出）。
+".dshi_rootMain{box-sizing:border-box;max-width:none;width:100%;height:100%;min-height:0;padding:calc(24px + var(--dsh-frame-top-clearance,0px)) 28px max(28px,var(--dsh-frame-bottom-clearance,0px)) max(28px,var(--dsh-frame-leading-clearance,0px));overflow:auto}" +
+    // S2-4：壳条不再吸顶（见 .dshi_sticky 注释），原先让出框架顶部的 top 覆盖规则删除；
+    // 上下留白统一由 .dshi_rootMain 的 padding 承担（底部补 max(28px, bottom-clearance)，
+    // 修侧边栏入口打开时首尾被宿主框架裁切）。
 ".dshi_sideIcon{display:block}";
     function ensureStyle() {
       try {
@@ -856,6 +869,31 @@ window.__ModuleLoader__.load({
       return "（原因：" + (cause.code ? "[" + cause.code + "] " : "") + cause.message + "）";
     }
 
+    // S2-1：区分「宿主拒绝写入」与「revision 过期」。宿主的 settings.mutate 对任何
+    // 拒绝（含非 volatile 键、权限、schema 校验失败）都只回 false、不抛原因，客户端
+    // 过去把一切失败都拼成「设置刚被其他窗口修改（revision 冲突）」，属错误归因。
+    // conflictCauseOf：沿 cause 链找冲突类 code（宿主 SETTINGS_CONFLICT / REVISION_CONFLICT
+    // 或任何 *conflict 码）。
+    function conflictCauseOf(error) {
+      var node = error;
+      for (var depth = 0; node && typeof node === "object" && depth < 6; depth += 1) {
+        var code = node.code ? String(node.code) : "";
+        if (code === "SETTINGS_CONFLICT" || code === "REVISION_CONFLICT" || /conflict/i.test(code)) return node;
+        node = node.cause;
+      }
+      return null;
+    }
+    // 读当前配置 revision（探测用）：读不到/未 ready 回 null，绝不让探测本身抛错。
+    function scopeRevisionOf(scope) {
+      try {
+        var snap = scope && typeof scope.getSnapshot === "function" ? scope.getSnapshot() : null;
+        if (!snap || snap.status !== "ready" || snap.revision === undefined || snap.revision === null) return null;
+        return snap.revision;
+      } catch (probeError) {
+        return null;
+      }
+    }
+
     // 0.4 P1#6（docs/0.4-REVIEW.md）：CAS 冲突重试公共函数——原 enableSave /
     // saveManualDir / saveDefaultPersona / personaWrite 四处同构实现收敛为唯一
     // 实现，四处调用点全部改走本函数。attempt() 每次重读快照并 scope.mutate
@@ -868,7 +906,15 @@ window.__ModuleLoader__.load({
     // attachCause 为真且 lastError 非空时挂标准 cause（B2 归因，上层经
     // causeNoteOf 拼「（原因：…）」）。成功时返回 true（原四处成功路径只关心
     // 「没抛 conflict」，返回值形状等价）。
-    async function casMutate(attempt, conflictCode, buildMessage, attachCause) {
+    //
+    // S2-1：opts.readRevision 提供时，失败后据此判定归因——
+    //   ① lastError 带冲突类 code，或两次尝试之间 revision 变了 → buildMessage
+    //      （各调用点的「revision 冲突」文案，行为不变）；
+    //   ② 否则 = 宿主拒绝写入：message 以「宿主拒绝写入：」开头、绝不出现
+    //      「设置刚被其他窗口修改」，code 仍用 conflictCode（上层分支口径不变）。
+    async function casMutate(attempt, conflictCode, buildMessage, attachCause, opts) {
+      var readRevision = opts && typeof opts.readRevision === "function" ? opts.readRevision : null;
+      var revisionBefore = readRevision ? readRevision() : null;
       var applied = false;
       var lastError = null; // B2：最后一次抛出的原始错误对象（conflict 挂 cause 用）
       try {
@@ -886,10 +932,24 @@ window.__ModuleLoader__.load({
         }
         if (applied !== true) {
           var lastMessage = lastError !== null ? (lastError && lastError.message) || String(lastError) : "";
-          var conflict = new Error(buildMessage({ lastError: lastError, lastMessage: lastMessage }));
-          conflict.code = conflictCode;
-          if (attachCause && lastError !== null) conflict.cause = lastError; // B2：不吞原始归因（如 shiori/ui-scope）
-          throw conflict;
+          var revisionAfter = readRevision ? readRevision() : null;
+          var revisionMoved = revisionBefore !== null && revisionAfter !== null && revisionBefore !== revisionAfter;
+          var isConflict = !readRevision ? true : !!(conflictCauseOf(lastError) || revisionMoved);
+          var failure;
+          if (isConflict) {
+            failure = new Error(buildMessage({ lastError: lastError, lastMessage: lastMessage }));
+          } else if (lastError && String(lastError.code || "") === "shiori/ui-scope") {
+            // 写前自检失败（快照不可用），宿主根本没被叫到：如实说「写入未生效」。
+            failure = new Error("写入未生效：" + lastMessage);
+          } else {
+            // S2-1：宿主拒绝写入——mutate 返回 false 且版本号没动，不是 revision 过期。
+            // 宿主不回报拒绝原因，原文（若有）与这句事实并列，便于用户/工程师排查。
+            failure = new Error("宿主拒绝写入：" + (lastMessage || "宿主未接受该写入（mutate 返回 false，版本号未变，不是 revision 过期）。")
+              + "（设置未被修改：可能是该配置项不允许热更新，或宿主策略/校验拒绝；原文可能为空，可查看宿主日志。）");
+          }
+          failure.code = conflictCode;
+          if (attachCause && lastError !== null) failure.cause = lastError; // B2：不吞原始归因（如 shiori/ui-scope）
+          throw failure;
         }
       }
       return true;
@@ -1004,6 +1064,31 @@ window.__ModuleLoader__.load({
       if (value === undefined || value === null) return "—";
       if (typeof value === "object") return stableStringify(value);
       return String(value);
+    }
+
+    // ── S2-2：人设卡下拉的数据与选项工具 ────────────────────────────────────
+    // getStatus 顶层 personas: string[]（由服务端从 dataRoot/persona/*.md 派生）。
+    // 契约要求客户端容忍缺失/非数组/空串 → 一律按空数组处理；空列表时调用方
+    // 保持手填输入框回退（不锁死、不崩）。
+    function personaOptionsFrom(status) {
+      var raw = status && typeof status === "object" ? status.personas : undefined;
+      if (!Array.isArray(raw)) return [];
+      var out = [];
+      for (var i = 0; i < raw.length; i++) {
+        var name = typeof raw[i] === "string" ? raw[i].trim() : "";
+        if (name === "") continue;
+        if (out.indexOf(name) >= 0) continue;
+        out.push(name);
+      }
+      return out;
+    }
+    // 下拉选项：保证当前值在列表里（服务端列表可能滞后于已保存配置，别让
+    // value 落空导致 select 显示空白）；列表为空时返回空数组。
+    function personaSelectValues(options, current) {
+      var list = Array.isArray(options) ? options.slice() : [];
+      var value = typeof current === "string" ? current.trim() : "";
+      if (value !== "" && list.indexOf(value) < 0) list.push(value);
+      return list;
     }
 
     function occupancyText(used, limit) {
@@ -1356,6 +1441,11 @@ window.__ModuleLoader__.load({
       var configPersona = configValueNow && typeof configValueNow.defaultPersona === "string" ? configValueNow.defaultPersona : "";
       var effectivePersona = String(personaDraft ?? "").trim() || configPersona;
       var personaMissing = effectivePersona === "";
+      // S2-2：人设卡下拉选项来自 getStatus.personas；列表为空（或旧宿主没这字段）
+      // 时退回手填输入框，绝不锁死（契约：缺失/非数组按空数组处理）。
+      var personaOptions = personaOptionsFrom(status);
+      var enablePersonaValue = personaDraft !== "" ? String(personaDraft) : configPersona;
+      var enablePersonaOptionList = personaSelectValues(personaOptions, enablePersonaValue);
       // 服务端 diagnostics 解析出的两个根只做回显确认（不写入配置——服务端只读派生）。
       var dataRootEcho = diagnosticsObj && diagnosticsObj.dataRoot !== undefined && diagnosticsObj.dataRoot !== null ? String(diagnosticsObj.dataRoot) : "—";
       var stateRootEcho = diagnosticsObj && diagnosticsObj.stateRoot !== undefined && diagnosticsObj.stateRoot !== null ? String(diagnosticsObj.stateRoot) : "—";
@@ -1411,7 +1501,7 @@ window.__ModuleLoader__.load({
           await casMutate(attempt, "shiori/ui-enable-conflict", function (ctx) {
             return "设置刚被其他窗口修改（revision 冲突），已重试一次仍未成功；请再点一次。"
               + (ctx.lastMessage !== "" ? "（最近错误：" + ctx.lastMessage + "）" : "");
-          }, true);
+          }, true, { readRevision: function () { return scopeRevisionOf(scope); } });
           await load(); // 成功后刷新状态卡（configurationState 走向下一态 / configured）
         } catch (e) {
           setEnableError({ code: (e && e.code) || "shiori/ui-enable", message: "启用失败：" + ((e && e.message) || String(e)) + causeNoteOf(e) });
@@ -1584,7 +1674,7 @@ window.__ModuleLoader__.load({
           await casMutate(attempt, "shiori/ui-dl-conflict", function (ctx) {
             return "设置刚被其他窗口修改（revision 冲突），已重试一次仍未成功；请再点一次。"
               + (ctx.lastMessage !== "" ? "（最近错误：" + ctx.lastMessage + "）" : "");
-          }, true);
+          }, true, { readRevision: function () { return scopeRevisionOf(scope); } });
           await load(); // 保存成功刷新状态卡（新目录的 modelDir / modelInstalled 即时可见）
         } catch (e) {
           setDlUiError("保存目录失败：" + ((e && e.message) || String(e)));
@@ -1606,7 +1696,15 @@ window.__ModuleLoader__.load({
       // ── 0.4 S6「卸载并清除数据」：二次确认（输入 dataRoot 原文）→ destroyData。
       // 与命令行 dsh-shiori-admin destroy 走同一个服务端 purge 模块，行为一致：
       // 只删 dataRoot，stateRoot 与 DSH 配置不受影响；失败如实显示错误码。
-      var destroyRoot = dataRootEcho !== "—" && dataRootEcho !== "" ? dataRootEcho : null;
+      // S2-6 根因：dataRootEcho 来自服务端 diagnostics 的 String() 原样回显，两端
+      // 可能带不可见空白；而确认框逐字符比较原始字符串——用户照抄「可见字符」永远
+      // 差那几个不可见字符，按钮就一直是灰的（截图 m01284 里输入框里的灰字其实就是
+      // placeholder，同一原因让人误以为已经填好）。修法：placeholder 与比较同源
+      // （都取 trim 后的 destroyRoot），草稿比较前也 trim；大小写仍严格区分。
+      var destroyRootRaw = dataRootEcho !== "—" && dataRootEcho !== "" ? String(dataRootEcho) : null;
+      var destroyRoot = destroyRootRaw !== null && destroyRootRaw.trim() !== "" ? destroyRootRaw.trim() : null;
+      var destroyDraftText = String(destroyDraft ?? "").trim();
+      var destroyMatches = destroyRoot !== null && destroyDraftText !== "" && destroyDraftText === destroyRoot;
       var startDestroyConfirm = function () {
         if (destroyBusy) return;
         setDestroyError(null);
@@ -1624,12 +1722,14 @@ window.__ModuleLoader__.load({
         if (!destroyRoot || destroyBusy) return;
         // 二次确认硬闸：输入与 dataRoot 原文逐字符不等时，这里直接返回——
         // 绝不发 RPC（按钮 disabled 只是第一道，处理函数这道不依赖 UI 行为）。
-        if (String(destroyDraft) !== destroyRoot) return;
+        if (!destroyMatches) return;
         var sid = props.sessionId;
         setDestroyBusy(true);
         setDestroyError(null);
         try {
-          await props.dsh.call("destroyData", sid, { confirm: destroyRoot });
+          // 服务端要求 confirm 与它自己的 dataRoot 逐字符一致：回传原文（不 trim）；
+          // 只有本地比较忽略首尾空白（见 destroyMatches）。
+          await props.dsh.call("destroyData", sid, { confirm: destroyRootRaw !== null ? destroyRootRaw : destroyRoot });
           setDestroyStage(null);
           setDestroyDraft("");
           setDestroyDone("已焚毁 dataRoot（" + destroyRoot + "）。只删 dataRoot，stateRoot 与 DSH 配置不受影响。插件仍在运行，重启后（或下一次访问数据）会用空目录重建 dataRoot。");
@@ -1673,17 +1773,31 @@ window.__ModuleLoader__.load({
             configScopeNow ? null : h("div", { className: "dshi_hint" },
               "设置命名空间不可用（configForms 缺席）：无法在此保存 / 启用，请用宿主插件配置页。"),
             h("label", { className: "dshi_label" }, "默认人设卡名",
-              h("input", {
-                className: "dshi_input",
-                // 草稿为空时回显当前配置值（needs-active 阶段服务端必已有卡名）。
-                value: personaDraft !== "" ? personaDraft : configPersona,
-                placeholder: "例如 amber",
-                // needs-active 态卡名只回显不改写：启用按钮只写 mode/allowActive，
-                // 不在此态顺手改默认卡（越出该状态该做的事）。快照还没就绪
-                //（configPersona 为空）时不锁死输入，避免只读+禁用死锁。
-                readOnly: needsActive && configPersona !== "",
-                onChange: function (event) { setPersonaDraft(event.target.value); }
-              })),
+              personaOptions.length > 0
+                ? h("select", {
+                    className: "dshi_select",
+                    "data-role": "persona-select",
+                    value: enablePersonaValue,
+                    // needs-active 态卡名只回显不改写（与输入框口径一致）：
+                    // 只在服务端已有非空卡名时禁用，快照未就绪不锁死。
+                    disabled: needsActive && configPersona !== "",
+                    onChange: function (event) { setPersonaDraft(event.target.value); }
+                  },
+                  enablePersonaValue === "" ? h("option", { key: "__unset", value: "" }, "请选择人设卡") : null,
+                  enablePersonaOptionList.map(function (name) {
+                    return h("option", { key: name, value: name }, name);
+                  }))
+                : h("input", {
+                    className: "dshi_input",
+                    // 草稿为空时回显当前配置值（needs-active 阶段服务端必已有卡名）。
+                    value: personaDraft !== "" ? personaDraft : configPersona,
+                    placeholder: "例如 amber",
+                    // needs-active 态卡名只回显不改写：启用按钮只写 mode/allowActive，
+                    // 不在此态顺手改默认卡（越出该状态该做的事）。快照还没就绪
+                    //（configPersona 为空）时不锁死输入，避免只读+禁用死锁。
+                    readOnly: needsActive && configPersona !== "",
+                    onChange: function (event) { setPersonaDraft(event.target.value); }
+                  })),
             ErrorBox(enableError),
             h("div", { className: "dshi_row" },
               needsPersona ? h("button", {
@@ -1785,8 +1899,14 @@ window.__ModuleLoader__.load({
                 : null),
             // S5：双源都失败的报错卡片——说明原因、手动目录输入框、可一键复制的
             // 安装提示词（含规范目录写法；URL 由服务端 installHint 下发）。
+            // S2-5：缺可选依赖不是故障——卡片用中性 warn 样式（不再红色 ErrorBox），
+            // 文案说明「可选能力、只影响语义召回、其余功能不受影响」。
             dlView && dlView.phase === "error"
-              ? h("div", { className: "dshi_error", "data-role": "download-error" },
+              ? h("div", {
+                  className: dlView.code === "DOWNLOAD_DEPENDENCY_MISSING" ? "dshi_warn" : "dshi_error",
+                  "data-role": "download-error",
+                  "data-tone": dlView.code === "DOWNLOAD_DEPENDENCY_MISSING" ? "warn" : "error"
+                },
                   h("div", null, "模型下载失败：" + (dlView.error
                     ? String(dlView.error)
                     : "两个下载源都不可达。")),
@@ -1795,8 +1915,11 @@ window.__ModuleLoader__.load({
                     // 三支（本地常量与语义层错误码同字符串）——缺依赖 / 依赖已装
                     // 但加载失败 / 其余（网络）。加载失败支明确「不是网络问题」，
                     // 不复用缺依赖那句（装依赖没用）。
+                    // S2-5：缺依赖支改为「可选能力缺失」口径——这是插件没装可
+                    // 选依赖，不是故障也不是网络问题；缺它只影响语义召回（向量
+                    // 检索），关键词召回、记忆读写等其他功能照常可用。
                     dlView.code === "DOWNLOAD_DEPENDENCY_MISSING"
-                      ? "这是插件缺可选依赖 @huggingface/transformers（不是网络问题）：在插件目录执行 npm i @huggingface/transformers 后重试，或用下方任一方式手动安装："
+                      ? "这不是插件故障：@huggingface/transformers 是可选依赖（未随插件包安装），缺它只影响语义召回（向量检索），关键词召回与其他记忆功能都不受影响。想要语义召回时，可在插件目录执行 npm i @huggingface/transformers 后重试，或用下方任一方式手动安装："
                       : dlView.code === "DOWNLOAD_RUNTIME_LOAD_FAILED"
                         ? "可选依赖已安装但加载失败（不是网络问题）：单纯 npm i @huggingface/transformers 不一定解决问题，请按上方错误信息处理，或用下方任一方式手动安装："
                         : "两个下载源都失败通常是网络原因（镜像 / 官方源均不可达，或代理未开）。请检查网络后点「下载模型」重试，或用下方任一方式手动安装："),
@@ -1846,14 +1969,21 @@ window.__ModuleLoader__.load({
               h("div", { className: "dshi_hint" }, "请输入 dataRoot 原文以确认（逐字符一致才能执行）："),
               h("input", {
                 className: "dshi_input",
+                "data-role": "destroy-confirm-input",
                 value: destroyDraft,
                 placeholder: destroyRoot,
+                autoComplete: "off",
+                spellCheck: false,
                 onChange: function (event) { setDestroyDraft(event.target.value); }
               }),
+              destroyDraftText !== "" && !destroyMatches
+                ? h("div", { className: "dshi_hint", "data-role": "destroy-mismatch" },
+                    "输入与 dataRoot 不一致（区分大小写，首尾空白忽略）：需要逐字符一致才能执行。")
+                : null,
               h("div", { className: "dshi_row" },
                 h("button", {
                   className: "dshi_btn dshi_btnDanger",
-                  disabled: destroyBusy || destroyDraft !== destroyRoot,
+                  disabled: destroyBusy || !destroyMatches,
                   onClick: runDestroy
                 }, destroyBusy ? "清除中…" : "确认清除"),
                 h("button", {
@@ -5157,20 +5287,9 @@ window.__ModuleLoader__.load({
       var occupancyState = useState(null);
       var occupancy = occupancyState[0];
       var setOccupancy = occupancyState[1];
-      // S4「工作区默认卡」（0.4）：设置页里改 defaultPersona。read-modify-write 单键
-      // set（与选卡按钮同款约束）：只 set defaultPersona，其余键原样保留。
-      var personaFieldState = useState(null); // null=未输入（输入框显示当前配置值）
-      var personaField = personaFieldState[0];
-      var setPersonaField = personaFieldState[1];
-      var personaSavingState = useState(false);
-      var personaSaving = personaSavingState[0];
-      var setPersonaSaving = personaSavingState[1];
-      var personaErrorState = useState(null);
-      var personaError = personaErrorState[0];
-      var setPersonaError = personaErrorState[1];
-      var personaOkState = useState(null);
-      var personaOk = personaOkState[0];
-      var setPersonaOk = personaOkState[1];
+      // S2-3：「工作区默认卡」编辑已移到壳条顶部选择器区（与「选工作区」「选会话」
+      // 同一水平行），本页不再持有 persona 相关 state。老测试预置的 states[0..4]
+      // 下标不变。
       useEffect(function () {
         try {
           setSnapshot(scope ? scope.getSnapshot() : null);
@@ -5213,51 +5332,6 @@ window.__ModuleLoader__.load({
         var parts = path.split(".");
         var factoryDefault = BUDGET_FACTORY_DEFAULTS[parts[0]] ? BUDGET_FACTORY_DEFAULTS[parts[0]][parts[1]] : undefined;
         change(path, factoryDefault);
-      };
-      // ── S4「工作区默认卡」：defaultPersona 编辑 + 单键 read-modify-write 保存 ──
-      var configPersonaNow = value && typeof value.defaultPersona === "string" ? value.defaultPersona : "";
-      var personaFieldValue = personaField !== null ? personaField : configPersonaNow;
-      var saveDefaultPersona = async function () {
-        setPersonaError(null);
-        setPersonaOk(null);
-        var persona = String(personaFieldValue ?? "").trim();
-        if (persona === "") {
-          setPersonaError({ code: "shiori/ui-persona-empty", message: "卡名不能为空。" });
-          return;
-        }
-        if (!scope || typeof scope.mutate !== "function" || typeof scope.getSnapshot !== "function") {
-          setPersonaError({ code: "shiori/ui-unsupported", message: "设置命名空间不可用，无法保存默认卡。" });
-          return;
-        }
-        setPersonaSaving(true);
-        try {
-          // 每次尝试都重读最新快照（CAS 冲突重试不吃旧值）；只 set defaultPersona
-          // 一个键，mode/allowActive/budgets 等其余键原样保留。
-          var attempt = async function () {
-            var snap = scope.getSnapshot();
-            var val = snap && snap.status === "ready" && snap.value && typeof snap.value === "object" ? snap.value : null;
-            if (!val) {
-              var missing = new Error("设置快照不可用（status=" + String(snap && snap.status) + "）。");
-              missing.code = "shiori/ui-scope";
-              throw missing;
-            }
-            return scope.mutate([{ op: "set", path: ["defaultPersona"], value: persona }], snap.revision);
-          };
-          // B1：与 enableSave 同口径——mutate 恰好 ≤2 次（首次结果 !==true 才
-          // 重试一次），第二次的原始错误文本拼进 conflict message，绝不第三次调用；
-          // 成功路径行为不变（重读快照、成功提示照旧）。P1#6：重试骨架改走公共
-          // casMutate，conflict 文案 / code / cause 与原实现逐字等价。
-          await casMutate(attempt, "shiori/ui-persona-conflict", function (ctx) {
-            return "设置刚被其他窗口修改（revision 冲突），请再点一次「保存默认卡」。"
-              + (ctx.lastError && ctx.lastError.message ? "（最近错误：" + ctx.lastError.message + "）" : "");
-          }, true);
-          setSnapshot(scope.getSnapshot());
-          setPersonaOk("工作区默认卡已保存为「" + persona + "」；下一轮对话按选卡优先级解析（会话专属卡 > 工作区路径 > 默认卡）。");
-        } catch (e) {
-          setPersonaError({ code: (e && e.code) || "shiori/ui-persona", message: "保存失败：" + ((e && e.message) || String(e)) + causeNoteOf(e) });
-        } finally {
-          setPersonaSaving(false);
-        }
       };
       // 字段行：界面名主位（技术名进 title tooltip）+ 后果描述 + 已修改徽章 +
       // 单字段恢复默认 + 就地中文错误。
@@ -5442,27 +5516,6 @@ window.__ModuleLoader__.load({
             integerField("spark.seedCount"),
             integerField("spark.linkCount")
           ])) : h("div", { className: "dshi_loading" }, snapshot && snapshot.status !== "ready" ? "设置命名空间不可用（服务端未注册 shiori 命名空间？）" : "加载中…"),
-        // S4「工作区默认卡」：设置页里的 defaultPersona 编辑（评审 q-b8f480de923fa65d：
-        // 单键 read-modify-write，与选卡按钮同款约束；trim 后空串拒绝）。
-        h("div", { className: "dshi_card", "data-role": "default-persona" },
-          h("div", { className: "dshi_row" },
-            h("span", { className: "dshi_cardTitle" }, "人设卡：工作区默认卡"),
-            h("span", { className: "dshi_titleSub" }, "defaultPersona · 单键写入，其余配置不动")),
-          h("div", { className: "dshi_hint" }, "没有会话专属卡、工作区路径也没匹配到时，注入这张卡（scope 名即卡名，切卡即换整套记忆）。单个会话的临时换卡用会话顶部的「记忆卡」按钮。"),
-          h("div", { className: "dshi_row" },
-            h("input", {
-              className: "dshi_input",
-              value: personaFieldValue,
-              placeholder: "例如 amber",
-              onChange: function (event) { setPersonaField(event.target.value); }
-            }),
-            h("button", {
-              className: "dshi_btn dshi_btnPrimary", type: "button",
-              disabled: personaSaving || !value,
-              onClick: saveDefaultPersona
-            }, personaSaving ? "保存中…" : "保存默认卡")),
-          personaOk ? h("div", { className: "dshi_ok" }, personaOk) : null,
-          ErrorBox(personaError)),
         errorCount > 0 ? h("div", { className: "dshi_blockError" },
           "有 " + errorCount + " 处越界，已禁用保存：", Object.keys(fieldErrors).map(function (path) {
             return h("div", { key: path }, fieldErrors[path]);
@@ -6223,6 +6276,70 @@ window.__ModuleLoader__.load({
       var personaScopeNow = modeStatus && typeof modeStatus.scope === "string" && modeStatus.scope !== ""
         ? modeStatus.scope
         : "global";
+      var personaScopeRead = function () {
+        return props.dsh && typeof props.dsh.configScope === "function" ? props.dsh.configScope() : undefined;
+      };
+      // ── S2-3「工作区默认卡」：从设置页底部搬到壳条顶部选择器区 ─────────────────
+      // 语义不变：单键 read-modify-write 只 set defaultPersona（其余配置键原样
+      // 保留）；trim 后空串拒绝；CAS false/抛错重试恰一次（casMutate）。
+      // UI 状态挂 availability.persona 子对象（不新增面板级 useState，
+      // PANEL_STATES=9 冻结），切会话时探测 effect 重写 availability 自动复位。
+      var workspacePersonaScope = personaScopeRead();
+      var workspacePersonaConfig = (function () {
+        try {
+          var snap = workspacePersonaScope && typeof workspacePersonaScope.getSnapshot === "function"
+            ? workspacePersonaScope.getSnapshot() : null;
+          return snap && snap.status === "ready" && snap.value && typeof snap.value === "object" ? snap.value : null;
+        } catch (e) { return null; }
+      })();
+      var configuredDefaultPersona = workspacePersonaConfig && typeof workspacePersonaConfig.defaultPersona === "string"
+        ? workspacePersonaConfig.defaultPersona : "";
+      // S2-2：下拉选项来自 getStatus.personas（缺失/非数组 → 空数组 → 手填回退）。
+      var workspacePersonaOptions = personaOptionsFrom(modeStatus);
+      var defaultPersonaDraft = typeof personaUi.defaultDraft === "string" ? personaUi.defaultDraft : "";
+      var workspacePersonaValue = defaultPersonaDraft !== "" ? defaultPersonaDraft : configuredDefaultPersona;
+      var workspacePersonaOptionList = personaSelectValues(workspacePersonaOptions, workspacePersonaValue);
+      var defaultPersonaBusy = personaUi.defaultBusy === true;
+      var defaultPersonaError = personaUi.defaultError || null;
+      var defaultPersonaOk = typeof personaUi.defaultOk === "string" ? personaUi.defaultOk : "";
+      var workspacePersonaSaveAttempt = async function (persona) {
+        var scope = personaScopeRead();
+        if (!scope || typeof scope.mutate !== "function" || typeof scope.getSnapshot !== "function") {
+          var unsupported = new Error("设置命名空间不可用（configForms 缺席），无法保存默认卡。");
+          unsupported.code = "shiori/ui-unsupported";
+          throw unsupported;
+        }
+        var snap = scope.getSnapshot();
+        var val = snap && snap.status === "ready" && snap.value && typeof snap.value === "object" ? snap.value : null;
+        if (!val) {
+          var missing = new Error("设置快照不可用（status=" + String(snap && snap.status) + "）。");
+          missing.code = "shiori/ui-scope";
+          throw missing;
+        }
+        return scope.mutate([{ op: "set", path: ["defaultPersona"], value: persona }], snap.revision);
+      };
+      var saveWorkspacePersona = async function () {
+        var persona = String(workspacePersonaValue ?? "").trim();
+        setPersonaUi({ defaultOk: "", defaultError: null });
+        if (persona === "") {
+          setPersonaUi({ defaultError: { code: "shiori/ui-persona-empty", message: "卡名不能为空。" } });
+          return;
+        }
+        if (!workspacePersonaScope) {
+          setPersonaUi({ defaultError: { code: "shiori/ui-unsupported", message: "设置命名空间不可用，无法保存默认卡。" } });
+          return;
+        }
+        setPersonaUi({ defaultBusy: true });
+        try {
+          await casMutate(function () { return workspacePersonaSaveAttempt(persona); }, "shiori/ui-persona-conflict", function (ctx) {
+            return "设置刚被其他窗口修改（revision 冲突），请再点一次「保存默认卡」。"
+              + (ctx.lastError && ctx.lastError.message ? "（最近错误：" + ctx.lastError.message + "）" : "");
+          }, true, { readRevision: function () { return scopeRevisionOf(personaScopeRead()); } });
+          setPersonaUi({ defaultBusy: false, defaultOk: "工作区默认卡已保存为「" + persona + "」；下一轮对话按选卡优先级解析（会话专属卡 > 工作区路径 > 默认卡）。" });
+        } catch (e) {
+          setPersonaUi({ defaultBusy: false, defaultError: { code: (e && e.code) || "shiori/ui-persona", message: "保存失败：" + ((e && e.message) || String(e)) + causeNoteOf(e) } });
+        }
+      };
       // 一次写入尝试：每次都重读最新快照再算 next（CAS 重试不吃旧列表）。
       // 只 set sessionPersonas 一个键，其余配置键原样保留（评审 B 硬约束）。
       var personaWriteAttempt = async function (personaValue) {
@@ -6266,7 +6383,7 @@ window.__ModuleLoader__.load({
           await casMutate(function () { return personaWriteAttempt(personaValue); }, "shiori/ui-persona-conflict", function (ctx) {
             return "设置刚被其他窗口修改（revision 冲突），已重试一次仍未成功；请点「切换」再试一次。"
               + (ctx.lastError && ctx.lastError.message ? "（最近错误：" + ctx.lastError.message + "）" : "");
-          }, true);
+          }, true, { readRevision: function () { return scopeRevisionOf(personaScopeRead()); } });
           // 「记忆已随人设卡切换」提示：组件内状态，只出一次（评审 D：不落 localStorage）；
           // 切会话时探测 effect 重写 availability，提示随之复位。
           setPersonaUi({ switched: true, open: false, busy: false });
@@ -6390,10 +6507,9 @@ window.__ModuleLoader__.load({
       // 根容器追加 scope class（.dshi_rootMain，见 shiori.css 末尾）并标 data-main。
       // 详情页 plugins.bundle.config 槽位没有该 prop，布局保持 860px 窄卡片不回归。
       var workbench = !!props.workbench;
-      // U8 sticky 壳条：工作区/会话选择器与 tab 栏包进一个 position:sticky 容器，
-      // 随宿主面板滚动保持固定；三个提示行留在壳条之后不粘。壳条占据自身布局
-      // 空间并有不透明底（--dshi-bg-card）+ 底边线，页面内容从壳条下方滚动，
-      // 不会被遮死。
+      // U8 壳条：工作区/会话选择器、工作区默认卡与 tab 栏包进 .dshi_sticky 容器。
+      // S2-4：壳条不吸顶（见 CSS 注释：嵌套滚动容器下 sticky 会遮挡内容），只作为
+      // 一块不透明底 + 底边线的普通布局块；提示行留在壳条之后。
       // data-main 只在 workbench 模式输出（详情页根不挂该属性）。
       var rootProps = { className: workbench ? "dshi_root dshi_rootMain" : "dshi_root" };
       if (workbench) rootProps["data-main"] = "true";
@@ -6406,9 +6522,11 @@ window.__ModuleLoader__.load({
         h("div", { className: "dshi_sticky" },
           // F7 黄条：只读态横幅（非报错、非红色；恢复写后随轮询自动消失）。
           readonlyNow ? h("div", { className: "dshi_roBanner", "data-role": "readonly-banner" }, readonlyBannerText(readonlyInfo)) : null,
-          workspaceOptions.length > 0
-            ? h("div", { className: "dshi_row" },
-                h("label", { className: "dshi_label" }, "工作区（先选工作区，再选会话）",
+          // S2-3：选择器统一成一条水平行（窄屏 flex-wrap 换行）：
+          // 选工作区 / 选会话 / 记忆卡按钮 / 工作区默认卡（S2-3 从预算页搬来）。
+          h("div", { className: "dshi_selectorRow", "data-role": "selector-row" },
+            workspaceOptions.length > 0
+              ? h("label", { className: "dshi_label" }, "工作区（先选工作区，再选会话）",
                   h("select", {
                     className: "dshi_select",
                     value: workspaceId,
@@ -6419,9 +6537,8 @@ window.__ModuleLoader__.load({
                       var count = workspaceSessionCount[item.workspaceId];
                       var label = count !== undefined ? item.title + "（" + count + " 个会话）" : item.title;
                       return h("option", { key: item.workspaceId, value: item.workspaceId, title: item.path || item.workspaceId }, label);
-                    }))))
-            : null,
-          h("div", { className: "dshi_row" },
+                    })))
+              : null,
             h("label", { className: "dshi_label" }, "会话（宿主解析，owner 授权）",
               sessions === null || sessions === undefined
                 ? h("input", { className: "dshi_input", placeholder: "session id", value: sessionId || manual, onChange: function (event) { setManual(event.target.value); setSessionId(event.target.value); } })
@@ -6450,7 +6567,38 @@ window.__ModuleLoader__.load({
                 // switched 提示不复位会一直挂着）。
                 setPersonaUi({ open: !personaCardOpen, draft: personaScopeNow === "global" ? "" : personaScopeNow, error: null, switched: false });
               }
-            }, h("span", { className: "dshi_personaName" }, "记忆卡：" + personaScopeNow))),
+            }, h("span", { className: "dshi_personaName" }, "记忆卡：" + personaScopeNow)),
+            // S2-3 工作区默认卡：与「选工作区」「选会话」同一水平行；人员卡列表
+            // （getStatus.personas）非空时是下拉，空列表退回手填输入框（不锁死）。
+            h("label", {
+              className: "dshi_label",
+              "data-role": "default-persona",
+              title: "没有会话专属卡、工作区路径也没匹配到时注入这张卡（defaultPersona，单键写入）"
+            }, "工作区默认卡（defaultPersona）",
+              workspacePersonaOptions.length > 0
+                ? h("select", {
+                    className: "dshi_select",
+                    "data-role": "default-persona-select",
+                    value: workspacePersonaValue,
+                    onChange: function (event) { setPersonaUi({ defaultDraft: event.target.value }); }
+                  },
+                    workspacePersonaValue === "" ? h("option", { key: "__unset", value: "" }, "请选择默认卡") : null,
+                    workspacePersonaOptionList.map(function (name) {
+                      return h("option", { key: name, value: name }, name);
+                    }))
+                : h("input", {
+                    className: "dshi_input",
+                    "data-role": "default-persona-input",
+                    value: workspacePersonaValue,
+                    placeholder: "例如 amber",
+                    onChange: function (event) { setPersonaUi({ defaultDraft: event.target.value }); }
+                  })),
+            h("button", {
+              className: "dshi_btn",
+              "data-role": "default-persona-save",
+              disabled: defaultPersonaBusy || !workspacePersonaScope,
+              onClick: saveWorkspacePersona
+            }, defaultPersonaBusy ? "保存中…" : "保存默认卡")),
           // 选卡行（展开时）：输入卡名即切（scope 名 = persona 名，切卡=换整套记忆）；
           // 「清除专属卡」把本会话条目的 persona 写成 null（回落默认解析链）。
           personaCardOpen && sessionId !== "" ? h("div", { className: "dshi_personaRow", "data-role": "persona-card-row" },
@@ -6479,6 +6627,9 @@ window.__ModuleLoader__.load({
               onClick: function () { setTab(entry.id); }
             }, entry.label);
           }))),
+        // S2-3：工作区默认卡的结果提示放在壳条之外（壳条保持纯选择器，不塞提示行）。
+        defaultPersonaOk ? h("div", { className: "dshi_ok", "data-role": "default-persona-ok" }, defaultPersonaOk) : null,
+        defaultPersonaError ? ErrorBox(defaultPersonaError) : null,
         // S4 切卡提示：组件内状态，一次写入成功只出现一条（评审 D：不落 localStorage）。
         personaSwitched ? h("div", { className: "dshi_ok", "data-role": "persona-switched" }, "记忆已随人设卡切换") : null,
         // 只有确定失败（null）才提示；undefined=首帧结果未出，不误报「不可用」。

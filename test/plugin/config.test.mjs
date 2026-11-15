@@ -55,6 +55,16 @@ function rejects(fn, message) {
   assert.ok(code === "INVALID_INPUT", `expected INVALID_INPUT failure${message ? ` (${message})` : ""}`);
 }
 
+// Config() 输出的 volatile 字段是 cosmokit 引用对象（宿主写入通道的要求），
+// 断言默认值时按 ref.get() 取值；普通值原样返回。
+function configValue(value) {
+  return value !== null && typeof value === "object"
+    && typeof value.get === "function"
+    && VOLATILE_WRITE in value
+    ? value.get()
+    : value;
+}
+
 // ---------------------------------------------------------------------------
 // 原生 Config schema dump（静态结构；缺省字段；非法值拒绝）
 // ---------------------------------------------------------------------------
@@ -62,8 +72,10 @@ function rejects(fn, message) {
 test("Config 是原生 Schemastery schema 且可解析缺省输入", () => {
   assert.equal(typeof Config, "function");
   const parsed = Config({});
-  assert.equal(parsed.mode, "shadow");
-  assert.equal(parsed.allowActive, false);
+  // 0.4-S1 起 mode / allowActive / defaultPersona 同 budgets 打 volatile：
+  // 宿主把它们替换成 cosmokit 引用对象（见 configValue），缺省值经 get() 读出。
+  assert.equal(configValue(parsed.mode), "shadow");
+  assert.equal(configValue(parsed.allowActive), false);
   assert.equal(parsed.ownerId, "local");
   assert.deepEqual(parsed.sessionPersonas, []);
   assert.deepEqual(parsed.workspacePersonas, []);
@@ -76,11 +88,34 @@ test("Config 是原生 Schemastery schema 且可解析缺省输入", () => {
   assert.equal(parsed.organize.enabled, false);
   assert.equal(parsed.forgetting.enabled, false);
   assert.deepEqual(parsed.forgetting.policy, { baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 });
-  // null-able 字段缺省时被 schema 省略；normalize 权威补 null
+  // null-able 字段缺省时被 schema 省略；normalize 权威补 null。
+  // defaultPersona 打了 volatile 后，schemastery 的可空缺省路径会把它包成
+  // get()===undefined 的引用（显式 null 才得到 null），normalize 两种都归一成 null。
   assert.ok(!("dataRoot" in parsed) || parsed.dataRoot === null);
   assert.ok(!("stateRoot" in parsed) || parsed.stateRoot === null);
-  assert.ok(!("defaultPersona" in parsed) || parsed.defaultPersona === null);
+  assert.ok(!("defaultPersona" in parsed)
+    || configValue(parsed.defaultPersona) === null
+    || configValue(parsed.defaultPersona) === undefined);
+  assert.equal(normalizePluginConfig({ defaultPersona: parsed.defaultPersona }).defaultPersona, null);
   assert.equal(SETTINGS_NAMESPACE, "shiori");
+});
+
+test("Config schema：mode / allowActive / defaultPersona 标记为 volatile（宿主 settings 允许写入）", () => {
+  // 真机缺陷：settings 写入通道只放行 volatile 字段，未标记的三个字段被拒
+  // （dsh-settings write(): Config field "mode" is not volatile）。
+  for (const field of ["mode", "allowActive", "defaultPersona"]) {
+    assert.equal(Config.dict[field].meta.volatile, true, `${field} 的 schema meta 必须带 volatile`);
+  }
+  // schema 解析后同样给出带写标记的引用对象（宿主依据它收集可写字段）。
+  const parsed = Config({ mode: "active", allowActive: true, defaultPersona: "amber" });
+  for (const field of ["mode", "allowActive", "defaultPersona"]) {
+    const value = parsed[field];
+    assert.equal(typeof value.get, "function", `${field} 应被替换成 cosmokit 引用对象`);
+    assert.ok(VOLATILE_WRITE in value, `${field} 引用对象应带 cosmokit.volatile.write 标记`);
+  }
+  assert.equal(parsed.mode.get(), "active");
+  assert.equal(parsed.allowActive.get(), true);
+  assert.equal(parsed.defaultPersona.get(), "amber");
 });
 
 test("Config schema 序列化为 JSON Schema 形状且接受显式 null 与完整样例", () => {
@@ -98,7 +133,7 @@ test("Config schema 序列化为 JSON Schema 形状且接受显式 null 与完�
     sessionPersonas: [{ sessionId: "s1", persona: null }],
     workspacePersonas: [{ workspace: "D:/somewhere/ws", persona: "k1" }],
   });
-  assert.equal(sample.mode, "shadow");
+  assert.equal(configValue(sample.mode), "shadow");
   assert.equal(sample.dataRoot, null);
   assert.deepEqual(sample.sessionPersonas, [{ sessionId: "s1", persona: null }]);
   assert.deepEqual(sample.workspacePersonas, [{ workspace: "D:/somewhere/ws", persona: "k1" }]);
@@ -516,6 +551,57 @@ test("volatile 回归：普通对象没有 cosmokit 写标记时不按 volatile 
   // 真正的普通预算对象照旧走原路径
   const plain = normalizePluginConfig({ budgets: { persona: { maxChars: 5000 } } });
   assert.equal(plain.budgets.persona.maxChars, 5000);
+});
+
+test("volatile：mode / allowActive / defaultPersona 引用对象被解包成普通值", () => {
+  // 宿主把三个 volatile 字段换成 cosmokit 引用对象交给插件（与 budgets 同款）。
+  const settings = normalizePluginConfig({
+    mode: volatileRef("active"),
+    allowActive: volatileRef(true),
+    defaultPersona: volatileRef("amber"),
+  });
+  // 解包结果是普通 string / boolean，不是引用对象——下游 scope.mjs / controller.mjs
+  // / management.mjs 直接做 === 比较，拿到引用对象会全部误判。
+  assert.equal(settings.mode, "active");
+  assert.equal(typeof settings.mode, "string");
+  assert.equal(settings.allowActive, true);
+  assert.equal(typeof settings.allowActive, "boolean");
+  assert.equal(settings.defaultPersona, "amber");
+  assert.equal(typeof settings.defaultPersona, "string");
+  assert.ok(Object.isFrozen(settings));
+
+  // 缺省路径同样解包：defaultPersona 的引用对象包着 null 时输出 null。
+  const defaults = normalizePluginConfig({
+    mode: volatileRef("shadow"),
+    allowActive: volatileRef(false),
+    defaultPersona: volatileRef(null),
+  });
+  assert.equal(defaults.mode, "shadow");
+  assert.equal(defaults.allowActive, false);
+  assert.equal(defaults.defaultPersona, null);
+});
+
+test("volatile：宿主形态（Config 解析产物整包喂给 normalize）解包后不漏引用对象", () => {
+  // 真机装配路径：宿主用 Config 解析后把带 cosmokit 引用的配置直接交给 apply，
+  // apply 第一步 normalize 必须把三个字段与 budgets 全部解包成普通值，下游
+  // scope.mjs / controller.mjs / management.mjs 的 === 比较才不会误判。
+  const fromHost = Config({ mode: "active", allowActive: true, defaultPersona: "amber" });
+  const settings = normalizePluginConfig(fromHost);
+  assert.equal(settings.mode, "active");
+  assert.equal(settings.allowActive, true);
+  assert.equal(settings.defaultPersona, "amber");
+  assert.equal(typeof settings.mode, "string");
+  assert.equal(typeof settings.allowActive, "boolean");
+  assert.equal(typeof settings.defaultPersona, "string");
+  // budgets 在宿主侧同样是引用对象，解包后是普通冻结对象。
+  assert.equal(typeof settings.budgets.get, "undefined");
+  assert.ok(Object.isFrozen(settings.budgets));
+});
+
+test("volatile：mode / allowActive 解包不绕过校验", () => {
+  rejects(() => normalizePluginConfig({ mode: volatileRef("turbo") }), "volatile bad mode");
+  rejects(() => normalizePluginConfig({ allowActive: volatileRef("yes") }), "volatile non-boolean allowActive");
+  rejects(() => normalizePluginConfig({ mode: volatileRef("active"), allowActive: volatileRef(false) }), "volatile active without allowActive");
 });
 
 // ---------------------------------------------------------------------------

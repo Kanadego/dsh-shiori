@@ -2184,7 +2184,9 @@ test("R7 回归 a：列表第一次返回 null、第二次返回数组 → 自�
   const optionValues = flattenVNode(tree).filter((n) => n.type === "option").map((n) => n.props.value);
   assert.deepEqual(optionValues, ["", "s1"]);
   assert.ok(collectText(tree).includes("会话一"), "标题作为选项文案");
-  assert.equal(flattenVNode(tree).find((n) => n.type === "input"), undefined, "手填输入框消失");
+  // S2-3 后选择器区同时挂「工作区默认卡」的手填兜底 input（当前 status 无 personas），
+  // 所以「手填输入框消失」按会话输入框（placeholder=session id）判定。
+  assert.equal(flattenVNode(tree).find((n) => n.type === "input" && n.props.placeholder === "session id"), undefined, "手填输入框消失");
   await cleanup();
 });
 

@@ -565,7 +565,7 @@ test("S1 needs-active 窄窗口：快照未就绪（configPersona 空）时启�
   assert.equal(input.props.readOnly, false, "configPersona 为空时不锁输入");
 });
 
-test("S1 启用 CAS：mutate 返回 false → 重读快照换 revision 重试一次；仍 false 亮冲突原文（评审 attempt-3 阻塞 B）", async () => {
+test("S1 启用 CAS：mutate 返回 false → 重读快照换 revision 重试一次；仍 false 按证据区分宿主拒绝 / revision 冲突（S2-1，评审 attempt-3 阻塞 B）", async () => {
   // false 一次后成功：恰好两次 mutate，第二次 revision 换新，无错误、状态卡刷新。
   const calls = [];
   const mutations = [];
@@ -616,7 +616,9 @@ test("S1 启用 CAS：mutate 返回 false → 重读快照换 revision 重试一
   assert.equal(mutations2.length, 2, "仍 false 也只重试一次（不无限重试）");
   const text = collectText(tree2);
   assert.ok(text.includes("启用失败"), "失败文案出现");
-  assert.ok(text.includes("revision 冲突"), "冲突说明（shiori/ui-enable-conflict）原文可见");
+  // S2-1：mutate 恒 false 且 revision 没动 = 宿主拒绝写入，不再误报「revision 冲突」。
+  assert.ok(text.includes("宿主拒绝写入"), "无冲突证据时如实说「宿主拒绝写入」");
+  assert.equal(text.includes("设置刚被其他窗口修改"), false, "不得把宿主拒绝拼成 revision 冲突");
   // 首次抛错、第二次返回 false：两条路径不得叠加，总共仍是两次 attempt
   //（评审 attempt-4 阻塞 1：此场景此前会调用 3 次）。
   const mutations3 = [];
@@ -639,8 +641,31 @@ test("S1 启用 CAS：mutate 返回 false → 重读快照换 revision 重试一
   assert.equal(mutations3.length, 2, "首次抛错 + 二次 false 也只有两次 attempt（重试不叠加）");
   const text3 = collectText(tree3);
   assert.ok(text3.includes("启用失败"), "失败文案出现");
-  assert.ok(text3.includes("revision 冲突"), "第二次仍未成功走冲突终态");
+  // S2-1：最后一次是普通错误、revision 未变 → 宿主拒绝写入（不误报 revision 冲突）。
+  assert.ok(text3.includes("宿主拒绝写入"), "无冲突证据仍走「宿主拒绝写入」");
   assert.ok(text3.includes("host hiccup"), "错误原文保留可见（不静默吞）");
+  // S2-1 对照：revision 在两次尝试之间确实变了（并发写入者动了），才允许说 revision 冲突。
+  const mutations4 = [];
+  const movedRevision = { v: 7 };
+  const movedScope = {
+    getSnapshot: () => ({ status: "ready", revision: movedRevision.v, value: { mode: "shadow", allowActive: false, defaultPersona: null, sessionPersonas: [] } }),
+    mutate: (ops, revision) => {
+      mutations4.push({ ops, revision });
+      movedRevision.v += 1; // 每次都有人抢先写，旧 fence 必失效
+      return Promise.resolve(false);
+    },
+  };
+  const { render: renderMoved } = await mountS1Status(s1StatusDto("needs-persona"), movedScope, []);
+  let tree4 = renderMoved();
+  flattenVNode(enableCardOf(tree4)).find((n) => n.type === "input").props.onChange({ target: { value: "amber" } });
+  tree4 = renderMoved();
+  findButton(tree4, "完成配置并启用").props.onClick();
+  await flush();
+  tree4 = renderMoved();
+  assert.equal(mutations4.length, 2, "revision 变化场景同样只重试一次");
+  const text4 = collectText(tree4);
+  assert.ok(text4.includes("revision 冲突"), "revision 确有变化时仍报 revision 冲突");
+  assert.equal(text4.includes("宿主拒绝写入"), false, "真冲突不落到宿主拒绝分支");
 });
 
 test("S1 启用：快照非 ready / 无 revision 时不发 mutate、亮原文（attempt 校验快照，评审 attempt-4 非阻塞）", async () => {
@@ -689,11 +714,72 @@ test("S1 兜底：configForms 缺席时按钮禁用并给说明；mutation 失�
 });
 
 // ---------------------------------------------------------------------------
-// S4「工作区默认卡」（0.4）：插件设置页（BudgetsTab）里的 defaultPersona 编辑，
-// 单键 read-modify-write：只 set defaultPersona，其余配置键原样保留。
+// S2-2：启用卡的人设卡下拉（getStatus.personas）。列表非空 → select，
+// 空/缺失/非数组 → 手填输入框回退（绝不锁死）。
 // ---------------------------------------------------------------------------
 
-async function mountBudgetsForPersona(initialValue, mutations, mutateImpl) {
+function dropdownScope(defaultPersona) {
+  return {
+    getSnapshot: () => ({ status: "ready", revision: 1, value: { mode: "shadow", allowActive: false, defaultPersona, sessionPersonas: [] } }),
+    mutate: () => Promise.resolve(true),
+  };
+}
+
+test("S2-2 启用卡：personas 非空 → 下拉列出全部卡名，选中后草稿生效、启用按钮解禁", async () => {
+  const dto = s1StatusDto("needs-persona");
+  dto.personas = ["amber", "beta", "  amber  ", ""]; // 重复/空白项应被清洗
+  const { render } = await mountS1Status(dto, dropdownScope(""), []);
+  let tree = render();
+  const card = enableCardOf(tree);
+  assert.ok(card, "needs-persona 渲染初始化卡");
+  const select = flattenVNode(card).find((n) => n.type === "select" && n.props["data-role"] === "persona-select");
+  assert.ok(select, "有卡列表时渲染下拉（data-role=persona-select）");
+  assert.equal(flattenVNode(card).some((n) => n.type === "input"), false, "有列表时不再渲染手填输入框");
+  const options = flattenVNode(select).filter((n) => n.type === "option").map((n) => collectText(n));
+  assert.deepEqual(options, ["请选择人设卡", "amber", "beta"], "选项来自 personas（去重、去空白）");
+  assert.equal(findButton(tree, "完成配置并启用").props.disabled, true, "未选卡时启用按钮禁用");
+  select.props.onChange({ target: { value: "beta" } });
+  tree = render();
+  const select2 = flattenVNode(enableCardOf(tree)).find((n) => n.type === "select" && n.props["data-role"] === "persona-select");
+  assert.equal(select2.props.value, "beta", "选中值进入草稿");
+  assert.equal(findButton(tree, "完成配置并启用").props.disabled, false, "选了非空卡名后启用按钮解禁");
+});
+
+test("S2-2 启用卡：personas 缺失 / 非数组 → 手填输入框回退（契约容忍，不崩不锁死）", async () => {
+  for (const personas of [undefined, null, "amber", 42, {}]) {
+    const dto = s1StatusDto("needs-persona");
+    if (personas !== undefined) dto.personas = personas;
+    const { render } = await mountS1Status(dto, dropdownScope(""), []);
+    const tree = render();
+    const card = enableCardOf(tree);
+    assert.ok(card, "初始化卡照常渲染（personas=" + JSON.stringify(personas) + "）");
+    const select = flattenVNode(card).find((n) => n.type === "select" && n.props["data-role"] === "persona-select");
+    assert.equal(select, undefined, "非数组不渲染下拉");
+    const input = flattenVNode(card).find((n) => n.type === "input");
+    assert.ok(input, "回退到手填输入框");
+    assert.equal(input.props.readOnly, false, "回退时输入框可编辑（不锁死）");
+  }
+});
+
+test("S2-2 启用卡：needs-active + 已有卡名 → 下拉只读回显（与输入框 readOnly 口径一致）", async () => {
+  const dto = s1StatusDto("needs-active");
+  dto.personas = ["amber", "beta"];
+  const { render } = await mountS1Status(dto, dropdownScope("amber"), []);
+  const tree = render();
+  const select = flattenVNode(enableCardOf(tree)).find((n) => n.type === "select" && n.props["data-role"] === "persona-select");
+  assert.ok(select, "needs-active 有列表 → 下拉");
+  assert.equal(select.props.value, "amber", "回显当前配置卡名");
+  assert.equal(select.props.disabled, true, "needs-active 已有卡名时只读");
+});
+
+// ---------------------------------------------------------------------------
+// S4「工作区默认卡」（0.4，S2-3 已搬到壳条选择器区）：「工作区默认卡」控件
+// defaultPersona 编辑，单键 read-modify-write：只 set defaultPersona，其余配置
+// 键原样保留。挂载 ShioriSection（面板 9 个 useState 预置），控件经
+// data-role="default-persona" 定位；personas 列表为空 → 手填输入框回退。
+// ---------------------------------------------------------------------------
+
+async function mountBudgetsForPersona(initialValue, mutations, mutateImpl, modeStatusExtra) {
   const host = makeStatefulReact();
   const state = { revision: 3, value: structuredClone(initialValue) };
   const scope = {
@@ -715,21 +801,21 @@ async function mountBudgetsForPersona(initialValue, mutations, mutateImpl) {
   });
   const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
   host.states.length = 0;
-  host.states.push("budgets", "session-A", "", null, undefined);
-  host.cursor.v = 0;
-  const sectionTree = sectionVNode.type(sectionVNode.props);
-  const tab = flattenVNode(sectionTree).find((n) => typeof n.type === "function" && n.type.name === "BudgetsTab");
-  assert.ok(tab, "BudgetsTab reached through real slot render");
-  // states 预置一次后跨渲染保留（personaField 等新 state 的写入在重渲染时可见）。
-  host.states.length = 0;
-  host.states.push(scope.getSnapshot(), null, null, undefined, null);
+  host.states.push(
+    "budgets", "session-A", "", [],
+    Object.assign({ mode: "active", scope: "amber" }, modeStatusExtra),
+    { sessionId: "session-A", blocked: false, error: null, probeError: null, skipped: 0, probing: false, done: true },
+    0, null, "",
+  );
   const render = () => {
     host.cursor.v = 0;
     host.runEffects.v = false;
-    return tab.type(tab.props);
+    return sectionVNode.type(sectionVNode.props);
   };
   return { host, render, scope };
 }
+
+const defaultPersonaControlOf = (tree) => flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "default-persona") || null;
 
 test("S4 工作区默认卡：输入回显当前配置值；保存只 set defaultPersona 一个键（mode/budgets 等原样保留）", async () => {
   const mutations = [];
@@ -740,8 +826,8 @@ test("S4 工作区默认卡：输入回显当前配置值；保存只 set defaul
   };
   const { render } = await mountBudgetsForPersona(initialValue, mutations);
   let tree = render();
-  const cardOf = (t) => flattenVNode(t).find((n) => n.props && n.props["data-role"] === "default-persona");
-  assert.ok(cardOf(tree), "设置页渲染「工作区默认卡」卡");
+  const cardOf = defaultPersonaControlOf;
+  assert.ok(cardOf(tree), "壳条选择器区渲染「工作区默认卡」控件");
   const inputOf = (t) => flattenVNode(cardOf(t)).find((n) => n.type === "input");
   assert.equal(inputOf(tree).props.value, "amber-old", "输入框回显当前 defaultPersona");
   inputOf(tree).props.onChange({ target: { value: "amber-new" } });
@@ -759,8 +845,7 @@ test("S4 工作区默认卡：trim 后空串拒绝（「卡名不能为空」且
   const initialValue = { mode: "shadow", allowActive: false, defaultPersona: null, budgets: structuredClone(FULL_BUDGETS) };
   const { render } = await mountBudgetsForPersona(initialValue, mutations);
   let tree = render();
-  const inputOf = (t) => flattenVNode(flattenVNode(t).find((n) => n.props && n.props["data-role"] === "default-persona"))
-    .find((n) => n.type === "input");
+  const inputOf = (t) => flattenVNode(defaultPersonaControlOf(t)).find((n) => n.type === "input");
   inputOf(tree).props.onChange({ target: { value: "   " } });
   tree = render();
   flattenVNode(tree).find((n) => n.type === "button" && collectText(n) === "保存默认卡").props.onClick();
@@ -839,7 +924,9 @@ test("0.4 B1：saveDefaultPersona 首次抛错、二次返回 false → 总共�
   assert.equal(mutations.length, 2, "首次抛错 + 二次 false 也是两次（重试不叠加）");
   const text = collectText(tree);
   assert.ok(text.includes("host hiccup"), "最后一次的原始错误文本可见");
-  assert.ok(text.includes("revision 冲突"), "冲突终态文案");
+  // S2-1：最后一次是普通错误、revision 未变 → 宿主拒绝写入（不再误报 revision 冲突）。
+  assert.ok(text.includes("宿主拒绝写入"), "无冲突证据 → 宿主拒绝写入");
+  assert.equal(text.includes("设置刚被其他窗口修改"), false, "不把宿主拒绝拼成 revision 冲突");
 });
 
 test("0.4 B2：conflict 挂 cause——第二次抛 shiori/ui-scope → 最终 code 仍是 ui-persona-conflict，cause 归因亮「原因：」", async () => {
@@ -1138,6 +1225,44 @@ test("0.4 收账：code=DOWNLOAD_RUNTIME_LOAD_FAILED → 报错卡片明确「�
   // 老行为不回归：缺依赖支与网络支文案各自保持原样（见上一用例）。
 });
 
+// S2-5：缺可选依赖不是故障——卡片走中性 warn 样式，文案说明「可选能力、
+// 只影响语义召回、其余功能不受影响」；其余失败仍用红色报错样式。
+test("S2-5 缺依赖提示：卡片用中性 warn 样式（不再是红色 ErrorBox），文案点明可选能力/只影响语义召回", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderStatus = await mountStatusPanel(mod, host);
+  const tree = renderStatusWithDto(host, renderStatus, s5SemanticDto({
+    ...s5IdleDownload,
+    running: false, phase: "error",
+    code: "DOWNLOAD_DEPENDENCY_MISSING",
+    error: "缺少可选依赖 @huggingface/transformers（未随插件包安装）。这不是网络问题，"
+      + "无需检查下载源——请在插件目录执行 npm i @huggingface/transformers 后重试。",
+    installHint: null,
+  }));
+  const card = flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "download-error");
+  assert.ok(card, "提示卡片渲染");
+  assert.ok(String(card.props.className).includes("dshi_warn"), "缺依赖卡片用 dshi_warn 中性样式");
+  assert.equal(String(card.props.className).includes("dshi_error"), false, "不再用红色 dshi_error");
+  assert.equal(card.props["data-tone"], "warn", "data-tone=warn 供样式/测试定位");
+  const text = collectText(tree);
+  assert.ok(text.includes("可选依赖"), "说明这是可选依赖");
+  assert.ok(text.includes("只影响语义召回"), "说明缺失只影响语义召回");
+  assert.ok(text.includes("其他记忆功能都不受影响") || text.includes("关键词召回与其他记忆功能都不受影响"),
+    "说明其余功能不受影响");
+  assert.equal(text.includes("网络原因"), false, "不说成网络原因");
+  // 对照：运行时加载失败仍走红色报错卡片（不是可选能力缺失）。
+  const runtimeTree = renderStatusWithDto(host, renderStatus, s5SemanticDto({
+    ...s5IdleDownload,
+    running: false, phase: "error",
+    code: "DOWNLOAD_RUNTIME_LOAD_FAILED",
+    error: "可选依赖已安装但运行时加载失败。",
+    installHint: null,
+  }));
+  const runtimeCard = flattenVNode(runtimeTree).find((n) => n.props && n.props["data-role"] === "download-error");
+  assert.ok(String(runtimeCard.props.className).includes("dshi_error"), "加载失败仍用红色报错样式");
+  assert.notEqual(runtimeCard.props["data-tone"], "warn", "加载失败不标 warn");
+});
+
 test("S5 done/cancelled 相：完成提示指向「重建向量」；取消提示状态回到未就绪", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
@@ -1241,6 +1366,46 @@ test("S6 二次确认：输入与 dataRoot 原文不一致 → 不发 RPC（按�
   findButton(tree, "确认清除").props.onClick();
   await flush();
   assert.equal(calls.filter((c) => c.method === "destroyData").length, 0, "大小写不一致也不发 RPC");
+});
+
+// S2-6：确认框根因修复——placeholder 与比较同源（都取 trim 后的 dataRoot），
+// 草稿比较前 trim：照抄可见字符（含从页面上带出的首尾空白）也能启用按钮；
+// 中间字符不同仍禁用；确认 RPC 仍回传服务端原文。
+test("S2-6 二次确认：输入完整 dataRoot（前后带空白）→ 按钮启用并发 destroyData；错误输入仍禁用", async () => {
+  const calls = [];
+  const dataRoot = String.raw`C:\Users\tester\.dsh\shiori-data`;
+  const dto = s1StatusDto("configured", { dataRoot, stateRoot: String.raw`C:\Users\tester\.dsh\shiori-state` });
+  const { render } = await mountS1Status(dto, null, calls);
+  let tree = render();
+  findButton(tree, "卸载并清除数据").props.onClick();
+  tree = render();
+  const input = flattenVNode(tree).find((n) => n.type === "input" && n.props["data-role"] === "destroy-confirm-input");
+  assert.ok(input, "确认输入框带 data-role=destroy-confirm-input（可定位）");
+  assert.equal(input.props.placeholder, dataRoot, "placeholder 与 dataRoot 同源（trim 后）");
+  assert.equal(input.props.autoComplete, "off", "关闭自动补全，避免浏览器插入隐藏字符");
+  // 逐字符输入完整路径（这里模拟从页面复制带出的首尾空白）→ 按钮启用
+  input.props.onChange({ target: { value: "  " + dataRoot + "  " } });
+  tree = render();
+  const confirm = findButton(tree, "确认清除");
+  assert.equal(confirm.props.disabled, false, "输入完整 dataRoot（首尾空白忽略）后确认按钮启用");
+  assert.equal(flattenVNode(tree).some((n) => n.props && n.props["data-role"] === "destroy-mismatch"), false,
+    "匹配时不出不一致提示");
+  confirm.props.onClick();
+  await flush();
+  const destroyCall = calls.find((c) => c.method === "destroyData");
+  assert.ok(destroyCall, "匹配后发出 destroyData");
+  assert.deepEqual(destroyCall.payload, { confirm: dataRoot }, "confirm 回传服务端原文（不受首尾空白影响）");
+  // 错误输入：中间字符不同 → 仍禁用 + 不一致提示
+  const second = await mountS1Status(dto, null, []);
+  let tree2 = second.render();
+  findButton(tree2, "卸载并清除数据").props.onClick();
+  tree2 = second.render();
+  flattenVNode(tree2).find((n) => n.type === "input" && n.props["data-role"] === "destroy-confirm-input")
+    .props.onChange({ target: { value: dataRoot.replace("shiori-data", "shiori-dat") } });
+  tree2 = second.render();
+  assert.equal(findButton(tree2, "确认清除").props.disabled, true, "错误输入仍禁用");
+  assert.ok(flattenVNode(tree2).some((n) => n.props && n.props["data-role"] === "destroy-mismatch"),
+    "错误输入给出「不一致」提示（不再让用户干瞪灰按钮）");
 });
 
 test("S6 二次确认：输入 dataRoot 原文 → 发 destroyData（confirm=原文）、成功后刷新状态并提示", async () => {

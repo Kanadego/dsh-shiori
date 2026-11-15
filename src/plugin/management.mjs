@@ -17,6 +17,8 @@
 //   映射/generation 仍相同；stop/断连撤销，重试与 merge 退休前重验；
 // - 候选队列持久快照跨重启恢复（queueStore）；plan 账不可变（planStore）。
 
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { analyzeCandidates } from "../organize/analyze.mjs";
 import {
   createCandidateQueue, buildDraft as buildOrganizeDraft, buildArchiveTopicPlan,
@@ -41,6 +43,31 @@ function fail(code, message, details) {
   error.code = code;
   if (details !== undefined) error.details = details;
   throw error;
+}
+
+// 人设卡文件名：persona adapter 的落盘布局是 <dataRoot>/persona/<name>.md
+// （persona.mjs 顶部磁盘布局），name 即配置里的 persona 名/scopeId。
+const PERSONA_CARD_SUFFIX = ".md";
+
+/**
+ * 人设卡清单（getStatus 的 personas 字段）：<dataRoot>/persona/*.md 的 basename
+ * 去掉 .md，名字升序。纯只读——绝不创建目录、不写盘；dataRoot 未初始化（inert）
+ * 或 persona 目录不存在时返回 []。其它读目录失败（如权限）照旧上抛，不把故障
+ * 伪装成「没有卡」。
+ */
+async function listPersonaNames(dataRoot) {
+  if (typeof dataRoot !== "string" || dataRoot.length === 0) return [];
+  let entries;
+  try {
+    entries = await readdir(join(dataRoot, "persona"), { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return [];
+    throw error;
+  }
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(PERSONA_CARD_SUFFIX))
+    .map((entry) => entry.name.slice(0, -PERSONA_CARD_SUFFIX.length))
+    .sort();
 }
 
 /**
@@ -245,6 +272,9 @@ export function createManagement(deps) {
       const status = {
         mode: isInert ? "inert" : settings.mode,
         configured,
+        // 人设卡清单（0.4 面板选卡用）：dataRoot/persona/*.md 的名字，升序；
+        // inert（dataRoot 未初始化）或目录不存在 → []。只读目录，不建目录。
+        personas: await listPersonaNames(settings.dataRoot),
         scope: null,
         occupancy: null,
         capabilities: {

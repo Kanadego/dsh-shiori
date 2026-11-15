@@ -2259,3 +2259,100 @@ test("S7 protocol：getGraph 输入新增可选 level/cluster；非法 level 被
     assert.ok(nodeItem.required.includes("degree"), "nodeOut 两条路径恒输出 degree，故进 required");
   }
 });
+
+// ── 0.4-S1：getStatus.personas（人设卡清单）──────────────────────────────────
+// 来源 <dataRoot>/persona/*.md 的 basename 去 .md，名字升序；dataRoot 未初始化
+// （inert）或目录不存在 → []；只读目录，绝不建目录/写盘。
+
+function shadowSettings({ dataRoot, stateRoot, rootsSource }) {
+  return {
+    mode: "shadow", allowActive: false,
+    dataRoot, stateRoot,
+    rootsSource: rootsSource ?? { dataRoot: "explicit", stateRoot: "explicit" },
+    ownerId: "local", defaultPersona: null,
+    sessionPersonas: [], workspacePersonas: [],
+    budgets: { persona: { maxChars: 12000 }, core: { targetChars: 2000, hardCapChars: 4000 } },
+    l2: { enabled: false }, organize: { enabled: false },
+    forgetting: { enabled: false, policy: normalizeForgetPolicy({}) },
+  };
+}
+
+/** 直构 shadow 门面（不启动 controller，getStatus 走纯内存 + 只读目录列举）。 */
+function createShadowManagement({ dataRoot, stateRoot, stateDir }) {
+  const { management } = createManagement({
+    settings: shadowSettings({ dataRoot, stateRoot }),
+    dataRoot,
+    state: createStateStore({ stateRoot: stateDir }),
+    resourcesFor: async () => { throw new Error("not used"); },
+    isStarted: () => false,
+    generation: () => 0,
+    registerGrant: () => { throw new Error("not used"); },
+    executeToolForScope: async () => { throw new Error("not used"); },
+  });
+  return management;
+}
+
+test("getStatus.personas：列出 dataRoot/persona/*.md 的名字（升序，忽略非 md）", async (t) => {
+  const { controller, base, trusted } = await setup(t);
+  const personaDir = path.join(base, "data", "persona");
+  await mkdir(personaDir, { recursive: true });
+  await writeFile(path.join(personaDir, "zeta.md"), "Z", "utf8");
+  await writeFile(path.join(personaDir, "a-card.md"), "A", "utf8");
+  await writeFile(path.join(personaDir, "notes.txt"), "n", "utf8");
+  const status = await controller.management.getStatus(trusted, {});
+  assert.deepEqual(status.personas, ["a-card", "zeta"]);
+  // wire 契约：outputSchema 显式声明 personas 并进 required（闭形状，不许漏字段）。
+  const statusOut = MANAGEMENT_METHODS.getStatus.outputSchema;
+  assert.deepEqual(statusOut.properties.personas, { type: "array", items: { type: "string" } });
+  assert.ok(statusOut.required.includes("personas"), "getStatus 恒输出 personas，进 required");
+});
+
+test("getStatus.personas：目录不存在返回 []，且绝不创建目录", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-personas-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const dataRoot = path.join(base, "data");
+  const stateDir = path.join(base, "state");
+  await mkdir(dataRoot, { recursive: true });
+  await mkdir(stateDir, { recursive: true });
+  const management = createShadowManagement({ dataRoot, stateRoot: stateDir, stateDir });
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
+  const status = await management.getStatus(trusted, {});
+  assert.equal(status.mode, "shadow");
+  assert.deepEqual(status.personas, []);
+  // 只读：persona/ 目录不会被顺手建出来
+  await assert.rejects(() => stat(path.join(dataRoot, "persona")), { code: "ENOENT" }, "getStatus 不得创建 persona 目录");
+});
+
+test("getStatus.personas：空 persona 目录返回 []", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-personas-empty-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const dataRoot = path.join(base, "data");
+  const stateDir = path.join(base, "state");
+  await mkdir(path.join(dataRoot, "persona"), { recursive: true });
+  await mkdir(stateDir, { recursive: true });
+  const management = createShadowManagement({ dataRoot, stateRoot: stateDir, stateDir });
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
+  const status = await management.getStatus(trusted, {});
+  assert.deepEqual(status.personas, []);
+});
+
+test("getStatus.personas：inert（dataRoot 未初始化）返回 []", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-personas-inert-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const stateDir = path.join(base, "state");
+  await mkdir(stateDir, { recursive: true });
+  const { management } = createManagement({
+    settings: shadowSettings({ dataRoot: null, stateRoot: null, rootsSource: { dataRoot: "default", stateRoot: "default" } }),
+    dataRoot: null,
+    state: createStateStore({ stateRoot: stateDir }),
+    resourcesFor: async () => { throw new Error("not used"); },
+    isStarted: () => false,
+    generation: () => 0,
+    registerGrant: () => { throw new Error("not used"); },
+    executeToolForScope: async () => { throw new Error("not used"); },
+  });
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
+  const status = await management.getStatus(trusted, {});
+  assert.equal(status.mode, "inert");
+  assert.deepEqual(status.personas, []);
+});

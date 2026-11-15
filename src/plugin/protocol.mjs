@@ -299,6 +299,9 @@ export const MANAGEMENT_METHODS = Object.freeze({
       properties: {
         mode: { enum: ["shadow", "active", "inert"] },
         configured: { type: "boolean" },
+        // 人设卡清单：<dataRoot>/persona/*.md 的 basename（去 .md），名字升序；
+        // 数据根未初始化（inert）或目录不存在时为空数组（绝不报错、绝不建目录）。
+        personas: { type: "array", items: { type: "string" } },
         scope: { oneOf: [{ type: "string" }, { type: "null" }] },
         occupancy: {
           oneOf: [
@@ -330,7 +333,7 @@ export const MANAGEMENT_METHODS = Object.freeze({
         },
         diagnostics: { type: "object", additionalProperties: true },
       },
-      required: ["mode", "configured", "scope", "occupancy", "capabilities", "diagnostics"],
+      required: ["mode", "configured", "personas", "scope", "occupancy", "capabilities", "diagnostics"],
     },
   },
 
