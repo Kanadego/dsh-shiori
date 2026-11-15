@@ -894,6 +894,21 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // 工作区路径归一：比较 workspacePersonas 的 workspace 键时忽略大小写、分隔符
+    // 方向与尾部分隔符（与服务端 resolvePersona 的路径前缀口径一致）。
+    function normalizeWorkspaceKey(value) {
+      var text = typeof value === "string" ? value.trim() : "";
+      if (text === "") return "";
+      text = text.replace(/\\/g, "/").replace(/\/+$/, "");
+      if (/^[a-zA-Z]:/.test(text)) text = text.toLowerCase();
+      return text;
+    }
+    // key 必须是 target 的完整目录前缀（父目录名不能当作兄弟目录名的前缀）。
+    function isWorkspacePrefix(key, target) {
+      if (key === "" || target === "") return false;
+      return target.indexOf(key.charAt(key.length - 1) === "/" ? key : key + "/") === 0;
+    }
+
     // 0.4 P1#6（docs/0.4-REVIEW.md）：CAS 冲突重试公共函数——原 enableSave /
     // saveManualDir / saveDefaultPersona / personaWrite 四处同构实现收敛为唯一
     // 实现，四处调用点全部改走本函数。attempt() 每次重读快照并 scope.mutate
@@ -2074,7 +2089,7 @@ window.__ModuleLoader__.load({
           setView(null); if (!reportSessionUnavailable(e, props, setError)) setError(e);
         }
       };
-      useEffect(function () { load(); }, [props.sessionId]);
+      useEffect(function () { load(); }, [props.sessionId, props.refreshToken]);
       var l0 = view && (view.l0 || view.persona);
       var l1 = view && (view.l1 || view.core);
       var budgets = (view && view.budgets) || props.budgets || {};
@@ -6302,8 +6317,41 @@ window.__ModuleLoader__.load({
           return snap && snap.status === "ready" && snap.value && typeof snap.value === "object" ? snap.value : null;
         } catch (e) { return null; }
       })();
-      var configuredDefaultPersona = workspacePersonaConfig && typeof workspacePersonaConfig.defaultPersona === "string"
-        ? workspacePersonaConfig.defaultPersona : "";
+      // 默认卡分两级（服务端解析顺序：会话专属卡 > 工作区路径最长前缀 > defaultPersona）：
+      // 'all' 写 defaultPersona（所有工作区的兜底卡）；'workspace' 写 workspacePersonas
+      // 里当前工作区那条。UI 只在该工作区有绝对路径时开放工作区范围。
+      var workspaceTargetPath = (function () {
+        // 注意：这里用 workspaces（useState，6060 行）而不是下方的 workspaceOptions
+        // （6570 行才声明，var 提升后此处是 undefined——早先引用它导致范围恒不可选）。
+        if (!workspaceId || !Array.isArray(workspaces)) return "";
+        for (var i = 0; i < workspaces.length; i++) {
+          if (workspaces[i] && String(workspaces[i].workspaceId) === String(workspaceId)) {
+            return typeof workspaces[i].path === "string" ? workspaces[i].path : "";
+          }
+        }
+        return "";
+      })();
+      var personaScopeTarget = personaUi.scopeTarget === "workspace" && workspaceTargetPath !== "" ? "workspace" : "all";
+      var configuredDefaultPersona = (function (cfg) {
+        if (!cfg || typeof cfg !== "object") return "";
+        if (personaScopeTarget === "all") {
+          return typeof cfg.defaultPersona === "string" ? cfg.defaultPersona : "";
+        }
+        var target = normalizeWorkspaceKey(workspaceTargetPath);
+        var exact = "";
+        var prefixValue = "";
+        var bestLen = -1;
+        var list = Array.isArray(cfg.workspacePersonas) ? cfg.workspacePersonas : [];
+        for (var i = 0; i < list.length; i++) {
+          var entry = list[i];
+          if (!entry || typeof entry.workspace !== "string" || typeof entry.persona !== "string") continue;
+          var key = normalizeWorkspaceKey(entry.workspace);
+          if (key === "") continue;
+          if (key === target) { exact = entry.persona; continue; }
+          if (isWorkspacePrefix(key, target) && key.length > bestLen) { bestLen = key.length; prefixValue = entry.persona; }
+        }
+        return exact !== "" ? exact : prefixValue;
+      })(workspacePersonaConfig);
       // S2-2：下拉选项来自 getStatus.personas（缺失/非数组 → 空数组 → 手填回退）。
       var workspacePersonaOptions = personaOptionsFrom(modeStatus);
       // 三态：undefined=用户还没动过（跟配置值）；string=用户正在编辑（含空串）。
@@ -6319,7 +6367,10 @@ window.__ModuleLoader__.load({
       var defaultPersonaBusy = personaUi.defaultBusy === true;
       var defaultPersonaError = personaUi.defaultError || null;
       var defaultPersonaOk = typeof personaUi.defaultOk === "string" ? personaUi.defaultOk : "";
-      var workspacePersonaSaveAttempt = async function (persona) {
+      // 一次写入尝试：target='all' 写 defaultPersona 单键；target='workspace' 时
+      // read-modify-write workspacePersonas（条目严格 {workspace, persona} 两键，
+      // 未知键会被 config 校验拒），精确命中当前工作区则替换，否则追加一条。
+      var workspacePersonaSaveAttempt = async function (persona, target) {
         var scope = personaScopeRead();
         if (!scope || typeof scope.mutate !== "function" || typeof scope.getSnapshot !== "function") {
           var unsupported = new Error("设置命名空间不可用（configForms 缺席），无法保存默认卡。");
@@ -6333,7 +6384,25 @@ window.__ModuleLoader__.load({
           missing.code = "shiori/ui-scope";
           throw missing;
         }
-        return scope.mutate([{ op: "set", path: ["defaultPersona"], value: persona }], snap.revision);
+        if (target !== "workspace") {
+          return scope.mutate([{ op: "set", path: ["defaultPersona"], value: persona }], snap.revision);
+        }
+        var path = workspaceTargetPath;
+        if (path === "") {
+          var noPath = new Error("当前工作区没有可用的绝对路径，无法按工作区保存。");
+          noPath.code = "shiori/ui-unsupported";
+          throw noPath;
+        }
+        var key = normalizeWorkspaceKey(path);
+        var current = Array.isArray(val.workspacePersonas) ? val.workspacePersonas : [];
+        var next = current.slice();
+        var hit = -1;
+        for (var i = 0; i < next.length; i++) {
+          if (next[i] && typeof next[i].workspace === "string" && normalizeWorkspaceKey(next[i].workspace) === key) { hit = i; break; }
+        }
+        var entry = { workspace: path, persona: persona };
+        if (hit >= 0) next[hit] = entry; else next.push(entry);
+        return scope.mutate([{ op: "set", path: ["workspacePersonas"], value: next }], snap.revision);
       };
       var saveWorkspacePersona = async function () {
         var persona = String(workspacePersonaValue ?? "").trim();
@@ -6348,11 +6417,16 @@ window.__ModuleLoader__.load({
         }
         setPersonaUi({ defaultBusy: true });
         try {
-          await casMutate(function () { return workspacePersonaSaveAttempt(persona); }, "shiori/ui-persona-conflict", function (ctx) {
+          await casMutate(function () { return workspacePersonaSaveAttempt(persona, personaScopeTarget); }, "shiori/ui-persona-conflict", function (ctx) {
             return "设置刚被其他窗口修改（revision 冲突），请再点一次「保存默认卡」。"
               + (ctx.lastError && ctx.lastError.message ? "（最近错误：" + ctx.lastError.message + "）" : "");
           }, true, { readRevision: function () { return scopeRevisionOf(personaScopeRead()); } });
-          setPersonaUi({ defaultBusy: false, defaultOk: "工作区默认人设卡已保存为「" + persona + "」；下一轮对话按选卡优先级解析（会话专属卡 > 工作区路径 > 默认卡）。" });
+          setPersonaUi({
+            defaultBusy: false,
+            defaultOk: personaScopeTarget === "workspace"
+              ? "工作区「" + workspaceTargetPath + "」的默认人设卡已保存为「" + persona + "」；该工作区下没有会话专属卡时用它。"
+              : "工作区默认人设卡已保存为「" + persona + "」；下一轮对话按选卡优先级解析（会话专属卡 > 工作区路径 > 默认卡）。"
+          });
         } catch (e) {
           setPersonaUi({ defaultBusy: false, defaultError: { code: (e && e.code) || "shiori/ui-persona", message: "保存失败：" + ((e && e.message) || String(e)) + causeNoteOf(e) } });
         }
@@ -6403,7 +6477,10 @@ window.__ModuleLoader__.load({
           }, true, { readRevision: function () { return scopeRevisionOf(personaScopeRead()); } });
           // 「记忆已随人设卡切换」提示：组件内状态，只出一次（评审 D：不落 localStorage）；
           // 切会话时探测 effect 重写 availability，提示随之复位。
-          setPersonaUi({ switched: true, open: false, busy: false });
+          // viewToken 自增：MemoryTab 的加载 effect 依赖它，切卡后重新 getMemoryView，
+          // 让「记忆内容」里的人设卡（L0）跟着换成新卡。壳条与 MemoryTab 是两个组件，
+          // 这里调不到 tab 内的 load()，只能靠 prop 触发。
+          setPersonaUi({ switched: true, open: false, busy: false, viewToken: (Number(personaUi.viewToken) || 0) + 1 });
           // 成功后刷一次 getStatus，让壳条按钮的当前卡名回显跟上（评审 C）。
           props.dsh.call("getStatus", sessionId, {}).then(function (status) {
             if (status && typeof status === "object") setModeStatus(status);
@@ -6590,8 +6667,24 @@ window.__ModuleLoader__.load({
             h("label", {
               className: "dshi_label",
               "data-role": "default-persona",
-              title: "没有会话专属卡、工作区路径也没匹配到时注入这张卡（defaultPersona，单键写入）"
-            }, "工作区默认人设卡（defaultPersona）",
+              title: personaScopeTarget === "workspace"
+                ? "只在当前工作区生效（workspacePersonas，服务端按路径最长前缀解析）"
+                : "所有工作区共用的兜底卡（defaultPersona）"
+            },
+              h("span", { className: "dshi_row" },
+                h("select", {
+                  className: "dshi_select",
+                  "data-role": "default-persona-scope",
+                  value: personaScopeTarget,
+                  disabled: workspaceTargetPath === "",
+                  title: workspaceTargetPath === "" ? "先在左侧选定一个工作区，才能按工作区设卡" : "这张默认卡的生效范围",
+                  onChange: function (event) {
+                    setPersonaUi({ scopeTarget: String(event.target.value ?? "all"), defaultDraft: null, defaultOk: "", defaultError: null });
+                  }
+                },
+                  h("option", { value: "all", "data-role": "persona-scope-option" }, "所有工作区（默认卡）"),
+                  h("option", { value: "workspace", "data-role": "persona-scope-option" }, "仅当前工作区")),
+                h("span", null, personaScopeTarget === "workspace" ? "工作区默认人设卡（workspacePersonas）" : "工作区默认人设卡（defaultPersona）")),
               // 有候选 → 下拉直接点选（末尾留一个「自定义」出口，选中换手输框）；
               // 没候选 → 直接手输。早前纯 select 只有一张卡时把手输锁死（实机反馈
               // 「ctrl+a 输 momo 立刻被回弹」），datalist 又没有可点的下拉感，两头都
@@ -6711,7 +6804,7 @@ window.__ModuleLoader__.load({
                     ? h("div", { className: "dshi_loading" }, "能力探测中…") : null,
                   tab !== "status" && tab !== "budgets" && modeStatus !== undefined && mode !== "active"
                     ? ModePlaceholder(mode) : null,
-                  tab === "memory" && (modeStatus === null || mode === "active") ? h(MemoryTab, { dsh: props.dsh, sessionId: sessionId, budgets: budgets, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow }) : null,
+                  tab === "memory" && (modeStatus === null || mode === "active") ? h(MemoryTab, { dsh: props.dsh, sessionId: sessionId, budgets: budgets, refreshToken: Number(personaUi.viewToken) || 0, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow }) : null,
                   tab === "graph" && (modeStatus === null || mode === "active") ? h(GraphTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow, focusTarget: jumpRef.current && jumpRef.current.tab === "graph" ? jumpRef.current : null }) : null,
                   tab === "candidates" && (modeStatus === null || mode === "active") ? h(CandidatesTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow }) : null,
                   tab === "topics" && (modeStatus === null || mode === "active") ? h(TopicsTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow, focusTarget: jumpRef.current && jumpRef.current.tab === "topics" ? jumpRef.current : null }) : null,

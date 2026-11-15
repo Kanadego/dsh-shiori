@@ -1281,7 +1281,7 @@ test("会话列表：丢弃非当前空壳会话（blank:true），当前 blank/
     { sessionId: "session-no-blank-field", title: "", updatedAt: 8 },
     { sessionId: "session-titled", title: "有标题的会话", updatedAt: 7 },
   ], "面板列表包含当前 blank 会话");
-  const currentOptions = flattenVNode(currentMounted.type(currentMounted.props)).filter((n) => n.type === "option");
+  const currentOptions = flattenVNode(currentMounted.type(currentMounted.props)).filter((n) => n.type === "option" && n.props["data-role"] !== "persona-scope-option");
   assert.ok(currentOptions.some((option) => option.props.value === "session-blank"), "下拉选项含当前 blank 会话");
   assert.ok(!currentOptions.some((option) => option.props.value === "session-other-blank"), "非当前 blank 会话不出现");
   await current.cleanup();
@@ -1296,7 +1296,7 @@ test("会话列表：丢弃非当前空壳会话（blank:true），当前 blank/
   try { mounted = await renderFreshPanel(empty.host, empty.sectionVNode); } catch (error) { threw = error; }
   assert.equal(threw, null, "手动选择列表为空时渲染不报错");
   assert.deepEqual(empty.host.states[3], [], "sessions 状态为空数组");
-  const options = flattenVNode(mounted.type(mounted.props)).filter((n) => n.type === "option");
+  const options = flattenVNode(mounted.type(mounted.props)).filter((n) => n.type === "option" && n.props["data-role"] !== "persona-scope-option");
   assert.equal(options.length, 1, "手动选择列表为空时只剩「— 选择会话 —」占位");
   await empty.cleanup();
 });
@@ -1339,7 +1339,7 @@ test("面板会话下拉：标题优先、超 60 字截断、无标题回退 id�
 
   assert.equal(host.states[1], "session-1", "自动选中过滤后的第一条（不再是子代理会话）");
   const tree = mounted.type(mounted.props);
-  const options = flattenVNode(tree).filter((n) => n.type === "option");
+  const options = flattenVNode(tree).filter((n) => n.type === "option" && n.props["data-role"] !== "persona-scope-option");
   assert.equal(options.length, 3, "placeholder + 两条普通会话（子代理被过滤）");
   assert.equal(options[0].props.value, "", "空列表占位选项保留");
   assert.equal(options[1].props.value, "session-1");
@@ -1364,7 +1364,7 @@ test("面板会话下拉：过滤后为空时仍渲染「选择会话」占位�
   assert.deepEqual(host.states[3], [], "sessions 状态为空数组（不是 null）");
   assert.equal(host.states[1], "", "不自动选中任何会话");
   const tree = mounted.type(mounted.props);
-  const options = flattenVNode(tree).filter((n) => n.type === "option");
+  const options = flattenVNode(tree).filter((n) => n.type === "option" && n.props["data-role"] !== "persona-scope-option");
   assert.equal(options.length, 1, "只剩「— 选择会话 —」占位");
   assert.equal(options[0].props.value, "");
   assert.ok(collectText(tree).includes("选择或输入会话后展示"), "空列表显示手选提示，不崩溃");
@@ -1886,7 +1886,7 @@ test("Q 槽健壮性 A：5 个候选全部不可用 → 保持占位项、sessio
   assert.equal(host.states[1], "", "全部不可用时 sessionId 置空");
   const select = flattenVNode(tree).find((n) => n.type === "select");
   assert.equal(select.props.value, "", "下拉保持在占位项");
-  const options = flattenVNode(tree).filter((n) => n.type === "option");
+  const options = flattenVNode(tree).filter((n) => n.type === "option" && n.props["data-role"] !== "persona-scope-option");
   assert.equal(options[0].props.value, "", "占位项仍是第一项（selectedIndex 0）");
   const text = collectText(tree);
   assert.ok(text.includes("未选择会话"), "面板显示「未选择会话」占位");
@@ -2181,7 +2181,7 @@ test("R7 回归 a：列表第一次返回 null、第二次返回数组 → 自�
   const select = flattenVNode(tree).find((n) => n.type === "select");
   assert.ok(select, "列表成功后渲染 <select>（不再是手填 input）");
   assert.equal(select.props.value, "s1", "下拉选中探测成功的会话");
-  const optionValues = flattenVNode(tree).filter((n) => n.type === "option").map((n) => n.props.value);
+  const optionValues = flattenVNode(tree).filter((n) => n.type === "option" && n.props["data-role"] !== "persona-scope-option").map((n) => n.props.value);
   assert.deepEqual(optionValues, ["", "s1"]);
   assert.ok(collectText(tree).includes("会话一"), "标题作为选项文案");
   // S2-3 后选择器区同时挂「工作区默认卡」的手填兜底 input（当前 status 无 personas），

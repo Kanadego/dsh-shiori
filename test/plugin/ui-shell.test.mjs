@@ -709,6 +709,10 @@ async function mountSectionStateful(panelPreset, wiring = {}) {
       calls.push({ method: "getStatus", payload });
       return { ok: true, value: wiring.status || { mode: "active", scope: "amber" } };
     },
+    getMemoryView: async (sid, payload) => {
+      calls.push({ method: "getMemoryView", payload });
+      return { l0: { content: "", budget: 12000 }, l1: { content: "", hardCap: 14000 } };
+    },
     executeTool: async () => ({ ok: true, value: {} }),
   };
   const ctx = {
@@ -718,7 +722,8 @@ async function mountSectionStateful(panelPreset, wiring = {}) {
       register: (meta, render) => { renderSlot = render; return () => {}; },
     },
   };
-  ctx.get = (key) => (key === "remote.shiori" ? shioriNamespace : undefined);
+  // workspaces：面板「选工作区」下拉与按工作区设默认卡都读宿主快照（ctx.get("workspaces")）。
+  ctx.get = (key) => (key === "remote.shiori" ? shioriNamespace : (key === "workspaces" ? wiring.workspaces : undefined));
   ctx.configForms = { get: (ns) => (ns === "shiori" ? (wiring.scope !== undefined ? wiring.scope : null) : undefined) };
   const cleanup = await mod.apply(ctx);
   const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
@@ -745,8 +750,8 @@ function s4PanelPreset(overrides = {}) {
     overrides.modeStatus !== undefined ? overrides.modeStatus : { mode: "active", scope: "amber" },
     availability,
     0,
-    null,
-    "",
+    overrides.workspaces !== undefined ? overrides.workspaces : null,
+    overrides.workspaceId !== undefined ? overrides.workspaceId : "",
   ];
 }
 
@@ -1035,7 +1040,8 @@ test("S2-3 工作区默认卡：personas 为空 → 手填输入框回退（不�
     let tree = render();
     const control = defaultPersonaControl(tree);
     assert.ok(control, "工作区默认卡控件照常渲染");
-    assert.equal(flattenVNode(control).some((n) => n.type === "select"), false, "空列表不渲染下拉");
+    const cardSelects = flattenVNode(control).filter((n) => n.type === "select" && n.props["data-role"] !== "default-persona-scope");
+    assert.equal(cardSelects.length, 0, "空列表不渲染卡名下拉（范围选择器是另一个控件）");
     const input = flattenVNode(control).find((n) => n.type === "input");
     assert.ok(input, "回退到手填输入框");
     assert.equal(input.props.value, "amber", "回显当前 defaultPersona");
@@ -1050,3 +1056,70 @@ test("S2-3 工作区默认卡：personas 为空 → 手填输入框回退（不�
     await cleanup();
   }
 });
+
+// 2026-11-15 实机反馈：切卡只刷 getStatus 会出现「壳条显示新卡、人设卡（L0）还是旧卡」，
+// 所以切卡成功后必须重取一次 getMemoryView（L0/L1 是按当前选卡解析的）。
+test("S4 切卡：成功后 refreshToken 自增，MemoryTab 重取 getMemoryView（L0 跟着换）", async () => {
+  const calls = [];
+  const mutations = [];
+  const scope = makeScopeForPersona({ mode: "active", allowActive: true, defaultPersona: "amber", sessionPersonas: [] }, mutations);
+  const { render, cleanup } = await mountSectionStateful(s4PanelPreset({ tab: "memory" }), { calls, scope });
+  const memoryTab = (tree) => flattenVNode(tree).find((n) => typeof n.type === "function" && n.type.name === "MemoryTab") || null;
+  try {
+    let tree = render();
+    const before = memoryTab(tree);
+    assert.ok(before, "memory tab 已挂载");
+    const tokenBefore = before.props.refreshToken;
+    personaButton(tree).props.onClick();
+    tree = render();
+    flattenVNode(personaRow(tree)).find((n) => n.type === "input").props.onChange({ target: { value: "momo" } });
+    tree = render();
+    findButton(personaRow(tree), "切换").props.onClick();
+    await flush(20);
+    const after = memoryTab(render());
+    assert.equal(after.props.refreshToken, tokenBefore + 1, "切卡成功后 refreshToken 自增一次");
+    assert.equal(after.props.sessionId, "session-A", "会话没变（只是选卡变了）");
+  } finally {
+    await cleanup();
+  }
+});
+
+// 2026-11-15 实机反馈：面板只能设「所有工作区」的默认卡，而配置本来就有
+// workspacePersonas（服务端按路径最长前缀解析）。范围=仅当前工作区时写
+// workspacePersonas 单键，条目严格 {workspace, persona} 两键。
+test("S2-3b 工作区默认卡：范围=仅当前工作区 → 写 workspacePersonas 单键", async () => {
+  const calls = [];
+  const mutations = [];
+  const scope = makeScopeForPersona({
+    mode: "active", allowActive: true, defaultPersona: "amber",
+    sessionPersonas: [], workspacePersonas: [{ workspace: "D:/proj/other", persona: "kappa" }],
+  }, mutations);
+  const workspaces = [{ workspaceId: "ws-1", title: "项目A", path: "D:/proj/a", sessionIds: [] }];
+  const { render, cleanup } = await mountSectionStateful(
+    s4PanelPreset({ workspaceId: "ws-1", workspaces, modeStatus: { mode: "active", scope: "amber", personas: [] } }),
+    { calls, scope },
+  );
+  try {
+    let tree = render();
+    const control = defaultPersonaControl(tree);
+    const rangeSelect = flattenVNode(control).find((n) => n.type === "select" && n.props["data-role"] === "default-persona-scope");
+    assert.ok(rangeSelect, "范围选择器存在");
+    assert.equal(rangeSelect.props.disabled, false, "选定工作区后可选「仅当前工作区」");
+    rangeSelect.props.onChange({ target: { value: "workspace" } });
+    tree = render();
+    const input = flattenVNode(defaultPersonaControl(tree)).find((n) => n.type === "input");
+    input.props.onChange({ target: { value: "  beta " } });
+    tree = render();
+    findButton(tree, "保存默认卡").props.onClick();
+    await flush(20);
+    assert.equal(mutations.length, 1, "按工作区保存一次 mutate");
+    assert.deepEqual(mutations[0].ops, [{
+      op: "set",
+      path: ["workspacePersonas"],
+      value: [{ workspace: "D:/proj/other", persona: "kappa" }, { workspace: "D:/proj/a", persona: "beta" }],
+    }], "只 set workspacePersonas；其它工作区条目原样保留；条目只 {workspace, persona}");
+  } finally {
+    await cleanup();
+  }
+});
+
