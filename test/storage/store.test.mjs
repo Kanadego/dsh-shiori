@@ -9,7 +9,7 @@ import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 
 import { createFileStore, groupsFilePath } from '../../src/storage/index.mjs';
-import { ensureGroupsFile, readGroups } from '../../src/core/groups.mjs';
+import { ensureGroupsFile, readGroups, writeGroups } from '../../src/core/groups.mjs';
 import {
   sha256, stubRenderL1, stubEvaluateMutation, TEST_CONFIG,
   makeTmpRoot, topicObject,
@@ -26,10 +26,20 @@ function opts(overrides = {}) {
   };
 }
 
-/** 建仓 + 初始化默认组清单（真实 S3-a ensureGroupsFile）。 */
+// 默认模板已收敛成单组 general；多组语义（dev/project/life/self）的用例需要自己
+// 显式种一份四组清单，避免被模板变更牵连。
+const TEST_GROUPS = [
+  { key: 'dev', title: '开发与配置', summary: '', order: 10 },
+  { key: 'self', title: '自我与关系', summary: '', order: 20 },
+  { key: 'project', title: '项目与工具', summary: '', order: 30 },
+  { key: 'life', title: '生活与偏好', summary: '', order: 40 },
+];
+
+/** 建仓 + 初始化组清单：groups:'default' 走真实默认模板，其余种四组夹具。 */
 async function makeStore(t, { groups = true } = {}) {
   const root = await makeTmpRoot(t);
-  if (groups) await ensureGroupsFile({ dataRoot: root, scopeId: 'amber' });
+  if (groups === 'default') await ensureGroupsFile({ dataRoot: root, scopeId: 'amber' });
+  else if (groups) await writeGroups({ dataRoot: root, scopeId: 'amber', groups: TEST_GROUPS, expectedRevision: null });
   const store = await createFileStore(opts({ root }));
   return { root, store };
 }
@@ -259,27 +269,27 @@ describe('S3 组存在性校验（commit 侧）', () => {
 });
 
 describe('S3 组清单初始化与提交协同', () => {
-  it('ensureGroupsFile 初始化的默认模板对 commit 可见（默认四组可挂载）', async (t) => {
-    const { store } = await makeStore(t);
+  it('ensureGroupsFile 初始化的默认模板对 commit 可见（默认组可挂载）', async (t) => {
+    const { store } = await makeStore(t, { groups: 'default' });
     await store.commit({
       operationId: 's3-tpl', expectedGeneration: 0,
       changes: [{
         kind: 'topic', key: 't9', expectedRevision: null,
-        topic: topicObject({ group: ['dev', 'self', 'project', 'life'] }),
+        topic: topicObject({ group: ['general'] }),
       }],
     });
     const topic = await store.readTopic('t9');
-    assert.deepEqual(topic.group, ['dev', 'self', 'project', 'life']);
+    assert.deepEqual(topic.group, ['general']);
   });
 
   it('groups.json 路径助手与 store root 一致（groupsFilePath）', async (t) => {
-    const { root } = await makeStore(t);
+    const { root } = await makeStore(t, { groups: 'default' });
     const file = groupsFilePath(root, 'amber');
     const raw = await fsp.readFile(file, 'utf8');
     const data = JSON.parse(raw);
     assert.equal(data.version, 1);
-    assert.deepEqual(data.groups.map((g) => g.key).sort(), ['dev', 'life', 'project', 'self']);
+    assert.deepEqual(data.groups.map((g) => g.key).sort(), ['general']);
     const { data: reread } = await readGroups({ dataRoot: root, scopeId: 'amber' });
-    assert.deepEqual(reread.groups.map((g) => g.key).sort(), ['dev', 'life', 'project', 'self']);
+    assert.deepEqual(reread.groups.map((g) => g.key).sort(), ['general']);
   });
 });

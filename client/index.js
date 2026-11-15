@@ -6352,7 +6352,7 @@ window.__ModuleLoader__.load({
             return "设置刚被其他窗口修改（revision 冲突），请再点一次「保存默认卡」。"
               + (ctx.lastError && ctx.lastError.message ? "（最近错误：" + ctx.lastError.message + "）" : "");
           }, true, { readRevision: function () { return scopeRevisionOf(personaScopeRead()); } });
-          setPersonaUi({ defaultBusy: false, defaultOk: "工作区默认卡已保存为「" + persona + "」；下一轮对话按选卡优先级解析（会话专属卡 > 工作区路径 > 默认卡）。" });
+          setPersonaUi({ defaultBusy: false, defaultOk: "工作区默认人设卡已保存为「" + persona + "」；下一轮对话按选卡优先级解析（会话专属卡 > 工作区路径 > 默认卡）。" });
         } catch (e) {
           setPersonaUi({ defaultBusy: false, defaultError: { code: (e && e.code) || "shiori/ui-persona", message: "保存失败：" + ((e && e.message) || String(e)) + causeNoteOf(e) } });
         }
@@ -6591,7 +6591,7 @@ window.__ModuleLoader__.load({
               className: "dshi_label",
               "data-role": "default-persona",
               title: "没有会话专属卡、工作区路径也没匹配到时注入这张卡（defaultPersona，单键写入）"
-            }, "工作区默认卡（defaultPersona）",
+            }, "工作区默认人设卡（defaultPersona）",
               // 有候选 → 下拉直接点选（末尾留一个「自定义」出口，选中换手输框）；
               // 没候选 → 直接手输。早前纯 select 只有一张卡时把手输锁死（实机反馈
               // 「ctrl+a 输 momo 立刻被回弹」），datalist 又没有可点的下拉感，两头都

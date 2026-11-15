@@ -1014,7 +1014,7 @@ test("S2-3 工作区默认卡：personas 非空 → 下拉列出卡名，回显�
     assert.equal(mutations.length, 1, "保存默认卡恰好一次 mutate");
     assert.deepEqual(mutations[0].ops, [{ op: "set", path: ["defaultPersona"], value: "beta" }],
       "只 set defaultPersona 单键");
-    assert.ok(collectText(tree).includes("工作区默认卡已保存为「beta」"), "成功提示可见");
+    assert.ok(collectText(tree).includes("工作区默认人设卡已保存为「beta」"), "成功提示可见");
   } finally {
     await cleanup();
   }

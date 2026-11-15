@@ -830,7 +830,7 @@ test("0.4-S1 rootsSource：shadow 直构缺一根时补 DSH_HOME 默认并如实
 // shadow（配置了 root）不建 scope 资源，不写盘；group_manage 进工具面。
 // ---------------------------------------------------------------------------
 
-test("S3 active start：scope 的 groups.json 按默认模板初始化；group_manage 在工具面", async (t) => {
+test("S3 active start：scope 的 groups.json 按默认模板初始化（单组 general）；group_manage 在工具面", async (t) => {
   const roots = await tempRoots();
   t.after(roots.cleanup);
   const bindings = fakeBindingsFactory();
@@ -841,7 +841,7 @@ test("S3 active start：scope 的 groups.json 按默认模板初始化；group_m
   await access(groupsFile); // active 启动即初始化（缺文件才写）
   const data = JSON.parse(await import("node:fs/promises").then((m) => m.readFile(groupsFile, "utf8")));
   assert.equal(data.version, 1);
-  assert.deepEqual(data.groups.map((g) => g.key).sort(), ["dev", "life", "project", "self"]);
+  assert.deepEqual(data.groups.map((g) => g.key).sort(), ["general"]);
   await controller.stop();
 });
 

@@ -35,6 +35,17 @@ async function cleanup(root) {
   await rm(root, { recursive: true, force: true });
 }
 
+// 多组用例的夹具：默认模板已经收敛成一个「通用」组，凡是要验证多组语义
+// （删组、迁移、组不存在报错）的用例，显式写这四组，语义与旧模板一致。
+const FOUR_GROUPS = [
+  { key: "dev", title: "开发与配置", summary: "DSH / 插件 / 发版 / 沙箱", order: 10 },
+  { key: "self", title: "自我与关系", summary: "身份 / 情绪 / 人际边界", order: 20 },
+  { key: "project", title: "项目与工具", summary: "在跟的项目 / 常用工具与流程", order: 30 },
+  { key: "life", title: "生活与偏好", summary: "作息 / 口味 / 日常安排", order: 40 },
+];
+const seedGroups = async (root, scopeId = "amber") =>
+  writeGroups({ dataRoot: root, scopeId, groups: FOUR_GROUPS, expectedRevision: null });
+
 function assertCode(error, code, pattern) {
   assert.equal(error.code, code, `期望 ${code}，实际 ${error.code}: ${error.message}`);
   if (pattern) assert.match(error.message, pattern);
@@ -43,16 +54,10 @@ function assertCode(error, code, pattern) {
 
 // ---------- 默认模板契约（§S3.2：随包常量，UI 与工具引同一份） ----------
 
-test("默认模板：四组固定 key/title/order，深冻结不可变", () => {
-  assert.deepEqual(
-    DEFAULT_GROUPS_TEMPLATE.map((g) => g.key),
-    ["dev", "self", "project", "life"],
-  );
-  assert.deepEqual(
-    DEFAULT_GROUPS_TEMPLATE.map((g) => g.title),
-    ["开发与配置", "自我与关系", "项目与工具", "生活与偏好"],
-  );
-  assert.deepEqual(DEFAULT_GROUPS_TEMPLATE.map((g) => g.order), [10, 20, 30, 40]);
+test("默认模板：只预置一个「通用」组，深冻结不可变", () => {
+  assert.deepEqual(DEFAULT_GROUPS_TEMPLATE.map((g) => g.key), ["general"]);
+  assert.deepEqual(DEFAULT_GROUPS_TEMPLATE.map((g) => g.title), ["通用"]);
+  assert.deepEqual(DEFAULT_GROUPS_TEMPLATE.map((g) => g.order), [10]);
   for (const entry of DEFAULT_GROUPS_TEMPLATE) {
     assert.equal(Object.isFrozen(entry), true);
     for (const value of Object.values(entry)) {
@@ -67,7 +72,7 @@ test("defaultGroupsTemplate 返回可变深拷贝，与常量内容一致", () =
   assert.deepEqual(copy, DEFAULT_GROUPS_TEMPLATE);
   assert.notEqual(copy, DEFAULT_GROUPS_TEMPLATE);
   copy[0].title = "改过的标题";
-  assert.equal(DEFAULT_GROUPS_TEMPLATE[0].title, "开发与配置");
+  assert.equal(DEFAULT_GROUPS_TEMPLATE[0].title, "通用");
 });
 
 // ---------- 首次初始化与读取（§S3.2） ----------
@@ -320,7 +325,7 @@ test("planGroupMigration：只为成员产计划，非成员跳过", () => {
 test("deleteGroup：组不存在报可读 NOT_FOUND；migrateTo 不存在 / 等于自身 报 INVALID_INPUT", async () => {
   const root = await makeRoot();
   try {
-    await ensureGroupsFile({ dataRoot: root, scopeId: "amber" });
+    await seedGroups(root);
     await assert.rejects(
       deleteGroup({ dataRoot: root, scopeId: "amber", key: "ghost", topics: [] }),
       (e) => assertCode(e, "NOT_FOUND", /组 "ghost" 不存在.*现有组: dev, self, project, life/),
@@ -344,7 +349,7 @@ test("deleteGroup：组不存在报可读 NOT_FOUND；migrateTo 不存在 / 等�
 test("deleteGroup：组内仍有 topic 且未给 migrateTo 一律拒绝（§S3.5）", async () => {
   const root = await makeRoot();
   try {
-    await ensureGroupsFile({ dataRoot: root, scopeId: "amber" });
+    await seedGroups(root);
     const topics = [
       { key: "topic-a", group: ["dev", "self"] },
       { key: "topic-b", group: ["dev"] },
@@ -365,7 +370,7 @@ test("deleteGroup：组内仍有 topic 且未给 migrateTo 一律拒绝（§S3.5
 test("deleteGroup：空组直接删；给 migrateTo 时删组并返回迁移计划", async () => {
   const root = await makeRoot();
   try {
-    await ensureGroupsFile({ dataRoot: root, scopeId: "amber" });
+    await seedGroups(root);
     const topics = [
       { key: "topic-a", group: ["dev", "self"] },
       { key: "topic-b", group: ["dev"] },
@@ -398,7 +403,7 @@ test("deleteGroup：空组直接删；给 migrateTo 时删组并返回迁移计�
 test("deleteGroup 可选 CAS：expectedRevision 不符时拒绝删除", async () => {
   const root = await makeRoot();
   try {
-    await ensureGroupsFile({ dataRoot: root, scopeId: "amber" });
+    await seedGroups(root);
     await assert.rejects(
       deleteGroup({
         dataRoot: root, scopeId: "amber", key: "dev", topics: [],

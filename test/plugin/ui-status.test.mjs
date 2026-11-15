@@ -837,7 +837,7 @@ test("S4 工作区默认卡：输入回显当前配置值；保存只 set defaul
   assert.equal(mutations.length, 1, "保存恰好一次 mutate");
   assert.deepEqual(mutations[0].ops, [{ op: "set", path: ["defaultPersona"], value: "amber-new" }],
     "只 set defaultPersona 单键");
-  assert.ok(collectText(render()).includes("工作区默认卡已保存"), "成功提示可见");
+  assert.ok(collectText(render()).includes("工作区默认人设卡已保存"), "成功提示可见");
 });
 
 test("S4 工作区默认卡：trim 后空串拒绝（「卡名不能为空」且不发 mutate）；失败亮错误原文", async () => {

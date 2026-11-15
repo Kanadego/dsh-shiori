@@ -341,16 +341,26 @@ import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createGroupManageTool, createTopicCreateTool } from "../../src/host/tools.mjs";
-import { ensureGroupsFile, groupsFilePath } from "../../src/core/groups.mjs";
+import { ensureGroupsFile, groupsFilePath, writeGroups } from "../../src/core/groups.mjs";
 import { withLock } from "../../src/storage/lockfile.mjs";
 import { atomicReplace } from "../../src/storage/fsutil.mjs";
+
+// 默认组模板已收敛成单组「通用」；这里需要 dev/life/project 这套多组语义，显式种四组。
+const FOUR_GROUPS = [
+  { key: "dev", title: "开发与配置", summary: "DSH / 插件 / 发版 / 沙箱", order: 10 },
+  { key: "self", title: "自我与关系", summary: "身份 / 情绪 / 人际边界", order: 20 },
+  { key: "project", title: "项目与工具", summary: "在跟的项目 / 常用工具与流程", order: 30 },
+  { key: "life", title: "生活与偏好", summary: "作息 / 口味 / 日常安排", order: 40 },
+];
+const seedGroups = (root) =>
+  writeGroups({ dataRoot: root, scopeId: "amber", groups: FOUR_GROUPS, expectedRevision: null });
 
 async function makeGroupFixture(t, initial = {}) {
   const base = await fsp.mkdtemp(path.join(os.tmpdir(), "shiori-s3-groupmanage-"));
   t.after(async () => {
     await fsp.rm(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {});
   });
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   const service = createFakeService({
     scopeId: "amber",
     topics: [
@@ -368,7 +378,7 @@ test("S3 topic_create：可选 group 写入 front-matter；超软上限只给 wa
   t.after(async () => {
     await fsp.rm(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {});
   });
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   const baseService = createFakeService({ scopeId: "amber" });
   // topic_create 的可见性探测以 NOT_FOUND 判「不存在」（真实 service 语义）；
   // fake service 缺 topic 抛 INVALID_STATE，这里对齐真实 code。
@@ -453,7 +463,7 @@ test("S3 group_manage list：组清单 + 各组 topic 计数", async (t) => {
   const dev = out.groups.find((g) => g.key === "dev");
   assert.equal(dev.topics, 1, "dev 组挂 1 个 topic");
   assert.equal(dev.title, "开发与配置");
-  assert.equal(out.groups.length, 4, "默认模板四组");
+  assert.equal(out.groups.length, 4, "夹具四组（默认模板已收敛为单组，见 groups.test.mjs）");
 });
 
 test("S3 group_manage create：建组成功；key 冲突报错", async (t) => {

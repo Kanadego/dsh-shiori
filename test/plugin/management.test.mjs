@@ -19,6 +19,17 @@ import {
 import { createGroupManageTool } from "../../src/host/tools.mjs";
 import { ensureGroupsFile, readGroups, writeGroups } from "../../src/core/groups.mjs";
 
+// 默认组模板已收敛成一个「通用」组；组相关用例仍需要 dev/life 这套多组夹具，
+// 显式写四组，避免用例被模板变更牵连。
+const FOUR_GROUPS = [
+  { key: "dev", title: "开发与配置", summary: "DSH / 插件 / 发版 / 沙箱", order: 10 },
+  { key: "self", title: "自我与关系", summary: "身份 / 情绪 / 人际边界", order: 20 },
+  { key: "project", title: "项目与工具", summary: "在跟的项目 / 常用工具与流程", order: 30 },
+  { key: "life", title: "生活与偏好", summary: "作息 / 口味 / 日常安排", order: 40 },
+];
+const seedGroups = async (root) =>
+  writeGroups({ dataRoot: root, scopeId: "amber", groups: FOUR_GROUPS, expectedRevision: null });
+
 function fakeBindingsFactory() {
   const registered = { preStep: null, sessionEvents: null, waterfall: null, sections: [], tools: [] };
   const factory = () => ({
@@ -1436,7 +1447,7 @@ test("P2-B3：旧形状兼容（store kind organize + plan.kind archive-topic）
 test("group_manage list 主组口径：多组 topic 只计入主组 t.group[0]，非主组不重复计数", async (t) => {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-groupcount-"));
   t.after(() => rm(base, { recursive: true, force: true }));
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   const service = {
     async listTopics() {
       return [
@@ -1461,7 +1472,7 @@ test("group_manage list 主组口径：多组 topic 只计入主组 t.group[0]�
 test("group_manage list 边界口径：group 空数组 / 缺失 / 非数组一律不计入任何组", async (t) => {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-groupedge-"));
   t.after(() => rm(base, { recursive: true, force: true }));
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   const service = {
     async listTopics() {
       return [
@@ -1502,7 +1513,7 @@ test("group_manage list 边界口径：group 空数组 / 缺失 / 非数组一�
 test("group_manage list 稀疏数组：空洞主组不污染任何组行计数（契约断言，不能判别旧实现）", async (t) => {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-groupsparse-"));
   t.after(() => rm(base, { recursive: true, force: true }));
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   const holed = new Array(2);       // [ <1 empty>, "dev" ]：group[0] 是空洞
   holed[1] = "dev";
   const tailSparse = ["life"];      // ["life", <1 empty>]：主组合法、尾部空洞
@@ -1532,7 +1543,7 @@ test("group_manage list 稀疏数组：空洞主组不污染任何组行计数�
 test("group_manage delete：CAS 冲突自动重读 revision 补删组条目，迁移绝不二次执行", async (t) => {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-groupcas-"));
   t.after(() => rm(base, { recursive: true, force: true }));
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   // 铺两行组：gone（待删）与 dest（迁移目标）。并发写者在迁移提交期间往清单追加
   // intruder 组，让 deleteGroup 的 CAS（expectedRevision=action 开头的快照）必失败。
   const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
@@ -1587,7 +1598,7 @@ test("group_manage delete：CAS 冲突自动重读 revision 补删组条目，�
 test("group_manage list：dangling 字段列出 topic.group 指向不存在组的条目（去重），既有键不丢", async (t) => {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-groupdangling-"));
   t.after(() => rm(base, { recursive: true, force: true }));
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
   await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
     { key: "dev", title: "开发", summary: "", order: 1 },
@@ -1623,7 +1634,7 @@ test("group_manage list：dangling 字段列出 topic.group 指向不存在组�
 test("group_manage repair：清掉悬空引用（CAS+operationId 单提交），有效组与卡片正文不动，repair 后 list 干净", async (t) => {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouprepair-"));
   t.after(() => rm(base, { recursive: true, force: true }));
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
   await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
     { key: "dev", title: "开发", summary: "", order: 1 },
@@ -1691,7 +1702,7 @@ test("group_manage repair：清掉悬空引用（CAS+operationId 单提交），
 test("group_manage repair：重读 topics 时悬空挂载已被别处摘掉 → 跳过 mutate，cleaned 0", async (t) => {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouprepairnoop-"));
   t.after(() => rm(base, { recursive: true, force: true }));
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
   await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
     { key: "dev", title: "开发", summary: "", order: 1 },
@@ -1720,7 +1731,7 @@ test("group_manage repair：重读 topics 时悬空挂载已被别处摘掉 → 
 test("group_manage repair：提交窗口内 dev 组被删 → remaining 精确为 2（提交后 known）", async (t) => {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouprepairknown-"));
   t.after(() => rm(base, { recursive: true, force: true }));
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
   await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
     { key: "dev", title: "开发", summary: "", order: 1 },
@@ -1763,7 +1774,7 @@ test("group_manage repair：提交窗口内 dev 组被删 → remaining 精确�
 test("group_manage list/repair 读序：读 topics 期间建出的组不被误判为悬空（必修 1 回归）", async (t) => {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouporder-"));
   t.after(() => rm(base, { recursive: true, force: true }));
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
   await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
     { key: "dev", title: "开发", summary: "", order: 1 },
@@ -1835,7 +1846,7 @@ test("group_manage repair：groups.json 缺失且有挂载 → INVALID_STATE 拒
 test("group_manage repair：service.mutate 抛 CAS 冲突如实透出，不吞不重试", async (t) => {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouprepairfail-"));
   t.after(() => rm(base, { recursive: true, force: true }));
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
   await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
     { key: "dev", title: "开发", summary: "", order: 1 },
@@ -1866,7 +1877,7 @@ test("group_manage repair：service.mutate 抛 CAS 冲突如实透出，不吞�
 test("group_manage repair：readTopic 与 mutate 之间组被建出（悬空已自愈）→ 提交前复核，不触写", async (t) => {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouprecheck-"));
   t.after(() => rm(base, { recursive: true, force: true }));
-  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  await seedGroups(base);
   const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
   await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
     { key: "dev", title: "开发", summary: "", order: 1 },

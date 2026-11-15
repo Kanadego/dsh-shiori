@@ -44,14 +44,14 @@ export const GROUPS_VERSION = 1;
 /** 组清单文件名（相对 scopes/<scopeId>/）。 */
 export const GROUPS_FILE_NAME = 'groups.json';
 
-// 默认组模板（DESIGN §S3.2：开发与配置 / 自我与关系 / 项目与工具 / 生活与偏好）。
-// 深冻结常量：后续 UI 与工具引同一份，杜绝副本漂移；需要可变副本时用
-// defaultGroupsTemplate() 取深拷贝。summary 为 0.4 预置说明文案（§S3.2 示例）。
+// 默认组模板：只预置一个「通用」组（0.4 调整）。
+// 早前预置 dev / self / project / life 四组，问题有两个：组清单会跟着 topic 索引
+// 一起进 L1，四个空组等于白占四行预算；而且绝大多数人实际只用一两个组，剩下
+// 的是噪音。现在按需建组（组工具 create），空库只留一个能落东西的地方。
+// 深冻结常量：UI 与工具引同一份，杜绝副本漂移；需要可变副本时用
+// defaultGroupsTemplate() 取深拷贝。
 export const DEFAULT_GROUPS_TEMPLATE = Object.freeze([
-  Object.freeze({ key: 'dev', title: '开发与配置', summary: 'DSH / 插件 / 发版 / 沙箱', order: 10 }),
-  Object.freeze({ key: 'self', title: '自我与关系', summary: '身份 / 情绪 / 人际边界', order: 20 }),
-  Object.freeze({ key: 'project', title: '项目与工具', summary: '在跟的项目 / 常用工具与流程', order: 30 }),
-  Object.freeze({ key: 'life', title: '生活与偏好', summary: '作息 / 口味 / 日常安排', order: 40 }),
+  Object.freeze({ key: 'general', title: '通用', summary: '没有特别归类的内容', order: 10 }),
 ]);
 
 /** 默认模板的可变深拷贝（写入 groups.json 用）。 */
