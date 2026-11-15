@@ -6286,6 +6286,9 @@ window.__ModuleLoader__.load({
       var personaScopeRead = function () {
         return props.dsh && typeof props.dsh.configScope === "function" ? props.dsh.configScope() : undefined;
       };
+      // 切卡行的候选项（getStatus.personas）：有卡给下拉（带自定义出口），没卡才手输。
+      var personaCardOptions = personaOptionsFrom(modeStatus);
+      var personaCardCustom = personaCardOptions.length === 0 || personaUi.cardCustom === true;
       // ── S2-3「工作区默认卡」：从设置页底部搬到壳条顶部选择器区 ─────────────────
       // 语义不变：单键 read-modify-write 只 set defaultPersona（其余配置键原样
       // 保留）；trim 后空串拒绝；CAS false/抛错重试恰一次（casMutate）。
@@ -6308,6 +6311,11 @@ window.__ModuleLoader__.load({
       var defaultPersonaDraft = typeof personaUi.defaultDraft === "string" ? personaUi.defaultDraft : null;
       var workspacePersonaValue = defaultPersonaDraft !== null ? defaultPersonaDraft : configuredDefaultPersona;
       var workspacePersonaOptionList = personaSelectValues(workspacePersonaOptions, workspacePersonaValue);
+      // 实机反馈：库里有卡时希望「直接点选」，库里没有（或想填一张还没建的卡）
+      // 时又要能手输。所以候选非空 → select（末尾带「自定义（手输卡名）」出口）；
+      // 候选为空 → 直接手输框。不会出现「选项里只有一张卡、手输被回弹」的死锁。
+      var CUSTOM_PERSONA_OPTION = "__custom__";
+      var defaultPersonaCustom = workspacePersonaOptions.length === 0 || personaUi.defaultCustom === true;
       var defaultPersonaBusy = personaUi.defaultBusy === true;
       var defaultPersonaError = personaUi.defaultError || null;
       var defaultPersonaOk = typeof personaUi.defaultOk === "string" ? personaUi.defaultOk : "";
@@ -6584,26 +6592,36 @@ window.__ModuleLoader__.load({
               "data-role": "default-persona",
               title: "没有会话专属卡、工作区路径也没匹配到时注入这张卡（defaultPersona，单键写入）"
             }, "工作区默认卡（defaultPersona）",
-              // 用 input + datalist 而不是 select：下拉只列出 persona/*.md 里已有的卡，
-              // 但用户经常要先把 defaultPersona 写成一张还没建的卡名（或临时改回别
-              // 的卡），select 会把手输锁死——实机反馈「删掉 amber 又弹回 amber、
-              // ctrl+a 输 momo 立刻被替换」就是这个（选项里只有 amber，选中值被
-              // 受控回弹）。datalist 既能点选也能自由输入，且不新增 useState。
-              h("input", {
-                className: "dshi_input",
-                "data-role": "default-persona-input",
-                value: workspacePersonaValue,
-                placeholder: "卡名（可下拉选，也可手输）",
-                list: workspacePersonaOptions.length > 0 ? "dshi-persona-options" : undefined,
-                autoComplete: "off",
-                onChange: function (event) { setPersonaUi({ defaultDraft: event.target.value }); }
-              }),
-              workspacePersonaOptions.length > 0
-                ? h("datalist", { id: "dshi-persona-options" },
+              // 有候选 → 下拉直接点选（末尾留一个「自定义」出口，选中换手输框）；
+              // 没候选 → 直接手输。早前纯 select 只有一张卡时把手输锁死（实机反馈
+              // 「ctrl+a 输 momo 立刻被回弹」），datalist 又没有可点的下拉感，两头都
+              // 不满足。这个形态两种都能走。
+              defaultPersonaCustom
+                ? h("input", {
+                    className: "dshi_input",
+                    "data-role": "default-persona-input",
+                    value: workspacePersonaValue,
+                    placeholder: "手输卡名（如 amber）",
+                    autoComplete: "off",
+                    onChange: function (event) { setPersonaUi({ defaultDraft: event.target.value }); }
+                  })
+                : h("select", {
+                    className: "dshi_select",
+                    "data-role": "default-persona-select",
+                    value: workspacePersonaValue,
+                    onChange: function (event) {
+                      var picked = String(event.target.value ?? "");
+                      if (picked === CUSTOM_PERSONA_OPTION) {
+                        setPersonaUi({ defaultCustom: true, defaultDraft: "" });
+                        return;
+                      }
+                      setPersonaUi({ defaultCustom: false, defaultDraft: picked });
+                    }
+                  },
                     workspacePersonaOptionList.map(function (name) {
-                      return h("option", { key: name, value: name });
-                    }))
-                : null),
+                      return h("option", { key: name, value: name }, name);
+                    }),
+                    h("option", { key: CUSTOM_PERSONA_OPTION, value: CUSTOM_PERSONA_OPTION }, "自定义（手输卡名）"))),
             h("button", {
               className: "dshi_btn",
               "data-role": "default-persona-save",
@@ -6614,12 +6632,30 @@ window.__ModuleLoader__.load({
           // 「清除专属卡」把本会话条目的 persona 写成 null（回落默认解析链）。
           personaCardOpen && sessionId !== "" ? h("div", { className: "dshi_personaRow", "data-role": "persona-card-row" },
             h("label", { className: "dshi_label" }, "切换到卡名（切卡即换整套记忆，下一轮对话生效；老会话内容留在原 scope）",
-              h("input", {
-                className: "dshi_input",
-                value: personaDraft,
-                placeholder: "输入卡名（如 amber）",
-                onChange: function (event) { setPersonaUi({ draft: event.target.value }); }
-              })),
+              personaCardCustom
+                ? h("input", {
+                    className: "dshi_input",
+                    value: personaDraft,
+                    placeholder: "手输卡名（如 amber）",
+                    onChange: function (event) { setPersonaUi({ draft: event.target.value }); }
+                  })
+                : h("select", {
+                    className: "dshi_select",
+                    value: personaDraft,
+                    onChange: function (event) {
+                      var picked = String(event.target.value ?? "");
+                      if (picked === CUSTOM_PERSONA_OPTION) {
+                        setPersonaUi({ cardCustom: true, draft: "" });
+                        return;
+                      }
+                      setPersonaUi({ cardCustom: false, draft: picked });
+                    }
+                  },
+                    personaDraft === "" ? h("option", { key: "__unset", value: "" }, "请选择卡名") : null,
+                    personaSelectValues(personaCardOptions, personaDraft).map(function (name) {
+                      return h("option", { key: name, value: name }, name);
+                    }),
+                    h("option", { key: CUSTOM_PERSONA_OPTION, value: CUSTOM_PERSONA_OPTION }, "自定义（手输卡名）"))),
             h("button", { className: "dshi_btn dshi_btnPrimary", disabled: personaBusy, onClick: personaSwitch }, personaBusy ? "切换中…" : "切换"),
             h("button", {
               className: "dshi_btn", disabled: personaBusy,
