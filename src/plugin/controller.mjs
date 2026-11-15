@@ -62,6 +62,7 @@ import { registerShioriTypert, readOptionalCordisService } from "./typert-descri
 import {
   validateControllerSettings, pinScope, sessionEvidenceFromExec,
   sessionEvidenceFromAgent, rejectIdentityFields, NULL_PERSONA_SCOPE, scopeIdForPersona,
+  liveSettingsForScope, readLiveRefs,
 } from "./scope.mjs";
 import { TOOL_OUTPUT_SCHEMAS, renderToolOutput } from "./tool-schemas.mjs";
 import { validateRoots } from "../runtime/index.mjs";
@@ -117,7 +118,17 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   if (ctx === null || typeof ctx !== "object") {
     fail("INVALID_INPUT", "ctx must be an object (host plugin context)", {});
   }
-  const settings = validateControllerSettings(rawSettings ?? {});
+  // 选卡三字段（defaultPersona / sessionPersonas / workspacePersonas）在宿主侧是 volatile
+  // 引用：settings 面板写入后宿主就地更新引用值、不重载插件（cordis-plugin-loader
+  // entry.ts 的 _commitVolatile）。这里保留引用，pinScope 每次实时解包，切卡才会在
+  // 会话进行中立即生效；引用缺失时 liveSettingsForScope 回落装配期快照。
+  const rawConfig = rawSettings ?? {};
+  const liveRefs = readLiveRefs(rawConfig.liveRefs);
+  // liveRefs 是本插件自己的热读通道，不属于冻结 settings 契约（validateControllerSettings
+  // 对未知顶层键 fail-closed），所以先摘掉再校验，校验通过后合回运行期对象。
+  const sanitized = { ...rawConfig };
+  delete sanitized.liveRefs;
+  const settings = Object.freeze({ ...validateControllerSettings(sanitized), liveRefs });
   if (dependencies === null || typeof dependencies !== "object") {
     fail("INVALID_INPUT", "dependencies must be an object", {});
   }
@@ -2041,7 +2052,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       dataRoot: settings.dataRoot,
       stateRoot: settings.stateRoot,
       rootsSource: settings.rootsSource,
-      configurationState: settings.defaultPersona === null
+      configurationState: liveSettingsForScope(settings).defaultPersona === null
         ? "needs-persona"
         : (settings.mode === "active" ? "configured" : "needs-active"),
       started: ctrl.started,

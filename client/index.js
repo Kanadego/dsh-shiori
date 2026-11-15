@@ -6331,7 +6331,14 @@ window.__ModuleLoader__.load({
         }
         return "";
       })();
-      var personaScopeTarget = personaUi.scopeTarget === "workspace" && workspaceTargetPath !== "" ? "workspace" : "all";
+      // 范围选择器三态：personaUi.scopeTarget 为 "all"/"workspace" 时是用户显式选择；
+// 未选（null/undefined）时跟随工作区选择器——选了具体工作区就默认存到该工作区，
+// 选「全部工作区」才回落到全局默认卡。早前默认恒为 all，用户选了工作区也还是存全局，
+// 看着像「保存默认卡不按工作区」。
+var personaScopeExplicit = personaUi.scopeTarget === "all" || personaUi.scopeTarget === "workspace";
+var personaScopeTarget = personaScopeExplicit
+  ? (personaUi.scopeTarget === "workspace" && workspaceTargetPath !== "" ? "workspace" : "all")
+  : (workspaceTargetPath !== "" ? "workspace" : "all");
       var configuredDefaultPersona = (function (cfg) {
         if (!cfg || typeof cfg !== "object") return "";
         if (personaScopeTarget === "all") {
@@ -6624,9 +6631,14 @@ window.__ModuleLoader__.load({
                   h("select", {
                     className: "dshi_select",
                     value: workspaceId,
-                    onChange: function (event) { setWorkspaceId(event.target.value); }
+                    onChange: function (event) {
+                      setWorkspaceId(event.target.value);
+                      // 切工作区后范围选择复位成「跟随工作区」：选了具体工作区就默认存到
+                      // 该工作区，避免上一次的显式选择（尤其 all）继续生效误导用户。
+                      setPersonaUi({ scopeTarget: null, defaultDraft: null, defaultOk: "", defaultError: null });
+                    }
                   },
-                    h("option", { value: "" }, "— 全部工作区 —"),
+                    h("option", { value: "" }, "— 全部工作区（不按工作区设卡）—"),
                     workspaceOptions.map(function (item) {
                       var count = workspaceSessionCount[item.workspaceId];
                       var label = count !== undefined ? item.title + "（" + count + " 个会话）" : item.title;
@@ -6684,7 +6696,14 @@ window.__ModuleLoader__.load({
                 },
                   h("option", { value: "all", "data-role": "persona-scope-option" }, "所有工作区（默认卡）"),
                   h("option", { value: "workspace", "data-role": "persona-scope-option" }, "仅当前工作区")),
-                h("span", null, personaScopeTarget === "workspace" ? "工作区默认人设卡（workspacePersonas）" : "工作区默认人设卡（defaultPersona）")),
+                h("span", {
+                  title: personaScopeTarget === "workspace"
+                    ? "写入 workspacePersonas，服务端按工作区路径最长前缀解析"
+                    : "写入 defaultPersona，所有工作区共用的兜底卡"
+                },
+                  personaScopeTarget === "workspace" && workspaceTargetPath !== ""
+                    ? "当前工作区的默认人设卡"
+                    : "所有工作区共用的默认人设卡")),
               // 有候选 → 下拉直接点选（末尾留一个「自定义」出口，选中换手输框）；
               // 没候选 → 直接手输。早前纯 select 只有一张卡时把手输锁死（实机反馈
               // 「ctrl+a 输 momo 立刻被回弹」），datalist 又没有可点的下拉感，两头都

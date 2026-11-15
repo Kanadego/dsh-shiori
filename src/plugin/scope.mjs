@@ -85,6 +85,11 @@ function requirePersonaName(value, field) {
   if (typeof value !== "string" || value.trim().length === 0) {
     fail("INVALID_INPUT", `settings.${field} must be a non-empty persona name or null`, { field });
   }
+  // 卡名会直接拼成 <dataRoot>/persona/<name>.md（persona.mjs cardFile），所以必须挡住
+  // 路径分隔符、上跳与 Windows ADS 冒号：否则 "../../x" 会读到 dataRoot 之外的文件。
+  if (/[\\/:]/.test(value) || value.includes("..") || value.trim() !== value) {
+    fail("INVALID_INPUT", `settings.${field} must not contain path separators, ".." or surrounding spaces`, { field });
+  }
   return value;
 }
 
@@ -371,6 +376,47 @@ export function personaForSession(settings, { sessionId, workspace } = {}) {
   return settings.defaultPersona;
 }
 
+/**
+ * 从装配期 raw settings 里挑出三个选卡字段的 volatile 引用（宿主热提交时不重载插件，
+ * 引用值就地更新；非引用形态一律记为 null，回落快照）。
+ */
+export function readLiveRefs(raw) {
+  const pick = (value) => (value !== null && typeof value === "object" && typeof value.get === "function" ? value : null);
+  if (raw === null || typeof raw !== "object") {
+    return Object.freeze({ defaultPersona: null, sessionPersonas: null, workspacePersonas: null });
+  }
+  return Object.freeze({
+    defaultPersona: pick(raw.defaultPersona),
+    sessionPersonas: pick(raw.sessionPersonas),
+    workspacePersonas: pick(raw.workspacePersonas),
+  });
+}
+
+/**
+ * 用 volatile 引用里的最新值覆盖装配期快照的选卡字段——面板「切换人设卡」写入
+ * sessionPersonas / workspacePersonas / defaultPersona 后，宿主不重载插件，只有
+ * 实时解包才能让当前会话的下一次调用用上新卡。引用缺失、抛错或热值非法时回落
+ * 快照，绝不因热更新失败而拒绝请求。
+ */
+export function liveSettingsForScope(settings) {
+  const refs = settings?.liveRefs;
+  if (refs === null || typeof refs !== "object") return settings;
+  const read = (ref, fallback) => {
+    if (ref === null || typeof ref !== "object" || typeof ref.get !== "function") return fallback;
+    try { return ref.get(); } catch { return fallback; }
+  };
+  try {
+    return Object.freeze({
+      ...settings,
+      defaultPersona: requirePersonaName(read(refs.defaultPersona, settings.defaultPersona), "defaultPersona"),
+      sessionPersonas: Object.freeze(validateMappings(read(refs.sessionPersonas, settings.sessionPersonas), "sessionPersonas", "sessionId").map((e) => Object.freeze(e))),
+      workspacePersonas: Object.freeze(validateMappings(read(refs.workspacePersonas, settings.workspacePersonas), "workspacePersonas", "workspace").map((e) => Object.freeze(e))),
+    });
+  } catch {
+    return settings;
+  }
+}
+
 /** persona 名 → scopeId（null persona → global）。 */
 export function scopeIdForPersona(persona) {
   return persona === null ? GLOBAL_SCOPE_ID : persona;
@@ -412,7 +458,7 @@ export function pinScope({ settings, sessionId, workspace, generation, source })
   if (!Number.isInteger(generation) || generation < 0) {
     fail("INVALID_INPUT", "pinScope requires a non-negative integer generation", { source });
   }
-  const persona = personaForSession(settings, { sessionId, workspace });
+  const persona = personaForSession(liveSettingsForScope(settings), { sessionId, workspace });
   return Object.freeze({
     sessionId,
     workspace: workspace ?? null,

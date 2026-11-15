@@ -37,7 +37,15 @@ export async function apply(ctx, config) {
   //    把「解析真实 link 的 canonical 绝对路径」回填 settings，保证验证与
   //    controller / RPC 实际使用的路径完全一致，不残留词法混排形式。
   const verified = verifyPluginRoots(normalized);
-  const settings = Object.freeze({ ...normalized, dataRoot: verified.dataRoot, stateRoot: verified.stateRoot });
+  // 选卡三字段（defaultPersona / sessionPersonas / workspacePersonas）在宿主侧是
+  // volatile 引用（cordis-plugin-loader 热提交后引用值就地更新、不重载插件）。引用原样
+  // 带到 controller，pinScope 每次实时解包，切卡才会在会话进行中立即生效。
+  const liveRefs = Object.freeze({
+    defaultPersona: config?.defaultPersona ?? null,
+    sessionPersonas: config?.sessionPersonas ?? null,
+    workspacePersonas: config?.workspacePersonas ?? null,
+  });
+  const settings = Object.freeze({ ...normalized, dataRoot: verified.dataRoot, stateRoot: verified.stateRoot, liveRefs });
 
   // 3. 构造 controller（契约签名为 async，返回 {start,stop,diagnostics,management}；
   //    不自动 start；inert shadow 由 P 以 needs-configuration 诊断挂载）
