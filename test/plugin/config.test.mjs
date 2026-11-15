@@ -77,8 +77,10 @@ test("Config 是原生 Schemastery schema 且可解析缺省输入", () => {
   assert.equal(configValue(parsed.mode), "shadow");
   assert.equal(configValue(parsed.allowActive), false);
   assert.equal(parsed.ownerId, "local");
-  assert.deepEqual(parsed.sessionPersonas, []);
-  assert.deepEqual(parsed.workspacePersonas, []);
+  // 0.4 面板热写起 sessionPersonas / workspacePersonas 同 budgets 打 volatile，
+  // 缺省值同样经引用对象读出（见 configValue）。
+  assert.deepEqual(configValue(parsed.sessionPersonas), []);
+  assert.deepEqual(configValue(parsed.workspacePersonas), []);
   // budgets 打了 .volatile()：宿主把值换成 cosmokit volatile 引用对象，不再直接可读
   // （见 src/plugin/config.mjs unwrapVolatile）。这里断言它是该形状且 get() 给出默认预算。
   assert.equal(typeof parsed.budgets.get, "function");
@@ -118,6 +120,34 @@ test("Config schema：mode / allowActive / defaultPersona 标记为 volatile（�
   assert.equal(parsed.defaultPersona.get(), "amber");
 });
 
+// 宿主 dsh-settings write() 的放行判据（lib/index.js isVolatilePath）：schema.meta.volatile
+// 命中即放行，否则沿 dict 下钻剩余路径——最近的 volatile 祖先覆盖整棵子树。这里照抄判据，
+// 直接断言面板三处写入路径都能通过宿主校验。
+function isVolatilePath(schema, path) {
+  if (schema.meta.volatile) return true;
+  const [key, ...rest] = path;
+  const child = key === undefined ? undefined : schema.dict?.[key];
+  return child !== undefined && isVolatilePath(child, rest);
+}
+
+test("Config schema：sessionPersonas / workspacePersonas / semantic.local.cacheDir 标记为 volatile（面板热写路径放行）", () => {
+  // 真机缺陷：面板三处写入被宿主拒绝——dsh-settings write():
+  // Config field "sessionPersonas" is not volatile（workspacePersonas 与
+  // semantic.local.cacheDir 同款）。
+  for (const path of [["sessionPersonas"], ["workspacePersonas"], ["semantic", "local", "cacheDir"]]) {
+    assert.equal(isVolatilePath(Config, path), true, `写入路径 ${path.join(".")} 必须命中 volatile`);
+  }
+  assert.equal(Config.dict.sessionPersonas.meta.volatile, true);
+  assert.equal(Config.dict.workspacePersonas.meta.volatile, true);
+  assert.equal(Config.dict.semantic.dict.local.dict.cacheDir.meta.volatile, true);
+  // 最小面：只放开写入目标，相邻字段仍不可热写（整体 volatile 会把它们一起放开）。
+  assert.notEqual(Config.dict.semantic.meta.volatile, true);
+  assert.notEqual(Config.dict.semantic.dict.local.meta.volatile, true);
+  assert.equal(isVolatilePath(Config, ["semantic", "provider"]), false);
+  assert.equal(isVolatilePath(Config, ["semantic", "local", "model"]), false);
+  assert.equal(isVolatilePath(Config, ["semantic", "local", "dims"]), false);
+});
+
 test("Config schema 序列化为 JSON Schema 形状且接受显式 null 与完整样例", () => {
   const text = JSON.stringify(Config);
   const json = JSON.parse(text); // 序列化无损（refs 图形式）
@@ -135,8 +165,8 @@ test("Config schema 序列化为 JSON Schema 形状且接受显式 null 与完�
   });
   assert.equal(configValue(sample.mode), "shadow");
   assert.equal(sample.dataRoot, null);
-  assert.deepEqual(sample.sessionPersonas, [{ sessionId: "s1", persona: null }]);
-  assert.deepEqual(sample.workspacePersonas, [{ workspace: "D:/somewhere/ws", persona: "k1" }]);
+  assert.deepEqual(configValue(sample.sessionPersonas), [{ sessionId: "s1", persona: null }]);
+  assert.deepEqual(configValue(sample.workspacePersonas), [{ workspace: "D:/somewhere/ws", persona: "k1" }]);
 });
 
 test("Config schema 拒绝非法枚举值", () => {
@@ -585,7 +615,13 @@ test("volatile：宿主形态（Config 解析产物整包喂给 normalize）解�
   // 真机装配路径：宿主用 Config 解析后把带 cosmokit 引用的配置直接交给 apply，
   // apply 第一步 normalize 必须把三个字段与 budgets 全部解包成普通值，下游
   // scope.mjs / controller.mjs / management.mjs 的 === 比较才不会误判。
-  const fromHost = Config({ mode: "active", allowActive: true, defaultPersona: "amber" });
+  const fromHost = Config({
+    mode: "active",
+    allowActive: true,
+    defaultPersona: "amber",
+    sessionPersonas: [{ sessionId: "s1", persona: "amber" }],
+    workspacePersonas: [{ workspace: join(TMP_ROOT, "ws-host"), persona: null }],
+  });
   const settings = normalizePluginConfig(fromHost);
   assert.equal(settings.mode, "active");
   assert.equal(settings.allowActive, true);
@@ -596,6 +632,54 @@ test("volatile：宿主形态（Config 解析产物整包喂给 normalize）解�
   // budgets 在宿主侧同样是引用对象，解包后是普通冻结对象。
   assert.equal(typeof settings.budgets.get, "undefined");
   assert.ok(Object.isFrozen(settings.budgets));
+  // 面板热写三路同理：映射是普通数组、cacheDir 是普通字符串（缺省值也解包）。
+  assert.ok(Array.isArray(settings.sessionPersonas));
+  assert.deepEqual(settings.sessionPersonas, [{ sessionId: "s1", persona: "amber" }]);
+  assert.ok(Array.isArray(settings.workspacePersonas));
+  assert.deepEqual(settings.workspacePersonas, [{ workspace: join(TMP_ROOT, "ws-host"), persona: null }]);
+  assert.equal(typeof settings.semantic.local.cacheDir, "string");
+  assert.equal(settings.semantic.local.cacheDir, "");
+});
+
+test("volatile：sessionPersonas / workspacePersonas 引用对象被解包成普通数组", () => {
+  const ws = join(TMP_ROOT, "ws-hot");
+  const settings = normalizePluginConfig({
+    sessionPersonas: volatileRef([{ sessionId: "s-hot", persona: "amber" }]),
+    workspacePersonas: volatileRef([{ workspace: ws, persona: "amber" }]),
+  });
+  // 下游 scope.mjs validateControllerSettings 与 controller.mjs 直接遍历数组、
+  // 读元素属性；拿到引用对象会 TypeError，所以这里断言普通数组与元素形状。
+  assert.ok(Array.isArray(settings.sessionPersonas));
+  assert.deepEqual(settings.sessionPersonas, [{ sessionId: "s-hot", persona: "amber" }]);
+  assert.ok(Array.isArray(settings.workspacePersonas));
+  assert.deepEqual(settings.workspacePersonas, [{ workspace: ws, persona: "amber" }]);
+  assert.equal(typeof settings.sessionPersonas.get, "undefined");
+  // 空数组与普通数组输入照旧（解包分支不改变既有语义）。
+  const empty = normalizePluginConfig({ sessionPersonas: volatileRef([]), workspacePersonas: volatileRef([]) });
+  assert.deepEqual(empty.sessionPersonas, []);
+  assert.deepEqual(empty.workspacePersonas, []);
+  const plain = normalizePluginConfig({
+    sessionPersonas: [{ sessionId: "s-plain", persona: null }],
+    workspacePersonas: [{ workspace: ws, persona: null }],
+  });
+  assert.deepEqual(plain.sessionPersonas, [{ sessionId: "s-plain", persona: null }]);
+  assert.deepEqual(plain.workspacePersonas, [{ workspace: ws, persona: null }]);
+});
+
+test("volatile：semantic.local.cacheDir 引用对象被解包成普通字符串", () => {
+  const dir = join(TMP_ROOT, "models-hot");
+  const settings = normalizePluginConfig({
+    semantic: { provider: "local", local: { cacheDir: volatileRef(dir) } },
+  });
+  // controller.semanticProviderConfig() 对 cacheDir 做字符串判断/拼接，引用对象会炸。
+  assert.equal(settings.semantic.local.cacheDir, dir);
+  assert.equal(typeof settings.semantic.local.cacheDir, "string");
+  assert.equal(typeof settings.semantic.local.cacheDir.get, "undefined");
+  // 空串契约同样解包（Config 缺省值在宿主侧也是引用对象）。
+  const empty = normalizePluginConfig({
+    semantic: { provider: "local", local: { cacheDir: volatileRef("") } },
+  });
+  assert.equal(empty.semantic.local.cacheDir, "");
 });
 
 test("volatile：mode / allowActive 解包不绕过校验", () => {

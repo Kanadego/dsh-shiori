@@ -215,7 +215,11 @@ test("semantic 段默认值正确（provider=none，零依赖零网络）", () =
   assert.equal(parsed.semantic.local.dims, 512);
   assert.equal(parsed.semantic.local.dtype, "fp32");
   // cacheDir 空串契约：由 controller.semanticProviderConfig() 解析成 <stateRoot>/semantic/models。
-  assert.equal(parsed.semantic.local.cacheDir, "");
+  // 0.4 面板「保存模型目录」热写起 cacheDir 打了 volatile，Config 解析产物是 cosmokit
+  // 引用对象，按 get() 取值（普通字符串输入仍原样）。
+  const cacheDirRef = parsed.semantic.local.cacheDir;
+  assert.equal(typeof cacheDirRef.get, "function");
+  assert.equal(cacheDirRef.get(), "");
   assert.equal(parsed.semantic.local.mirror, "https://hf-mirror.com/");
   assert.equal(parsed.semantic.api.endpoint, null);
   assert.equal(parsed.semantic.api.keyRef, null);

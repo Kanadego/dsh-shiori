@@ -187,14 +187,17 @@ export const Config = z.object({
   stateRoot: nullableString().default(null).description("运行状态根目录（绝对路径），与 dataRoot 互不嵌套；缺省（null）时自动解析为 <DSH_HOME>/shiori-state 并自动创建目录（DSH_HOME 取环境变量 DSH_HOME，未设置时为 ~/.dsh）"),
   ownerId: z.string().default("local").description("可信部署配置的单用户 owner 标识；模型不可传"),
   defaultPersona: personaChoice().volatile().description("默认人设卡名；null=global memory / 无默认卡"),
+  // volatile：面板「切换人设卡 / 保存工作区默认卡」直接写这两个字段（client 走
+  // settings mutate，路径 ["sessionPersonas"] / ["workspacePersonas"]）；未标记时
+  // 宿主 dsh-settings write() 直接报 Config field "..." is not volatile。
   sessionPersonas: z.array(z.object({
     sessionId: z.string().description("宿主会话 id"),
     persona: personaChoice().description("该会话的人设卡；null=global"),
-  })).default([]).description("会话级选卡映射（下一次调用生效）"),
+  })).default([]).volatile().description("会话级选卡映射（宿主热提交，不重载插件；下一次调用生效）"),
   workspacePersonas: z.array(z.object({
     workspace: z.string().description("工作区绝对路径"),
     persona: personaChoice().description("该工作区的人设卡；null=global"),
-  })).default([]).description("工作区级选卡映射（最长路径边界匹配）"),
+  })).default([]).volatile().description("工作区级选卡映射（宿主热提交，不重载插件；最长路径边界匹配）"),
   // volatile：宿主 settings 服务只收纳「schema 里至少一个 meta.volatile 字段」的
   // 命名空间（dsh-settings describe()）；标记后值以 cosmokit volatile 引用交给插件，
   // 读取处经 unwrapVolatile 解包。语义＝宿主热提交该字段、不重载插件。
@@ -208,7 +211,11 @@ export const Config = z.object({
       dims: z.natural().default(512).description("向量维度"),
       dtype: z.union([z.const("fp32"), z.const("fp16"), z.const("q8")]).default("fp32")
         .description("ONNX 推理精度：fp32=精度基线（91MB）；fp16=折中；q8=最小最快（23MB，短文本 p95 约 4ms）"),
-      cacheDir: z.string().default("").description("模型缓存目录；空字符串表示用 <dataRoot>/models（0.4-S5 起模型跟业务数据走，升级插件、重装包都不用重下）"),
+      // volatile：面板「保存模型目录」写 ["semantic","local","cacheDir"]。按最小面在叶子
+      // 节点标记——宿主 isVolatilePath 命中最近的 volatile 祖先即放行，嵌套固定路径
+      // 是 schemastery 允许的（validateVolatileSchema 只拒「volatile 套 volatile」），
+      // 因此不必把整个 semantic.local 变成 volatile 整块。
+      cacheDir: z.string().default("").volatile().description("模型缓存目录；空字符串表示用 <dataRoot>/models（0.4-S5 起模型跟业务数据走，升级插件、重装包都不用重下；宿主热提交，不重载插件）"),
       mirror: z.string().default("https://hf-mirror.com/").description("HuggingFace 镜像地址（国内直连 huggingface.co 一般不可达）"),
     }).default({ model: "Xenova/bge-small-zh-v1.5", dims: 512, dtype: "fp32", cacheDir: "", mirror: "https://hf-mirror.com/" }),
     minSimilarity: z.number().default(0.55)
@@ -416,9 +423,10 @@ export function normalizeSemantic(value) {
     if (dtype !== "fp32" && dtype !== "fp16" && dtype !== "q8") {
       fail(`semantic.local.dtype must be "fp32", "fp16" or "q8", got ${String(dtype)}`);
     }
+    // semantic.local.cacheDir 打了 volatile：宿主交过来的是 cosmokit 引用对象，先解包。
     const cacheDir = value.local.cacheDir === undefined
       ? DEFAULT_SEMANTIC.local.cacheDir
-      : value.local.cacheDir;
+      : unwrapVolatile(value.local.cacheDir);
     if (typeof cacheDir !== "string") {
       fail(`semantic.local.cacheDir must be a string (empty string = use <dataRoot>/models), got ${String(cacheDir)}`);
     }
@@ -614,12 +622,14 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
   const ownerId = raw.ownerId === undefined ? "local" : requireNonEmptyString(raw.ownerId, "ownerId");
   const defaultPersonaRaw = unwrapVolatile(raw.defaultPersona);
   const defaultPersona = defaultPersonaRaw === undefined ? null : requirePersona(defaultPersonaRaw, "defaultPersona");
+  // sessionPersonas / workspacePersonas 在宿主侧同样是 cosmokit 引用对象（见
+  // unwrapVolatile）；直接读会拿到 { get, [write] } 而不是数组，映射校验必炸。
   const sessionPersonas = raw.sessionPersonas === undefined
     ? []
-    : requireMappingList(raw.sessionPersonas, "sessionPersonas", sessionMapping);
+    : requireMappingList(unwrapVolatile(raw.sessionPersonas), "sessionPersonas", sessionMapping);
   const workspacePersonas = raw.workspacePersonas === undefined
     ? []
-    : requireMappingList(raw.workspacePersonas, "workspacePersonas", workspaceMapping);
+    : requireMappingList(unwrapVolatile(raw.workspacePersonas), "workspacePersonas", workspaceMapping);
   // budgets 在宿主侧是 volatile 引用对象（见 unwrapVolatile）；解包后再做权威校验。
   const budgets = normalizeBudgets(unwrapVolatile(raw.budgets));
   const l2 = normalizeSwitch(raw.l2, "l2");
