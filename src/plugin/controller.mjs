@@ -9,7 +9,7 @@
 //   工具 / section / 锁；同一 scope 资源复用（不每会话另开同 scope 独占锁）；
 // - inert：shadow 且 dataRoot/stateRoot 皆 null → 不启 runtime、不接管工具 /
 //   section、不读写业务数据；仅 management.getStatus 可用，其余 NOT_CONFIGURED；
-// - active：16 工具（10 兼容 + topic_create + 6 Spark）经真实 defineTool 注册；
+// - active：17 工具（9 兼容 + topic_create + group_manage + 6 Spark）经真实 defineTool 注册；
 //   L0/L1 真实 async system-prompt/assemble waterfall 刷新；L2 经 agent/pre-step
 //   投递（仅 l2.enabled）；压缩探针订阅完成事件（同 callId direct/PTC 仅推进一次）；
 // - shadow（配置了 root）：纯内存只读挂载 —— 不注册工具 / section / waterfall /
@@ -29,7 +29,9 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { join } from "node:path";
 import { createShioriService } from "../service/index.mjs";
 import { openSparkStore } from "../sparks/store.mjs";
-import { createCompatTools, createTopicCreateTool } from "../host/tools.mjs";
+import { createCompatTools, createTopicCreateTool, createGroupManageTool } from "../host/tools.mjs";
+// S3：scope 首次进 active 时初始化组清单（幂等；shadow/inert 不建资源不写盘）。
+import { ensureGroupsFile } from "../core/groups.mjs";
 import { createSeatGuard } from "../host/seat.mjs";
 import { createSparkTools } from "../sparks/tools.mjs";
 import { createCompressProbe } from "../host/compress-probe.mjs";
@@ -39,6 +41,16 @@ import { evaluateMutation } from "../core/index.mjs";
 import { buildSparkAttachment, commitDelivery } from "../sparks/delivery.mjs";
 import { createColdSearch } from "../forgetting/cold-search.mjs";
 import { createEmbeddingProvider } from "../semantic/index.mjs";
+// S5：模型下载与安装校验（与 provider 同住 semantic/local.mjs；controller 只做
+// 任务编排——单飞、取消、诊断落点，不自己写下载器）。
+import {
+  createLocalModelDownloader,
+  isLocalModelInstalled,
+  localModelDir,
+  expectedModelFiles,
+  DOWNLOAD_DEPENDENCY_MISSING,
+  DOWNLOAD_RUNTIME_LOAD_FAILED,
+} from "../semantic/local.mjs";
 import { openSemanticVectorStore } from "../semantic/store.mjs";
 import { mergeSemanticRecall } from "../sparks/semantic-recall.mjs";
 import { createPersonaAdapter } from "./persona.mjs";
@@ -62,14 +74,16 @@ const SECTION_ORDER = { persona: 0, core: 0.5 };
 const WRITE_TOOL_NAMES = new Set([
   "soul_update", "memory_append", "memory_rewrite", "core_write",
   "topic_append", "topic_create",
+  "group_manage",
   "spark_save", "spark_update", "spark_forget", "spark_feedback",
 ]);
 
-/** 16 工具全名（契约清单）。 */
+/** 17 工具全名（契约清单；S3 起含 group_manage）。 */
 const ALL_TOOL_NAMES = Object.freeze([
   "soul_read", "soul_update", "memory_read", "memory_search",
   "memory_append", "memory_rewrite", "core_write", "topic_append",
   "topic_create", "memory_list_topics",
+  "group_manage",
   "spark_save", "spark_read", "spark_update", "spark_forget",
   "spark_feedback", "spark_graph",
 ]);
@@ -77,8 +91,17 @@ const ALL_TOOL_NAMES = Object.freeze([
 // F1b：语义向量重建的保留名。它不是宿主工具——绝不加入 ALL_TOOL_NAMES、绝不
 // 经 defineTool 注册；只经 management.executeTool（wire 的 name 是自由字符串，
 // protocol.mjs 未收缩枚举）在本文件内部分发拦截，供面板「重建向量」按钮调用。
-// dispatchTool 在 ALL_TOOL_NAMES 检查之前识别它（见该函数），宿主工具面保持 16 个不变。
+// dispatchTool 在 ALL_TOOL_NAMES 检查之前识别它（见该函数），宿主工具面保持 17 个不变。
 const SEMANTIC_REBUILD_TOOL = "semantic_rebuild";
+
+// S5：模型下载的保留名（与 semantic_rebuild 同一通道：不是宿主工具，绝不加入
+// ALL_TOOL_NAMES、绝不经 defineTool 注册；只经 management.executeTool 在
+// dispatchTool 内部拦截，供面板「下载模型」按钮与取消按钮调用）。
+const SEMANTIC_DOWNLOAD_TOOL = "semantic_download";
+
+// S5：下载源回退（镜像失败后的兜底官方源；源顺序＝配置 mirror 先、官方源后，
+// 去重后逐源尝试）。与服务端配置默认镜像保持同一写法（带尾斜杠）。
+const SEMANTIC_FALLBACK_SOURCE = "https://huggingface.co/";
 
 // 重建分批大小（F1b 任务书 g 条：每批 20 张，批间 setTimeout 让出事件循环）。
 const SEMANTIC_REBUILD_BATCH = 20;
@@ -108,8 +131,17 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     now = () => new Date(),
     loadDshTools,
     loadDshLlm,
+    // S5：模型下载器工厂（默认真实实现；测试注入假下载器，绝不真下载）。
+    createDownloader = createLocalModelDownloader,
+    // S5 复审：座位守卫工厂（默认真实实现；测试注入只读/可写桩，不占真实座位）。
+    createSeatGuardFactory = createSeatGuard,
   } = dependencies;
 
+  // inert 判定（0.4-S1 起，reviewer P2① 口径）：仅由 mode 与根校验共同决定——
+  // shadow 且双根 null。normalize 已保证 apply 路径双根必非 null（缺失走 DSH_HOME
+  // 默认），故生产 apply 不会进入 inert；本分支是**直构/嵌入方兼容路径**（测试、
+  // 桌面宿主内嵌 service 以 null 根挂载），由 controller.test.mjs 的直构 inert 用例
+  // 覆盖，不是死代码。inert 下不启 runtime、不触盘，仅 management.getStatus 可用。
   const isInert = settings.mode === "shadow" && settings.dataRoot === null && settings.stateRoot === null;
   const nowIso = () => now().toISOString();
 
@@ -117,16 +149,23 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   // transformers 运行时推迟到首次 embed 才 import，见 semantic/local.mjs）；
   // "none" → null（行为与 0.1 逐字节一致）；"api" 不在此创建（本期未实现，
   // createEmbeddingProvider 会抛 NOT_IMPLEMENTED，配置在 normalize 层就该被拦）。
-  // cacheDir 空字符串在此兑现配置承诺（config.mjs 契约）：解析为
-  // <stateRoot>/semantic/models——模型缓存与向量索引同住 stateRoot 派生区，
-  // 绝不落 dataRoot。stateRoot 为 null（inert）时保持空串：local provider 在
-  // inert 下永远不会被使用（pre-step / executeTool 均不可达）。
+  // S5 口径变更：cacheDir 空字符串在此兑现配置承诺（config.mjs 契约），解析为
+  // <dataRoot>/models——模型跟业务数据走（0.4-S5）：dataRoot 随业务数据备份/迁移，
+  // 升级插件、重装包都不用重下模型；旧的 <stateRoot>/semantic/models 落点退役。
+  // dataRoot 为 null（inert 直构）时保持空串：local provider 在 inert 下永远
+  // 不会被使用（pre-step / executeTool 均不可达）。
+  function modelDirResolved() {
+    const local = settings.semantic.local;
+    if (local.cacheDir !== "") return local.cacheDir;
+    if (settings.dataRoot === null) return null;
+    return join(settings.dataRoot, "models");
+  }
   function semanticProviderConfig() {
     const semantic = settings.semantic;
     if (semantic.provider !== "local") return semantic;
-    const local = semantic.local;
-    if (local.cacheDir !== "" || settings.stateRoot === null) return semantic;
-    return { ...semantic, local: { ...local, cacheDir: join(settings.stateRoot, "semantic", "models") } };
+    const modelDir = modelDirResolved();
+    if (modelDir === null) return semantic;
+    return { ...semantic, local: { ...semantic.local, cacheDir: modelDir } };
   }
   const semanticProvider = settings.semantic.provider === "local"
     ? createEmbeddingProvider(semanticProviderConfig())
@@ -153,6 +192,9 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     stopCount: 0,
     generation: 0,
     banned: false,
+    /** S5 复审 P1：下载任务代次计数器。start/stop/新任务各自 +1；旧任务
+     *  收尾时发现代次不匹配即退场，不许覆写新代次的状态。 */
+    downloadGeneration: 0,
     /** 本代注册 disposer（逆序撤销）。 */
     disposers: [],
     /** scope 资源缓存：scopeId → {service, sparkStore, personaAdapter, tools, toolByName} */
@@ -206,14 +248,36 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       l2RecoveredFromSessionLog: 0,
       workingDirectoryLookups: 0,
       startFailures: [],
+      /** P0#3：下载完成后自动 rebuild 的触发次数（diagnostics().counters 可观测；
+       *  同代次重复完成事件被触发闸拦下时不计数，「恰好一次」可断言）。 */
+      autoRebuildAttempts: 0,
     },
     /** F1b 语义召回运行态（getStatus.diagnostics.semantic 的数据源）：
-     *  ready=provider 至少一次 embed 成功；rebuild 是面板「重建向量」的单飞进度。 */
+     *  ready=provider 至少一次 embed 成功；rebuild 是面板「重建向量」的单飞进度。
+     *  S5：download 是面板「下载模型」的单飞任务态（进度/取消都放诊断，前端
+     *  轮询既有 getStatus 读，不新增 RPC、不新开宿主工具）。 */
     semantic: {
       ready: false,
       lastError: null,
       lastRecallAt: null,
       rebuild: { running: false, phase: "idle", total: 0, done: 0, error: null },
+      download: {
+        running: false,
+        phase: "idle", // idle | starting | downloading | verifying | done | error | cancelled
+        percent: null,
+        loadedBytes: 0,
+        totalBytes: 0,
+        filesDone: 0,
+        filesTotal: 0,
+        source: null,
+        error: null,
+        /** S5 复审 P1 + 0.4 收账遗留 1：失败归因码（DOWNLOAD_DEPENDENCY_MISSING =
+         *  缺可选依赖；DOWNLOAD_RUNTIME_LOAD_FAILED = 依赖已装但运行时加载失败；
+         *  两者都与网络无关；null = 其余失败按网络/源故障归因）。 */
+        code: null,
+        installHint: null,
+        cancelRequested: false,
+      },
     },
   };
 
@@ -294,13 +358,25 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       },
     });
     // 每 scope 工具集：与真实工具路径同校验 / coordinator / CAS。
-    // 9 兼容 + topic_create + 6 Spark = 16（契约清单）。
+    // 9 兼容 + topic_create + group_manage（S3）+ 6 Spark = 17（契约清单）。
     // M3：sessionId 取自 dispatchTool 的 AsyncLocalStorage 证据（真实会话 id，
     // 供工具侧「当前会话锁定」身份校验），不再固定 null。
     const getSessionInfo = () => ({
       sessionId: toolSessionContext.getStore()?.sessionId ?? null,
       scopeId,
     });
+    // S3：scope 首次进 active 即初始化组清单（幂等，缺文件才写默认模板）。
+    // 已存在时只校验不改动；shadow/inert 不建 scope 资源，不会走到这里，
+    // 「shadow 不写盘」与「读路径绝不写盘」的约束都不被破坏。
+    // 0.4 补丁（账本 #22e213）：只读实例（座位被先启动的宿主持有，F7 判据）
+    // 不写 groups.json——建文件归持写权的那台；重启后首次开 scope 时补
+    // （ensureGroupsFile 幂等；resourcesFor 的结果按 scope 缓存进
+    // ctrl.scopes，同进程内不会再次进入这条路）。座位判定在
+    // createSeatGuard 创建时已 poll 一次（SEAT_HOLD_MS=0 命中即只读），
+    // 此处读 status 即为当前事实。
+    if ((ctrl.readonlyGuard?.status?.().writable ?? true) === true) {
+      await ensureGroupsFile({ dataRoot: settings.dataRoot, scopeId });
+    }
     const compatTools = [
       ...createCompatTools({
         service: serviceForTools,
@@ -312,6 +388,15 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       createTopicCreateTool({
         service: serviceForTools,
         getSessionInfo,
+        now,
+        readonlyGuard: ctrl.readonlyGuard ?? undefined,
+      }),
+      // S3：第 17 个宿主工具（组清单管理；topic 组迁移经 service.mutate 走
+      // store 提交协议，不绕存储层）。
+      createGroupManageTool({
+        service: serviceForTools,
+        dataRoot: settings.dataRoot,
+        scopeId,
         now,
         readonlyGuard: ctrl.readonlyGuard ?? undefined,
       }),
@@ -455,7 +540,22 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       await store.save(); // 每批原子落盘：崩溃/中止后重试从断点续传
       await new Promise((resolve) => setTimeout(resolve, 0)); // 让出事件循环
     }
+    // S5 复审 P2：收尾写（retainOnly + save）前再查一次中止——批间检查挡不住
+    // 「最后一批 save 刚过、stop 到达」的窗口；stop 后不该再碰 state/semantic。
+    if (ctrl.banned || !ctrl.started) {
+      rebuild.phase = "aborted";
+      return;
+    }
     // 剔除：索引中已不在 active 集的条目（卡片删除/归档后的残留向量）。
+    // ── 0.4 收账遗留 3（已知残余窗口，本批只记录不修）────────────────────
+    // 残余窗口：从这里进入 store.retainOnly(ids) 之后、直到下方 await
+    // store.save() 完成——期间若 stop（banned / !started）到达，收尾写不会被
+    // 中止，save 会与 stop 的清理并发进行。在测试里表现为 Windows EBUSY：
+    // teardown 的 rm（删除 stateRoot）撞上还没写完的 store.save。
+    // 为什么不在此处修：彻底消除要把 save 拆成「可中止的两段提交」
+    // （先写影子文件、停后再择机提交），属于结构性改动，超出本批范围，
+    // 留给 0.5。调用方规避方式：stop 前先等到 rebuild.running === false
+    // （见 test/plugin/controller.test.mjs 建索引门禁用例的 waitFor）。
     store.retainOnly(records.map((r) => r.id));
     await store.save();
   }
@@ -481,6 +581,20 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       fail("INVALID_STATE",
         `语义召回未开启（semantic.provider="${settings.semantic.provider}"），没有可重建的向量索引；`
         + "请先把 semantic.provider 设为 \"local\" 并重启插件。", {});
+    }
+    // S5：模型必须已安装（期望文件齐全）才允许建索引。维度校验在下载收尾的
+    // 真实推理里做（local.mjs），这里拦的是「根本没下模型 / 半截下载」。
+    const rebuildModelDir = modelDirResolved();
+    if (rebuildModelDir === null
+      || !isLocalModelInstalled({
+        cacheDir: rebuildModelDir,
+        model: settings.semantic.local.model,
+        dtype: settings.semantic.local.dtype,
+      })) {
+      fail("INVALID_STATE",
+        "本地语义模型尚未安装（或下载不完整）：请先在状态页点「下载模型」，"
+        + `安装目录 ${rebuildModelDir ?? "（未解析，dataRoot 未配置）"} 下必须齐备 `
+        + expectedModelFiles(settings.semantic.local.dtype).join("、") + "。", {});
     }
     if (args !== undefined && args !== null
       && (typeof args !== "object" || Array.isArray(args))) {
@@ -531,6 +645,250 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     return { started: true, ...rebuildSnapshot() };
   }
 
+  // ─────────────────────────────────────────────────────────
+  // S5：语义模型下载（面板「下载模型」按钮的保留名通道）
+  // ─────────────────────────────────────────────────────────
+
+  /** 下载任务快照（返回值与 getStatus.diagnostics.semantic.download 同形状）。 */
+  function downloadSnapshot() {
+    const dl = ctrl.semantic.download;
+    return {
+      running: dl.running,
+      phase: dl.phase,
+      percent: dl.percent,
+      loadedBytes: dl.loadedBytes,
+      totalBytes: dl.totalBytes,
+      filesDone: dl.filesDone,
+      filesTotal: dl.filesTotal,
+      source: dl.source,
+      error: dl.error,
+      code: dl.code ?? null,
+      installHint: dl.installHint,
+    };
+  }
+
+  /** 下载源顺序：配置镜像先、官方源兜底；重复源去重（配置可能已填官方源）。 */
+  function downloadMirrors() {
+    const mirrors = [settings.semantic.local.mirror, SEMANTIC_FALLBACK_SOURCE]
+      .filter((m) => typeof m === "string" && m.length > 0);
+    return [...new Set(mirrors)];
+  }
+
+  /**
+   * 全源失败时的可复制安装提示词（面板一键复制）：写清模型 repo id、规范目录
+   * 写法（<缓存根>/<org>/<model>/）、必须齐备的文件清单与各下载源。
+   * 0.4 收账遗留 1：依赖说明按归因码分流——只有缺依赖（DOWNLOAD_DEPENDENCY_MISSING）
+   * 挂「npm i 装依赖」提示；运行时加载失败（DOWNLOAD_RUNTIME_LOAD_FAILED）依赖
+   * 已装、装了也没用，提示改为先看错误信息修好依赖再重试。
+   */
+  function downloadInstallHint(cacheDir, mirrors, code = null) {
+    const model = settings.semantic.local.model;
+    const dtype = settings.semantic.local.dtype;
+    const modelDir = localModelDir(cacheDir, model);
+    const dependencyNote = code === DOWNLOAD_RUNTIME_LOAD_FAILED
+      ? "依赖说明：可选依赖 @huggingface/transformers 已安装，但本次运行时加载失败（不是网络问题）。"
+        + "请先看上方错误信息，修复依赖环境（文件权限、版本兼容等）后重试——直接 npm i 不会解决问题。"
+      : "依赖说明：本功能依赖可选依赖 @huggingface/transformers；若报错是「缺少可选依赖」，"
+        + "这不是网络问题——先在插件目录执行 npm i @huggingface/transformers 再重试。";
+    return [
+      "请把 HuggingFace 模型 " + model + " 安装到本机以下目录（目录结构必须保持「<缓存根>/<org>/<model>/」）：",
+      modelDir,
+      "该目录下必须齐备这些文件：" + expectedModelFiles(dtype).join("、"),
+      dependencyNote,
+      "可用任一下载源：",
+      mirrors.join("\n"),
+      "示例（huggingface-cli，可在任意可联网环境执行后整目录拷回）：",
+      "huggingface-cli download " + model + " --local-dir \"" + modelDir + "\"",
+      "安装完成后回到本页点「下载模型」即可（已存在的文件不会重下）。",
+    ].join("\n");
+  }
+
+  /**
+   * 下载任务态整体复位成空闲（S5 复审 P1）：start / stop（清理路径）各调一次，
+   * 保证跨 stop/restart 不残留「下载中」——否则重启后面板一直转圈、点下载只得到
+   * started:false、取消也没人消费。error/installHint 一并清空：跨代次的旧报错
+   * 不许冒充新代次的诊断。
+   */
+  function resetDownloadIdle() {
+    const dl = ctrl.semantic.download;
+    dl.running = false;
+    dl.phase = "idle";
+    dl.percent = null;
+    dl.loadedBytes = 0;
+    dl.totalBytes = 0;
+    dl.filesDone = 0;
+    dl.filesTotal = 0;
+    dl.source = null;
+    dl.error = null;
+    dl.code = null;
+    dl.installHint = null;
+    dl.cancelRequested = false;
+  }
+
+  /** 复位下载任务态并进入新一轮（semanticDownload 入口专用）。 */
+  function resetDownloadState() {
+    resetDownloadIdle();
+    const dl = ctrl.semantic.download;
+    dl.running = true;
+    dl.phase = "starting";
+  }
+
+  /**
+   * 下载完成后自动 rebuild 的触发（P0#3，0.4 审查报告）：下载成功即替用户
+   * 点一次「重建向量」，不必再手动操作。防重不靠这里——runSemanticDownload
+   * 的 done 分支结构上只走一次（stale/running 检查在前，running 先翻 false），
+   * semanticRebuild 自身单飞（已有 rebuild 在跑 → started:false 快照）；本函数
+   * 只做两道纵深防御：
+   * ① banned/started 闸——真实可达：stop() 的 sync prefix（banned=true）与
+   *    cleanupGeneration 真正 +1 代次之间隔着一个微任务，done 续体若排在该窗口
+   *    （见 test「banned 窗口内迟到 done」用例的 thenable 构造），stale() 尚看不
+   *    出代次已换，必须在此拦下，不许 stop 之后拉起 resourcesFor/vectorStoreFor；
+   * ② 代次闸——兜底，防未来的重放/重复投递形态（当前结构不可达，不写成主防线）。
+   * 计数器 autoRebuildAttempts 经 diagnostics().counters 可观测（恰好一次可断言）。
+   * 失败不静默：运行期错误本就落 rebuild.error + lastError；触发期同步抛错
+   * （只读态 / 门禁 / 目录无法解析等）在 catch 里落 lastError，面板可见。
+   */
+  let autoRebuildTriggeredGen = -1;
+  function triggerAutoRebuildAfterDownload(scope, gen) {
+    if (ctrl.banned || !ctrl.started) return; // stop 之后（含 banned/gen+1 窗口）：不触发
+    if (gen === autoRebuildTriggeredGen) return; // 纵深防御：同代次重复投递兜底
+    autoRebuildTriggeredGen = gen;
+    ctrl.diag.autoRebuildAttempts += 1;
+    semanticRebuild(scope, {})
+      .catch((error) => {
+        ctrl.semantic.lastError =
+          `下载后自动重建向量失败：${error instanceof Error ? error.message : String(error)}`;
+      });
+  }
+
+  /**
+   * 后台下载主体（detached，不进 stop 排空——与 rebuild 同取舍；中止语义由
+   * isCancelled 检查保证：stop/取消后 progress_callback 立即抛哨兵收场）。
+   * S5 复审 P1：所有写回都带代次防护——gen 与 ctrl.downloadGeneration 不匹配
+   * （stop/restart 已复位、或已有新任务接管）时静默退场，旧任务绝不覆写新状态。
+   */
+  async function runSemanticDownload(scope, downloader, dl, gen) {
+    const stale = () => gen !== ctrl.downloadGeneration;
+    const result = await downloader.download({
+      onProgress: (snap) => {
+        if (stale()) return; // 旧代次任务的迟到进度不许覆写当前状态
+        dl.percent = snap.percent;
+        dl.loadedBytes = snap.loadedBytes;
+        dl.totalBytes = snap.totalBytes;
+        dl.filesDone = snap.filesDone;
+        dl.filesTotal = snap.filesTotal;
+      },
+      onSource: (source) => { if (stale()) return; dl.source = source; },
+      onPhase: (phase) => { if (stale()) return; dl.phase = phase; },
+      // stop（banned）同样视为取消：不与宿主关闭竞速。
+      isCancelled: () => dl.cancelRequested === true || ctrl.banned || !ctrl.started,
+    });
+    // 代次不匹配（已被 stop/restart 复位，或新任务已接管）：直接退场不写回。
+    if (stale() || dl.running !== true) return;
+    // running 先翻 false：done 分支只走一次——触发天然在「恰一次」的窗口里
+    // （banned/gen+1 窗口内的迟到 done 由 triggerAutoRebuildAfterDownload 拦下）。
+    dl.running = false;
+    if (result.ok === "done") {
+      dl.phase = "done";
+      dl.code = null;
+      dl.installHint = null;
+      // 下载收尾已含真实推理校验（local.mjs）：provider 就绪语义与 embed 成功同口径。
+      ctrl.semantic.ready = true;
+      ctrl.semantic.lastError = null;
+      // P0#3：done = 文件齐全 + 维度校验通过（真实推理），自动串一次 rebuild。
+      // 与面板按钮同参（增量 rebuild，args:{}）；文件门禁正常放行，真实下载的
+      // 收尾校验已保证文件齐备。
+      triggerAutoRebuildAfterDownload(scope, gen);
+    } else if (result.ok === "cancelled") {
+      dl.phase = "cancelled";
+      dl.error = null;
+    } else {
+      dl.phase = "error";
+      dl.error = result.error;
+      dl.code = result.code ?? null;
+      dl.installHint = downloadInstallHint(modelDirResolved() ?? "", downloadMirrors(), dl.code);
+      ctrl.semantic.lastError = result.code === DOWNLOAD_DEPENDENCY_MISSING
+        ? result.error // 依赖缺失如实归因（不改写「模型下载失败：」前缀混入网络暗示）
+        : `模型下载失败：${result.error}`;
+    }
+  }
+
+  /**
+   * semantic_download 保留名入口（dispatchTool 在工具表检查之前拦截到此）。
+   * 单飞：已有下载在跑时直接返回当前快照；args.cancel=true 请求协作取消。
+   * @returns {started?: boolean, cancelled?: boolean, ...downloadSnapshot()}
+   */
+  async function semanticDownload(scope, args) {
+    // 只读态拒绝：与 semantic_rebuild 同口径——模型文件落 <dataRoot>/models，
+    // 只读宿主不应触发对 dataRoot 的写入。
+    if (ctrl.readonlyGuard !== null) {
+      try {
+        ctrl.readonlyGuard.assertWritable();
+      } catch (error) {
+        fail(error?.code ?? "HOST_LOCKED",
+          "当前宿主处于只读态（写权被其他实例持有），不能下载模型。模型落 <dataRoot>/models；等持有写权的实例退出后可重试。",
+          { holder: error?.details ?? error?.message ?? null });
+      }
+    }
+    if (semanticProvider === null) {
+      fail("INVALID_STATE",
+        `语义召回未开启（semantic.provider="${settings.semantic.provider}"），没有可下载的本地模型；`
+        + "请先把 semantic.provider 设为 \"local\" 并重启插件。", {});
+    }
+    if (args !== undefined && args !== null
+      && (typeof args !== "object" || Array.isArray(args))) {
+      fail("INVALID_INPUT", "semantic_download args must be an object or undefined", {});
+    }
+    const dl = ctrl.semantic.download;
+    if (args?.cancel === true) {
+      if (!dl.running) {
+        return { cancelled: false, ...downloadSnapshot() }; // 幂等：没有在跑的任务，原样返回
+      }
+      dl.cancelRequested = true; // 协作取消：后台任务在下一个 progress_callback 检查点收场
+      return { cancelled: true, ...downloadSnapshot() };
+    }
+    if (typeof args?.cancel !== "undefined" && typeof args?.cancel !== "boolean") {
+      fail("INVALID_INPUT", `semantic_download args.cancel must be a boolean or undefined, got ${String(args.cancel)}`, {});
+    }
+    // 单飞检查与置位必须同步完成（首个 await 之前），并发第二次调用只会拿到快照。
+    if (dl.running) {
+      return { started: false, ...downloadSnapshot() };
+    }
+    const cacheDir = modelDirResolved();
+    if (cacheDir === null) {
+      fail("INVALID_STATE",
+        "模型缓存目录无法解析（semantic.local.cacheDir 为空且 dataRoot 未配置）："
+        + "请配置 dataRoot 或显式指定 semantic.local.cacheDir。", {});
+    }
+    // S5 复审 P1：新任务先 +1 代次再置位——旧任务（含正在收尾的）看到代次不匹配
+    // 即静默退场，其迟到进度/收尾写不会污染本任务的状态。
+    ctrl.downloadGeneration += 1;
+    const gen = ctrl.downloadGeneration;
+    resetDownloadState();
+    const mirrors = downloadMirrors();
+    const downloader = createDownloader({
+      model: settings.semantic.local.model,
+      dims: settings.semantic.local.dims,
+      dtype: settings.semantic.local.dtype,
+      cacheDir,
+      mirrors,
+    });
+    const kickoff = runSemanticDownload(scope, downloader, dl, gen)
+      .catch((error) => {
+        // 下载器本身抛错（不该发生：download 吞实现错误只返回结果）——如实落 error 态。
+        if (gen !== ctrl.downloadGeneration || dl.running !== true) return; // 代次已换/已复位
+        dl.running = false;
+        dl.phase = "error";
+        dl.error = `模型下载任务异常：${error instanceof Error ? error.message : String(error)}`;
+        dl.code = null;
+        // 复审 P3-3：显式传 code（此处恒为 null，与上行对应），不许依赖参数默认值兜底。
+        dl.installHint = downloadInstallHint(cacheDir, mirrors, dl.code);
+        ctrl.semantic.lastError = dl.error;
+      });
+    kickoff.catch(() => {}); // 错误已收进 download.error；detached 不进 stop 排空
+    return { started: true, ...downloadSnapshot() };
+  }
+
   async function dispatchTool(scope, name, args, exec) {
     // B4：禁新请求（stop 后）不再执行任何工具。
     if (ctrl.banned || !ctrl.started) {
@@ -540,6 +898,10 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     // 它不是宿主工具，见 SEMANTIC_REBUILD_TOOL 处注释）。
     if (name === SEMANTIC_REBUILD_TOOL) {
       return semanticRebuild(scope, args);
+    }
+    // S5：semantic_download 保留名拦截（同上；args.cancel=true 为协作取消）。
+    if (name === SEMANTIC_DOWNLOAD_TOOL) {
+      return semanticDownload(scope, args);
     }
     if (!ALL_TOOL_NAMES.includes(name)) {
       fail("INVALID_INPUT", `unknown shiori tool "${String(name)}"`, {});
@@ -1197,6 +1559,13 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     // 只读态下面板写方法（analyze / reviewCandidate / previewPlan /
     // executePlan）抛 HOST_LOCKED，与写工具同口径。
     readonlyGuard: () => ctrl.readonlyGuard,
+    // 0.4 S6（review-rework a1 中-2）：仅 destroyData 使用的 scope 资源缓存
+    // 失效入口——复用 stop 的清理路径 closeAllScopes（async，返回 Promise<string[]>
+    // 的 close 错误数组；调用方 management.destroyData 必须 await），不新造缓存
+    // 语义。焚毁 dataRoot 后，缓存的 scope 资源全部指向已删目录；不清掉，后续
+    // 访问会拿到旧缓存（内存里还有已焚毁的卡片记录，甚至写回旧数据）。下一次
+    // 访问按需重建空资源。
+    invalidateScopeResources: () => closeAllScopes(),
   });
 
   // M4-drain：management 数据方法全部纳入在途排空——stop 等待收场（带上限），
@@ -1205,6 +1574,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   const DRAINED_MANAGEMENT_METHODS = [
     "getMemoryView", "getGraph", "listCandidates", "analyze",
     "reviewCandidate", "previewPlan", "executePlan", "executeTool", "getTimeline",
+    "destroyData",
   ];
   const management = { ...managementFacade };
   for (const name of DRAINED_MANAGEMENT_METHODS) {
@@ -1217,6 +1587,8 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   // F1b：getStatus.diagnostics.semantic（wire 的 diagnostics 块为
   // additionalProperties:true，纯增量注入；不改方法数、不改描述符）。
   // 面板状态页的语义召回只读状态与「重建向量」按钮进度都从这里读。
+  // S5 纯增量：download（下载任务态）+ modelDir（解析后的模型缓存目录）
+  // + modelInstalled（期望文件是否齐备，供「下载模型」按钮高亮）。
   function semanticDiagnostics(scopeId) {
     const rebuild = ctrl.semantic.rebuild;
     const diag = {
@@ -1231,7 +1603,26 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       lastError: ctrl.semantic.lastError,
       lastRecallAt: ctrl.semantic.lastRecallAt,
       rebuild: { ...rebuild },
+      /** S5：模型缓存目录（cacheDir 显式配置优先，空串兑现为 <dataRoot>/models；
+       *  inert（dataRoot null）时为 null）。 */
+      modelDir: modelDirResolved(),
+      /** S5：模型是否已完整安装（期望文件齐备；目录未解析时恒 false）。 */
+      modelInstalled: false,
+      /** S5：面板「下载模型」的单飞任务态（进度/取消/报错卡片数据源）。
+       *  cancelRequested 是内部取消旗标，不进 wire 快照。 */
+      download: (() => {
+        const { cancelRequested, ...publicDownload } = ctrl.semantic.download;
+        void cancelRequested;
+        return publicDownload;
+      })(),
     };
+    if (diag.modelDir !== null) {
+      diag.modelInstalled = isLocalModelInstalled({
+        cacheDir: diag.modelDir,
+        model: settings.semantic.local.model,
+        dtype: settings.semantic.local.dtype,
+      });
+    }
     if (typeof scopeId === "string" && ctrl.scopes.has(scopeId)) {
       const store = ctrl.scopes.get(scopeId).vectorStore;
       diag.vectors = store === null ? 0 : store.size();
@@ -1296,6 +1687,10 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     requireStartable();
     ctrl.startCount += 1;
     ctrl.generation += 1;
+    // S5 复审 P1：新代次作废旧下载任务的收尾写；下载态复位成空闲——
+    // 跨 stop/restart 不残留「下载中」（面板轮询/按钮态都读 diagnostics.semantic.download）。
+    ctrl.downloadGeneration += 1;
+    resetDownloadIdle();
     const generation = ctrl.generation;
     ctrl.stopRequested = false;
     ctrl.banned = false;
@@ -1330,7 +1725,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       // 一律只读。只读判定必须落在工具层——面板置灰挡不住模型。
       // 座位目录不可写时 fail-open 保持可写（见 host/seat.mjs 顶部取舍说明），
       // 原因留在 diagnostics.readonly.seat.degraded / lastError。
-      ctrl.seatGuard = await createSeatGuard({ dataRoot: settings.dataRoot });
+      ctrl.seatGuard = await createSeatGuardFactory({ dataRoot: settings.dataRoot });
       ctrl.readonlyGuard = ctrl.seatGuard.guard;
       checkNotStopped("readonly-seat");
 
@@ -1440,7 +1835,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       // 真实 async waterfall：固定可信 scope → await 刷新/校验 → 仅替换本包
       // section。B4：入口排空追踪；B7：体内错误隔离。
       bindings.registerAssembleWaterfall((assembly, context, next) => trackInFlight(assembleWaterfall(assembly, context, next)));
-      // 16 工具经真实 defineTool 注册。
+      // 17 工具经真实 defineTool 注册。
       for (const def of registeredToolDefs()) {
         await bindings.registerTool(def);
       }
@@ -1492,6 +1887,11 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
 
   async function cleanupGenerationInner(phase) {
     const errors = [];
+    // S5 复审 P1：清理路径（stop / start 失败）同步复位下载任务态并 +1 代次——
+    // 下载任务是 detached，不进排空；靠代次失效收尾写 + 状态复位保证
+    // stop 之后 diagnostics.semantic.download 不残留 running=true。
+    ctrl.downloadGeneration += 1;
+    resetDownloadIdle();
     // 1) 撤销注册与订阅（bindings 逆序 dispose）。
     try {
       const disposed = bindings.disposeAll();
@@ -1583,6 +1983,18 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       mode: isInert ? "inert" : settings.mode,
       configured: !isInert,
       needsConfiguration: isInert,
+      // 0.4-S1（纯增量）：apply 阶段解析后的两个根（null=inert 直构时保持 null）、
+      // 根来源（explicit=用户显式配置 / default=DSH_HOME 缺省解析）与配置完成度信号，
+      // 与面板初始化卡片三行（根路径 / 模式 / 人设卡）逐行对齐，前端不必自行推断：
+      //   needs-persona：人设卡未配置（defaultPersona null，最优先）；
+      //   needs-active：人设卡已配置但 mode 非 active（shadow 只读，等用户点「启用」）；
+      //   configured：active 且人设卡已配置。
+      dataRoot: settings.dataRoot,
+      stateRoot: settings.stateRoot,
+      rootsSource: settings.rootsSource,
+      configurationState: settings.defaultPersona === null
+        ? "needs-persona"
+        : (settings.mode === "active" ? "configured" : "needs-active"),
       started: ctrl.started,
       starting: ctrl.starting,
       banned: ctrl.banned,

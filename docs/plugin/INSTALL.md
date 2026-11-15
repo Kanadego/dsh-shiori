@@ -31,10 +31,10 @@ dsh --profile <name> --dump-config
 
 ## 首次配置
 
-默认 inert shadow：挂载成功但显示 `needs-configuration`，不读写业务数据。在设置页（本包详情 → 预算配置）或 profile 的 `cordis.patch.yml` 里配置：
+装完即用（0.4 起）：`dataRoot` / `stateRoot` 缺省时各自解析为 `<DSH_HOME>/shiori-data` 与 `<DSH_HOME>/shiori-state`（`DSH_HOME` 取环境变量，未设置时为 `~/.dsh`），挂载阶段自动创建目录；默认以 shadow 只读模式运行（不写业务数据）。在设置页（本包详情 → 预算配置）或 profile 的 `cordis.patch.yml` 里按需调整：
 
-- 保持 shadow 只读：设置 `dataRoot` / `stateRoot` 为两个绝对、互不嵌套的目录；
-- 启用 active：`mode: "active"` + `allowActive: true` + 上述两个根。
+- 什么都不配即可用：双根各自独立解析，互不牵连（只显式给一个根时另一个仍走默认落点）；也可以显式设为两个绝对、互不嵌套的目录；
+- 启用 active：`mode: "active"` + `allowActive: true`——不再要求先配置双根，缺省根可直接启用。
 
 保存经宿主原生配置服务提交：`budgets` 是宿主认可的 volatile 字段，由宿主热提交、不触发插件重载。运行中的 controller 仍使用启动时快照，新预算在下次插件重载或宿主重启后生效。
 
@@ -64,5 +64,5 @@ dsh plugin --profile <name> remove dsh-shiori
 | 安装后 `--dump-config` 报 peers 缺失 | profile 基础栈未含所需服务；确认 profile 基于 `@deepseek-ai/dsh-base` 模板 |
 | `pnpm was not found` | 安装 pnpm 并加入 PATH |
 | 面板显示 `shiori/ui-unavailable` | web 前端未挂载 typert Gateway（transport unavailable）——仅工具模式，属如实诊断 |
-| needs-configuration 常驻 | inert shadow：配置两个绝对根后重启 profile |
+| needs-configuration 常驻 | 0.4 起缺省双根自动就绪，正常安装不应出现；若出现说明根解析异常——检查 `DSH_HOME` 与磁盘权限后重启 profile |
 | profile 名为 `desktop` 时命令行报错 | 该 profile 由 Electron 应用独占管理，改用应用内插件市场安装 |

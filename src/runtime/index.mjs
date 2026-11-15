@@ -4,7 +4,7 @@
  *     export async function createShioriRuntime(options, dependencies = {})
  *       -> { start(), stop(), refresh(), diagnostics(), service, bridge, host }
  *
- * 契约见 ../../CONTRACTS.md §D。核心边界：
+ * 契约见 ../../docs/CONTRACTS.md §D。核心边界：
  * - scope/root 只来自 factory 可信参数（activeScopeId / dataRoot / stateRoot），
  *   工具 payload 不可能改变它们（tools 层 rejectScope，service 层 noScope，本模块不引入新入口）；
  * - dataRoot 与 stateRoot 必须是不同的绝对路径且互不嵌套（含 junction/symlink 解析后判定）；

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { selectVisibleTopics } from "../../src/core/topics.mjs";
+import { selectVisibleTopics, groupSoftLimitWarning, GROUP_SOFT_LIMIT } from "../../src/core/topics.mjs";
+import { renderL1 } from "../../src/core/render.mjs";
 
 function makeTopic(overrides = {}) {
   return {
@@ -317,4 +318,84 @@ test("archivedAt 归档标记：合法 ISO 串可通过校验并透传；非法�
       (error) => error.code === "INVALID_INPUT" && /archivedAt/.test(error.message),
     );
   }
+});
+
+// ---------- 0.4 S3：group/pinned 分组元数据（可选字段） ----------
+
+test("S3: group/pinned 可选字段通过校验并原样透传（首个是主组）", () => {
+  const topic = makeTopic({ key: "grouped", scopeId: "amber", group: ["dev", "self"], pinned: true });
+  const result = selectVisibleTopics({ activeScopeId: "amber", topics: [topic] });
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0].group, ["dev", "self"]);
+  assert.equal(result[0].pinned, true);
+  // 主组 = 首个元素：核心层只透传数组，不重排、不拆主组
+  assert.equal(result[0].group[0], "dev");
+});
+
+test("S3: 老数据没有 group/pinned 字段时行为不变，读取不注入默认值", () => {
+  const topic = makeTopic({ key: "legacy", scopeId: "amber" });
+  const result = selectVisibleTopics({ activeScopeId: "amber", topics: [topic] });
+  assert.equal(result[0].group, undefined);
+  assert.equal(result[0].pinned, undefined);
+});
+
+test("S3: group 形状违规被拒绝（非数组/空元素/坏 key/重复）", () => {
+  const cases = [
+    [{ group: "dev" }, /group must be an array/],
+    [{ group: 42 }, /group must be an array/],
+    [{ group: [42] }, /group\[0\] must be a non-empty string/],
+    [{ group: [""] }, /group\[0\] must be a non-empty string/],
+    [{ group: ["a", "a"] }, /duplicate key "a"/],
+    [{ group: ["dev", "bad<key"] }, /group\[1\]/],
+    [{ group: ["dev", ""] }, /group\[1\] must be a non-empty string/],
+  ];
+  for (const [overrides, pattern] of cases) {
+    assertRejected(
+      { activeScopeId: "amber", topics: [makeTopic({ key: "g", scopeId: "amber", ...overrides })] },
+      pattern,
+    );
+  }
+});
+
+test("S3: pinned 只接受布尔值", () => {
+  for (const bad of [1, "true", null, 0]) {
+    assertRejected(
+      { activeScopeId: "amber", topics: [makeTopic({ key: "p", scopeId: "amber", pinned: bad })] },
+      /pinned must be a boolean/,
+    );
+  }
+  // pinned: false 合法（显式不钉住）
+  const ok = selectVisibleTopics({
+    activeScopeId: "amber",
+    topics: [makeTopic({ key: "p", scopeId: "amber", pinned: false })],
+  });
+  assert.equal(ok[0].pinned, false);
+});
+
+test("S3: group 软上限超 3 个组不拒绝，只给提示文案", () => {
+  assert.equal(GROUP_SOFT_LIMIT, 3);
+  // 4 组：校验通过（软约束不拒绝）
+  const four = makeTopic({ key: "g4", scopeId: "amber", group: ["a", "b", "c", "d"] });
+  const result = selectVisibleTopics({ activeScopeId: "amber", topics: [four] });
+  assert.equal(result.length, 1);
+  assert.match(groupSoftLimitWarning(four), /软上限 3/);
+  assert.match(groupSoftLimitWarning(four), /主组为 "a"/);
+  // 3 组与未分组：无提示
+  const three = makeTopic({ key: "g3", scopeId: "amber", group: ["a", "b", "c"] });
+  assert.equal(groupSoftLimitWarning(three), null);
+  assert.equal(groupSoftLimitWarning(makeTopic({ key: "g0", scopeId: "amber" })), null);
+});
+
+test("S3: L1 渲染结果与 0.3.1 完全一致（group/pinned 不参与渲染）", () => {
+  const base = [
+    makeTopic({ key: "a", scopeId: "amber" }),
+    makeTopic({ key: "b", scopeId: "amber" }),
+    makeTopic({ key: "c", scopeId: "global", archivedAt: "2026-11-07T00:00:00.000Z" }),
+  ];
+  const without = renderL1({ coreText: "正文。", topics: base });
+  const withMeta = base.map((t) => ({ ...t, group: ["dev", "self"], pinned: true }));
+  const withIt = renderL1({ coreText: "正文。", topics: withMeta });
+  assert.equal(withIt.text, without.text);
+  assert.equal(withIt.chars, without.chars);
+  assert.deepEqual(withIt.indexText, without.indexText);
 });

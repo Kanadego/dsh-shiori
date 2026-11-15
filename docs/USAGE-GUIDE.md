@@ -68,6 +68,42 @@ dsh plugin --profile <名称> remove dsh-shiori
 
 只移除包与挂载，记忆数据原样保留。插件不会替你删任何数据。
 
+### 卸载并清除数据（0.4 S6 新增）
+
+想连数据一起清掉、不留手动翻目录的活时，有两条入口，走的是同一份删除实现（`src/storage/purge.mjs`），行为完全一致：
+
+**命令行**（包自带 `dsh-shiori-admin` 命令，也可 `node <插件目录>/bin/admin.mjs` 运行）：
+
+~~~bash
+# 只读清点：两个根的路径、文件数、总字节、topic 数
+dsh-shiori-admin status [--data <path>] [--state <path>]
+
+# 焚毁整个 dataRoot（没有 --yes 时要求手动输入 dataRoot 原文确认）
+dsh-shiori-admin destroy --data <path> [--yes]
+~~~
+
+**面板**：状态页底部的「卸载并清除数据」红色危险按钮。点开后要求**手动输入 dataRoot 原文**（逐字符一致才能执行，不是点两下确认）；成功后自动刷新状态并提示，失败会显示服务端错误码。
+
+**焚毁后的正常现象**：插件仍在运行，重启后（或下一次访问数据）会用空目录重建 `dataRoot`——空目录出现不代表没删干净；面板成功提示里也会写明这一点。
+
+**会删什么 / 不会删什么：**
+
+| | |
+| --- | --- |
+| 会删 | 整个 `dataRoot` 目录：人设卡、L1 核心、L3 专题、Spark 卡片库、journal、模型缓存（`<dataRoot>/models`）——目录本身也会被移除 |
+| 不会删 | `stateRoot`（工具重放账、L2 投递账、计划账等全部保留）、DSH 的插件配置（`cordis.patch.yml` / settings）、插件包本身（不会自动执行 `dsh plugin remove`） |
+
+安全边界（命令行与面板同一套，任一不满足即拒绝，命令行退出码 3）：目标必须是绝对路径、不含 `..` 段、与 `stateRoot` 互不相交（相等或互相嵌套都拒绝）、不是盘符根、不是用户主目录（或其祖先）、不是仓库根（或其祖先）、目标存在时必须是目录（**symlink/junction 作为 dataRoot 直接拒绝**，不解析不跟随）。目录里的软链接只删链接本身，绝不递归删链接目标。
+
+命令行退出码：0 成功 / 1 用法错误（缺参数、未知子命令、未知参数）/ 2 用户取消 / 3 安全校验失败（含相对路径、含 `..` 段、指向 stateRoot、盘符根、主目录、仓库根、symlink/junction）。
+
+两条补充（review-rework a1）：
+
+- **自定义了 `stateRoot` 时，命令行必须同时传 `--state`**——否则安全校验用的是默认 stateRoot（`<DSH_HOME>/shiori-state`），和你的真实 stateRoot 对不上号。面板不受影响（服务端始终用配置解析出的两个根）。
+- **祖先路径经过 junction 时**，删除按解析后的真实路径进行，junction 本体保留不删。
+
+数据根缺省时是 `<DSH_HOME>/shiori-data`（DSH_HOME 未设置时为 `~/.dsh`）——`status` 不带参数即可看到具体路径。
+
 ## 2. 配置参数
 
 配置在 profile 的 `cordis.patch.yml`：
@@ -97,8 +133,8 @@ dsh plugin --profile <名称> remove dsh-shiori
 | --- | --- | --- |
 | `mode` | `shadow` | `shadow` 只读影子；`active` 才注册工具、写数据、装配 L0/L1 |
 | `allowActive` | `false` | `mode: active` 时必须显式 `true`，否则 INVALID_INPUT |
-| `dataRoot` | `null` | 业务数据根（绝对路径），与 `stateRoot` 互不嵌套 |
-| `stateRoot` | `null` | 运行状态根（绝对路径） |
+| `dataRoot` | `null` → `<DSH_HOME>/shiori-data` | 业务数据根（绝对路径），与 `stateRoot` 互不嵌套；缺省自动解析（0.4-S1） |
+| `stateRoot` | `null` → `<DSH_HOME>/shiori-state` | 运行状态根（绝对路径）；缺省自动解析，两根各取各的默认、互不牵连（0.4-S1） |
 | `ownerId` | `local` | 可信单用户标识，模型不可传 |
 | `defaultPersona` | `null` | 默认人设卡名；`null` = 用 `global` 记忆 |
 | `sessionPersonas` | `[]` | `[{sessionId, persona}]`，优先级最高 |
@@ -110,7 +146,7 @@ dsh plugin --profile <名称> remove dsh-shiori
 | `forgetting.policy` | `30 / 240 / 0.25` | baseHalfLifeDays / maxHalfLifeDays / archiveScore |
 | `semantic` | `none` | 语义召回接口预留（F1 方案 C，字段名冻结）：`provider: none/local/api`、`local.model`（默认 `bge-small-zh-v1.5`）、`local.dims`（默认 512）、`api.endpoint` / `api.keyRef`（默认 `null`）。0.2 本期只定契约不实现召回，`provider: none` 时零依赖、零网络、行为与 0.1 一致 |
 
-**根目录铁律**：两个根都 `null` 且是 shadow ⇒ inert 挂载（只报 `needs-configuration`，不读写任何文件）；一旦给了任一根或开了 active，两个根都必须显式给、绝对、互不嵌套（盘符根单独保护）。
+**根目录铁律（0.4-S1 起）**：`dataRoot` / `stateRoot` 缺省（null）时自动解析为 `<DSH_HOME>/shiori-data` 与 `<DSH_HOME>/shiori-state`（`DSH_HOME` 取环境变量 `DSH_HOME`，未设置时为 `~/.dsh`），两根**各取各的默认、互不牵连**（只显式给一个根时另一个落默认）；apply 阶段校验（绝对、真实 link 解析后互不嵌套——盘符根单独保护）通过后**自动创建两个目录**（shadow 态同样创建，装完即用）。`mode` 默认仍为 `shadow`（只读），只有 `mode=active` 且 `allowActive=true` 才启用写入；inert（`needs-configuration`）不再因 root 缺失触发，仅在直构 settings 双根皆 null 时保留为兼容路径。
 
 ### budgets（水位与投递预算）
 
@@ -201,7 +237,7 @@ dsh plugin --profile <名称> remove dsh-shiori
 
 `待执行 / 已执行 / 已作废`（open / executed / superseded）。已执行的计划不能重复预览或执行；想再整理请重新 analyze。
 
-## 4. 模型侧十六个工具
+## 4. 模型侧十七个工具
 
 | 工具 | 作用 | 必填 | 注意 |
 | --- | --- | --- | --- |
@@ -215,6 +251,7 @@ dsh plugin --profile <名称> remove dsh-shiori
 | `topic_append` | 追加到指定专题 | topic、section、content | 专题不存在会报错，先用 topic_create |
 | `memory_list_topics` | 列专题（含 revision token） | — | 合并 / 编辑前拿权威 token |
 | `topic_create` | 新建专题 | topic、title | 已存在返回 alreadyExists |
+| `group_manage` | 管理专题分组：列出（计数只认主组）/ 建组 / 改名 / 删除 / 迁移成员 | action | 删除非空组需 `migrateTo`：成员先整体改挂、组条目后删（两次提交，见工具描述的并发边界） |
 | `spark_save` | 存 Spark 卡 | content、title、triggers | triggers 必填（空数组 = 不唤醒） |
 | `spark_read` | 读卡 | id | 可读归档卡 |
 | `spark_update` | 改卡（含 links） | id + 变更字段 | links 的 target 必须在库内 |

@@ -1,8 +1,8 @@
-// Shiori P5-PLUGIN · 16 工具输出 schema 唯一权威（slot P）。
+// Shiori P5-PLUGIN · 17 工具输出 schema 唯一权威（slot P）。
 //
 // 契约（CONTRACTS §4）：所有宿主工具提供 output:{schema,render}；输出 schema
 // 覆盖所有读分支 / nullable / changes / 写回执；严禁空对象闭合 schema；实际
-// 9 兼容工具 + topic_create + 6 Spark 工具共 16 个。
+// 9 兼容工具 + topic_create + group_manage（S3）+ 6 Spark 工具共 17 个。
 //
 // schema 形状按真实 DSH dsh-tools 0.2.1-rc.2 的 author-facing value schema DSL
 // 编写（lib/index.js compileValueSchema，本文件形状已经真实 defineTool 编译验证）：
@@ -38,6 +38,8 @@ const writeReceiptSchema = {
     projection: { type: "string", required: true },
     changes: { type: "array", items: changeEntry, required: true },
     replayed: { type: "boolean" },
+    // S3：group 超软上限（>3）时的提示文本（只 warning 不报错）。
+    warning: { type: "string" },
     // topic_create 附加回执字段
     created: { type: "boolean" },
     alreadyExists: { type: "boolean" },
@@ -55,6 +57,9 @@ const topicEntry = {
     scopeId: { oneOf: [{ type: "string" }, { type: "null" }] },
     revision: { ...hexRev, required: true },
     updated: { oneOf: [{ type: "string" }, { type: "null" }] },
+    // S3：分组元数据（group 缺省 []，pinned 缺省 false）。
+    group: { type: "array", items: { type: "string" } },
+    pinned: { type: "boolean" },
     chars: { type: "integer" },
     bytes: { type: "integer" },
   },
@@ -73,6 +78,29 @@ const matchEntry = {
   },
 };
 
+// S3 group_manage 输出条目：组清单行（list 的 groups 元素）与迁移计划行（delete
+// 的 migrated 元素）。order 用 number（DSL 不限整数，模板用整数但 update 可改）。
+const groupEntry = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    key: { type: "string", required: true },
+    title: { type: "string", required: true },
+    summary: { type: "string", required: true },
+    order: { type: "number", required: true },
+    topics: { type: "integer" },
+  },
+};
+
+const groupMigrationEntry = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    topicKey: { type: "string", required: true },
+    group: { type: "array", items: { type: "string" }, required: true },
+  },
+};
+
 const sparkReceiptProperties = {
   ok: { type: "boolean", required: true },
   tool: { type: "string", required: true },
@@ -84,7 +112,7 @@ const sparkReceiptProperties = {
   vitality: { oneOf: [{ type: "string" }, { type: "null" }], required: true },
 };
 
-/** 16 个工具的输出 schema（name → schema）。 */
+/** 17 个工具的输出 schema（name → schema；S3 起含 group_manage）。 */
 export const TOOL_OUTPUT_SCHEMAS = Object.freeze({
   // ── L0 persona ──────────────────────────────────────────────
   soul_read: {
@@ -112,6 +140,9 @@ export const TOOL_OUTPUT_SCHEMAS = Object.freeze({
       topic: { type: "string", required: true },
       content: { type: "string", required: true },
       revision: { ...hexRev, required: true },
+      // S3：topic 读分支的分组元数据（core 读分支缺省 [] / false）。
+      group: { type: "array", items: { type: "string" } },
+      pinned: { type: "boolean" },
     },
   },
   memory_search: {
@@ -133,6 +164,24 @@ export const TOOL_OUTPUT_SCHEMAS = Object.freeze({
     additionalProperties: false,
     properties: {
       topics: { type: "array", items: topicEntry, required: true },
+    },
+  },
+
+  // ── S3 分组 ─────────────────────────────────────────────────
+  group_manage: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      scope: { type: "string", required: true },
+      action: { type: "string", required: true },
+      // groups.json 的 revision（list/delete 为操作后清单哈希；清单缺失时 null）。
+      revision: { ...hexRev, required: true },
+      groups: { type: "array", items: groupEntry },
+      key: { type: "string" },
+      created: { type: "boolean" },
+      updated: { type: "boolean" },
+      deleted: { type: "boolean" },
+      migrated: { type: "array", items: groupMigrationEntry },
     },
   },
 
@@ -229,11 +278,12 @@ export const TOOL_OUTPUT_SCHEMAS = Object.freeze({
   },
 });
 
-/** 16 个工具名（契约清单）。 */
+/** 17 个工具名（契约清单；S3 起含 group_manage）。 */
 export const TOOL_NAMES = Object.freeze([
   "soul_read", "soul_update",
   "memory_read", "memory_search", "memory_append", "memory_rewrite",
   "core_write", "topic_append", "topic_create", "memory_list_topics",
+  "group_manage",
   "spark_save", "spark_read", "spark_update", "spark_forget", "spark_feedback", "spark_graph",
 ]);
 

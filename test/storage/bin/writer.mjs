@@ -21,7 +21,10 @@ try {
     policy: stubEvaluateMutation,
     renderL1: stubRenderL1,
     config: TEST_CONFIG,
-    lockTimeoutMs: 20_000,
+    // C-fix C1：8 路并发负载下单次 fs 链可能被拉长，20s deadline 曾把合法慢速
+    // 翻转打成 fatal（resultFile={fatal}→父进程断言 w.done undefined）。抬到 60s
+    // 只放大调度预算；CAS 语义与翻转次数不变。
+    lockTimeoutMs: 60_000,
   });
   let done = 0; let conflicts = 0;
   for (let i = 0; i < count; i += 1) {

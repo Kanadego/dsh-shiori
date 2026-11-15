@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   projectGraph,
+  clusterProjection,
   graphSummary,
   normalizeGraphRecords,
 } from "../../src/sparks/graph.mjs";
@@ -316,4 +317,137 @@ test("graphSummary rejects non-projection input", () => {
     const error = codedOf(() => graphSummary(bad));
     assert.equal(error.code, "INVALID_INPUT");
   }
+});
+
+// ── clusterProjection（0.4-S7 两级聚类投影）──────────────────────────────
+
+test("clusterProjection level=1：主实体分簇、无实体归未分类、count 降序同数 key 字典序", () => {
+  const records = [
+    mk("a", { entities: ["项目甲"] }),
+    mk("b", { entities: [" 项目甲 "] }),   // trim 后同簇
+    mk("c", { entities: ["项目甲", "项目乙"] }), // 只看 entities[0]
+    mk("d", { entities: ["项目乙"] }),
+    mk("e"),                                   // 无实体 → __unclustered__
+    mk("f", { entities: ["", "  ", 42, null] }), // 实体全是脏值 → __unclustered__
+    mk("g", { entities: ["beta"] }),
+    mk("h", { entities: ["alpha"] }),
+  ];
+  const p1 = clusterProjection({ scopeId: SCOPE, records });
+  assert.equal(p1.schemaVersion, 1);
+  assert.equal(p1.level, 1);
+  assert.equal(p1.scopeId, SCOPE);
+  assert.equal(p1.total, 8);
+  // 排序：count 降序（甲 3 > 未分类 2 > 其余 1），同 count 按 key 字典序
+  //（"alpha" < "beta"；汉字 key 的 code-unit 在 ASCII 之后，所以「项目乙」垫底）。
+  assert.deepEqual(p1.clusters.map((c) => [c.key, c.count]), [
+    ["项目甲", 3], ["__unclustered__", 2], ["alpha", 1], ["beta", 1], ["项目乙", 1],
+  ]);
+});
+
+test("clusterProjection level=1：同 count 的簇按 key 字典序（ASCII 序，与输入顺序无关）", () => {
+  const records = [
+    mk("g1", { entities: ["gamma"] }),
+    mk("a1", { entities: ["alpha"] }),
+    mk("b1", { entities: ["beta"] }),
+    mk("a2", { entities: ["alpha"] }),
+    mk("b2", { entities: ["beta"] }),
+    mk("g2", { entities: ["gamma"] }),
+    mk("z", { entities: ["Zeta"] }), // 大写 Z (0x5A) 排在小写之前
+  ];
+  const p = clusterProjection({ scopeId: SCOPE, records });
+  // count 降序：alpha/beta/gamma 各 2 在前，Zeta 只 1 张垫底；count=2 组内按 key 字典序。
+  assert.deepEqual(p.clusters.map((c) => c.key), ["alpha", "beta", "gamma", "Zeta"]);
+  assert.equal(p.total, 7);
+  // 输入乱序输出不变（纯函数可复现）
+  const shuffled = [records[4], records[0], records[6], records[2], records[1], records[5], records[3]];
+  assert.deepEqual(clusterProjection({ scopeId: SCOPE, records: shuffled }).clusters,
+    p.clusters);
+});
+
+test("clusterProjection level=1：samples 最多 3 个标题，非字符串/空串标题不进 samples", () => {
+  const records = [
+    mk("n1", { entities: ["簇"] }), mk("n2", { entities: ["簇"] }), mk("n3", { entities: ["簇"] }),
+    mk("n4", { entities: ["簇"] }), mk("n5", { entities: ["簇"], title: "标题五" }),
+    mk("noTitle", { entities: ["簇"], title: null }),
+    mk("emptyTitle", { entities: ["簇"], title: "" }),
+  ];
+  const p = clusterProjection({ scopeId: SCOPE, records });
+  const bucket = p.clusters[0];
+  assert.equal(bucket.count, 7);
+  assert.deepEqual(bucket.samples, ["title-n1", "title-n2", "title-n3"]);
+});
+
+test("clusterProjection level=1：空输入返回空簇集，total=0", () => {
+  const p = clusterProjection({ scopeId: SCOPE, records: [] });
+  assert.equal(p.level, 1);
+  assert.deepEqual(p.clusters, []);
+  assert.equal(p.total, 0);
+  // 全部被过滤（异 scope / archived）也一样
+  const filtered = clusterProjection({ scopeId: SCOPE, records: [mk("x", { scopeId: "other" }), mk("y", { state: "archived" })] });
+  assert.deepEqual(filtered.clusters, []);
+  assert.equal(filtered.total, 0);
+});
+
+test("clusterProjection level=2：节点形状与 projectGraph 一致，边只保留两端都在簇内的，degree 为簇内度数", () => {
+  const records = [
+    mk("a", { entities: ["甲"], links: [{ target: "b" }, { target: "c" }] }),
+    mk("b", { entities: ["甲"], links: [{ target: "a", rel: "related" }, { target: "c" }] }),
+    mk("c", { entities: ["乙"], links: [{ target: "b" }] }),
+    mk("ghost", { state: "archived", entities: ["甲"] }), // 被过滤，不进簇
+  ];
+  const full = projectGraph({ scopeId: SCOPE, records });
+  const p = clusterProjection({ scopeId: SCOPE, records, cluster: "甲" });
+  assert.equal(p.level, 2);
+  assert.deepEqual(p.cluster, { key: "甲", label: "甲", count: 2 });
+  // 节点形状与 projectGraph 逐字段一致（复用投影逻辑，不复制一份字段）
+  for (const node of p.nodes) {
+    const twin = full.nodes.find((n) => n.id === node.id);
+    assert.ok(twin);
+    assert.deepEqual(Object.keys(node).sort(), Object.keys(twin).sort());
+  }
+  assert.deepEqual(p.nodes.map((n) => n.id), ["a", "b"]);
+  // 跨簇边（a-c、b-c）不保留；a-b 互逆折叠保留
+  assert.deepEqual(p.edges, [{ source: "a", target: "b", rel: "related", reciprocal: true }]);
+  // degree 重算为簇内度数（全图里 a 是 2，簇内只有 1）
+  assert.equal(p.nodes.find((n) => n.id === "a").degree, 1);
+  assert.equal(p.nodes.find((n) => n.id === "b").degree, 1);
+  // 全图投影不受影响（projectGraph 原样不动）：a 的全图边是 a-b 与 a-c 共 2 条
+  assert.equal(full.nodes.find((n) => n.id === "a").degree, 2);
+});
+
+test("clusterProjection level=2：未知 cluster 不抛错，空 nodes/edges + count 0", () => {
+  const p = clusterProjection({ scopeId: SCOPE, records: [mk("a", { entities: ["甲"] })], cluster: "不存在" });
+  assert.equal(p.level, 2);
+  assert.deepEqual(p.cluster, { key: "不存在", label: "不存在", count: 0 });
+  assert.deepEqual(p.nodes, []);
+  assert.deepEqual(p.edges, []);
+});
+
+test("clusterProjection level=2：__unclustered__ 也是可进入的簇，label 固定「未分类」", () => {
+  const records = [
+    mk("a"), mk("b", { entities: [] }),
+    mk("c", { entities: ["甲"] }),
+    mk("d", { entities: ["甲"] }),
+    mk("e", { entities: ["甲"] }),
+  ];
+  const p = clusterProjection({ scopeId: SCOPE, records, cluster: "__unclustered__" });
+  assert.deepEqual(p.cluster, { key: "__unclustered__", label: "未分类", count: 2 });
+  assert.deepEqual(p.nodes.map((n) => n.id), ["a", "b"]);
+});
+
+test("clusterProjection level=1：samples 来自同簇卡（按 id 序），单卡簇 count=1 也在列", () => {
+  const records = [mk("solo", { entities: ["独苗簇"] })];
+  const p = clusterProjection({ scopeId: SCOPE, records });
+  assert.deepEqual(p.clusters, [{ key: "独苗簇", label: "独苗簇", count: 1, samples: ["title-solo"] }]);
+  assert.equal(p.total, 1);
+});
+
+test("clusterProjection rejects bad scopeId / non-array records / non-string cluster", () => {
+  for (const bad of [undefined, "", 42, null]) {
+    const error = codedOf(() => clusterProjection({ scopeId: bad, records: [] }));
+    assert.equal(error.code, "INVALID_INPUT");
+  }
+  assert.equal(codedOf(() => clusterProjection({ scopeId: SCOPE, records: "nope" })).code, "INVALID_INPUT");
+  assert.equal(codedOf(() => clusterProjection({ scopeId: SCOPE, records: [], cluster: 42 })).code, "INVALID_INPUT");
+  assert.equal(codedOf(() => clusterProjection({ scopeId: SCOPE, records: [], cluster: {} })).code, "INVALID_INPUT");
 });

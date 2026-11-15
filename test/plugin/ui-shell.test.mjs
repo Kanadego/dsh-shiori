@@ -498,3 +498,461 @@ test("U8 BudgetsTab：保存失败只出失败 toast，绝不出现需重启提�
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// S2 侧边栏独立入口：main 全屏槽位 + sidebar.panellist 图标，与详情页入口并存。
+// 槽位写法对齐 dsh-email 的 workbench register 模板（lib/client.js:136-141）。
+// ---------------------------------------------------------------------------
+
+// 捕获 apply 里全部 register 调用（含顺序与 meta/render），供 S2 断言用；
+// register 返回的 disposer 会记录被释放的槽位名，供 cleanup 断言用。
+async function mountCapturingSlots(ctxExtra = {}) {
+  const calls = [];
+  const disposed = [];
+  const mod = loadClientModule();
+  const ctx = {
+    remote: { $mount: async () => async () => {} },
+    slots: {
+      inject: (name, fn) => fn(),
+      register: (meta, render) => { calls.push({ meta, render }); return () => { disposed.push(meta.name); }; },
+    },
+    ...ctxExtra,
+  };
+  const cleanup = await mod.apply(ctx);
+  return { calls, cleanup, disposed };
+}
+
+// 执行一次组件函数（stub react：hooks 走 reactStub，样式注入走 fake document）。
+function renderComponent(vnode, fake) {
+  const previousDocument = globalThis.document;
+  globalThis.document = fake;
+  try {
+    return vnode.type(vnode.props);
+  } finally {
+    globalThis.document = previousDocument;
+  }
+}
+
+test("S2 槽位：apply 依次注册 assistant-actions / main / sidebar.panellist / plugins.bundle.config，main 带 workbench:true，bundle.config 仍是最后一次注册", async () => {
+  const fake = makeFakeDocument();
+  const { calls, cleanup, disposed } = await mountCapturingSlots();
+  try {
+    assert.deepEqual(
+      calls.map((c) => c.meta.name),
+      ["conversation.chat.assistant-actions", "main", "sidebar.panellist", "plugins.bundle.config"],
+      "四个槽位按序注册，bundle.config 收尾（最后一次 register 获胜语义不变）",
+    );
+    // main 槽位：key=shiori，inject 下发 workbench:true（dsh-email 模板口径）。
+    const main = calls.find((c) => c.meta.name === "main");
+    assert.equal(main.meta.key, "shiori", "main 槽位 key=shiori");
+    assert.deepEqual(main.meta.inject(), { workbench: true }, "main 槽位 inject 带 workbench:true");
+    // 渲染进 main 槽位（宿主把 inject 结果并入 props）：复用 ShioriSection，
+    // 根容器切换为全屏 scope class 并标 data-main=true。
+    const mainVNode = main.render({ workbench: true });
+    assert.equal(typeof mainVNode.type, "function", "main 槽位渲染面板组件（复用 PanelView）");
+    const mainRoot = renderComponent(mainVNode, fake.doc);
+    assert.equal(mainRoot.type, "div", "main 根为 div 容器");
+    assert.equal(mainRoot.props.className, "dshi_root dshi_rootMain", "main 槽位根挂全屏 scope class");
+    assert.equal(mainRoot.props["data-main"], "true", "main 槽位根标 data-main=true");
+    // sidebar.panellist：id=shiori、order=60、label=记忆。
+    const sidebar = calls.find((c) => c.meta.name === "sidebar.panellist");
+    assert.equal(sidebar.meta.id, "shiori", "sidebar.panellist id=shiori");
+    assert.equal(sidebar.meta.order, 60, "sidebar.panellist order=60");
+    assert.equal(sidebar.meta.label, "记忆", "sidebar.panellist label=记忆");
+    // 图标渲染：内联 SVG（评审 q-315cc6110122fd8d 拍板 B 方案——client bundle 拿不到
+    // 自身资源 URL，img 引包内 icon.png 实机大概率 404；png 留给市场与配置页）。
+    const iconVNode = sidebar.render({ size: 18 });
+    const icon = iconVNode.type(iconVNode.props);
+    assert.equal(icon.type, "svg", "侧边栏图标为内联 svg 元素");
+    assert.equal(icon.props.className, "dshi_sideIcon", "图标带 scope class");
+    assert.equal(icon.props.width, 18, "图标宽度随 size 下发");
+    assert.equal(icon.props.height, 18, "图标高度随 size 下发");
+    assert.equal(icon.props.viewBox, "0 0 24 24", "viewBox 与宿主图标同一套");
+    assert.equal(icon.props.stroke, "currentColor", "描边随宿主文字色");
+    assert.equal(icon.props.strokeWidth, 1.75, "描边宽度 1.75（宿主图标口径）");
+    assert.equal(icon.props["aria-hidden"], true, "装饰性图标 aria-hidden（可访问名来自宿主 label=记忆）");
+    assert.ok(Array.isArray(icon.children) && icon.children.length >= 1, "书页线稿 path 存在");
+    // 宿主不传 size 时回退默认 20（评审：别写死 16，收窄时会传更小值）。
+    const iconDefault = sidebar.render({}).type(sidebar.render({}).props).props;
+    assert.equal(iconDefault.width, 20, "size 缺省回退 20");
+    // 侧边栏收窄时宿主传更小值（评审 attempt-1：补 size=16 缩放断言）。
+    const iconSmallVNode = sidebar.render({ size: 16 });
+    const iconSmall = iconSmallVNode.type(iconSmallVNode.props).props;
+    assert.equal(iconSmall.width, 16, "size=16 时图标宽度随宿主收窄");
+    assert.equal(iconSmall.height, 16, "size=16 时图标高度随宿主收窄");
+    // 详情页入口并存：bundle.config 仍渲染窄卡片根（无全屏 scope class）。
+    const detail = calls[calls.length - 1];
+    assert.equal(detail.meta.name, "plugins.bundle.config", "详情页槽位仍在");
+    assert.equal(detail.meta.key, "dsh-shiori", "详情页 key=dsh-shiori 不回归");
+    const detailVNode = detail.render({ entryKey: "dsh-shiori" });
+    const detailRoot = renderComponent(detailVNode, fake.doc);
+    assert.equal(detailRoot.props.className, "dshi_root", "详情页根仍是 860px 窄卡片布局");
+    assert.ok(!("data-main" in detailRoot.props), "详情页根不输出 data-main 属性");
+    // 卸载真的释放两个新槽位的 disposer（评审 attempt-1 顺带项）。
+    await cleanup();
+    assert.ok(disposed.includes("main"), "cleanup 释放 main 槽位 disposer");
+    assert.ok(disposed.includes("sidebar.panellist"), "cleanup 释放 sidebar.panellist 槽位 disposer");
+    assert.ok(disposed.includes("plugins.bundle.config"), "cleanup 释放详情页槽位 disposer");
+  } finally {
+    // fake document 无 removeChild 之外的清理需求。
+  }
+});
+
+test("S2 门控：main 槽位抛错或缺失时不得注册 sidebar.panellist（不留点了没落点的死按钮），详情页入口不受影响", async () => {
+  // 与 mountCapturingSlots 同款记录桩，但 slots.inject 可按槽位名注入故障
+  //（抛错 / 返回非函数），register 仍记录全部注册调用。
+  async function mountWithSlotInject(injectImpl) {
+    const calls = [];
+    const mod = loadClientModule();
+    const ctx = {
+      remote: { $mount: async () => async () => {} },
+      slots: {
+        inject: injectImpl,
+        register: (meta, render) => { calls.push({ meta, render }); return () => {}; },
+      },
+    };
+    const cleanup = await mod.apply(ctx);
+    return { calls, cleanup };
+  }
+  // ① main 槽位注册抛错：静默跳过 main 与 sidebar.panellist，bundle.config 照常收尾。
+  {
+    const { calls } = await mountWithSlotInject((name, fn) => {
+      if (name === "main") throw new Error("main slot unavailable");
+      return fn();
+    });
+    assert.deepEqual(
+      calls.map((c) => c.meta.name),
+      ["conversation.chat.assistant-actions", "plugins.bundle.config"],
+      "main 抛错 → main 与 sidebar.panellist 都不注册，bundle.config 仍收尾",
+    );
+    assert.equal(calls.find((c) => c.meta.name === "sidebar.panellist"), undefined,
+      "main 不可用时绝不注册侧边栏入口");
+  }
+  // ② main 槽位缺失（inject 返回非函数）：同样不挂 sidebar.panellist。
+  {
+    const { calls } = await mountWithSlotInject((name, fn) => (name === "main" ? undefined : fn()));
+    assert.deepEqual(
+      calls.map((c) => c.meta.name),
+      ["conversation.chat.assistant-actions", "plugins.bundle.config"],
+      "main 缺失 → sidebar.panellist 不注册，详情页入口照常",
+    );
+    assert.equal(calls.find((c) => c.meta.name === "sidebar.panellist"), undefined,
+      "main 缺失时绝不注册侧边栏入口");
+  }
+});
+
+test("S2 样式：全屏容器 scope class 与侧边栏图标 CSS 声明存在（max-width/padding 覆盖窄卡片默认值）", async () => {
+  const fake = makeFakeDocument();
+  const previousDocument = globalThis.document;
+  globalThis.document = fake.doc;
+  try {
+    const mod = loadClientModule();
+    const { cleanup, tree } = await mountSection(mod);
+    const css = styleTextOf(fake);
+    // 全屏容器：放开 860px 限宽、吃满宿主高度、顶部/左侧让出宿主框架留白（照
+    // dsh-email workbench 模板 w-page[data-main=true] 的口径），内容随宿主宽度
+    // 收缩（1440 与 900 宽都不横向溢出的样式保证）。
+    assert.ok(css.includes(".dshi_rootMain{box-sizing:border-box;max-width:none;width:100%;height:100%;"), "全屏容器显式 border-box（根元素不吃 .dshi_root * 重置，100% 宽高叠 padding 不再溢出）");
+    assert.ok(
+      css.includes("padding:calc(24px + var(--dsh-frame-top-clearance,0px)) 28px 0 max(28px,var(--dsh-frame-leading-clearance,0px))"),
+      "全屏容器 padding 覆盖（frame clearance 口径）",
+    );
+    assert.ok(css.includes("overflow:auto}"), "全屏容器自滚动");
+    // workbench 下 sticky 壳条让出宿主框架顶部留白（评审 attempt-1 顺带项）。
+    assert.ok(
+      css.includes(".dshi_rootMain .dshi_sticky{top:calc(24px + var(--dsh-frame-top-clearance,0px))}"),
+      "workbench 下 sticky 壳条 top 含 frame clearance",
+    );
+    // 侧边栏图标样式。
+    assert.ok(css.includes(".dshi_sideIcon{display:block}"), "侧边栏图标 scope class 声明存在");
+    // 详情页窄卡片默认值未被改动。
+    assert.ok(css.includes(".dshi_root{max-width:860px;"), "详情页 860px 窄卡片默认值保留");
+    await cleanup();
+  } finally {
+    globalThis.document = previousDocument;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// S4 选卡按钮（0.4，评审 q-b8f480de923fa65d 拍板）：sticky 壳条里的「会话顶部」
+// 按钮，显示当前卡名（getStatus.scope，global 原样显示）；切换走 sessionPersonas
+// 单键 read-modify-write（条目只 {sessionId, persona} 两键、清卡=persona 置 null
+// 不删条目）；「记忆已随人设卡切换」提示只出现一次（组件内状态）。
+// ---------------------------------------------------------------------------
+
+// 有状态渲染整个 ShioriSection（面板 9 个 useState 预置，挂选卡交互断言）。
+// wiring：{ calls, scope, status }——经真实 ctx 注入 remote.shiori 与 configForms
+// （api 走 ctx.get("remote.shiori") / ctx.configForms.get("shiori")，测试 stub 不直接传 dsh）。
+async function mountSectionStateful(panelPreset, wiring = {}) {
+  const calls = wiring.calls || [];
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((name) => (name === "react" ? host.react : zod));
+  let renderSlot = null;
+  const shioriNamespace = {
+    getStatus: async (sid, payload) => {
+      calls.push({ method: "getStatus", payload });
+      return { ok: true, value: wiring.status || { mode: "active", scope: "amber" } };
+    },
+    executeTool: async () => ({ ok: true, value: {} }),
+  };
+  const ctx = {
+    remote: { $mount: async () => async () => {} },
+    slots: {
+      inject: (name, fn) => fn(),
+      register: (meta, render) => { renderSlot = render; return () => {}; },
+    },
+  };
+  ctx.get = (key) => (key === "remote.shiori" ? shioriNamespace : undefined);
+  ctx.configForms = { get: (ns) => (ns === "shiori" ? (wiring.scope !== undefined ? wiring.scope : null) : undefined) };
+  const cleanup = await mod.apply(ctx);
+  const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
+  host.states.length = 0;
+  host.states.push(...panelPreset);
+  const render = () => {
+    host.cursor.v = 0;
+    host.runEffects.v = false;
+    return sectionVNode.type(sectionVNode.props);
+  };
+  return { host, render, cleanup, calls };
+}
+
+function s4PanelPreset(overrides = {}) {
+  const availability = Object.assign({
+    sessionId: "session-A", blocked: false, error: null, probeError: null,
+    skipped: 0, probing: false, done: true,
+  }, overrides.availability || {});
+  return [
+    overrides.tab || "status",
+    overrides.sessionId !== undefined ? overrides.sessionId : "session-A",
+    "",
+    overrides.sessions !== undefined ? overrides.sessions : [],
+    overrides.modeStatus !== undefined ? overrides.modeStatus : { mode: "active", scope: "amber" },
+    availability,
+    0,
+    null,
+    "",
+  ];
+}
+
+function findButton(tree, label) {
+  return flattenVNode(tree).find((n) => n.type === "button" && collectText(n) === label) || null;
+}
+
+function personaButton(tree) {
+  return flattenVNode(tree).find((n) => n.type === "button" && n.props && n.props["data-role"] === "persona-card-btn") || null;
+}
+
+function personaRow(tree) {
+  return flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "persona-card-row") || null;
+}
+
+function switchedHints(tree) {
+  return flattenVNode(tree).filter((n) => n.props && n.props["data-role"] === "persona-switched");
+}
+
+function makeScopeForPersona(initialValue, mutations) {
+  const state = { revision: 11, value: structuredClone(initialValue) };
+  return {
+    getSnapshot: () => ({ status: "ready", revision: state.revision, value: structuredClone(state.value) }),
+    mutate: (ops, revision) => {
+      mutations.push({ ops, revision });
+      for (const op of ops) state.value[op.path[0]] = structuredClone(op.value);
+      state.revision += 1;
+      return Promise.resolve(true);
+    },
+  };
+}
+
+// CAS 冲突桩：第一次 mutate 带 fence 不匹配 → 返回 false 且未应用（并发写入者
+// 已把 revision 顶到 12）；之后恢复正常。覆盖「mutate 返回 applied=false → 重读
+// 快照重试一次成功」路径（评审 rework 非阻塞 3：此前该路径零覆盖）。
+function makeCasConflictScope(initialValue, mutations) {
+  const state = { revision: 11, value: structuredClone(initialValue) };
+  let failFirst = true;
+  return {
+    getSnapshot: () => ({ status: "ready", revision: state.revision, value: structuredClone(state.value) }),
+    mutate: (ops, revision) => {
+      mutations.push({ ops, revision });
+      if (failFirst) {
+        failFirst = false;
+        state.revision += 1; // 并发写入者先动了一步，旧 fence 失效
+        return Promise.resolve(false);
+      }
+      for (const op of ops) state.value[op.path[0]] = structuredClone(op.value);
+      state.revision += 1;
+      return Promise.resolve(true);
+    },
+  };
+}
+
+test("S4 选卡按钮：壳条内显示当前卡名（global 原样显示）、未选会话禁用、点击展开选卡行", async () => {
+  // global：scope 为 null → 显示「记忆卡：global」；未选会话（sessionId=""）禁用。
+  const { render, cleanup } = await mountSectionStateful(
+    s4PanelPreset({ sessionId: "", modeStatus: { mode: "active", scope: null } }));
+  try {
+    let tree = render();
+    let btn = personaButton(tree);
+    assert.ok(btn, "壳条内渲染选卡按钮");
+    assert.equal(collectText(btn), "记忆卡：global", "无卡时原样显示 global");
+    assert.equal(btn.props.disabled, true, "未选会话时禁用");
+    assert.equal(personaRow(tree), null, "未展开时无选卡行");
+    // amber：显示当前卡名；点击展开选卡行（输入框回显当前卡名）。
+    const { render: render2, cleanup: cleanup2 } = await mountSectionStateful(s4PanelPreset());
+    tree = render2();
+    btn = personaButton(tree);
+    assert.equal(collectText(btn), "记忆卡：amber", "显示当前卡名");
+    assert.equal(btn.props.disabled, false, "已选会话可点");
+    assert.equal(btn.props.title.includes("记忆卡：amber"), true, "title 带全名（窄屏截断兜底）");
+    btn.props.onClick();
+    tree = render2();
+    const row = personaRow(tree);
+    assert.ok(row, "点击展开选卡行");
+    const input = flattenVNode(row).find((n) => n.type === "input");
+    assert.equal(input.props.value, "amber", "输入框回显当前卡名");
+    assert.ok(findButton(row, "切换") && findButton(row, "清除专属卡") && findButton(row, "取消"), "切换 / 清除专属卡 / 取消三键齐备");
+    await cleanup2();
+  } finally {
+    await cleanup();
+  }
+});
+
+test("S4 切卡：sessionPersonas 单键 read-modify-write（条目 {sessionId, persona} 两键、其余条目原样保留、单键 set）", async () => {
+  const calls = [];
+  const mutations = [];
+  const scope = makeScopeForPersona({
+    mode: "active", allowActive: true, defaultPersona: "amber",
+    sessionPersonas: [{ sessionId: "s-other", persona: "kappa" }, { sessionId: "session-A", persona: "amber" }],
+  }, mutations);
+  const { render, cleanup } = await mountSectionStateful(s4PanelPreset(), { calls, scope });
+  try {
+    let tree = render();
+    personaButton(tree).props.onClick();
+    tree = render();
+    let row = personaRow(tree);
+    flattenVNode(row).find((n) => n.type === "input").props.onChange({ target: { value: "  beta " } });
+    tree = render();
+    row = personaRow(tree);
+    findButton(row, "切换").props.onClick();
+    await flush(20);
+    assert.equal(mutations.length, 1, "切换恰好一次 mutate");
+    const sent = mutations[0];
+    assert.deepEqual(sent.ops, [{
+      op: "set",
+      path: ["sessionPersonas"],
+      value: [{ sessionId: "s-other", persona: "kappa" }, { sessionId: "session-A", persona: "beta" }],
+    }], "只 set sessionPersonas 单键；条目只 {sessionId, persona} 两键；其他条目原样保留");
+    assert.equal(sent.revision, 11, "带快照 revision fence");
+    const getStatusAfter = calls.filter((c) => c.method === "getStatus").length;
+    assert.ok(getStatusAfter >= 1, "成功后再刷一次 getStatus 让回显跟上（评审 C）");
+    // 提示只出现一次：切完后连续重渲染，data-role=persona-switched 恰好 1 个。
+    tree = render();
+    assert.equal(switchedHints(tree).length, 1, "「记忆已随人设卡切换」恰好一条");
+    tree = render();
+    assert.equal(switchedHints(tree).length, 1, "再渲染仍只有一条（组件内状态，不是每渲染重复）");
+    assert.equal(collectText(switchedHints(tree)[0]), "记忆已随人设卡切换", "提示文案逐字一致");
+    // 选卡行已收起、草稿仍在（下次展开继续用）。
+    assert.equal(personaRow(tree), null, "切换成功后选卡行收起");
+    // 再展开选卡行：上一轮「已切换」提示复位（评审 attempt-3 非阻塞）。
+    personaButton(tree).props.onClick();
+    tree = render();
+    assert.ok(personaRow(tree), "重新展开选卡行");
+    assert.equal(switchedHints(tree).length, 0, "重新展开后上一轮提示已复位");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("S4 切卡 CAS 冲突：mutate 返回 false → 重读快照换新 revision 重试一次成功", async () => {
+  const calls = [];
+  const mutations = [];
+  const scope = makeCasConflictScope({
+    mode: "active", allowActive: true, defaultPersona: "amber",
+    sessionPersonas: [{ sessionId: "s-other", persona: "kappa" }, { sessionId: "session-A", persona: "amber" }],
+  }, mutations);
+  const { render, cleanup } = await mountSectionStateful(s4PanelPreset(), { calls, scope });
+  try {
+    let tree = render();
+    personaButton(tree).props.onClick();
+    tree = render();
+    const row = personaRow(tree);
+    flattenVNode(row).find((n) => n.type === "input").props.onChange({ target: { value: "beta" } });
+    tree = render();
+    findButton(personaRow(tree), "切换").props.onClick();
+    await flush(20);
+    tree = render();
+    // 恰好两次 mutate：第一次 fence=11 被 CAS 拒（applied=false，未应用），
+    // 重读快照后第二次 fence=12 成功——不是报错收场，也不是无限重试。
+    assert.equal(mutations.length, 2, "CAS false 恰好重试一次");
+    assert.equal(mutations[0].revision, 11, "第一次带旧 fence");
+    assert.equal(mutations[1].revision, 12, "重试前重读快照、换新 fence");
+    const expectedValue = [{ sessionId: "s-other", persona: "kappa" }, { sessionId: "session-A", persona: "beta" }];
+    assert.deepEqual(mutations[0].ops, [{ op: "set", path: ["sessionPersonas"], value: expectedValue }]);
+    assert.deepEqual(mutations[1].ops, mutations[0].ops, "重试的 ops 与第一次一致");
+    assert.equal(collectText(tree).includes("切换失败"), false, "重试成功不走失败文案");
+    assert.equal(switchedHints(tree).length, 1, "成功后提示恰好一条");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("S4 切卡兜底：空卡名拒绝（不发 mutate）；清除专属卡=persona 置 null 且条目保留；失败亮错误原文", async () => {
+  const calls = [];
+  const mutations = [];
+  const scope = makeScopeForPersona({
+    mode: "active", allowActive: true, defaultPersona: "amber",
+    sessionPersonas: [{ sessionId: "session-A", persona: "amber" }],
+  }, mutations);
+  const { render, cleanup } = await mountSectionStateful(s4PanelPreset(), { calls, scope });
+  try {
+    let tree = render();
+    personaButton(tree).props.onClick();
+    tree = render();
+    let row = personaRow(tree);
+    // 空卡名：清空输入 → 切换 → 本地拒绝（「卡名不能为空」），不发 mutate。
+    flattenVNode(row).find((n) => n.type === "input").props.onChange({ target: { value: "   " } });
+    tree = render();
+    row = personaRow(tree);
+    findButton(row, "切换").props.onClick();
+    await flush(10);
+    tree = render();
+    row = personaRow(tree);
+    assert.ok(collectText(row).includes("卡名不能为空"), "空串拒绝提示");
+    assert.equal(mutations.length, 0, "空卡名不发 mutate");
+    // 失败路径：mutate 抛错 → 错误原文可见（不静默吞）。
+    const failingScope = {
+      getSnapshot: scope.getSnapshot,
+      mutate: () => Promise.reject(Object.assign(new Error("host refused"), { code: "shiori/denied" })),
+    };
+    const failing = await mountSectionStateful(s4PanelPreset(), { scope: failingScope });
+    let tree2 = failing.render();
+    personaButton(tree2).props.onClick();
+    tree2 = failing.render();
+    flattenVNode(personaRow(tree2)).find((n) => n.type === "input").props.onChange({ target: { value: "beta" } });
+    tree2 = failing.render();
+    findButton(personaRow(tree2), "切换").props.onClick();
+    await flush(20);
+    tree2 = failing.render();
+    const errRow = personaRow(tree2);
+    assert.ok(errRow, "失败后选卡行保持展开");
+    assert.ok(collectText(errRow).includes("切换失败"), "失败文案出现");
+    assert.ok(collectText(errRow).includes("host refused"), "错误原文可见（不静默吞）");
+    await failing.cleanup();
+    // 清除专属卡：persona 置 null，条目保留（评审 B 硬约束②）。
+    // （选卡行此前是展开态：先点一下收起、再点开，回到展开态再清卡。）
+    tree = render();
+    personaButton(tree).props.onClick();
+    tree = render();
+    personaButton(tree).props.onClick();
+    tree = render();
+    findButton(personaRow(tree), "清除专属卡").props.onClick();
+    await flush(20);
+    assert.equal(mutations.length, 1, "清除恰好一次 mutate");
+    assert.deepEqual(mutations[0].ops, [{
+      op: "set",
+      path: ["sessionPersonas"],
+      value: [{ sessionId: "session-A", persona: null }],
+    }], "清卡=该条目 persona 写成 null，条目不从数组删除");
+  } finally {
+    await cleanup();
+  }
+});

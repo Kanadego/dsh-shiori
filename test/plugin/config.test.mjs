@@ -3,13 +3,16 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, parse, sep } from "node:path";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, parse, sep } from "node:path";
 import {
   Config,
   normalizePluginConfig,
+  normalizeSemantic,
   verifyPluginRoots,
+  defaultDshHome,
+  defaultPluginRoots,
   BUDGET_CEILINGS,
   SETTINGS_NAMESPACE,
 } from "../../src/plugin/config.mjs";
@@ -17,6 +20,11 @@ import { DEFAULT_CONFIG } from "../../src/core/config.mjs";
 
 const TMP_ROOT = mkdtempSync(join(tmpdir(), "shiori-q-config-"));
 const VOLATILE_WRITE = Symbol.for("cosmokit.volatile.write");
+
+// 0.4-S1（reviewer P3）：测试入口统一注入 DSH_HOME=临时目录——0.4 起缺省根在
+// normalize/verify 里真实解析并 mkdir，不注入的话任何缺省根用例都会在真实
+// ~/.dsh 下创建目录。各用例内可用 withDshHome 临时改写并用后恢复。
+process.env.DSH_HOME = join(TMP_ROOT, "dsh-home");
 
 // U2 起插件层预算在 core 契约之上多两个权威水位字段（由默认占比 × 默认硬顶派生，
 // 见 src/plugin/config.mjs derivedWaterDefaults）。core 的 DEFAULT_CONFIG 本身不含
@@ -100,16 +108,18 @@ test("Config schema 拒绝非法枚举值", () => {
 });
 
 // ---------------------------------------------------------------------------
-// normalizePluginConfig：缺省 inert shadow
+// normalizePluginConfig：缺省 shadow + 双根落 DSH_HOME 默认（0.4-S1）
 // ---------------------------------------------------------------------------
 
-test("缺省配置规范化为 inert shadow 且不修改输入", () => {
+test("缺省配置规范化为 shadow 且双根落 DSH_HOME 默认路径；不修改输入（0.4-S1）", () => {
   const raw = {};
   const settings = normalizePluginConfig(raw);
   assert.equal(settings.mode, "shadow");
   assert.equal(settings.allowActive, false);
-  assert.equal(settings.dataRoot, null);
-  assert.equal(settings.stateRoot, null);
+  assert.equal(settings.dataRoot, defaultPluginRoots().dataRoot);
+  assert.equal(settings.stateRoot, defaultPluginRoots().stateRoot);
+  assert.equal(settings.rootsSource.dataRoot, "default");
+  assert.equal(settings.rootsSource.stateRoot, "default");
   assert.equal(settings.ownerId, "local");
   assert.equal(settings.defaultPersona, null);
   assert.deepEqual(settings.sessionPersonas, []);
@@ -146,9 +156,18 @@ test("未知顶层与段内键一律拒绝", () => {
 // 根目录规则
 // ---------------------------------------------------------------------------
 
-test("仅一root配置时必须两者显式提供", () => {
-  rejects(() => normalizePluginConfig({ dataRoot: join(TMP_ROOT, "d") }), "data only");
-  rejects(() => normalizePluginConfig({ stateRoot: join(TMP_ROOT, "s") }), "state only");
+test("单根配置合法：缺省根独立落 DSH_HOME 默认（各根互不牵连，0.4-S1）", () => {
+  const onlyData = normalizePluginConfig({ dataRoot: join(TMP_ROOT, "d") });
+  assert.equal(onlyData.dataRoot, join(TMP_ROOT, "d"));
+  assert.equal(onlyData.stateRoot, defaultPluginRoots().stateRoot);
+  assert.equal(onlyData.rootsSource.dataRoot, "explicit");
+  assert.equal(onlyData.rootsSource.stateRoot, "default");
+
+  const onlyState = normalizePluginConfig({ stateRoot: join(TMP_ROOT, "s") });
+  assert.equal(onlyState.dataRoot, defaultPluginRoots().dataRoot);
+  assert.equal(onlyState.stateRoot, join(TMP_ROOT, "s"));
+  assert.equal(onlyState.rootsSource.dataRoot, "default");
+  assert.equal(onlyState.rootsSource.stateRoot, "explicit");
 });
 
 test("roots 必须绝对路径且互不嵌套", () => {
@@ -164,14 +183,21 @@ test("roots 必须绝对路径且互不嵌套", () => {
   rejects(() => normalizePluginConfig({ dataRoot: data, stateRoot: "relative/y" }), "relative state");
 });
 
-test("active 必须 allowActive 且两根齐全；缺一拒绝", () => {
-  rejects(() => normalizePluginConfig({ mode: "active" }), "active without roots");
-  rejects(() => normalizePluginConfig({ mode: "active", allowActive: true }), "active allowActive without roots");
+test("active 必须 allowActive；双根可缺省走 DSH_HOME 默认（0.4-S1）", () => {
+  // allowActive 缺省/false 仍是硬闸（安全取向不变）
+  rejects(() => normalizePluginConfig({ mode: "active" }), "active without allowActive");
   rejects(() => normalizePluginConfig({
     mode: "active",
     dataRoot: join(TMP_ROOT, "a"),
     stateRoot: join(TMP_ROOT, "b"),
-  }), "active without allowActive");
+  }), "active with roots without allowActive");
+  // 0.4-S1：active 不再要求显式双根——根缺失走默认（启用按钮只写 mode+allowActive 即可）
+  const okDefaulted = normalizePluginConfig({ mode: "active", allowActive: true });
+  assert.equal(okDefaulted.mode, "active");
+  assert.equal(okDefaulted.dataRoot, defaultPluginRoots().dataRoot);
+  assert.equal(okDefaulted.stateRoot, defaultPluginRoots().stateRoot);
+  assert.equal(okDefaulted.rootsSource.dataRoot, "default");
+  assert.equal(okDefaulted.rootsSource.stateRoot, "default");
   const ok = normalizePluginConfig({
     mode: "active",
     allowActive: true,
@@ -179,6 +205,7 @@ test("active 必须 allowActive 且两根齐全；缺一拒绝", () => {
     stateRoot: join(TMP_ROOT, "b"),
   });
   assert.equal(ok.mode, "active");
+  assert.equal(ok.rootsSource.dataRoot, "explicit");
   // shadow + 双根允许（已配置即非 inert）
   const shadowRooted = normalizePluginConfig({
     dataRoot: join(TMP_ROOT, "a"),
@@ -199,8 +226,11 @@ test("profileRoot 仅在显式传入时计算并列默认根；非法值拒绝",
   );
   assert.equal(explicit.dataRoot, join(TMP_ROOT, "a"));
   rejects(() => normalizePluginConfig({}, { profileRoot: "relative" }), "relative profileRoot");
-  // 未传 profileRoot 时不猜测任何根
-  assert.equal(normalizePluginConfig({}).dataRoot, null);
+  // 0.4-S1：未传 profileRoot 时缺省根落 DSH_HOME 默认路径（不再是 null）
+  const noProfile = normalizePluginConfig({});
+  assert.equal(noProfile.dataRoot, defaultPluginRoots().dataRoot);
+  assert.equal(noProfile.stateRoot, defaultPluginRoots().stateRoot);
+  assert.equal(noProfile.rootsSource.dataRoot, "default");
 });
 
 // ---------------------------------------------------------------------------
@@ -288,9 +318,15 @@ test("forgetting policy 部分覆盖 + 默认补全；非法值拒绝", () => {
 // verifyPluginRoots：真实路径（含 link 解析）
 // ---------------------------------------------------------------------------
 
-test("verifyPluginRoots：inert 通过；真实目录解析后不嵌套", () => {
-  const inert = verifyPluginRoots(normalizePluginConfig({}));
-  assert.equal(inert.inert, true);
+test("verifyPluginRoots：双根 null 解析默认根并 mkdir（inert 退役）；真实目录解析后不嵌套", () => {
+  // 0.4-S1：双根 null 不再 inert——解析默认根（本文件顶部已把 DSH_HOME 指到临时目录）
+  // 并真实创建目录
+  const defaulted = verifyPluginRoots(normalizePluginConfig({}));
+  assert.equal(defaulted.inert, false);
+  assert.equal(defaulted.dataRoot, defaultPluginRoots().dataRoot);
+  assert.equal(defaulted.stateRoot, defaultPluginRoots().stateRoot);
+  assert.equal(existsSync(defaulted.dataRoot), true);
+  assert.equal(existsSync(defaulted.stateRoot), true);
 
   const dataDir = join(TMP_ROOT, "vr", "data");
   const stateDir = join(TMP_ROOT, "vr", "state");
@@ -456,4 +492,214 @@ test("volatile 回归：普通对象没有 cosmokit 写标记时不按 volatile 
   // 真正的普通预算对象照旧走原路径
   const plain = normalizePluginConfig({ budgets: { persona: { maxChars: 5000 } } });
   assert.equal(plain.budgets.persona.maxChars, 5000);
+});
+
+// ---------------------------------------------------------------------------
+// 0.4-S1 · 根路径默认化（装完即用）：defaultDshHome / defaultPluginRoots /
+// verifyPluginRoots 的 null → 默认根解析与 apply 阶段 mkdir -p
+// ---------------------------------------------------------------------------
+
+/** 在单个用例内临时设置 DSH_HOME，用后恢复（normalize/verify 都在调用期读 env）。 */
+function withDshHome(value, fn) {
+  const previous = process.env.DSH_HOME;
+  try {
+    if (value === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = value;
+    fn();
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous;
+  }
+}
+
+test("defaultDshHome / defaultPluginRoots：DSH_HOME 优先，缺省 ~/.dsh；根并列在主目录下", () => {
+  const envHome = join(TMP_ROOT, "dsh-home");
+  withDshHome(envHome, () => {
+    assert.equal(defaultDshHome(), envHome);
+    const roots = defaultPluginRoots();
+    assert.equal(roots.dataRoot, join(envHome, "shiori-data"));
+    assert.equal(roots.stateRoot, join(envHome, "shiori-state"));
+  });
+  withDshHome(undefined, () => {
+    // 环境变量未设置 → ~/.dsh（纯推导断言，不触发 mkdir，不污染真实主目录）
+    assert.equal(defaultDshHome(), join(homedir(), ".dsh"));
+    const roots = defaultPluginRoots();
+    assert.equal(roots.dataRoot, join(homedir(), ".dsh", "shiori-data"));
+    assert.equal(roots.stateRoot, join(homedir(), ".dsh", "shiori-state"));
+  });
+  // 空字符串环境变量按未设置处理
+  withDshHome("", () => {
+    assert.equal(defaultDshHome(), join(homedir(), ".dsh"));
+  });
+});
+
+test("Config schema 文案写明默认落点（DSH_HOME）", () => {
+  const text = JSON.stringify(Config);
+  assert.ok(text.includes("DSH_HOME"), "dataRoot/stateRoot description must name DSH_HOME");
+  assert.ok(text.includes("shiori-data"), "dataRoot description must name the default folder");
+  assert.ok(text.includes("shiori-state"), "stateRoot description must name the default folder");
+});
+
+test("0.4-S1：显式 dataRoot + stateRoot 缺省 → 只补 stateRoot（各根独立解析互不牵连）", () => {
+  withDshHome(join(TMP_ROOT, "dsh-partial"), () => {
+    // 正向：只给 dataRoot，stateRoot 落 DSH_HOME 默认
+    const dataDir = join(TMP_ROOT, "partial", "data");
+    const settings = normalizePluginConfig({ dataRoot: dataDir });
+    assert.equal(settings.dataRoot, dataDir, "explicit dataRoot wins");
+    assert.equal(settings.stateRoot, join(TMP_ROOT, "dsh-partial", "shiori-state"), "missing stateRoot is defaulted independently");
+    // 反向：只给 stateRoot，dataRoot 落 DSH_HOME 默认
+    const stateDir = join(TMP_ROOT, "partial", "state");
+    const reversed = normalizePluginConfig({ stateRoot: stateDir });
+    assert.equal(reversed.stateRoot, stateDir, "explicit stateRoot wins");
+    assert.equal(reversed.dataRoot, join(TMP_ROOT, "dsh-partial", "shiori-data"), "missing dataRoot is defaulted independently");
+  });
+});
+
+test("verifyPluginRoots：双根皆 null → 解析默认根（DSH_HOME 下）并 mkdir -p，不再 inert", () => {
+  const envHome = join(TMP_ROOT, "dsh-verify");
+  withDshHome(envHome, () => {
+    const verified = verifyPluginRoots(normalizePluginConfig({}));
+    assert.equal(verified.inert, false, "missing roots must no longer mount inert (0.4-S1)");
+    assert.equal(verified.dataRoot, join(envHome, "shiori-data"));
+    assert.equal(verified.stateRoot, join(envHome, "shiori-state"));
+    // apply 阶段 mkdir -p：目录真实创建
+    assert.equal(existsSync(verified.dataRoot), true, "default dataRoot must be created at apply");
+    assert.equal(existsSync(verified.stateRoot), true, "default stateRoot must be created at apply");
+  });
+});
+
+test("verifyPluginRoots：显式配置尚未存在的根目录时 mkdir -p 就绪", () => {
+  const dataDir = join(TMP_ROOT, "mkdir-explicit", "data");
+  const stateDir = join(TMP_ROOT, "mkdir-explicit", "state");
+  assert.equal(existsSync(dataDir), false);
+  const verified = verifyPluginRoots(normalizePluginConfig({ dataRoot: dataDir, stateRoot: stateDir }));
+  assert.equal(verified.inert, false);
+  assert.equal(existsSync(dataDir), true);
+  assert.equal(existsSync(stateDir), true);
+});
+
+test("verifyPluginRoots：DSH_HOME 为相对路径 → 可读拒绝（不静默落 cwd）", () => {
+  withDshHome("relative-dsh-home", () => {
+    let threw = null;
+    try {
+      verifyPluginRoots(normalizePluginConfig({}));
+    } catch (error) {
+      threw = error;
+    }
+    assert.ok(threw, "relative DSH_HOME must be rejected");
+    assert.equal(threw.code, "INVALID_INPUT");
+    assert.match(threw.message, /absolute path/);
+  });
+});
+
+test("verifyPluginRoots：目录创建失败给出可读诊断（父路径是文件）", () => {
+  // 用一个已存在的「文件」当 dataRoot 的父级：mkdir 在其下创建目录必然失败，
+  // 且失败发生在嵌套校验之后（不会对合法配置产生误伤）。
+  const blocker = join(TMP_ROOT, "mkdir-fail", "blocker");
+  mkdirSync(dirname(blocker), { recursive: true });
+  writeFileSync(blocker, "not a directory", "utf8");
+  const dataRoot = join(blocker, "shiori-data");
+  const stateRoot = join(TMP_ROOT, "mkdir-fail", "state");
+  let threw = null;
+  try {
+    verifyPluginRoots(normalizePluginConfig({ dataRoot, stateRoot }));
+  } catch (error) {
+    threw = error;
+  }
+  assert.ok(threw, "mkdir under a file path must fail");
+  assert.equal(threw.code, "INVALID_INPUT");
+  assert.match(threw.message, /cannot create shiori root directories/);
+  assert.match(threw.message, /dataRoot=/, "diagnostic names both roots");
+});
+
+// 0.4 补丁（账本 #a423c4）：上面部分用例名义上调 verify，实际经 normalize 时
+// 就抛了（normalize 恒把 null 根补成默认路径）。verify 本体的两个分支——
+// 「双 null 兜底解析默认根」与「兜底里对相对 DSH_HOME 的可读拒绝」——只对
+// 直构 / 嵌入方的 settings（未经 normalize）可达，必须直调 verify 才算真单测。
+
+test("verifyPluginRoots 本体：直构 settings 双根 null（未经 normalize）→ 兜底解析默认根并 mkdir", () => {
+  // review a1（打回项 4）：verify 返回的 inert 是无条件字面量 false，断言它恒真
+  // 无鉴别力——换成「兜底给出的默认根必须是解析真实 link 后的 canonical 绝对
+  // 路径」：DSH_HOME 用 junction，若 verify 回填了词法混排形式这条就红。
+  const base = join(TMP_ROOT, "verify-direct-defaults");
+  const home = join(base, "real-home");
+  mkdirSync(home, { recursive: true });
+  const link = join(base, "link-home");
+  try {
+    symlinkSync(home, link, "dir");
+  } catch {
+    symlinkSync(home, link, "junction");
+  }
+  withDshHome(link, () => {
+    const verified = verifyPluginRoots({ dataRoot: null, stateRoot: null });
+    assert.equal(verified.dataRoot, join(home, "shiori-data"), "默认 dataRoot 须解析到真实路径而非 junction 词形");
+    assert.equal(verified.stateRoot, join(home, "shiori-state"), "默认 stateRoot 须解析到真实路径而非 junction 词形");
+    assert.equal(existsSync(verified.dataRoot), true, "兜底分支同样要 mkdir -p");
+    assert.equal(existsSync(verified.stateRoot), true, "兜底分支同样要 mkdir -p");
+  });
+});
+
+test("verifyPluginRoots 本体：DSH_HOME 为相对路径 → verify 自己的可读拒绝（不经 normalize 直构双 null）", () => {
+  // 「verifyPluginRoots：DSH_HOME 为相对路径」一条走 normalize（normalize 的
+  // normalizeRoot 先抛）；这里直调 verify，证明 verify 兜底分支里的 normalizeRoot
+  // 也拦得住相对默认根，不静默落 cwd。
+  withDshHome("relative-dsh-home", () => {
+    let threw = null;
+    try {
+      verifyPluginRoots({ dataRoot: null, stateRoot: null });
+    } catch (error) {
+      threw = error;
+    }
+    assert.ok(threw, "verify 本体必须拒绝相对默认根");
+    assert.equal(threw.code, "INVALID_INPUT");
+    assert.match(threw.message, /absolute path/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P0#3（0.4 审查报告）：手动模型目录 semantic.local.cacheDir 的路径校验
+// （非空必须绝对路径 + 含 .. 片段一律拒绝；空串保持 <dataRoot>/models 契约）
+// ---------------------------------------------------------------------------
+
+test("P0#3 semantic.local.cacheDir：相对路径拒绝、含 .. 片段拒绝；空串与规范绝对路径放行", () => {
+  const localWith = (cacheDir) => ({ provider: "local", local: { cacheDir } });
+  // 相对路径拒绝（错误口径沿用本模块 fail 的 INVALID_INPUT）。
+  assert.throws(() => normalizeSemantic(localWith("hf-cache")), (e) => {
+    assert.equal(e.code, "INVALID_INPUT");
+    assert.match(e.message, /semantic\.local\.cacheDir/);
+    assert.match(e.message, /absolute path/);
+    return true;
+  }, "相对路径被拒（P0#3）");
+  assert.throws(() => normalizeSemantic(localWith(join("models", "cache"))), (e) => {
+    assert.equal(e.code, "INVALID_INPUT");
+    return true;
+  }, "多段相对路径同样被拒");
+  // 绝对路径含 .. 片段：命中的是「.. 段」规则本身（fail 消息 must not contain）。
+  // 夹具用字符串拼接而非 path.join——join 会把 ".." 折叠掉，构造不出含 .. 的
+  // 绝对路径字面。
+  for (const bad of [
+    join(tmpdir(), "cache") + "/../root",
+    join(tmpdir(), "cache") + "\\..\\root",
+    join(tmpdir(), "a") + "/../b",
+  ]) {
+    assert.throws(() => normalizeSemantic(localWith(bad)), (e) => {
+      assert.equal(e.code, "INVALID_INPUT");
+      assert.match(e.message, /must not contain/);
+      return true;
+    }, `绝对路径含 .. 片段被拒（P0#3）：${bad}`);
+  }
+  // 相对路径（即便字符串里含 ..）：先命中的是「绝对路径」规则（fail 消息
+  // absolute path）——.. 段规则只对已过绝对路径关的输入生效。
+  assert.throws(() => normalizeSemantic(localWith(".." + join("escape", "dir"))), (e) => {
+    assert.equal(e.code, "INVALID_INPUT");
+    assert.match(e.message, /absolute path/);
+    return true;
+  }, "相对路径（含 ..）被拒的是绝对路径规则（P0#3）");
+  // 空串契约不回归：仍代表「用 <dataRoot>/models」。
+  const empty = normalizeSemantic(localWith(""));
+  assert.equal(empty.local.cacheDir, "");
+  // 规范绝对路径放行，值原样透传（不再做折叠/改写）。
+  const abs = join(tmpdir(), "hf-cache");
+  const ok = normalizeSemantic(localWith(abs));
+  assert.equal(ok.local.cacheDir, abs);
 });

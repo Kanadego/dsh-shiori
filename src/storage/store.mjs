@@ -41,6 +41,12 @@ import {
   computePayloadHash, readJournal, saveJournal, listJournals, newJournal,
 } from './journal.mjs';
 import { assertEncodableUtf8, decodeUtf8Strict } from './fsutil.mjs';
+// S3 分组（0.4）：commit 侧组存在性校验复用 S3-a 的 groups.mjs（assertGroupsExist
+// 语义 / readGroups 锁内读取）。有向依赖 storage→core/groups：groups.mjs 只依赖
+// storage 的 errors/paths/lockfile/fsutil 叶子模块，不反向依赖 store，无循环。
+// 锁可重入（lockfile.mjs withLock 对同 root 的嵌套调用直接执行），commit 持锁
+// 期间调用 readGroups 不会死锁。
+import { assertGroupsExist, readGroups, GROUPS_VERSION } from '../core/groups.mjs';
 
 const FAULT_POINTS = new Set(['prepare', 'backup', 'first-rename', 'renames', 'marker']);
 
@@ -282,7 +288,9 @@ class FileStore {
             + '请补全 YAML front-matter 或移除该文件后重试',
           );
         }
-        const { meta, body } = parsed;
+        // S3：group/pinned 是一等可选字段（parseTopicFile 缺省补 [] / false），
+        // 不回写磁盘——老文件 front-matter 原样保留。
+        const { meta, body, group, pinned } = parsed;
         if (meta.key !== key) {
           shadow.push({ file, reason: `front-matter key "${meta.key}" 与文件名 "${key}" 不一致，已跳过` });
           continue;
@@ -303,7 +311,7 @@ class FileStore {
         // 不照收成归档时间——按「未归档」处理（字段省略），与写入侧同口径。
         byKey.set(key, {
           key, title: meta.title, summary: meta.summary, scopeId,
-          revision, updated: meta.updated, body,
+          revision, updated: meta.updated, body, group, pinned,
           ...(isCanonicalIso(meta.archivedAt) ? { archivedAt: meta.archivedAt } : {}),
         });
       }
@@ -360,9 +368,11 @@ class FileStore {
           throw invalidState(`topic "${key}" 的 summary 含换行（破坏索引行结构）`, { file });
         }
         // 归档标记读取降级（P2-2/A2）：手改的垃圾串按「未归档」处理，不照收。
+        // S3：group/pinned 随解析结果返回（缺省 [] / false，不回写磁盘）。
         return {
           key, title: meta.title, summary: meta.summary, scopeId,
           revision: sha256Buffer(raw), updated: meta.updated, body,
+          group: parsed.group, pinned: parsed.pinned,
           ...(isCanonicalIso(meta.archivedAt) ? { archivedAt: meta.archivedAt } : {}),
         };
       }
@@ -566,6 +576,9 @@ class FileStore {
         });
       }
 
+      // ---- S3 分组：本批写入携带的 group 必须已建组（组清单校验在预算评估前）----
+      await this.#assertCommitGroupsExist(entries);
+
       // ---- 预算：完整可见快照经注入渲染器生成 current/candidate 文本 ----
       const view = await this.#effectiveView();
       const currentRendered = this.renderL1({ coreText: view.core.text, topics: view.topics });
@@ -588,6 +601,9 @@ class FileStore {
           revision: e.afterRevision,
           updated: meta ? meta.updated : null,
           body: parsed.hasFrontMatter ? parsed.body : e.buffer.toString('utf8'),
+          // S3：候选快照同样携带 group/pinned（与扫描视图同形状，快照不丢字段）。
+          group: parsed.group,
+          pinned: parsed.pinned,
           ...(meta?.archivedAt ? { archivedAt: meta.archivedAt } : {}),
         });
       }
@@ -718,6 +734,17 @@ class FileStore {
       throw invalidInput(`changes[${index}] 的 topic 变更需要提供 topic 对象或 text`);
     }
     const t = change.topic;
+    // S3（0.4 防静默丢字段）：topic 对象出现未识别键一律 INVALID_INPUT 并列出
+    // 键名。此前未识别键被静默忽略——group/pinned 接线前正是这样丢数据的。
+    const allowedTopicKeys = ['key', 'title', 'summary', 'updated', 'scopeId', 'archivedAt', 'body', 'extra', 'group', 'pinned'];
+    const unknownKeys = Object.keys(t).filter((k) => !allowedTopicKeys.includes(k));
+    if (unknownKeys.length > 0) {
+      throw invalidInput(
+        `changes[${index}].topic 存在未识别字段: ${unknownKeys.map((k) => `"${k}"`).join('、')}`
+        + `（允许的字段: ${allowedTopicKeys.map((k) => `"${k}"`).join(' ')}）`,
+        { unknownKeys },
+      );
+    }
     if (t.key !== undefined && t.key !== key) {
       throw invalidInput(`changes[${index}].topic.key 与 change.key 不一致`, { topicKey: t.key, key });
     }
@@ -739,6 +766,23 @@ class FileStore {
       }
       meta.archivedAt = t.archivedAt; // serializeTopicFile：空省略，非空校验 ISO
     }
+    // S3 分组（0.4）：group（组 key 数组，首个是主组；空数组 = 未分组）与
+    // pinned（布尔钉住）。形状在这里给出可读报错，序列化层（serializeTopicFile）
+    // 与组存在性校验（#assertCommitGroupsExist）随后再各自把关。
+    if (t.group !== undefined) {
+      if (!Array.isArray(t.group) || t.group.some((g) => typeof g !== 'string' || g.length === 0)) {
+        throw invalidInput(`changes[${index}].topic.group 必须是非空字符串数组（空数组 = 未分组）`, {
+          got: t.group,
+        });
+      }
+      meta.group = t.group;
+    }
+    if (t.pinned !== undefined) {
+      if (typeof t.pinned !== 'boolean') {
+        throw invalidInput(`changes[${index}].topic.pinned 必须是布尔值（缺省 false）`, { got: t.pinned });
+      }
+      meta.pinned = t.pinned;
+    }
     this.#validateTopicMeta(index, key, meta, t);
     let extra;
     if (t.extra !== undefined) {
@@ -756,6 +800,33 @@ class FileStore {
       throw invalidInput(`changes[${index}].topic.body 必须是字符串`);
     }
     return serializeTopicFile({ ...meta, extra }, body);
+  }
+
+  /**
+   * S3 分组（0.4 §S3.1）：本批提交落盘后携带的 group（结构化 topic 与裸 text 的
+   * front-matter 都覆盖——统一以最终 buffer 解析结果为准）必须已存在于 active
+   * scope 的组清单；清单缺失时视为「无任何组」，非空 group 一律拒绝。
+   * 必须在锁内调用：readGroups 与 store 共用同一把跨进程锁，重入安全；
+   * 读路径绝不写盘（组清单的初始化由宿主激活路径显式调 ensureGroupsFile）。
+   */
+  async #assertCommitGroupsExist(entries) {
+    const groupKeys = new Set();
+    for (const e of entries) {
+      if (e.kind !== 'topic') continue;
+      const parsed = parseTopicFile(e.buffer);
+      if (parsed.hasFrontMatter) {
+        for (const g of parsed.group) groupKeys.add(g);
+      }
+    }
+    if (groupKeys.size === 0) return;
+    let data;
+    try {
+      data = (await readGroups({ dataRoot: this.rootReal, scopeId: this.activeScopeId })).data;
+    } catch (error) {
+      if (error?.code !== 'NOT_FOUND') throw error;
+      data = { version: GROUPS_VERSION, groups: [] };
+    }
+    assertGroupsExist(data, [...groupKeys], 'changes 的 group');
   }
 
   #validateTopicMeta(index, key, meta, source) {

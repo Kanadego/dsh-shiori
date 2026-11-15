@@ -9,10 +9,19 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { withLock, holdsLock } from '../../src/storage/lockfile.mjs';
 
-const options = { timeoutMs: 1000, retryMs: 2 };
+// timeoutMs 是本文件里各「预期成功」acquire 的调度预算，不是被测性质：8 路并发
+// 负载下（其他 node 进程同时跑同样的测试），单个 fs 调用可能被拉长到数百 ms，
+// 胜者的 guard 占用链（mkdir→readdir→lstat→readFile→rmdir，含 release 阶段再次
+// 取 guard）会远超 1s，败者按 1s deadline 轮询会误报「Guard occupied」。抬到 10s
+// 只放大预算。所有预期 LOCK_BUSY 的路径都不受影响：它们要么显式传 timeoutMs:0
+//（deadline 立即到期），要么是 fail-fast 错误（EACCES 读失败、legacy 残留物、
+// owner 已变），在第一次尝试内即抛出，从不依赖 deadline 耗尽。断言一字未动。
+const options = { timeoutMs: 10_000, retryMs: 2 };
 const deadPid = 2147483647;
 function gate() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
-async function bounded(p, ms = 5000) {
+// C-fix C1：gate 是编排机制不是断言——8 路并发负载下子进程拉起 + 事件派发可能
+// 远超 5s，gate 误超时会制造假失败。预算抬到 30s，断言一字未动。
+async function bounded(p, ms = 30_000) {
   let timer;
   try { return await Promise.race([p, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('gate timed out')), ms); })]); }
   finally { clearTimeout(timer); }
@@ -182,6 +191,58 @@ test('guard release retries transient errors and does not leave a mutex behind',
   patch(t, 'rmdir', old => async function(p, ...args) { if (p === guard && attempts++ < 3) throw ioError('EPERM'); return old.call(this, p, ...args); });
   await withLock(root, options, async () => {});
   assert.ok(attempts >= 5); await absent(guard);
+});
+
+// C-fix C1（评审授权后必补）：guard-acquire 的 mkdir 对瞬时 OS 错误（Windows
+// delete-pending 竞争窗口）有界重试。三条边界：瞬时错误重试后成功、持续性错误
+// 到界 fail-closed 且 ioCode 保留、EEXIST 语义原样（绝不自动接管）。
+test('transient guard mkdir EPERM is retried within deadline and withLock completes', async t => {
+  const { root, lock, guard } = await fixture(t);
+  let mkdirCalls = 0;
+  patch(t, 'mkdir', old => async function(p, ...args) {
+    if (p === guard) { mkdirCalls += 1; if (mkdirCalls === 1) throw ioError('EPERM'); }
+    return old.call(this, p, ...args);
+  });
+  await withLock(root, options, async () => {
+    assert.equal(JSON.parse(await fs.readFile(lock, 'utf8')).pid, process.pid);
+  });
+  // acquire 第一次 mkdir 撞 EPERM 后重试成功（第 2 次），release 再取一次 guard
+  //（第 3 次）——重试确实发生过，且整条 withLock 正常完成。
+  assert.ok(mkdirCalls >= 3, `transient EPERM 后重试发生，mkdir 调用数=${mkdirCalls}`);
+  await absent(lock); await absent(guard);
+});
+
+test('persistent guard mkdir EPERM fails closed at the bound with real ioCode', async t => {
+  const { root, lock, guard } = await fixture(t);
+  let mkdirCalls = 0;
+  patch(t, 'mkdir', old => async function(p, ...args) {
+    if (p === guard) { mkdirCalls += 1; throw ioError('EPERM'); }
+    return old.call(this, p, ...args);
+  });
+  // 持续性权限故障不许被吞成「等一等就好」：有界重试耗尽后抛 LOCK_BUSY，
+  // details.ioCode 保留真实 code（EPERM），phase 仍是 guard-acquire。
+  // C-fix P0#4：重试预算必须「恰好有界」——首次 mkdir + 4 次重试 = 5 次。
+  // 少于 5 说明重试被砍（瞬时抖动会变成误报占用），多于 5 说明上限被放宽
+  //（持续性故障会被拖长等待），两者都是回归。timeoutMs=1000 / retryMs=2 下
+  // 四次重试退避合计 4+6+8+10=28ms，距 deadline 余量充足，计数不受负载抖动影响。
+  await assert.rejects(
+    withLock(root, { timeoutMs: 1000, retryMs: 2 }, async () => assert.fail('entered')),
+    e => e.code === 'LOCK_BUSY' && e.details.phase === 'guard-acquire' && e.details.ioCode === 'EPERM',
+  );
+  assert.equal(mkdirCalls, 5, `持续 EPERM 下 mkdir 应恰好调用 5 次（首次+4 次重试），实际=${mkdirCalls}`);
+  await absent(lock);
+});
+
+test('regression: EEXIST guard to deadline still reports Guard occupied, never takeover', async t => {
+  const { root, lock, guard } = await fixture(t);
+  await fs.mkdir(guard); // 外部持有者占住 guard：EEXIST 语义必须原样（fail-closed）
+  await assert.rejects(
+    withLock(root, { timeoutMs: 30, retryMs: 2 }, async () => assert.fail('entered')),
+    e => e.code === 'LOCK_BUSY' && e.details.phase === 'guard-acquire'
+      && e.message.includes('Guard occupied; no automatic guard takeover'),
+  );
+  await absent(lock);
+  assert.ok((await fs.lstat(guard)).isDirectory(), '被占的 guard 不许被自动接管或清除');
 });
 
 test('permanent guard release failure is explicit and prevents fn, never auto-clears guard', async t => {

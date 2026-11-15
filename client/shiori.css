@@ -148,3 +148,32 @@
 .dshi_staleBar{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap;border:1px solid var(--dshi-warn);background:rgba(180,83,9,.10);color:var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-xs) var(--dshi-space-sm);font-size:var(--dshi-font-sm)}
 .dshi_staleBarBtn{border:1px solid var(--dshi-warn);background:none;color:var(--dshi-warn);font:inherit;font-size:var(--dshi-font-xs);border-radius:var(--dshi-radius-sm);padding:2px 10px;cursor:pointer}
 .dshi_staleBarBtn:disabled{opacity:.5;cursor:default}
+/* S4 统一分页页码条：上一页 / 页码 / 下一页 + 页码提示。页码按钮用小号胶囊，
+   当前页反色（渐变主按钮同款），禁用态与 .dshi_btn 一致。 */
+.dshi_pageBar{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap}
+.dshi_pageNum{border:1px solid var(--dsw-alias-border-l2,#dce2eb);background:var(--dshi-bg-card);color:var(--dshi-text-dim);border-radius:var(--dshi-radius-sm);min-width:26px;padding:2px 6px;font:inherit;font-size:var(--dshi-font-xs);cursor:pointer}
+.dshi_pageNum:hover:not(:disabled){color:var(--dshi-text)}
+.dshi_pageNumOn{border-color:transparent;background:linear-gradient(135deg,var(--dshi-accent-a),var(--dshi-accent-b));color:#fff;font-weight:600}
+.dshi_pageNum:disabled{opacity:.5;cursor:default}
+/* S4 分组管理：组行内就地编辑表单（建组/改名/改摘要/调序共用一组输入行）。 */
+.dshi_groupForm{display:flex;flex-direction:column;gap:var(--dshi-space-xs);border:1px dashed var(--dsw-alias-border-l2,#dce2eb);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}
+.dshi_migration{border:1px solid var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm);display:flex;flex-direction:column;gap:var(--dshi-space-xs)}
+/* S4 选卡按钮行（会话顶部，对齐快照按钮形态的 .dshi_btn）与切换提示。 */
+.dshi_personaRow{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap}
+/* 卡名在按钮内截断（窄屏不横向溢出），全名走按钮的 title 属性。 */
+.dshi_personaName{display:inline-block;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+/* S2 侧边栏 main 槽位全屏容器：仅 PanelView 挂到 main 槽位（props.workbench 为真）
+   时追加在 .dshi_root 上；详情页窄卡片（max-width:860px）不加此类，布局不回归。
+   高度 / padding / 自滚动口径照 dsh-email workbench 模板的 w-page[data-main=true]：
+   放开 860px 限宽、吃满宿主高度、顶部与左侧让出宿主框架留白（frame clearance），
+   内容宽度跟随宿主（1440 与 900 宽都不横向溢出，子元素一律 min-width:0 收缩）。
+   box-sizing:border-box 必须显式写：根元素不被 .dshi_root * 的通配重置覆盖，
+   宿主也没有全局重置——content-box 下 width/height:100% 再叠左右各 28px padding
+   会横向溢出 56px、纵向底部 padding 区滚不到（attempt-1 评审阻塞项）。 */
+.dshi_rootMain{box-sizing:border-box;max-width:none;width:100%;height:100%;min-height:0;padding:calc(24px + var(--dsh-frame-top-clearance,0px)) 28px 0 max(28px,var(--dsh-frame-leading-clearance,0px));overflow:auto}
+/* S2：workbench 下 sticky 壳条让出宿主框架顶部留白，滚动后不压进框架区。 */
+.dshi_rootMain .dshi_sticky{top:calc(24px + var(--dsh-frame-top-clearance,0px))}
+/* S2 侧边栏「记忆」图标：sidebar.panellist 槽位渲染的内联 SVG 线稿（评审拍板：
+   client bundle 拿不到自身资源 URL，不引包内 icon.png，png 留给市场与配置页），
+   尺寸由宿主下发（props.size），display:block 防基线空隙撑破侧边栏布局。 */
+.dshi_sideIcon{display:block}

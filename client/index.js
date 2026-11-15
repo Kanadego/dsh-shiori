@@ -188,7 +188,24 @@ window.__ModuleLoader__.load({
     //（底色沿用 dshi_roBanner 的 rgba(180,83,9,.10)，不引入新色系）。
 ".dshi_staleBar{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap;border:1px solid var(--dshi-warn);background:rgba(180,83,9,.10);color:var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-xs) var(--dshi-space-sm);font-size:var(--dshi-font-sm)}" +
 ".dshi_staleBarBtn{border:1px solid var(--dshi-warn);background:none;color:var(--dshi-warn);font:inherit;font-size:var(--dshi-font-xs);border-radius:var(--dshi-radius-sm);padding:2px 10px;cursor:pointer}" +
-".dshi_staleBarBtn:disabled{opacity:.5;cursor:default}";
+".dshi_staleBarBtn:disabled{opacity:.5;cursor:default}" +
+    // S4 统一分页页码条 / 分组管理表单 / 迁移确认 / 选卡行（与 client/shiori.css 同步）。
+".dshi_pageBar{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap}" +
+".dshi_pageNum{border:1px solid var(--dsw-alias-border-l2,#dce2eb);background:var(--dshi-bg-card);color:var(--dshi-text-dim);border-radius:var(--dshi-radius-sm);min-width:26px;padding:2px 6px;font:inherit;font-size:var(--dshi-font-xs);cursor:pointer}" +
+".dshi_pageNum:hover:not(:disabled){color:var(--dshi-text)}" +
+".dshi_pageNumOn{border-color:transparent;background:linear-gradient(135deg,var(--dshi-accent-a),var(--dshi-accent-b));color:#fff;font-weight:600}" +
+".dshi_pageNum:disabled{opacity:.5;cursor:default}" +
+".dshi_groupForm{display:flex;flex-direction:column;gap:var(--dshi-space-xs);border:1px dashed var(--dsw-alias-border-l2,#dce2eb);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}" +
+".dshi_migration{border:1px solid var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm);display:flex;flex-direction:column;gap:var(--dshi-space-xs)}" +
+".dshi_personaRow{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap}" +
+".dshi_personaName{display:inline-block;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}" +
+    // S2 侧边栏 main 槽位全屏容器（与 client/shiori.css 末尾三条规则逐字一致，
+    // client.test.mjs 压缩比对）：仅 props.workbench 时追加，详情页窄卡片不回归；
+    // box-sizing:border-box 显式写（根元素不吃 .dshi_root * 通配重置，content-box
+    // 下 100% 宽高叠 padding 会溢出），sticky 壳条 top 让出宿主框架留白。
+".dshi_rootMain{box-sizing:border-box;max-width:none;width:100%;height:100%;min-height:0;padding:calc(24px + var(--dsh-frame-top-clearance,0px)) 28px 0 max(28px,var(--dsh-frame-leading-clearance,0px));overflow:auto}" +
+".dshi_rootMain .dshi_sticky{top:calc(24px + var(--dsh-frame-top-clearance,0px))}" +
+".dshi_sideIcon{display:block}";
     function ensureStyle() {
       try {
         if (document.getElementById("dsh-shiori-style")) return;
@@ -444,7 +461,7 @@ window.__ModuleLoader__.load({
     };
 
     // ── 冻结 wire 定义（namespace shiori；参数 session→wire sessionId + payload） ──
-    var RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"];
+    var RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
     function sessionCodec() {
       return {
         mode: "strict",
@@ -830,6 +847,80 @@ window.__ModuleLoader__.load({
           h("summary", { className: "dshi_hint" }, "原始错误信息"),
           h("pre", { className: "dshi_pre" }, detail)) : null);
     }
+    // B2：conflict Error 挂了标准 cause（保留最后一次的原始错误对象）——上层
+    // catch 拼 message 时若 cause 存在且 message 非空，追加「（原因：…）」；
+    // cause 带 code 时连码一起亮出来（诊断时能看出被吞掉的归因，如 shiori/ui-scope）。
+    function causeNoteOf(error) {
+      var cause = error && error.cause;
+      if (!cause || typeof cause.message !== "string" || cause.message === "") return "";
+      return "（原因：" + (cause.code ? "[" + cause.code + "] " : "") + cause.message + "）";
+    }
+
+    // 0.4 P1#6（docs/0.4-REVIEW.md）：CAS 冲突重试公共函数——原 enableSave /
+    // saveManualDir / saveDefaultPersona / personaWrite 四处同构实现收敛为唯一
+    // 实现，四处调用点全部改走本函数。attempt() 每次重读快照并 scope.mutate
+    // 一次，返回 true=成功；本函数保证 mutate 恰 ≤2 次调用（首次结果 !==true
+    // ——返回 false 或抛错——才重试恰一次，第二次仍 !==true 直接抛 conflict，
+    // 绝无第三次调用）。conflict 文案由 buildMessage(ctx) 按各调用点原样拼：
+    // ctx.lastError = 最后一次抛出的原始错误对象（第二次未抛时为首次的错误，
+    // 与原实现 lastError/lastFailMessage 的赋值时机一致）；ctx.lastMessage =
+    // (lastError && lastError.message) || String(lastError)。code=conflictCode；
+    // attachCause 为真且 lastError 非空时挂标准 cause（B2 归因，上层经
+    // causeNoteOf 拼「（原因：…）」）。成功时返回 true（原四处成功路径只关心
+    // 「没抛 conflict」，返回值形状等价）。
+    async function casMutate(attempt, conflictCode, buildMessage, attachCause) {
+      var applied = false;
+      var lastError = null; // B2：最后一次抛出的原始错误对象（conflict 挂 cause 用）
+      try {
+        applied = await attempt();
+      } catch (firstError) {
+        applied = false;
+        lastError = firstError;
+      }
+      if (applied !== true) {
+        try {
+          applied = await attempt();
+        } catch (secondError) {
+          applied = false;
+          lastError = secondError;
+        }
+        if (applied !== true) {
+          var lastMessage = lastError !== null ? (lastError && lastError.message) || String(lastError) : "";
+          var conflict = new Error(buildMessage({ lastError: lastError, lastMessage: lastMessage }));
+          conflict.code = conflictCode;
+          if (attachCause && lastError !== null) conflict.cause = lastError; // B2：不吞原始归因（如 shiori/ui-scope）
+          throw conflict;
+        }
+      }
+      return true;
+    }
+
+    // 0.4 P1#6：getStatus 轮询公共函数——原「重建向量」startRebuild 内联 for(;;)
+    // 循环与 S5 pollDownloadLoop 两处同构实现收敛为唯一实现，两处调用点改走本
+    // 函数。每轮先查 alive()（P1-1：会话镜像 ref 比对 + 卸载 cleanup，任一不满足
+    // 即停），再拉 getStatus；查询失败 → onError(e)（调用点自拼原文案）后停止；
+    // extract(fresh) 返回非空 → setStatus(fresh) + onSample(extracted)（返回
+    // true = 已到终态，结束轮询，显示回落 diagnostics）；随后按 intervalMs 睡眠。
+    // 守卫时机、setStatus 调用点、终态判定、错误文案全部留在调用点回调里原样
+    // 保留，行为等价。
+    async function pollStatus(opts) {
+      for (;;) {
+        if (!opts.alive()) return;
+        var fresh;
+        try {
+          fresh = await opts.dsh.call("getStatus", opts.sid, {});
+        } catch (e) {
+          opts.onError(e);
+          return;
+        }
+        var extracted = opts.extract(fresh);
+        if (extracted !== null) {
+          opts.setStatus(fresh);
+          if (opts.onSample(extracted) === true) return;
+        }
+        await new Promise(function (resolve) { setTimeout(resolve, opts.intervalMs); });
+      }
+    }
 
     // U3 水位三档具名常量：ratio < WATER_WARN_RATIO 正常、达到 WATER_WARN_RATIO 警示、
     // 达到 WATER_DANGER_RATIO 危险；WATER_FULL_RATIO 仅用于占满截断。颜色不在 JS 写死，
@@ -959,6 +1050,77 @@ window.__ModuleLoader__.load({
       };
     }
 
+    // ── S4 统一分页（前端切片，每页 10 条；不新增后端分页参数） ────────────────
+    // 五处列表（最近变更 / 专题索引导航 / 专题页 topic 列表 / 闪回从未命中 /
+    // 时间线翻页）共用同一套页码条；单页时不渲染页码条（不添乱）。
+    var LIST_PAGE_SIZE = 10;
+
+    // rows 切片：返回 { items, total, totalPages, page }；page 越界自动钳回
+    // 1..totalPages（列表刷新变短后旧页码不丢状态、不空白）。rows 非数组按空处理。
+    function paginateRows(rows, page) {
+      var list = Array.isArray(rows) ? rows : [];
+      var totalPages = Math.max(1, Math.ceil(list.length / LIST_PAGE_SIZE));
+      var current = Math.min(Math.max(1, page || 1), totalPages);
+      var start = (current - 1) * LIST_PAGE_SIZE;
+      return {
+        items: list.slice(start, start + LIST_PAGE_SIZE),
+        total: list.length,
+        totalPages: totalPages,
+        page: current
+      };
+    }
+
+    // 统一页码条：上一页 / 1..N 页码 / 下一页 / 页码提示。goTo(n) 收 1 起页码；
+    // totalPages<=1 返回 null（调用方不渲染）。
+    function pageBar(page, totalPages, goTo, busy) {
+      var current = Math.min(Math.max(1, page || 1), Math.max(1, totalPages));
+      if (!totalPages || totalPages <= 1) return null;
+      var nums = [];
+      for (var i = 1; i <= totalPages; i++) nums.push(i);
+      return h("div", { className: "dshi_pageBar" },
+        h("button", {
+          className: "dshi_btn",
+          disabled: Boolean(busy) || current <= 1,
+          onClick: function () { goTo(current - 1); }
+        }, "上一页"),
+        nums.map(function (n) {
+          return h("button", {
+            key: n,
+            className: "dshi_pageNum" + (n === current ? " dshi_pageNumOn" : ""),
+            disabled: Boolean(busy) || n === current,
+            onClick: function () { goTo(n); }
+          }, String(n));
+        }),
+        h("button", {
+          className: "dshi_btn",
+          disabled: Boolean(busy) || current >= totalPages,
+          onClick: function () { goTo(current + 1); }
+        }, "下一页"),
+        h("span", { className: "dshi_hint" },
+          "第 " + current + " / " + totalPages + " 页（每页 " + LIST_PAGE_SIZE + " 条）"));
+    }
+
+    // ── S4 脱敏：专题索引导航里的机器串（updated 时间戳 + rev shiori-r1.<token>）──
+    // 例：`2026-11-05T09:56:36.451Z rev shiori-r1.eyJ...`——正文只留友好日期
+    //（YYYY-MM-DD），原始串整体由调用方放进 title 属性（悬停可见、可排查）。
+    // 纯函数：任何形状（null / 数字 / 非日期前缀）都不抛错，取不出日期返回 ""。
+    function topicFriendlyDay(value) {
+      var text = String(value === undefined || value === null ? "" : value);
+      var hit = text.match(/^\s*(\d{4}-\d{2}-\d{2})/);
+      return hit ? hit[1] : "";
+    }
+
+    // 行的原始机器串（updated 原文 + revision token 原文，rev 前缀与老 UI 口径一致）；
+    // 只进 title 属性，绝不进正文文本树。字段缺失时返回能取到的部分（可能为空串）。
+    function topicMachineText(row) {
+      var updated = row && row.updated !== undefined && row.updated !== null ? String(row.updated) : "";
+      var revision = row && row.revision !== undefined && row.revision !== null ? String(row.revision) : "";
+      if (updated !== "" && revision !== "") return updated + " rev " + revision;
+      if (updated !== "") return updated;
+      if (revision !== "") return "rev " + revision;
+      return "";
+    }
+
     // ── F1b：语义召回只读状态 + 重建向量按钮 ─────────────────────────────
     // 数据源：getStatus.diagnostics.semantic（wire 的 diagnostics 块是
     // additionalProperties:true，服务端纯增量注入；客户端不做结构假设——
@@ -987,12 +1149,7 @@ window.__ModuleLoader__.load({
       return String(semantic.provider);
     }
 
-    function semanticReadyText(semantic) {
-      if (!semantic || !semantic.enabled) return "—";
-      if (semantic.ready === true) return "已就绪";
-      if (semantic.ready === false) return "未就绪（还没有成功生成过向量）";
-      return "未知";
-    }
+    // semanticReadyText 在下方 S5 块定义（区分「模型已安装」与「向量已生成」）。
 
     function rebuildPhaseText(semantic, localProgress) {
       var rebuild = (semantic && semantic.rebuild) || {};
@@ -1014,6 +1171,59 @@ window.__ModuleLoader__.load({
       return label;
     }
 
+    // ── S5：模型下载（「下载模型」按钮 + 进度 + 报错卡片）────────────────
+    // 数据源：diagnostics.semantic.download（服务端单飞任务态，前端轮询既有
+    // getStatus 读，不新增 RPC）+ diagnostics.semantic.modelDir / modelInstalled
+    //（目录口径 = <dataRoot>/models，「未安装」时按钮高亮）。触发通道：
+    // executeTool 保留名 semantic_download（不是宿主工具，服务端 dispatchTool
+    // 内部拦截；args.cancel=true 协作取消）。源地址等含 URL 的文案一律由服务端
+    // installHint 下发——bundle 里不写死任何 http 字面量。
+    var SEMANTIC_DOWNLOAD_TOOL = "semantic_download";
+    var DOWNLOAD_POLL_MS = 1500;
+    var DOWNLOAD_PHASE_LABELS = {
+      idle: "空闲",
+      starting: "启动中…",
+      downloading: "下载中",
+      verifying: "校验中（维度与文件名）",
+      done: "已完成",
+      error: "失败",
+      cancelled: "已取消（状态回到未就绪）"
+    };
+
+    function semanticReadyText(semantic) {
+      if (!semantic || !semantic.enabled) return "—";
+      if (semantic.ready === true) return "已就绪";
+      // S5：模型文件已齐备但还没成功生成过向量——如实区分「模型在」与「向量在」。
+      if (semantic.modelInstalled === true) return "已就绪（模型已安装，首次使用或重建后生成向量）";
+      if (semantic.ready === false) return "未就绪（模型未安装，还没有成功生成过向量）";
+      return "未知";
+    }
+
+    // MB 文案（保留 1 位小数；未知/0 → null 不显示假数字）。
+    function downloadMbText(bytes) {
+      if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) return null;
+      return (bytes / 1048576).toFixed(1);
+    }
+
+    function downloadPhaseText(dl) {
+      if (!dl || !dl.phase || dl.phase === "idle") return "—";
+      var label = DOWNLOAD_PHASE_LABELS[dl.phase] || String(dl.phase);
+      var parts = [];
+      if (dl.phase === "downloading" || dl.phase === "verifying" || dl.phase === "starting") {
+        if (dl.percent !== null && dl.percent !== undefined) parts.push(String(dl.percent) + "%");
+        var loaded = downloadMbText(dl.loadedBytes);
+        var total = downloadMbText(dl.totalBytes);
+        if (loaded !== null && total !== null) parts.push(loaded + "MB / " + total + "MB");
+        else if (loaded !== null) parts.push(loaded + "MB");
+        if (typeof dl.filesTotal === "number" && dl.filesTotal > 0) {
+          parts.push((typeof dl.filesDone === "number" ? dl.filesDone : 0) + "/" + dl.filesTotal + " 个文件");
+        }
+        if (dl.source) parts.push("源 " + dl.source);
+      }
+      if (dl.phase === "error" && dl.error) return label + "：" + dl.error;
+      return parts.length > 0 ? label + "：" + parts.join(" · ") : label;
+    }
+
     function StatusTab(props) {
       var state = useState(null);
       var status = state[0];
@@ -1030,6 +1240,17 @@ window.__ModuleLoader__.load({
       var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
       var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
       tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
+      // S1 启用入口（0.4）：configurationState 为 needs-persona / needs-active 时
+      // 渲染初始化卡。新 state 一律追加在既有 state 之后（老测试 states 下标不变）。
+      var personaDraftState = useState("");
+      var personaDraft = personaDraftState[0];
+      var setPersonaDraft = personaDraftState[1];
+      var enableBusyState = useState(false);
+      var enableBusy = enableBusyState[0];
+      var setEnableBusy = enableBusyState[1];
+      var enableErrorState = useState(null);
+      var enableError = enableErrorState[0];
+      var setEnableError = enableErrorState[1];
       // P1-1（重建轮询串会话）：当前 sessionId 的镜像 ref——渲染体同步，轮询每轮
       // 与发起时的 sid 比对。旧实现比对创建闭包里的 props.sessionId，props 对象
       // 不随重渲染更新，切换会话后比对恒等、轮询永不停止。pollAliveRef 由挂载
@@ -1072,20 +1293,21 @@ window.__ModuleLoader__.load({
           setRebuildProgress({ running: false, phase: "error", error: (e && e.message) ? String(e.message) : String(e) });
           return;
         }
-        for (;;) {
+        // P1#6：轮询骨架改走公共 pollStatus（原内联 for(;;) 已上移为模块级唯一
+        // 实现）；alive / 终态判定 / 错误文案按原样留在回调里，行为等价。
+        await pollStatus({
+          dsh: props.dsh,
+          sid: sid,
+          intervalMs: REBUILD_POLL_MS,
           // P1-1：每轮比对镜像 ref（渲染体同步的当前会话）；组件已卸载（cleanup
           // 置假）同样停轮询。读闭包里的 props 判断不出会话切换，这里必须走 ref。
-          if (!pollAliveRef.current || sidRef.current !== sid) return; // 会话已切换 / 已卸载：停止轮询
-          var fresh;
-          try {
-            fresh = await props.dsh.call("getStatus", sid, {});
-          } catch (e) {
-            setRebuildProgress({ running: false, phase: "error", error: (e && e.message) ? "进度查询失败：" + String(e.message) : String(e) });
-            return;
-          }
-          if (fresh && fresh.diagnostics && fresh.diagnostics.semantic) {
-            setStatus(fresh);
-            var rebuild = fresh.diagnostics.semantic.rebuild || {};
+          alive: function () { return pollAliveRef.current && sidRef.current === sid; },
+          extract: function (fresh) {
+            return fresh && fresh.diagnostics && fresh.diagnostics.semantic ? fresh.diagnostics.semantic : null;
+          },
+          setStatus: setStatus,
+          onSample: function (semantic) {
+            var rebuild = semantic.rebuild || {};
             setRebuildProgress({
               running: rebuild.running === true,
               phase: rebuild.phase || "running",
@@ -1093,15 +1315,335 @@ window.__ModuleLoader__.load({
               total: rebuild.total,
               error: rebuild.error || null,
             });
-            if (rebuild.running !== true) return; // done / error / aborted：结束轮询，显示回落到 diagnostics
-          }
-          await new Promise(function (resolve) { setTimeout(resolve, REBUILD_POLL_MS); });
-        }
+            return rebuild.running !== true; // done / error / aborted：结束轮询，显示回落到 diagnostics
+          },
+          onError: function (e) {
+            setRebuildProgress({ running: false, phase: "error", error: (e && e.message) ? "进度查询失败：" + String(e.message) : String(e) });
+          },
+        });
       };
       var occupancy = (status && status.occupancy) || {};
       var capabilities = status && status.capabilities && typeof status.capabilities === "object" ? status.capabilities : null;
       var startedFlag = status && status.diagnostics && typeof status.diagnostics === "object" && !Array.isArray(status.diagnostics)
         ? status.diagnostics.started : undefined;
+      // ── S1 启用入口（0.4）─────────────────────────────────────────────────
+      // configurationState 三态由服务端给出（前端不再自行推断）：
+      //   needs-persona = 人设卡未指定（最优先）→ 输入框 + 「保存人设卡」；
+      //   needs-active  = 人设卡已配置但 mode 非 active → 「启用记忆」按钮；
+      //   configured    = 已配置且 active，本卡不渲染。
+      var diagnosticsObj = status && status.diagnostics && typeof status.diagnostics === "object" && !Array.isArray(status.diagnostics)
+        ? status.diagnostics : null;
+      var configurationState = diagnosticsObj && typeof diagnosticsObj.configurationState === "string"
+        ? diagnosticsObj.configurationState : undefined;
+      var needsPersona = configurationState === "needs-persona";
+      var needsActive = configurationState === "needs-active";
+      // 设置命名空间（宿主 configForms）：缺席（旧宿主 / 无 ctx 的合成测试）时
+      // 启用卡只回显服务端诊断，不出写入口（按钮禁用 + 一行说明）。
+      var readConfigScope = function () {
+        try {
+          return props.dsh && typeof props.dsh.configScope === "function" ? props.dsh.configScope() : undefined;
+        } catch (error) { return undefined; }
+      };
+      var configScopeNow = readConfigScope();
+      var configValueNow = (function () {
+        try {
+          var snap = configScopeNow && typeof configScopeNow.getSnapshot === "function" ? configScopeNow.getSnapshot() : null;
+          return snap && snap.status === "ready" && snap.value && typeof snap.value === "object" ? snap.value : null;
+        } catch (error) { return null; }
+      })();
+      // 生效卡名：输入框草稿优先，空则回退当前配置值（needs-active 的服务端定义
+      // 即「人设卡已配置」，配置里必有非空卡名可回退）。
+      var configPersona = configValueNow && typeof configValueNow.defaultPersona === "string" ? configValueNow.defaultPersona : "";
+      var effectivePersona = String(personaDraft ?? "").trim() || configPersona;
+      var personaMissing = effectivePersona === "";
+      // 服务端 diagnostics 解析出的两个根只做回显确认（不写入配置——服务端只读派生）。
+      var dataRootEcho = diagnosticsObj && diagnosticsObj.dataRoot !== undefined && diagnosticsObj.dataRoot !== null ? String(diagnosticsObj.dataRoot) : "—";
+      var stateRootEcho = diagnosticsObj && diagnosticsObj.stateRoot !== undefined && diagnosticsObj.stateRoot !== null ? String(diagnosticsObj.stateRoot) : "—";
+      // rootsSource 是对象 {dataRoot:"explicit"|"default", stateRoot:...}（校验在
+      // src/plugin/scope.mjs），按字段拼显示；非对象/缺失回退 —，绝不 String 化
+      // 整个对象（0.4 审查 P0#1：对象被 String 化后渲染成对象退化占位文本）。
+      var rootsSourceEcho = (function () {
+        var src = diagnosticsObj ? diagnosticsObj.rootsSource : undefined;
+        if (!src || typeof src !== "object") return "—";
+        var dataRoot = typeof src.dataRoot === "string" && src.dataRoot !== "" ? src.dataRoot : "—";
+        var stateRoot = typeof src.stateRoot === "string" && src.stateRoot !== "" ? src.stateRoot : "—";
+        return "dataRoot=" + dataRoot + " / stateRoot=" + stateRoot;
+      })();
+      // activate=true →「完成配置并启用」（needs-persona 首装）：一次性写 mode /
+      // allowActive / defaultPersona 三个键（不多不少），点一次即落 configured；
+      // activate=false →「启用记忆」（needs-active）：只写 mode / allowActive 两个键
+      // ——该态下服务端必已有非空 defaultPersona，卡名只回显不改写，不得越态顺手改默认卡。
+      // 绝不写 dataRoot / stateRoot / 其他键（settings 未知键会被服务端校验拒绝）。
+      var enableSave = async function (activate) {
+        var scope = readConfigScope();
+        if (!scope || typeof scope.mutate !== "function") {
+          setEnableError({ code: "shiori/ui-unsupported", message: "设置命名空间不可用（configForms 缺席），无法在面板里保存 / 启用；请在宿主插件配置页手动设置。" });
+          return;
+        }
+        if (activate && effectivePersona === "") {
+          setEnableError({ code: "shiori/ui-persona-required", message: "请先填写非空的默认人设卡名，再完成配置并启用。" });
+          return;
+        }
+        var ops = [
+          { op: "set", path: ["mode"], value: "active" },
+          { op: "set", path: ["allowActive"], value: true }
+        ];
+        if (activate) ops.push({ op: "set", path: ["defaultPersona"], value: effectivePersona });
+        // 与选卡 / 工作区默认卡同口径（评审 attempt-3 阻塞 B、attempt-4 阻塞 1）：
+        // mutate 返回 applied=false 或抛错都算未成功——重读快照换 revision 重试
+        // 恰一次（首次结果先落变量，只有 !==true 才再 attempt 一次；第二次仍
+        // !==true 直接报 shiori/ui-enable-conflict，绝无第三次调用）。
+        var attempt = function () {
+          var snap = scope.getSnapshot();
+          if (!snap || snap.status !== "ready" || !snap.value || typeof snap.value !== "object" || snap.revision === undefined || snap.revision === null) {
+            var bad = new Error("设置快照不可用（status=" + String(snap && snap.status) + "）。");
+            bad.code = "shiori/ui-scope";
+            throw bad;
+          }
+          return scope.mutate(ops, snap.revision);
+        };
+        setEnableBusy(true);
+        setEnableError(null);
+        try {
+          // P1#6：CAS 重试改走公共 casMutate（原内联两段 try/catch 已上移为
+          // 模块级唯一实现）；mutate 恰 ≤2 次、conflict 文案 / code / cause
+          // 挂载与原实现逐字等价。
+          await casMutate(attempt, "shiori/ui-enable-conflict", function (ctx) {
+            return "设置刚被其他窗口修改（revision 冲突），已重试一次仍未成功；请再点一次。"
+              + (ctx.lastMessage !== "" ? "（最近错误：" + ctx.lastMessage + "）" : "");
+          }, true);
+          await load(); // 成功后刷新状态卡（configurationState 走向下一态 / configured）
+        } catch (e) {
+          setEnableError({ code: (e && e.code) || "shiori/ui-enable", message: "启用失败：" + ((e && e.message) || String(e)) + causeNoteOf(e) });
+        } finally {
+          setEnableBusy(false);
+        }
+      };
+      // 首帧回填：把当前配置的卡名填进输入框（真实宿主 effect 可执行；合成测试里
+      // effect 不自动跑，由 enableSave 的 effectivePersona 回退逻辑兜底）。
+      useEffect(function () {
+        if (personaDraft === "" && configPersona !== "") setPersonaDraft(configPersona);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      // ── S5：模型下载 ──────────────────────────────────────────────────────
+      // 新 state 一律追加在既有 state 之后（老测试 states 下标不变）：
+      // dlProgress = 本地进度快照（null = 不在本次轮询周期内，显示回落到
+      // diagnostics.semantic.download——面板重开时直接看到服务端在跑的任务）；
+      // manualDirDraft = 报错卡片里「手动指定模型目录」输入框草稿；
+      // dlUiError / copyFeedback = 保存目录失败 / 复制提示词的一次性反馈。
+      var dlProgressState = useState(null);
+      var dlProgress = dlProgressState[0];
+      var setDlProgress = dlProgressState[1];
+      var manualDirState = useState("");
+      var manualDirDraft = manualDirState[0];
+      var setManualDirDraft = manualDirState[1];
+      var dlUiErrorState = useState(null);
+      var dlUiError = dlUiErrorState[0];
+      var setDlUiError = dlUiErrorState[1];
+      var copyFeedbackState = useState(null);
+      var copyFeedback = copyFeedbackState[0];
+      var setCopyFeedback = copyFeedbackState[1];
+      // ── 0.4 S6「卸载并清除数据」危险按钮（新 state 追加在既有 state 之后，
+      // 老测试 states 下标不变）：stage=null 隐藏确认框 / "confirm" 展开；
+      // 二次确认必须输入 dataRoot 原文（逐字符相等），不一致时不发 RPC
+      // （按钮禁用 + 处理函数双重拦截，不依赖任何一种单防线）。
+      var destroyStageState = useState(null);
+      var destroyStage = destroyStageState[0];
+      var setDestroyStage = destroyStageState[1];
+      var destroyDraftState = useState("");
+      var destroyDraft = destroyDraftState[0];
+      var setDestroyDraft = destroyDraftState[1];
+      var destroyBusyState = useState(false);
+      var destroyBusy = destroyBusyState[0];
+      var setDestroyBusy = destroyBusyState[1];
+      var destroyErrorState = useState(null);
+      var destroyError = destroyErrorState[0];
+      var setDestroyError = destroyErrorState[1];
+      var destroyDoneState = useState(null);
+      var destroyDone = destroyDoneState[0];
+      var setDestroyDone = destroyDoneState[1];
+      // 显示口径：本地快照优先（点击后的即时反馈），否则回落服务端诊断——
+      // 关闭面板再打开，任务仍在跑（服务端单飞不随面板走）。
+      var serverDownload = semantic && typeof semantic.download === "object" && semantic.download !== null
+        ? semantic.download : null;
+      var dlView = dlProgress !== null ? dlProgress : serverDownload;
+      var dlRunning = dlView !== null && dlView.running === true;
+      var dlPollingRef = useRef(false);
+      // 轮询循环（不发起新任务）：每轮比对镜像 ref（会话切换/卸载即停），
+      // 与重建轮询同一套 P1-1 纪律。
+      var pollDownloadLoop = async function (sid) {
+        if (dlPollingRef.current) return;
+        dlPollingRef.current = true;
+        try {
+          // P1#6：轮询骨架改走公共 pollStatus（与重建轮询同一唯一实现）；
+          // alive / 终态判定 / 进度字段映射 / 错误文案按原样留在回调里，行为等价。
+          await pollStatus({
+            dsh: props.dsh,
+            sid: sid,
+            intervalMs: DOWNLOAD_POLL_MS,
+            alive: function () { return pollAliveRef.current && sidRef.current === sid; },
+            extract: function (fresh) {
+              return fresh && fresh.diagnostics && fresh.diagnostics.semantic
+                && fresh.diagnostics.semantic.download ? fresh.diagnostics.semantic : null;
+            },
+            setStatus: setStatus,
+            onSample: function (semantic) {
+              var dl = semantic.download;
+              setDlProgress({
+                running: dl.running === true,
+                phase: dl.phase || "idle",
+                percent: dl.percent !== undefined ? dl.percent : null,
+                loadedBytes: dl.loadedBytes !== undefined ? dl.loadedBytes : 0,
+                totalBytes: dl.totalBytes !== undefined ? dl.totalBytes : 0,
+                filesDone: dl.filesDone !== undefined ? dl.filesDone : 0,
+                filesTotal: dl.filesTotal !== undefined ? dl.filesTotal : 0,
+                source: dl.source || null,
+                error: dl.error || null,
+                code: dl.code || null,
+                installHint: dl.installHint || null,
+              });
+              return dl.running !== true;
+            },
+            onError: function (e) {
+              setDlProgress({
+                running: false, phase: "error", percent: null, loadedBytes: 0, totalBytes: 0,
+                error: "进度查询失败：" + ((e && e.message) ? String(e.message) : String(e)),
+              });
+            },
+          });
+        } finally {
+          dlPollingRef.current = false;
+        }
+      };
+      var startDownload = async function () {
+        if (!semantic || !semantic.enabled || dlRunning) return;
+        var sid = props.sessionId;
+        setDlProgress({
+          running: true, phase: "starting", percent: null, loadedBytes: 0, totalBytes: 0,
+          filesDone: 0, filesTotal: 0, source: null, error: null, installHint: null,
+        });
+        try {
+          await props.dsh.call("executeTool", sid, { name: SEMANTIC_DOWNLOAD_TOOL, args: {} });
+        } catch (e) {
+          // 只读态 / 未开启语义 / 服务端拒绝：中文错误 + 可重试（按钮回到可点）。
+          setDlProgress({
+            running: false, phase: "error", percent: null, loadedBytes: 0, totalBytes: 0,
+            error: (e && e.message) ? String(e.message) : String(e), installHint: null,
+          });
+          return;
+        }
+        await pollDownloadLoop(sid);
+      };
+      var cancelDownload = async function () {
+        if (!dlRunning) return;
+        var sid = props.sessionId;
+        try {
+          await props.dsh.call("executeTool", sid, { name: SEMANTIC_DOWNLOAD_TOOL, args: { cancel: true } });
+        } catch (e) {
+          setDlUiError("取消失败：" + ((e && e.message) ? String(e.message) : String(e)));
+          return;
+        }
+        // 取消是协作式的：任务在服务端下一个检查点收场，轮询循环随后读到
+        // running=false（cancelled 相）并结束；这里不本地猜终态。
+      };
+      // 面板重开时任务仍在跑：服务端 running 翻真即接续轮询（不发起新任务）。
+      // 依赖是服务端 running 布尔（轮询中的 setStatus 重渲染不会重复触发）。
+      var serverDlRunning = serverDownload !== null && serverDownload.running === true;
+      useEffect(function () {
+        if (serverDlRunning && semantic && semantic.enabled) pollDownloadLoop(props.sessionId);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [serverDlRunning]);
+      // 「手动指定模型目录」：把已备好的缓存根写进 semantic.local.cacheDir
+      //（单键 read-modify-write，CAS false/抛错重试恰一次，与启用卡同口径）。
+      var saveManualDir = async function () {
+        var dir = String(manualDirDraft ?? "").trim();
+        if (dir === "") {
+          setDlUiError("请先填写非空的模型缓存目录。");
+          return;
+        }
+        var scope = readConfigScope();
+        if (!scope || typeof scope.mutate !== "function") {
+          setDlUiError("设置命名空间不可用（configForms 缺席），无法在面板里保存目录；请在宿主插件配置页手动设置 semantic.local.cacheDir。");
+          return;
+        }
+        var ops = [{ op: "set", path: ["semantic", "local", "cacheDir"], value: dir }];
+        var attempt = function () {
+          var snap = scope.getSnapshot();
+          if (!snap || snap.status !== "ready" || !snap.value || typeof snap.value !== "object" || snap.revision === undefined || snap.revision === null) {
+            var bad = new Error("设置快照不可用（status=" + String(snap && snap.status) + "）。");
+            bad.code = "shiori/ui-scope";
+            throw bad;
+          }
+          return scope.mutate(ops, snap.revision);
+        };
+        setDlUiError(null);
+        try {
+          // P1#6：CAS 重试改走公共 casMutate；并补挂标准 cause（0.4-REVIEW
+          // §2.4 问题 6 点名：B2 范围外的第四处补齐口径，conflict 文案不变，
+          // catch 侧不读 cause，用户可见文案零变化）。
+          await casMutate(attempt, "shiori/ui-dl-conflict", function (ctx) {
+            return "设置刚被其他窗口修改（revision 冲突），已重试一次仍未成功；请再点一次。"
+              + (ctx.lastMessage !== "" ? "（最近错误：" + ctx.lastMessage + "）" : "");
+          }, true);
+          await load(); // 保存成功刷新状态卡（新目录的 modelDir / modelInstalled 即时可见）
+        } catch (e) {
+          setDlUiError("保存目录失败：" + ((e && e.message) || String(e)));
+        }
+      };
+      var copyInstallHint = async function () {
+        var text = dlView && dlView.installHint ? String(dlView.installHint) : "";
+        if (text === "") {
+          setCopyFeedback("暂无安装提示词可复制。");
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopyFeedback("已复制到剪贴板。");
+        } catch (e) {
+          setCopyFeedback("复制失败：" + ((e && e.message) ? String(e.message) : String(e)) + "（请手动选择文本复制）");
+        }
+      };
+      // ── 0.4 S6「卸载并清除数据」：二次确认（输入 dataRoot 原文）→ destroyData。
+      // 与命令行 dsh-shiori-admin destroy 走同一个服务端 purge 模块，行为一致：
+      // 只删 dataRoot，stateRoot 与 DSH 配置不受影响；失败如实显示错误码。
+      var destroyRoot = dataRootEcho !== "—" && dataRootEcho !== "" ? dataRootEcho : null;
+      var startDestroyConfirm = function () {
+        if (destroyBusy) return;
+        setDestroyError(null);
+        setDestroyDone(null);
+        setDestroyDraft("");
+        setDestroyStage("confirm");
+      };
+      var cancelDestroy = function () {
+        if (destroyBusy) return;
+        setDestroyStage(null);
+        setDestroyDraft("");
+        setDestroyError(null);
+      };
+      var runDestroy = async function () {
+        if (!destroyRoot || destroyBusy) return;
+        // 二次确认硬闸：输入与 dataRoot 原文逐字符不等时，这里直接返回——
+        // 绝不发 RPC（按钮 disabled 只是第一道，处理函数这道不依赖 UI 行为）。
+        if (String(destroyDraft) !== destroyRoot) return;
+        var sid = props.sessionId;
+        setDestroyBusy(true);
+        setDestroyError(null);
+        try {
+          await props.dsh.call("destroyData", sid, { confirm: destroyRoot });
+          setDestroyStage(null);
+          setDestroyDraft("");
+          setDestroyDone("已焚毁 dataRoot（" + destroyRoot + "）。只删 dataRoot，stateRoot 与 DSH 配置不受影响。插件仍在运行，重启后（或下一次访问数据）会用空目录重建 dataRoot。");
+          await load(); // 成功后刷新状态页（根目录已清空，占用等回零）
+        } catch (e) {
+          // 失败必须显示错误码（如 INVALID_INPUT / UNSUPPORTED / NOT_CONFIGURED）
+          setDestroyError({
+            code: (e && e.code) || "shiori/ui-destroy",
+            message: "清除失败：" + ((e && e.message) || String(e)),
+          });
+        } finally {
+          setDestroyBusy(false);
+        }
+      };
       return h("div", { className: "dshi_card" },
         h("div", { className: "dshi_row" },
           h("span", { className: "dshi_cardTitle" }, "运行状态"),
@@ -1115,6 +1657,48 @@ window.__ModuleLoader__.load({
                 "需要先完成配置，记忆才能工作（",
                 "needs-configuration",
                 "）")
+            : null,
+          (needsPersona || needsActive) ? h("div", { className: "dshi_card", "data-role": "enable-card" },
+            h("div", { className: "dshi_row" },
+              h("span", { className: "dshi_cardTitle" }, needsPersona ? "完成初始配置：默认人设卡" : "启用记忆"),
+              h("span", { className: "dshi_badge dshi_badgeWarn" }, configurationState)),
+            h("div", { className: "dshi_hint" }, needsPersona
+              ? "记忆还没有默认人设卡：填一个卡名（例如你的项目代号），点「完成配置并启用」一次写好配置并启用记忆，下一轮对话即注入。"
+              : "人设卡已配置、记忆还是 shadow 只读。确认下方根路径无误后点「启用记忆」，下一轮对话即注入记忆。"),
+            h("div", { className: "dshi_items" },
+              h("div", { className: "dshi_item dshi_mono", title: dataRootEcho }, "数据根 dataRoot: " + dataRootEcho),
+              h("div", { className: "dshi_item dshi_mono", title: stateRootEcho }, "状态根 stateRoot: " + stateRootEcho),
+              h("div", { className: "dshi_item dshi_mono" }, "根来源 rootsSource: " + rootsSourceEcho),
+              h("div", { className: "dshi_hint" }, "以上根路径来自服务端解析（只读回显确认，面板不会把它们写进配置）。")),
+            configScopeNow ? null : h("div", { className: "dshi_hint" },
+              "设置命名空间不可用（configForms 缺席）：无法在此保存 / 启用，请用宿主插件配置页。"),
+            h("label", { className: "dshi_label" }, "默认人设卡名",
+              h("input", {
+                className: "dshi_input",
+                // 草稿为空时回显当前配置值（needs-active 阶段服务端必已有卡名）。
+                value: personaDraft !== "" ? personaDraft : configPersona,
+                placeholder: "例如 amber",
+                // needs-active 态卡名只回显不改写：启用按钮只写 mode/allowActive，
+                // 不在此态顺手改默认卡（越出该状态该做的事）。快照还没就绪
+                //（configPersona 为空）时不锁死输入，避免只读+禁用死锁。
+                readOnly: needsActive && configPersona !== "",
+                onChange: function (event) { setPersonaDraft(event.target.value); }
+              })),
+            ErrorBox(enableError),
+            h("div", { className: "dshi_row" },
+              needsPersona ? h("button", {
+                className: "dshi_btn dshi_btnPrimary",
+                disabled: enableBusy || personaMissing || !configScopeNow,
+                onClick: function () { enableSave(true); }
+              }, enableBusy ? "配置并启用中…" : "完成配置并启用") : null,
+              needsActive ? h("button", {
+                className: "dshi_btn dshi_btnPrimary",
+                // needs-active 不写卡名，卡名缺失不该禁用启用（快照未就绪的
+                // 窄窗口也不死锁，评审 attempt-3 非阻塞）。
+                disabled: enableBusy || !configScopeNow,
+                onClick: function () { enableSave(false); }
+              }, enableBusy ? "启用中…" : "启用记忆") : null,
+              personaMissing && needsPersona ? h("span", { className: "dshi_hint" }, "先填写非空卡名。") : null))
             : null,
           h("div", { className: "dshi_items" },
             statusRow("运行模式", statusModeText(status.mode),
@@ -1137,30 +1721,147 @@ window.__ModuleLoader__.load({
                 className: "dshi_badge" + (on ? "" : " dshi_badgeDim")
               }, (STATUS_CAPABILITY_LABELS[key] || key) + "：" + statusCapabilityText(capabilities[key]));
             }))) : null,
-          // F1b：语义召回只读状态 + 重建向量（数据全部来自 diagnostics.semantic；
-          // 旧服务端没有该字段时整块不渲染，不报错）。
+          // F1b：语义召回只读状态 + 重建向量；S5：+ 下载模型（数据全部来自
+          // diagnostics.semantic；旧服务端没有该字段时整块不渲染，不报错）。
           semantic ? h("div", { className: "dshi_card" },
             h("div", { className: "dshi_row" },
               h("span", { className: "dshi_cardTitle" }, "语义召回"),
               h("span", { className: "dshi_badge" + (semantic.enabled ? "" : " dshi_badgeDim") },
                 semantic.enabled ? "已开启" : "未开启"),
-              semantic.enabled
-                ? h("button", {
-                    className: "dshi_btn",
-                    onClick: startRebuild,
-                    disabled: rebuildRunning
-                  }, rebuildRunning ? "重建中…" : "重建向量")
+              semantic.enabled ? h("div", { className: "dshi_row" },
+                // S5：未安装模型时「下载模型」高亮（主按钮）——干净机器的第一入口。
+                h("button", {
+                  className: semantic.modelInstalled === false && !dlRunning
+                    ? "dshi_btn dshi_btnPrimary" : "dshi_btn",
+                  onClick: startDownload,
+                  disabled: dlRunning
+                }, dlRunning ? "下载中…" : "下载模型"),
+                dlRunning ? h("button", {
+                  className: "dshi_btn dshi_btnDanger",
+                  onClick: cancelDownload
+                }, "取消") : null,
+                h("button", {
+                  className: "dshi_btn",
+                  onClick: startRebuild,
+                  disabled: rebuildRunning
+                }, rebuildRunning ? "重建中…" : "重建向量"))
                 : null),
             h("div", { className: "dshi_items" },
+              statusRow("模型目录", semantic.modelDir ? String(semantic.modelDir) : "—",
+                "模型跟数据根走（<dataRoot>/models）：升级插件、重装包都不用重下"),
+              statusRow("模型文件", semantic.modelInstalled === true ? "已安装"
+                : (semantic.modelInstalled === false ? "未安装（点「下载模型」获取）" : "—")),
+              // S5：下载进度（一条 pipeline 拉多个文件，进度由服务端按 total 字节
+              // 加权聚合、按 file 去重；这里只如实显示快照）。
+              (dlView && dlView.phase && dlView.phase !== "idle" && dlView.phase !== "error")
+                ? h(fragment, null,
+                    statusRow("下载进度", downloadPhaseText(dlView)),
+                    h("div", {
+                      className: "dshi_bar",
+                      role: "progressbar",
+                      "aria-label": "模型下载进度",
+                      "aria-valuemin": 0,
+                      "aria-valuemax": 100,
+                      "aria-valuenow": typeof dlView.percent === "number" ? dlView.percent : 0
+                    },
+                      h("div", {
+                        className: "dshi_barFill",
+                        style: { width: (typeof dlView.percent === "number" ? dlView.percent : 0) + "%" }
+                      })))
+                : null,
               statusRow("提供方", semanticProviderText(semantic), "provider=" + String(semantic.provider != null ? semantic.provider : "—")),
               statusRow("就绪状态", semanticReadyText(semantic)),
               statusRow("已建向量数", semantic.vectors === null || semantic.vectors === undefined ? "—" : String(semantic.vectors) + " 张卡片"),
               statusRow("重建进度", rebuildPhaseText(semantic, rebuildProgress),
                 rebuildProgress !== null && rebuildProgress.phase === "error" ? "可再次点击「重建向量」重试（增量续传，已完成的卡片不会重算）" : null),
+              dlView && dlView.phase === "done"
+                ? h("div", { className: "dshi_ok" }, "模型已就绪（已通过维度与文件校验）；点「重建向量」建立/更新索引。")
+                : null,
+              dlView && dlView.phase === "cancelled"
+                ? h("div", { className: "dshi_hint" }, "下载已取消，状态回到未就绪；需要时可再次点「下载模型」。")
+                : null,
               semantic.lastError
                 ? h("div", { className: "dshi_error" }, "上次召回错误：" + String(semantic.lastError))
-                : null))
+                : null),
+            // S5：双源都失败的报错卡片——说明原因、手动目录输入框、可一键复制的
+            // 安装提示词（含规范目录写法；URL 由服务端 installHint 下发）。
+            dlView && dlView.phase === "error"
+              ? h("div", { className: "dshi_error", "data-role": "download-error" },
+                  h("div", null, "模型下载失败：" + (dlView.error
+                    ? String(dlView.error)
+                    : "两个下载源都不可达。")),
+                  h("div", { className: "dshi_hint" },
+                    // S5 复审 P1 + 0.4 收账遗留 1：归因文案按服务端下发的 code 分
+                    // 三支（本地常量与语义层错误码同字符串）——缺依赖 / 依赖已装
+                    // 但加载失败 / 其余（网络）。加载失败支明确「不是网络问题」，
+                    // 不复用缺依赖那句（装依赖没用）。
+                    dlView.code === "DOWNLOAD_DEPENDENCY_MISSING"
+                      ? "这是插件缺可选依赖 @huggingface/transformers（不是网络问题）：在插件目录执行 npm i @huggingface/transformers 后重试，或用下方任一方式手动安装："
+                      : dlView.code === "DOWNLOAD_RUNTIME_LOAD_FAILED"
+                        ? "可选依赖已安装但加载失败（不是网络问题）：单纯 npm i @huggingface/transformers 不一定解决问题，请按上方错误信息处理，或用下方任一方式手动安装："
+                        : "两个下载源都失败通常是网络原因（镜像 / 官方源均不可达，或代理未开）。请检查网络后点「下载模型」重试，或用下方任一方式手动安装："),
+                  h("div", { className: "dshi_hint" },
+                    "也可以手动指定已备好的模型缓存目录（目录结构必须是 <缓存根>/<org>/<model>/，保存后重新点「下载模型」即可，已存在的文件不会重下）："),
+                  h("div", { className: "dshi_row" },
+                    h("input", {
+                      className: "dshi_input",
+                      value: manualDirDraft,
+                      placeholder: "例如 /data/hf-cache（其下有 Xenova/bge-small-zh-v1.5）",
+                      onChange: function (event) { setManualDirDraft(event.target.value); }
+                    }),
+                    h("button", {
+                      className: "dshi_btn",
+                      onClick: saveManualDir,
+                      disabled: !configScopeNow
+                    }, "保存目录")),
+                  configScopeNow ? null
+                    : h("div", { className: "dshi_hint" },
+                        "设置命名空间不可用（configForms 缺席）：无法在此保存目录，请在宿主插件配置页设置 semantic.local.cacheDir。"),
+                  ErrorBox(dlUiError),
+                  dlView.installHint ? h("pre", { className: "dshi_pre" }, String(dlView.installHint)) : null,
+                  dlView.installHint ? h("div", { className: "dshi_row" },
+                    h("button", { className: "dshi_btn", onClick: copyInstallHint }, "复制安装提示词"),
+                    copyFeedback ? h("span", { className: "dshi_hint" }, copyFeedback) : null)
+                    : null)
+              : null)
             : null,
+          // 0.4 S6「卸载并清除数据」危险按钮：与命令行 destroy 走同一 purge
+          // 模块；二次确认必须输入 dataRoot 原文（不是点两下确认），失败如实
+          // 显示错误码。dataRoot 未知（diagnostics 缺席）时整卡不渲染。
+          destroyRoot ? h("div", { className: "dshi_card", "data-role": "destroy-data-card" },
+            h("div", { className: "dshi_row" },
+              h("span", { className: "dshi_cardTitle" }, "卸载并清除数据"),
+              destroyStage === null ? h("button", {
+                className: "dshi_btn dshi_btnDanger",
+                disabled: destroyBusy,
+                onClick: startDestroyConfirm,
+              }, "卸载并清除数据") : null),
+            h("div", { className: "dshi_hint" },
+              "只删 dataRoot（" + destroyRoot + "）：stateRoot 与 DSH 配置不受影响。删除后全部记忆数据清空，不可恢复。"),
+            destroyDone ? h("div", { className: "dshi_ok", "data-role": "destroy-done" }, destroyDone) : null,
+            destroyError ? h("div", { className: "dshi_error", "data-role": "destroy-error" },
+              destroyError.message + "（code: " + String(destroyError.code) + "）") : null,
+            destroyStage === "confirm" ? h("div", { className: "dshi_confirm", "data-role": "destroy-confirm" },
+              h("div", null, "危险操作：将永久删除整个 dataRoot 的全部内容（目录本身一并移除）。只删 dataRoot，stateRoot 与 DSH 配置不受影响。"),
+              h("div", { className: "dshi_hint" }, "请输入 dataRoot 原文以确认（逐字符一致才能执行）："),
+              h("input", {
+                className: "dshi_input",
+                value: destroyDraft,
+                placeholder: destroyRoot,
+                onChange: function (event) { setDestroyDraft(event.target.value); }
+              }),
+              h("div", { className: "dshi_row" },
+                h("button", {
+                  className: "dshi_btn dshi_btnDanger",
+                  disabled: destroyBusy || destroyDraft !== destroyRoot,
+                  onClick: runDestroy
+                }, destroyBusy ? "清除中…" : "确认清除"),
+                h("button", {
+                  className: "dshi_btn",
+                  disabled: destroyBusy,
+                  onClick: cancelDestroy
+                }, "取消"))) : null,
+          ) : null,
           h("details", null,
             h("summary", { className: "dshi_hint" }, "技术细节（原始字段，一般不用看）"),
             h("div", { className: "dshi_items" },
@@ -1990,6 +2691,35 @@ window.__ModuleLoader__.load({
       return adj;
     }
 
+    // ── 0.4-S7 两级视图（闪回图谱方案 B）：首屏只画簇圆，点开进簇再画节点与连线 ──
+    // 簇数据来自 getGraph level=1（clusters，服务端已按 count 降序、同数按 key 字典序）。
+    // 单卡簇（count===1）降级成一个点：不画簇圆边框；空簇（count<=0）不渲染。
+    var CLUSTER_DOT_RADIUS = 5;
+    function clusterRadiusOf(count) {
+      return Math.round(18 + Math.min(30, 4 * Math.sqrt(Math.max(1, count))));
+    }
+    // 确定性网格布点：按画布等分，不随机、不迭代（簇圆不参与力导向）。
+    function clusterPositionsOf(clusters) {
+      var positions = {};
+      var count = Array.isArray(clusters) ? clusters.length : 0;
+      if (count === 0) return positions;
+      var cols = Math.max(1, Math.ceil(Math.sqrt(count)));
+      var rows = Math.ceil(count / cols);
+      for (var i = 0; i < count; i++) {
+        var key = clusters[i] && clusters[i].key;
+        if (key === undefined || key === null) continue;
+        positions[String(key)] = {
+          x: GRAPH_VIEW_W * ((i % cols) + 1) / (cols + 1),
+          y: GRAPH_VIEW_H * (Math.floor(i / cols) + 1) / (rows + 1)
+        };
+      }
+      return positions;
+    }
+    // 簇圆配色与节点实体聚类同源（同一主实体同一色），未分类走中性色。
+    function clusterStrokeOf(key) {
+      return key === "__unclustered__" ? NEUTRAL_FILL : CLUSTER_PALETTE[clusterIndexOf(String(key))];
+    }
+
     function GraphTab(props) {
       var state = useState(null);
       var graph = state[0];
@@ -2018,6 +2748,18 @@ window.__ModuleLoader__.load({
       var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
       var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
       tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
+      // 0.4-S7 两级视图：null = 首屏簇圆（getGraph level=1）；字符串 = 已进簇
+      // （getGraph level=2，值是 cluster key）。新 state 追加在既有 state 之后。
+      var activeClusterState = useState(null);
+      var activeCluster = activeClusterState[0];
+      var setActiveCluster = activeClusterState[1];
+      // #9a026e：getGraph 在途标记。进簇/返回那一瞬间 graph 还是上一次响应（旧
+      // level=1 数据），过渡期不能拿旧图渲染空态文案——渲染处按本标记走「加载中…」，
+      // focusMiss 也不判 miss。初值 false：首帧 graph 本就是 null，走既有「加载中…」
+      // 分支；首个 sessionId effect 里的 load() 会同步把它拉起。
+      var graphLoadingState = useState(false);
+      var graphLoading = graphLoadingState[0];
+      var setGraphLoading = graphLoadingState[1];
       var dragRef = useRef(null);
       var wrapRef = useRef(null);
       // F7：只读态（另一实例在写）写按钮置灰；F4：时间线跳转目标（type 必须是 spark）。
@@ -2058,20 +2800,75 @@ window.__ModuleLoader__.load({
           if (typeof element.removeEventListener === "function") element.removeEventListener("wheel", onWheel);
         };
       }, [graph]);
-      var load = async function () {
+      // 0.4-S7：按视图层级拉取——首屏 level=1（只拿簇），进簇 level=2（簇内节点与边），
+      // 时间线跳转 focusTarget 在途时走不带参数的全量兼容路径（跳转选中逻辑依赖节点）。
+      // candidates 页的 id→title 映射继续走它自己的全量调用，与本函数无关。
+      var load = async function (requestedCluster) {
         var origin = tabGuard.mark();
+        setGraphLoading(true); // #9a026e：请求在途，过渡期渲染走「加载中…」
         setError(null);
         try {
-          var result = await props.dsh.call("getGraph", props.sessionId, {});
+          var clusterKey = requestedCluster === undefined ? activeCluster : requestedCluster;
+          var payload = focusTarget ? {} : (clusterKey ? { level: 2, cluster: clusterKey } : { level: 1 });
+          var result = await props.dsh.call("getGraph", props.sessionId, payload);
           if (tabGuard.isStale(origin)) return; // P1-2：会话已切换，丢弃旧响应
           setGraph(result);
         } catch (e) {
           if (tabGuard.isStale(origin)) return;
           setGraph(null); if (!reportSessionUnavailable(e, props, setError)) setError(e);
+        } finally {
+          // #9a026e：请求落地（成功或失败）清除在途标记。会话已切换（isStale）时
+          // 不清——旧会话的迟到响应没资格动新会话 load() 刚设的加载态，否则 A 的
+          // 响应会把 B 的「加载中…」误关，A 的加载态也由此不带进 B。
+          if (!tabGuard.isStale(origin)) setGraphLoading(false);
         }
       };
-      useEffect(function () { load(); }, [props.sessionId]);
+      // 进簇：复位选中与视口，再拉 level=2（显式传 key，避免闭包读到旧 state）。
+      var enterCluster = function (cluster) {
+        var key = cluster && typeof cluster.key === "string" && cluster.key !== "" ? cluster.key : null;
+        if (!key) return;
+        setActiveCluster(key);
+        setSelected(null);
+        setView({ x: 0, y: 0, k: 1 });
+        load(key);
+      };
+      // 返回首屏：复位选中与视口，重拉 level=1。
+      var backToAll = function () {
+        setActiveCluster(null);
+        setSelected(null);
+        setView({ x: 0, y: 0, k: 1 });
+        load(null);
+      };
+      // P2（rework）：切会话时两级视图状态一并复位——旧会话的簇状态（activeCluster）
+      // 不能带进新会话（否则会拿 A 的簇名请求 B 的 level=2，拿到空簇还挂着旧面包屑）。
+      // 复位后重拉 level=1。挂载首跑时三处复位都是空转（初值即 null）。
+      useEffect(function () {
+        setActiveCluster(null);
+        setSelected(null);
+        setGraph(null);
+        setGraphLoading(false); // #9a026e：切会话复位加载标记，别把 A 会话的加载态带进 B（随后 load(null) 重新拉起）
+        load(null);
+      }, [props.sessionId]);
       var normalized = useMemo(function () { return graph ? normalizeGraph(graph) : { nodes: [], edges: [] }; }, [graph]);
+      // 0.4-S7 簇视图派生：level=1 响应带 clusters（无 nodes/edges）。空簇不渲染；
+      // 簇布点是确定性网格（无随机无迭代），只在簇集变化时重算。
+      var clusterView = !focusTarget && activeCluster === null && graph !== null && Array.isArray(graph.clusters);
+      var visibleClusters = clusterView
+        ? graph.clusters.filter(function (c) { return c && Number(c.count) > 0; })
+        : [];
+      var clusterPositions = useMemo(function () {
+        return clusterView ? clusterPositionsOf(visibleClusters) : {};
+        // eslint 禁：graph 引用稳定即可，簇布点不需要细粒度依赖
+      }, [clusterView ? graph : null]);
+      // level=2 面包屑簇名：优先用响应里的 cluster.label（未分类簇给固定文案）。
+      var clusterLabel = activeCluster !== null && graph && graph.cluster && typeof graph.cluster.label === "string"
+        ? graph.cluster.label
+        : activeCluster;
+      // P4（rework）：level=2 簇为空（count 0，未知簇/空簇）是「簇暂无卡」，
+      // 不是「scope 无卡」——两者空态文案要区分。
+      var emptyClusterView = activeCluster !== null && graph !== null
+        && graph.cluster !== undefined && graph.cluster !== null
+        && Number(graph.cluster.count) === 0;
       // 力导向布局：normalized 不变就不重算。邻居表只服务 hover 高亮。
       var layout = useMemo(function () { return forceLayout(normalized.nodes, normalized.edges); }, [normalized]);
       var adjacency = useMemo(function () { return adjacencyOf(normalized); }, [normalized]);
@@ -2092,6 +2889,14 @@ window.__ModuleLoader__.load({
       useEffect(function () {
         if (!focusTarget || consumedJumpSeq.current === focusTarget.seq) return;
         if (graph === null) return;
+        // P3（rework）：跳转到达时若还挂在簇视图，先复位回全量视图再消费——
+        // 簇视图的节点集不全（面包屑还挂着旧簇名，目标卡在别的簇会误判 miss）。
+        // 复位后 load() 因 focusTarget 在途走全量兼容路径，图到货后 deps 重跑再消费。
+        if (activeCluster !== null) {
+          setActiveCluster(null);
+          load();
+          return;
+        }
         consumedJumpSeq.current = focusTarget.seq;
         var found = null;
         for (var i = 0; i < normalized.nodes.length; i++) {
@@ -2100,7 +2905,9 @@ window.__ModuleLoader__.load({
         setSelected(found);
       }, [focusTarget && focusTarget.seq, normalized]);
       var jumpConsumed = Boolean(focusTarget && consumedJumpSeq.current === focusTarget.seq);
-      var focusMiss = Boolean(focusTarget && !jumpConsumed && graph !== null
+      // #9a026e：graphLoading 在途时 graph 还是上一次响应（旧数据），不能拿它判
+      // miss——否则进簇过渡期会先误弹「可能已删除或已归档」（卡片其实没丢）。
+      var focusMiss = Boolean(focusTarget && !jumpConsumed && graph !== null && !graphLoading
         && !normalized.nodes.some(function (n) { return String(n.id) === focusTarget.id; }));
       var onPointerDown = function (event) {
         dragRef.current = { startX: event.clientX, startY: event.clientY, originX: view.x, originY: view.y, moved: false };
@@ -2142,11 +2949,16 @@ window.__ModuleLoader__.load({
       return h("div", { className: "dshi_card" },
         h("div", { className: "dshi_row" },
           h("span", { className: "dshi_cardTitle" }, "Spark 图谱（active）"),
-          h("button", { className: "dshi_btn", onClick: load }, "刷新"),
+          // 0.4-S7 面包屑「全部 › 簇名」+ 返回：进簇后可见，返回复位回首屏簇圆。
+          h("button", { className: "dshi_btn", onClick: backToAll, disabled: activeCluster === null }, "返回"),
+          h("span", { className: "dshi_hint" }, activeCluster !== null ? "全部 › " + clusterLabel : "全部"),
+          h("button", { className: "dshi_btn", onClick: function () { load(); } }, "刷新"),
           h("button", { className: "dshi_btn", onClick: function () { zoomBy(1.2); } }, "放大 +"),
           h("button", { className: "dshi_btn", onClick: function () { zoomBy(1 / 1.2); } }, "缩小 −"),
           h("button", { className: "dshi_btn", onClick: function () { setView({ x: 0, y: 0, k: 1 }); } }, "复位")),
-        h("div", { className: "dshi_legend" },
+        clusterView ? h("div", { className: "dshi_legend" },
+          h("span", { className: "dshi_hint" }, "簇圆大小 = 簇内卡片数；单卡簇显示为点；点击簇圆进簇查看卡片与连线"))
+          : h("div", { className: "dshi_legend" },
           h("span", null, h("i", { className: "dshi_dot", style: { background: "transparent", border: "2px solid var(--dsw-alias-state-success-primary,#1a7f37)" } }), "evergreen"),
           h("span", null, h("i", { className: "dshi_dot", style: { background: "transparent", border: "2px solid var(--dsw-alias-state-business-primary,#3964fe)" } }), "ephemeral"),
           h("span", null, h("i", { className: "dshi_dot", style: { background: "transparent", border: "2px solid var(--dsw-alias-label-tertiary,#8b93a1)" } }), "非 active"),
@@ -2155,7 +2967,57 @@ window.__ModuleLoader__.load({
         ErrorBox(error),
         focusMiss ? h("div", { className: "dshi_roHint" }, "时间线跳转：卡片「" + shortId(focusTarget.id) + "」不在当前图谱（可能已删除或已归档）。") : null,
         ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
-        normalized.nodes.length === 0 && !error ? h("div", { className: "dshi_loading" }, graph ? "当前 scope 无 active 卡" : "加载中…") : null,
+        clusterView && visibleClusters.length === 0 && !error
+          ? h("div", { className: "dshi_loading" }, graph ? "当前 scope 无 active 卡" : "加载中…") : null,
+        clusterView && visibleClusters.length > 0 ? h("div", {
+          className: "dshi_graphWrap",
+          ref: wrapRef,
+          onPointerDown: onPointerDown,
+          onPointerMove: onPointerMove,
+          onPointerUp: onPointerUp,
+          onPointerLeave: onPointerUp
+        },
+          h("svg", { className: "dshi_graphSvg", viewBox: "0 0 " + GRAPH_VIEW_W + " " + GRAPH_VIEW_H },
+            h("g", { transform: "translate(" + view.x + "," + view.y + ") scale(" + view.k + ")" },
+              visibleClusters.map(function (cluster) {
+                var position = clusterPositions[String(cluster.key)] || { x: GRAPH_VIEW_W / 2, y: GRAPH_VIEW_H / 2 };
+                var count = Number(cluster.count) > 0 ? Number(cluster.count) : 0;
+                var isDot = count === 1;
+                var radius = isDot ? CLUSTER_DOT_RADIUS : clusterRadiusOf(count);
+                var color = clusterStrokeOf(cluster.key);
+                return h("g", {
+                  key: String(cluster.key),
+                  className: "dshi_graphNode",
+                  // C8 同款键盘可达：Tab 聚焦、Enter/Space 进簇。
+                  tabIndex: 0,
+                  role: "button",
+                  "aria-label": cluster.label + "：" + count + " 张卡片，点击进簇",
+                  onPointerUp: function () { enterCluster(cluster); },
+                  onKeyDown: function (event) {
+                    if (!event) return;
+                    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+                    if (typeof event.preventDefault === "function") event.preventDefault();
+                    enterCluster(cluster);
+                  }
+                },
+                  h("circle", {
+                    cx: position.x, cy: position.y, r: radius,
+                    // 单卡簇降级为点：只画填充、不画簇圆边框；普通簇圆大小按 count。
+                    style: isDot
+                      ? { fill: color, fillOpacity: 0.4, stroke: "none" }
+                      : { fill: color, fillOpacity: 0.15, stroke: color, strokeWidth: 2 }
+                  }),
+                  h("text", { className: "dshi_nodeLabel", x: position.x, y: position.y + radius + 14, textAnchor: "middle" },
+                    h("title", null, cluster.label + "（" + count + " 张）"), cluster.label),
+                  h("text", { className: "dshi_nodeLabel", x: position.x, y: position.y + radius + 30, textAnchor: "middle" }, count + " 张"));
+              }))))
+        : null,
+        !clusterView && emptyClusterView && !error
+          ? h("div", { className: "dshi_loading" }, "该簇（" + clusterLabel + "）暂无卡片") : null,
+        // #9a026e：getGraph 在途（graphLoading）一律显示「加载中…」，过渡期不闪
+        // 上一份响应（旧 level=1）的「当前 scope 无 active 卡」假空态。
+        !clusterView && !emptyClusterView && normalized.nodes.length === 0 && !error
+          ? h("div", { className: "dshi_loading" }, graphLoading ? "加载中…" : (graph ? "当前 scope 无 active 卡" : "加载中…")) : null,
         // C3 降级提示：超上限改用圆形静布（不再跑 O(n²) 力导向），如实告知用户。
         normalized.nodes.length > FORCE_LAYOUT_MAX_NODES ? h("div", { className: "dshi_hint" },
           "节点数 " + normalized.nodes.length + " 超过力导向布局上限（" + FORCE_LAYOUT_MAX_NODES + "），已改用圆形静布以保证面板不冻结；要恢复精细布局请缩小 scope 或归档旧卡后刷新。") : null,
@@ -2587,11 +3449,9 @@ window.__ModuleLoader__.load({
     // （U6 收尾：legacy 主题概念整体删除——数据层第一批起不再产生 legacy 行，
     //  isLegacyTopicRow / LEGACY_TOPIC_UPDATED 及各处过滤、提示均为死分支，已清。
     //  0.3 起合并流程裁撤：mergeBodyDraft / validateMergeFormLocal /
-    //  validateOrganizeProposalLocal / proposalSkeleton 一并删除。）
-    function topicRevisionPrefix(token) {
-      var text = String(token ?? "");
-      return text.length > 28 ? text.slice(0, 28) + "…" : text;
-    }
+    //  validateOrganizeProposalLocal / proposalSkeleton 一并删除。
+    //  0.4 S4 起专题行的 rev 前缀展示也随脱敏移除（topicRevisionPrefix 删除），
+    //  机器串整体收敛进 title 属性，见上方 topicFriendlyDay / topicMachineText。）
     // Q-B：候选/计划脏数据的人话错误（保留原 code 便于排查）。
     // U5：服务端原文不再拼进 message 顶大红字——放 detail 字段，ErrorBox 收进
     // 默认折叠的 details。0.3 起本页只做遗忘、不再有「分析整理候选」按钮：
@@ -2769,6 +3629,45 @@ window.__ModuleLoader__.load({
       var searchState = useState("");
       var search = searchState[0];
       var setSearch = searchState[1];
+      // ── S3.4 分组管理（0.4）：组清单走 group_manage 工具（list/create/update/delete），
+      // 不新开后端接口。新 state 一律追加在既有 state 之后（老测试 states 下标不变）。
+      // groups: null=未载入 | {loading,error,groups,revision}；组行含 list 投影的 topics 计数。
+      var groupsState = useState(null);
+      var groups = groupsState[0];
+      var setGroups = groupsState[1];
+      // 就地表单：null 关闭 | {mode:"create"} | {mode:"edit", key, title, summary, order}（草稿均为字符串）。
+      var groupFormState = useState(null);
+      var groupForm = groupFormState[0];
+      var setGroupForm = groupFormState[1];
+      // 成员浏览：null 关闭 | {key, loading, error, rows}（rows=memory_list_topics 行，
+      // 渲染复用平铺列表的 renderArchiveTopicRow，不做第二套交互）。
+      var memberViewState = useState(null);
+      var memberView = memberViewState[0];
+      var setMemberView = memberViewState[1];
+      // 迁移确认：null | {key, members:[topicKey], target, busy, error}。删非空组必经此卡。
+      var migrationState = useState(null);
+      var migration = migrationState[0];
+      var setMigration = migrationState[1];
+      // 组操作忙/错（独立于候选队列的 busy/error，互不牵连）。
+      var groupBusyState = useState(false);
+      var groupBusy = groupBusyState[0];
+      var setGroupBusy = groupBusyState[1];
+      var groupErrorState = useState(null);
+      var groupError = groupErrorState[0];
+      var setGroupError = groupErrorState[1];
+      // 专题索引归档列表的前端分页页码（S4 列表②；刷新后钳回有效范围，状态可回退）。
+      var archivePageState = useState(1);
+      var archivePage = archivePageState[0];
+      var setArchivePage = archivePageState[1];
+      // 候选列表的前端分页页码（S4 统一口径兜底：候选同样每页 10 条）。
+      var candidatesPageState = useState(1);
+      var candidatesPage = candidatesPageState[0];
+      var setCandidatesPage = candidatesPageState[1];
+      // 分组成员列表的前端分页页码（S4 五处列表之末处：组内成员同样每页 10 条；
+      // openMembers 展开/换组时复位 1）。
+      var memberPageState = useState(1);
+      var memberPage = memberPageState[0];
+      var setMemberPage = memberPageState[1];
       // F7：只读态（另一实例在写）——analyze / review / preview / execute 与合并
       // 流程全部置灰（服务端 assertHostWritable 同口径），页内黄字说明原因。
       var ro = props.readOnly === true;
@@ -2791,6 +3690,12 @@ window.__ModuleLoader__.load({
           setBusy(false);
           // 专题列表是会话（scope）绑定的：切会话即清，等「专题索引归档」卡重新拉取
           setTopics(null);
+          // 分组管理同样 scope 绑定：切会话即清（含就地表单 / 成员浏览 / 迁移确认）。
+          setGroups(null);
+          setGroupForm(null);
+          setMemberView(null);
+          setMigration(null);
+          setGroupError(null);
         }
       }, [props.sessionId]);
 
@@ -2938,6 +3843,8 @@ window.__ModuleLoader__.load({
           if (wasArchivePreview) {
             loadTopics();
             setPreview(null);
+            // 成员浏览开着时同步刷新成员清单（归档/恢复已改变成员构成）。
+            if (memberView && memberView.key) refreshMembers(memberView.key);
           }
         });
       };
@@ -2956,6 +3863,252 @@ window.__ModuleLoader__.load({
           if (isStale(origin)) return;
           setTopics({ loading: false, error: candidateActionError(e), topics: [], total: 0 });
         });
+      };
+      // ── S3.4 分组管理：组清单取数与 CRUD（全部走 group_manage 工具，不新开后端）──
+      // 组操作错误的人话映射（保留原 code 与原始 message 进 ErrorBox 的折叠 details）。
+      var groupActionError = function (error) {
+        var code = error && error.code ? String(error.code) : "";
+        var detail = (error && error.message) || String(error);
+        if (code === "INVALID_STATE") {
+          return { code: code, message: "服务端拒绝了这次组操作：组内可能还有 topic，或组清单已被并发修改。请「刷新组」后重试；删非空组请走迁移确认。", detail: detail };
+        }
+        if (code === "INVALID_INPUT") {
+          return { code: code, message: "group_manage 拒绝了参数：组 key / 标题可能不合规范，或组 key 已存在（详见「原始错误信息」）。", detail: detail };
+        }
+        if (code === "HOST_LOCKED") {
+          return { code: code, message: "另一实例正在写入，当前只读：组写操作已停用，恢复后重试。", detail: detail };
+        }
+        return { code: code || "UNKNOWN", message: "组操作失败：" + detail, detail: detail };
+      };
+      var callGroupManage = function (args) {
+        return props.dsh.call("executeTool", props.sessionId, { name: "group_manage", args: args });
+      };
+      var groupFormField = function (field) {
+        return groupForm && typeof groupForm[field] === "string" ? groupForm[field] : "";
+      };
+      var loadGroups = function () {
+        var origin = mark();
+        setGroups(function (prev) {
+          return { loading: true, error: null, groups: prev && Array.isArray(prev.groups) ? prev.groups : [], revision: prev ? prev.revision : null };
+        });
+        callGroupManage({ action: "list" }).then(function (result) {
+          if (isStale(origin)) return;
+          var rows = Array.isArray(result && result.groups) ? result.groups : [];
+          setGroups({ loading: false, error: null, groups: rows, revision: result && result.revision !== undefined && result.revision !== null ? result.revision : null });
+        }, function (e) {
+          if (isStale(origin)) return;
+          setGroups({ loading: false, error: groupActionError(e), groups: [], revision: null });
+        });
+      };
+      // 组行排序：order 升序，缺数按 0，同序按 key（与组清单模板的 10/20/30/40 口径一致）。
+      var sortedGroups = groups && Array.isArray(groups.groups)
+        ? groups.groups.slice().sort(function (a, b) {
+            var oa = typeof (a && a.order) === "number" && Number.isFinite(a.order) ? a.order : 0;
+            var ob = typeof (b && b.order) === "number" && Number.isFinite(b.order) ? b.order : 0;
+            if (oa !== ob) return oa - ob;
+            var ka = String((a && a.key) ?? "");
+            var kb = String((b && b.key) ?? "");
+            return ka < kb ? -1 : ka > kb ? 1 : 0;
+          })
+        : [];
+      var doGroupCreate = async function () {
+        var origin = mark();
+        setGroupBusy(true);
+        setGroupError(null);
+        try {
+          await callGroupManage({
+            action: "create",
+            key: groupFormField("key").trim(),
+            title: groupFormField("title").trim(),
+            summary: groupFormField("summary").trim(),
+            order: Number(groupFormField("order")),
+            operationId: newId()
+          });
+          setGroupForm(null);
+          shioriToast("success", "分组已创建");
+          loadGroups();
+        } catch (e) {
+          if (!isStale(origin)) setGroupError(groupActionError(e));
+        } finally {
+          if (!isStale(origin)) setGroupBusy(false);
+        }
+      };
+      var doGroupUpdate = async function (key) {
+        var origin = mark();
+        setGroupBusy(true);
+        setGroupError(null);
+        try {
+          await callGroupManage({
+            action: "update",
+            key: key,
+            title: groupFormField("title").trim(),
+            summary: groupFormField("summary").trim(),
+            order: Number(groupFormField("order")),
+            operationId: newId()
+          });
+          setGroupForm(null);
+          shioriToast("success", "分组已更新");
+          loadGroups();
+        } catch (e) {
+          if (!isStale(origin)) setGroupError(groupActionError(e));
+        } finally {
+          if (!isStale(origin)) setGroupBusy(false);
+        }
+      };
+      // 相邻交换调序：与相邻组互换 order；两边等值时多挪一步，保证交换一定生效
+      //（精细调序在编辑表单里直接改 order 数字）。
+      var doGroupMove = async function (key, dir) {
+        var index = -1;
+        for (var gi = 0; gi < sortedGroups.length; gi++) {
+          if (String(sortedGroups[gi] && sortedGroups[gi].key) === String(key)) { index = gi; break; }
+        }
+        var neighbor = sortedGroups[index + dir];
+        if (index < 0 || !neighbor) return;
+        var selfGroup = sortedGroups[index];
+        var newSelf = typeof neighbor.order === "number" && Number.isFinite(neighbor.order) ? neighbor.order : 0;
+        var newNeighbor = typeof selfGroup.order === "number" && Number.isFinite(selfGroup.order) ? selfGroup.order : 0;
+        if (newSelf === newNeighbor) newSelf = newNeighbor + dir;
+        var origin = mark();
+        setGroupBusy(true);
+        setGroupError(null);
+        try {
+          await callGroupManage({ action: "update", key: key, order: newSelf, operationId: newId() });
+          try {
+            await callGroupManage({ action: "update", key: String(neighbor.key), order: newNeighbor, operationId: newId() });
+          } catch (secondErr) {
+            // 调序是两次 update：第一次已生效、第二次失败时不能只报错不收场——
+            // 按服务端实际顺序刷新清单，并提示用户重试（评审 rework 非阻塞 1）。
+            if (!isStale(origin)) {
+              loadGroups();
+              setGroupError({
+                code: (secondErr && secondErr.code) || "shiori/ui-group-move",
+                message: "第一次调序已生效、第二次失败，已按服务端顺序刷新，请重试：" + ((secondErr && secondErr.message) || String(secondErr))
+              });
+            }
+            return;
+          }
+          shioriToast("success", "分组顺序已更新");
+          loadGroups();
+        } catch (e) {
+          if (!isStale(origin)) setGroupError(groupActionError(e));
+        } finally {
+          if (!isStale(origin)) setGroupBusy(false);
+        }
+      };
+      // 成员浏览：拉 memory_list_topics（含 S3 的 group/pinned 字段）按组过滤，
+      // 行渲染复用平铺列表的 renderArchiveTopicRow（同一套组件、同一套交互）。
+      var openMembers = async function (key) {
+        if (memberView && memberView.key === key) { setMemberView(null); return; }
+        var origin = mark();
+        setMemberPage(1); // 换组展开从第 1 页看起
+        setMemberView({ key: key, loading: true, error: null, rows: [] });
+        try {
+          var listed = await props.dsh.call("executeTool", props.sessionId, { name: "memory_list_topics", args: {} });
+          if (isStale(origin)) return;
+          var rows = (Array.isArray(listed && listed.topics) ? listed.topics : [])
+            // 主组口径（0.4 审查 P0#2 连带）：多组 topic 只归属主组 row.group[0]，
+            // 与 group_manage list 的计数口径一致；indexOf 会把挂了该组的非主组
+            // topic 也漏进来，导致成员列表条数与组行计数对不上。
+            .filter(function (row) { return Array.isArray(row && row.group) && row.group[0] === key; });
+          // B3：函数式更新——同会话换组时 A 组的迟到响应不得盖住 B 组
+          //（渲染时捕获的 memberView 是旧值，闭包 key 直写会顶掉当前组）；
+          // 仅当成员列表仍停在本组（prev.key === key）时写入，与 refreshMembers 同口径。
+          setMemberView(function (prev) {
+            return prev && prev.key === key ? { key: key, loading: false, error: null, rows: rows } : prev;
+          });
+        } catch (e) {
+          if (isStale(origin)) return;
+          setMemberView(function (prev) {
+            // error 分支保留 prev.rows（与 refreshMembers 同口径）：已有行不因刷新失败清空。
+            return prev && prev.key === key ? { key: key, loading: false, error: candidateActionError(e), rows: prev.rows } : prev;
+          });
+        }
+      };
+      // 成员浏览的原地刷新（不翻转开合）：移出 / 恢复索引执行成功后成员清单
+      // 已变，开着成员列表时同步重拉（评审 attempt-3 非阻塞）。
+      var refreshMembers = function (key) {
+        var origin = mark();
+        props.dsh.call("executeTool", props.sessionId, { name: "memory_list_topics", args: {} }).then(function (listed) {
+          if (isStale(origin)) return;
+          var rows = (Array.isArray(listed && listed.topics) ? listed.topics : [])
+            // 主组口径，与 openMembers 同口径（refresh 后成员清单不得换一套口径）。
+            .filter(function (row) { return Array.isArray(row && row.group) && row.group[0] === key; });
+          // 函数式更新：迟到的回调不得把已关闭 / 已换组的成员列表重新顶开
+          //（评审 attempt-4 非阻塞：渲染时捕获的 memberView 是旧值）。
+          setMemberView(function (prev) {
+            return prev && prev.key === key ? { key: key, loading: false, error: null, rows: rows } : prev;
+          }); // 越界页码由 paginateRows 钳回
+        }, function (e) {
+          if (isStale(origin)) return;
+          setMemberView(function (prev) {
+            return prev && prev.key === key ? { key: key, loading: false, error: candidateActionError(e), rows: prev.rows } : prev;
+          });
+        });
+      };
+      // 删除入口：组内已有 topic（list 投影计数 > 0）先弹迁移确认（列成员 + 选目标组）；
+      // 计数为 0 直接删。服务端仍会兜底拒绝——错误 details 带成员清单时自动转迁移确认。
+      var startMigration = function (key, knownMembers) {
+        var others = sortedGroups.filter(function (g) { return g && g.key !== key; });
+        if (Array.isArray(knownMembers)) {
+          setMigration({ key: key, members: knownMembers.map(String), target: others.length > 0 ? String(others[0].key) : "", busy: false, error: null });
+          return;
+        }
+        var origin = mark();
+        setMigration({ key: key, members: [], target: others.length > 0 ? String(others[0].key) : "", busy: true, error: null });
+        props.dsh.call("executeTool", props.sessionId, { name: "memory_list_topics", args: {} }).then(function (result) {
+          if (isStale(origin)) return;
+          var members = (Array.isArray(result && result.topics) ? result.topics : [])
+            .filter(function (row) { return Array.isArray(row && row.group) && row.group.indexOf(key) >= 0; })
+            .map(function (row) { return String(row && row.key); });
+          setMigration({ key: key, members: members, target: others.length > 0 ? String(others[0].key) : "", busy: false, error: null });
+        }, function (e) {
+          if (isStale(origin)) return;
+          setMigration({ key: key, members: [], target: "", busy: false, error: candidateActionError(e) });
+        });
+      };
+      var doDeleteGroup = async function (key) {
+        var group = null;
+        for (var gi = 0; gi < sortedGroups.length; gi++) {
+          if (String(sortedGroups[gi] && sortedGroups[gi].key) === String(key)) { group = sortedGroups[gi]; break; }
+        }
+        if (group && Number(group.topics) > 0) { startMigration(key, null); return; }
+        var origin = mark();
+        setGroupBusy(true);
+        setGroupError(null);
+        try {
+          await callGroupManage({ action: "delete", key: key, operationId: newId() });
+          shioriToast("success", "分组已删除");
+          loadGroups();
+        } catch (e) {
+          if (!isStale(origin)) {
+            var members = e && e.details && Array.isArray(e.details.members) ? e.details.members : null;
+            if (members !== null) startMigration(key, members);
+            else setGroupError(groupActionError(e));
+          }
+        } finally {
+          if (!isStale(origin)) setGroupBusy(false);
+        }
+      };
+      // 迁移确认执行：delete 带 migrateTo，服务端同一提交里改挂全部成员后删组条目。
+      var confirmMigration = async function () {
+        if (!migration) return;
+        var key = migration.key;
+        var target = String(migration.target ?? "");
+        if (target === "" || target === String(key)) {
+          setMigration(function (prev) { return assign({}, prev, { error: { code: "shiori/ui-migrate-target", message: "先选择一个迁移目标组（不能是被删的组本身）。" } }); });
+          return;
+        }
+        setMigration(function (prev) { return assign({}, prev, { busy: true, error: null }); });
+        try {
+          await callGroupManage({ action: "delete", key: key, migrateTo: target, operationId: newId() });
+          shioriToast("success", "成员已迁到「" + target + "」，分组已删除");
+          setMigration(null);
+          if (memberView && memberView.key === key) setMemberView(null);
+          loadGroups();
+          loadTopics(); // 专题索引归档列表（若已载入）同步刷新
+        } catch (e) {
+          setMigration(function (prev) { return assign({}, prev, { busy: false, error: groupActionError(e) }); });
+        }
       };
       // ── U5：筛选 / 搜索 / 就地预览（纯前端推导，协议与守卫不变）───
       // 候选人话标题：集群说共享词 + 卡数，链接说「A ↔ B」，孤立卡直接给源卡标题；
@@ -3164,16 +4317,20 @@ window.__ModuleLoader__.load({
       };
       // 0.3：手动归档入口——原合并卡里的专题列表独立成卡，只保留「移出索引 /
       // 恢复到索引」（0.2.2 归档入口，previewPlan kind=archive-topic，协议不变）。
+      // S4 脱敏（0.4）：updated 时间戳 + rev shiori-r1.<token> 这类机器串不再进
+      // 正文——只显示友好日期（YYYY-MM-DD），原始串整体进行的 title 属性（悬停可查）。
+      // 分组管理卡的成员浏览复用本函数（同一套组件、同一套交互，不做第二套）。
       var renderArchiveTopicRow = function (row) {
         var key = String(row.key ?? "");
         var archived = row.archived === true;
+        var machineText = topicMachineText(row);
+        var friendlyDay = topicFriendlyDay(row && row.updated);
         return h("div", { key: key, className: "dshi_item" },
           h("div", { className: "dshi_itemHead" },
             h("span", { className: "dshi_mono" }, key),
             row.title ? h("span", { className: "dshi_badgeDim dshi_badge" }, String(row.title)) : null,
             archived ? h("span", { className: "dshi_badgeDim dshi_badge" }, "已归档") : null,
-            row.updated ? h("span", { className: "dshi_hint" }, String(row.updated)) : null,
-            row.revision ? h("span", { className: "dshi_hint dshi_mono" }, "rev " + topicRevisionPrefix(row.revision)) : null,
+            machineText !== "" ? h("span", { className: "dshi_hint", title: machineText }, friendlyDay || "—") : null,
             archived ? h("button", {
               className: "dshi_btn",
               disabled: busy || ro,
@@ -3212,8 +4369,15 @@ window.__ModuleLoader__.load({
             CANDIDATE_FILTERS.map(function (f) {
               return h("button", { key: f[0], className: "dshi_filterChip" + (filter === f[0] ? " dshi_filterChipOn" : ""), onClick: function () { setFilter(f[0]); } }, f[1] + "（" + statusCounts[f[0]] + "）");
             }),
-            h("input", { className: "dshi_input dshi_searchInput", placeholder: "搜索：按标题或短 id 过滤", value: search, onChange: function (event) { setSearch(event.target.value); } })),
-          items.length === 0 || visibleRows.length === 0 ? h("div", { className: "dshi_hint" }, "（空）") : h("div", { className: "dshi_items" }, visibleRows)),
+              h("input", { className: "dshi_input dshi_searchInput", placeholder: "搜索：按标题或短 id 过滤", value: search, onChange: function (event) { setSearch(event.target.value); } })),
+          // S4 分页：候选列表同样前端分页每页 10 条（统一页码条；筛选/搜索后切片）。
+          (function () {
+            if (items.length === 0 || visibleRows.length === 0) return h("div", { className: "dshi_hint" }, "（空）");
+            var pageData = paginateRows(visibleRows, candidatesPage);
+            return h(fragment, { key: "candidates-page" },
+              h("div", { className: "dshi_items" }, pageData.items),
+              pageBar(pageData.page, pageData.totalPages, setCandidatesPage, busy));
+          })()),
           // 0.3：手动归档入口（原在「合并进主题」卡里，独立成卡；连线编辑不在这里，
           // 在闪回图谱点节点打开的卡片详情里）。
           h("div", { className: "dshi_card" },
@@ -3227,11 +4391,171 @@ window.__ModuleLoader__.load({
           topics && !topics.loading && !topics.error ? (topics.topics.length === 0
             ? h("div", { className: "dshi_hint" }, "当前 scope 还没有专题。")
             : (function () {
-              var unarchivedCount = sortTopicRows(topics.topics).filter(function (row) { return !(row && row.archived === true); }).length;
+              var sorted = sortTopicRows(topics.topics);
+              var unarchivedCount = sorted.filter(function (row) { return !(row && row.archived === true); }).length;
+              // S4 列表②：专题索引导航改前端分页（每页 10 条，统一页码条；
+              // 不新增后端分页参数，刷新后页码钳回有效范围、状态可回退）。
+              var archivePageData = paginateRows(sorted, archivePage);
               return h("div", { className: "dshi_items" },
-                h("div", { className: "dshi_hint" }, "未归档 " + unarchivedCount + " 篇。"),
-                sortTopicRows(topics.topics).map(renderArchiveTopicRow));
+                h("div", { className: "dshi_hint" }, "未归档 " + unarchivedCount + " 篇，共 " + sorted.length + " 篇。"),
+                archivePageData.items.map(renderArchiveTopicRow),
+                pageBar(archivePageData.page, archivePageData.totalPages, setArchivePage, busy));
             })()) : null),
+          // ── S3.4 分组管理（0.4）：组清单走 group_manage 工具（list/create/update/
+          // delete），挂在专题索引归档卡下方；成员浏览复用 renderArchiveTopicRow。
+          h("div", { className: "dshi_card", "data-role": "group-manage" },
+            h("div", { className: "dshi_row" },
+              h("span", { className: "dshi_cardTitle" }, "分组管理"),
+              h("button", { className: "dshi_btn", disabled: groupBusy, onClick: loadGroups }, groups !== null && groups.loading ? "刷新中…" : "载入 / 刷新组"),
+              h("button", {
+                className: "dshi_btn", disabled: groupBusy || ro,
+                onClick: function () { setGroupForm({ mode: "create", key: "", title: "", summary: "", order: "50" }); }
+              }, "建组"),
+              groups !== null && !groups.loading && !groups.error && sortedGroups.length > 0
+                ? h("span", { className: "dshi_hint" }, "共 " + sortedGroups.length + " 个组")
+                : null),
+            h("div", { className: "dshi_hint" }, "组是 topic 的归类标签（挂在 topic front-matter 的 group 字段，agent 侧 group_manage 工具同源）。这里建组、改名、改摘要、调序、删组；删非空组必须先给成员选一个迁移目标组。"),
+            groupError ? ErrorBox(groupError) : null,
+            groups === null ? h("div", { className: "dshi_hint" }, "点「载入 / 刷新组」列出当前 scope 的组。") : null,
+            groups !== null && groups.loading ? h("div", { className: "dshi_loading" }, "组清单加载中…") : null,
+            groups !== null && groups.error ? ErrorBox(groups.error) : null,
+            // 建组表单（就地展开；key/title 必填、order 数字，服务端二次校验）。
+            groupForm !== null && groupForm.mode === "create" ? h("div", { className: "dshi_groupForm" },
+              h("div", { className: "dshi_row" },
+                h("input", {
+                  className: "dshi_input", placeholder: "组 key（如 dev）", value: groupFormField("key"),
+                  onChange: function (event) { setGroupForm(function (prev) { return assign({}, prev, { key: event.target.value }); }); }
+                }),
+                h("input", {
+                  className: "dshi_input", placeholder: "标题（如 开发与配置）", value: groupFormField("title"),
+                  onChange: function (event) { setGroupForm(function (prev) { return assign({}, prev, { title: event.target.value }); }); }
+                })),
+              h("div", { className: "dshi_row" },
+                h("input", {
+                  className: "dshi_input", placeholder: "摘要（可空）", value: groupFormField("summary"),
+                  onChange: function (event) { setGroupForm(function (prev) { return assign({}, prev, { summary: event.target.value }); }); }
+                }),
+                h("input", {
+                  className: "dshi_input", type: "number", placeholder: "排序", title: "排序（数字小的在前）",
+                  value: groupFormField("order"),
+                  onChange: function (event) { setGroupForm(function (prev) { return assign({}, prev, { order: event.target.value }); }); }
+                })),
+              h("div", { className: "dshi_row" },
+                h("button", {
+                  className: "dshi_btn dshi_btnPrimary", disabled: groupBusy || ro
+                    || groupFormField("key").trim() === "" || groupFormField("title").trim() === ""
+                    || !Number.isFinite(Number(groupFormField("order"))),
+                  onClick: doGroupCreate
+                }, groupBusy ? "创建中…" : "创建"),
+                h("button", { className: "dshi_btn", disabled: groupBusy, onClick: function () { setGroupForm(null); } }, "取消"))) : null,
+            // 组行：key / 标题 / 摘要 / topic 数 / 排序 + 成员 / 编辑 / 调序 / 删除。
+            groups !== null && !groups.loading && !groups.error && sortedGroups.length === 0
+              ? h("div", { className: "dshi_hint" }, "当前 scope 还没有组。点「建组」创建，或让 agent 用 group_manage 建。") : null,
+            sortedGroups.length > 0 ? h("div", { className: "dshi_items" }, sortedGroups.map(function (group, index) {
+              var groupKey = String((group && group.key) ?? "");
+              var editing = groupForm !== null && groupForm.mode === "edit" && groupForm.key === groupKey;
+              var isDeleting = migration !== null && migration.key === groupKey;
+              return h("div", { key: groupKey, className: "dshi_item" },
+                h("div", { className: "dshi_itemHead" },
+                  h("span", { className: "dshi_mono" }, groupKey),
+                  group && group.title ? h("span", { className: "dshi_badgeDim dshi_badge" }, String(group.title)) : null,
+                  group && group.summary ? h("span", { className: "dshi_hint" }, String(group.summary)) : null,
+                  h("span", { className: "dshi_hint" }, (group && Number.isInteger(group.topics) ? group.topics : 0) + " 个 topic"),
+                  h("span", { className: "dshi_hint dshi_mono", title: "排序（数字小的在前）" }, "order " + String((group && group.order) ?? "—")),
+                  h("span", { style: { flex: 1 } }),
+                  h("button", { className: "dshi_btn", disabled: groupBusy, onClick: function () { openMembers(groupKey); } },
+                    memberView && memberView.key === groupKey ? "收起成员" : "成员"),
+                  h("button", {
+                    className: "dshi_btn", disabled: groupBusy || ro,
+                    onClick: function () { setGroupForm({ mode: "edit", key: groupKey, title: String((group && group.title) ?? ""), summary: String((group && group.summary) ?? ""), order: String((group && group.order) ?? "") }); }
+                  }, "编辑"),
+                  h("button", {
+                    className: "dshi_btn", disabled: groupBusy || ro || index === 0, title: "与上一组交换排序",
+                    onClick: function () { doGroupMove(groupKey, -1); }
+                  }, "↑"),
+                  h("button", {
+                    className: "dshi_btn", disabled: groupBusy || ro || index === sortedGroups.length - 1, title: "与下一组交换排序",
+                    onClick: function () { doGroupMove(groupKey, 1); }
+                  }, "↓"),
+                  h("button", {
+                    className: "dshi_btn dshi_btnDanger", disabled: groupBusy || ro || isDeleting,
+                    // 账本 #85ff4d（review-rework a2 顺带 2）：主组计数为 0 ≠ 空组——
+                    // 只被当副组挂着的组在主组口径下显示 0 个 topic，删除仍要走
+                    // 迁移确认，title 如实写，不写死「删除空组」。
+                    title: group && Number(group.topics) > 0 ? "组内还有 topic：删除前需选择迁移目标组" : "0 个主组主题，仍需迁移确认",
+                    onClick: function () { doDeleteGroup(groupKey); }
+                  }, "删除")),
+                // 成员浏览：与平铺列表同一套行组件（移出索引 / 恢复到索引同款交互）；
+                // S4 五处列表之末处——成员也按每页 10 条前端分页（pageBar 统一样式）。
+                memberView && memberView.key === groupKey ? h("div", null,
+                  memberView.loading ? h("div", { className: "dshi_loading" }, "成员加载中…") : null,
+                  memberView.error ? ErrorBox(memberView.error) : null,
+                  !memberView.loading && !memberView.error ? (memberView.rows.length === 0
+                    ? h("div", { className: "dshi_hint" }, "这个组还没有 topic。在 agent 侧用 topic_create / topic_append 的 group 参数归入（字符串数组，首个为主组，如 group: [\"<组key>\"]）；两个工具的 group 都要求组已存在，本组已满足。")
+                    // ↑ 旧文案错把 memory_rewrite 说成有 group 参数（它只有
+                    // content/topic/operationId，见 src/host/tools.mjs）；真实可
+                    // 归组的是 topic_create（建新 topic 时挂组）与 topic_append
+                    //（改挂已有 topic 的组），组本身由 group_manage action=create
+                    // 创建（0.4-REVIEW P1#6）。
+                    : h(fragment, { key: "members-page" },
+                        h("div", { className: "dshi_items" },
+                          paginateRows(memberView.rows, memberPage).items.map(renderArchiveTopicRow)),
+                        pageBar(memberPage, paginateRows(memberView.rows, memberPage).totalPages,
+                          function (target) { setMemberPage(target); }, false))) : null) : null,
+                // 就地编辑表单：改名 / 改摘要 / 调序（order 数字）。
+                editing ? h("div", { className: "dshi_groupForm" },
+                  h("div", { className: "dshi_row" },
+                    h("span", { className: "dshi_mono" }, groupKey),
+                    h("input", {
+                      className: "dshi_input", placeholder: "标题", value: groupFormField("title"),
+                      onChange: function (event) { setGroupForm(function (prev) { return assign({}, prev, { title: event.target.value }); }); }
+                    })),
+                  h("div", { className: "dshi_row" },
+                    h("input", {
+                      className: "dshi_input", placeholder: "摘要（可空）", value: groupFormField("summary"),
+                      onChange: function (event) { setGroupForm(function (prev) { return assign({}, prev, { summary: event.target.value }); }); }
+                    }),
+                    h("input", {
+                      className: "dshi_input", type: "number", placeholder: "排序", title: "排序（数字小的在前）",
+                      value: groupFormField("order"),
+                      onChange: function (event) { setGroupForm(function (prev) { return assign({}, prev, { order: event.target.value }); }); }
+                    })),
+                  h("div", { className: "dshi_row" },
+                    h("button", {
+                      className: "dshi_btn dshi_btnPrimary", disabled: groupBusy || ro
+                        || groupFormField("title").trim() === "" || !Number.isFinite(Number(groupFormField("order"))),
+                      onClick: function () { doGroupUpdate(groupKey); }
+                    }, groupBusy ? "保存中…" : "保存"),
+                    h("button", { className: "dshi_btn", disabled: groupBusy, onClick: function () { setGroupForm(null); } }, "取消"))) : null);
+            })) : null,
+            // 迁移确认：删非空组必经——列出成员并让用户选 migrateTo 目标组；
+            // 确认后走 group_manage delete {key, migrateTo}（服务端同一提交完成迁移+删组）。
+            migration !== null ? h("div", { className: "dshi_migration", "data-role": "group-migration" },
+              h("div", { className: "dshi_cardTitle" }, "删除分组前先迁移成员"),
+              h("div", { className: "dshi_hint" },
+                "组「" + String(migration.key) + "」内有 " + migration.members.length + " 个 topic："
+                + (migration.members.length > 0 ? migration.members.join("、") : "（成员清单加载中或为空）")),
+              migration.busy ? h("div", { className: "dshi_loading" }, "成员清单加载中…") : null,
+              migration.error ? ErrorBox(migration.error) : null,
+              h("label", { className: "dshi_label" }, "迁移目标组",
+                h("select", {
+                  className: "dshi_select", value: String(migration.target ?? ""),
+                  onChange: function (event) { setMigration(function (prev) { return assign({}, prev, { target: event.target.value }); }); }
+                },
+                  h("option", { value: "" }, "— 选择目标组 —"),
+                  sortedGroups.filter(function (g) { return g && g.key !== migration.key; }).map(function (g) {
+                    return h("option", { key: String(g.key), value: String(g.key) },
+                      String(g.key) + (g.title ? "（" + String(g.title) + "）" : ""));
+                  }))),
+              h("div", { className: "dshi_row" },
+                h("button", {
+                  className: "dshi_btn dshi_btnDanger", disabled: migration.busy || ro,
+                  onClick: confirmMigration
+                }, migration.busy ? "迁移中…" : "确认迁移并删除"),
+                h("button", {
+                  className: "dshi_btn", disabled: migration.busy,
+                  onClick: function () { setMigration(null); }
+                }, "取消"))) : null),
           // 计划列表独立成卡（只含遗忘计划）；已执行 / 已作废默认折叠。
           h("div", { className: "dshi_card" },
           h("div", { className: "dshi_cardTitle" }, "计划（" + visiblePlans.length + "）"),
@@ -3331,6 +4655,10 @@ window.__ModuleLoader__.load({
       var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
       var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
       tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
+      // S4 列表③：专题页 topic 列表前端分页页码（每页 10 条；搜索/排序后切片）。
+      var topicsPageState = useState(1);
+      var topicsPage = topicsPageState[0];
+      var setTopicsPage = topicsPageState[1];
       // F7：只读态（另一实例在写）写按钮置灰。
       var ro = props.readOnly === true;
       // F4：时间线跳转目标（面板级 ref 传入；type 必须是 topic）。
@@ -3502,6 +4830,9 @@ window.__ModuleLoader__.load({
         });
       }
       var archivedStyle = { color: "var(--dsw-alias-label-tertiary)" };
+      // S4 列表③：topic 列表前端分页（每页 10 条，统一页码条；搜索/排序后切片，
+      // 页码越界自动钳回——筛选后列表变短不丢状态）。
+      var topicsPageData = paginateRows(visibleTopics, topicsPage);
 
       return h("div", null,
         h("div", { className: "dshi_row", style: { marginBottom: 8 } },
@@ -3525,7 +4856,8 @@ window.__ModuleLoader__.load({
         busy && topics === null ? h("div", { className: "dshi_loading" }, "正在读取主题列表…") : null,
         topics !== null && topics.length === 0 ? h("div", { className: "dshi_hint" }, "这个作用域下还没有主题。") : null,
         topics !== null && topics.length > 0 && visibleTopics.length === 0 ? h("div", { className: "dshi_hint" }, "没有匹配的主题，试试调整搜索词。") : null,
-        topics !== null ? h("div", { className: "dshi_items" }, visibleTopics.map(function (row) {
+        topics !== null ? h("div", null,
+          h("div", { className: "dshi_items" }, topicsPageData.items.map(function (row) {
           var key = String(row.key);
           var archived = row.archived === true;
           var isOpen = opened === key;
@@ -3566,7 +4898,8 @@ window.__ModuleLoader__.load({
                       : h("pre", { className: "dshi_pre" }, String(detail.content ?? "")))
                   : null)
               : null);
-        })) : null);
+          })),
+          pageBar(topicsPageData.page, topicsPageData.totalPages, setTopicsPage, busy)) : null);
     }
 
     // ── U2 预算页重写（标杆页，其他页对齐它的标准） ─────────────────────────
@@ -3824,6 +5157,20 @@ window.__ModuleLoader__.load({
       var occupancyState = useState(null);
       var occupancy = occupancyState[0];
       var setOccupancy = occupancyState[1];
+      // S4「工作区默认卡」（0.4）：设置页里改 defaultPersona。read-modify-write 单键
+      // set（与选卡按钮同款约束）：只 set defaultPersona，其余键原样保留。
+      var personaFieldState = useState(null); // null=未输入（输入框显示当前配置值）
+      var personaField = personaFieldState[0];
+      var setPersonaField = personaFieldState[1];
+      var personaSavingState = useState(false);
+      var personaSaving = personaSavingState[0];
+      var setPersonaSaving = personaSavingState[1];
+      var personaErrorState = useState(null);
+      var personaError = personaErrorState[0];
+      var setPersonaError = personaErrorState[1];
+      var personaOkState = useState(null);
+      var personaOk = personaOkState[0];
+      var setPersonaOk = personaOkState[1];
       useEffect(function () {
         try {
           setSnapshot(scope ? scope.getSnapshot() : null);
@@ -3866,6 +5213,51 @@ window.__ModuleLoader__.load({
         var parts = path.split(".");
         var factoryDefault = BUDGET_FACTORY_DEFAULTS[parts[0]] ? BUDGET_FACTORY_DEFAULTS[parts[0]][parts[1]] : undefined;
         change(path, factoryDefault);
+      };
+      // ── S4「工作区默认卡」：defaultPersona 编辑 + 单键 read-modify-write 保存 ──
+      var configPersonaNow = value && typeof value.defaultPersona === "string" ? value.defaultPersona : "";
+      var personaFieldValue = personaField !== null ? personaField : configPersonaNow;
+      var saveDefaultPersona = async function () {
+        setPersonaError(null);
+        setPersonaOk(null);
+        var persona = String(personaFieldValue ?? "").trim();
+        if (persona === "") {
+          setPersonaError({ code: "shiori/ui-persona-empty", message: "卡名不能为空。" });
+          return;
+        }
+        if (!scope || typeof scope.mutate !== "function" || typeof scope.getSnapshot !== "function") {
+          setPersonaError({ code: "shiori/ui-unsupported", message: "设置命名空间不可用，无法保存默认卡。" });
+          return;
+        }
+        setPersonaSaving(true);
+        try {
+          // 每次尝试都重读最新快照（CAS 冲突重试不吃旧值）；只 set defaultPersona
+          // 一个键，mode/allowActive/budgets 等其余键原样保留。
+          var attempt = async function () {
+            var snap = scope.getSnapshot();
+            var val = snap && snap.status === "ready" && snap.value && typeof snap.value === "object" ? snap.value : null;
+            if (!val) {
+              var missing = new Error("设置快照不可用（status=" + String(snap && snap.status) + "）。");
+              missing.code = "shiori/ui-scope";
+              throw missing;
+            }
+            return scope.mutate([{ op: "set", path: ["defaultPersona"], value: persona }], snap.revision);
+          };
+          // B1：与 enableSave 同口径——mutate 恰好 ≤2 次（首次结果 !==true 才
+          // 重试一次），第二次的原始错误文本拼进 conflict message，绝不第三次调用；
+          // 成功路径行为不变（重读快照、成功提示照旧）。P1#6：重试骨架改走公共
+          // casMutate，conflict 文案 / code / cause 与原实现逐字等价。
+          await casMutate(attempt, "shiori/ui-persona-conflict", function (ctx) {
+            return "设置刚被其他窗口修改（revision 冲突），请再点一次「保存默认卡」。"
+              + (ctx.lastError && ctx.lastError.message ? "（最近错误：" + ctx.lastError.message + "）" : "");
+          }, true);
+          setSnapshot(scope.getSnapshot());
+          setPersonaOk("工作区默认卡已保存为「" + persona + "」；下一轮对话按选卡优先级解析（会话专属卡 > 工作区路径 > 默认卡）。");
+        } catch (e) {
+          setPersonaError({ code: (e && e.code) || "shiori/ui-persona", message: "保存失败：" + ((e && e.message) || String(e)) + causeNoteOf(e) });
+        } finally {
+          setPersonaSaving(false);
+        }
       };
       // 字段行：界面名主位（技术名进 title tooltip）+ 后果描述 + 已修改徽章 +
       // 单字段恢复默认 + 就地中文错误。
@@ -4050,6 +5442,27 @@ window.__ModuleLoader__.load({
             integerField("spark.seedCount"),
             integerField("spark.linkCount")
           ])) : h("div", { className: "dshi_loading" }, snapshot && snapshot.status !== "ready" ? "设置命名空间不可用（服务端未注册 shiori 命名空间？）" : "加载中…"),
+        // S4「工作区默认卡」：设置页里的 defaultPersona 编辑（评审 q-b8f480de923fa65d：
+        // 单键 read-modify-write，与选卡按钮同款约束；trim 后空串拒绝）。
+        h("div", { className: "dshi_card", "data-role": "default-persona" },
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_cardTitle" }, "人设卡：工作区默认卡"),
+            h("span", { className: "dshi_titleSub" }, "defaultPersona · 单键写入，其余配置不动")),
+          h("div", { className: "dshi_hint" }, "没有会话专属卡、工作区路径也没匹配到时，注入这张卡（scope 名即卡名，切卡即换整套记忆）。单个会话的临时换卡用会话顶部的「记忆卡」按钮。"),
+          h("div", { className: "dshi_row" },
+            h("input", {
+              className: "dshi_input",
+              value: personaFieldValue,
+              placeholder: "例如 amber",
+              onChange: function (event) { setPersonaField(event.target.value); }
+            }),
+            h("button", {
+              className: "dshi_btn dshi_btnPrimary", type: "button",
+              disabled: personaSaving || !value,
+              onClick: saveDefaultPersona
+            }, personaSaving ? "保存中…" : "保存默认卡")),
+          personaOk ? h("div", { className: "dshi_ok" }, personaOk) : null,
+          ErrorBox(personaError)),
         errorCount > 0 ? h("div", { className: "dshi_blockError" },
           "有 " + errorCount + " 处越界，已禁用保存：", Object.keys(fieldErrors).map(function (path) {
             return h("div", { key: path }, fieldErrors[path]);
@@ -4104,6 +5517,10 @@ window.__ModuleLoader__.load({
       var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
       var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
       tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
+      // S4 列表④：闪回「从未命中」卡片前端分页（每页 10 条，统一页码条）。
+      var neverHitPageState = useState(1);
+      var neverHitPage = neverHitPageState[0];
+      var setNeverHitPage = neverHitPageState[1];
       var load = async function () {
         var origin = tabGuard.mark();
         setError(null);
@@ -4167,12 +5584,18 @@ window.__ModuleLoader__.load({
         !l2Off && data !== null ? h(fragment, null,
           h("div", { className: "dshi_bgroup" },
             h("div", { className: "dshi_cardTitle" }, "从未命中（" + neverHit.length + " 张）"),
-            neverHit.length > 0 ? h("div", { className: "dshi_items" }, neverHit.map(function (node) {
-              return h("div", { key: node.id, className: "dshi_item" },
-                h("div", { className: "dshi_itemHead" },
-                  h("span", null, typeof node.title === "string" && node.title !== "" ? node.title : String(node.id))),
-                h("span", { className: "dshi_hint" }, fbDaysText(node.createdAt)));
-            })) : h("div", { className: "dshi_empty" },
+            neverHit.length > 0 ? (function () {
+              // S4 列表④：从未命中卡片前端分页（每页 10 条，统一页码条）。
+              var pageData = paginateRows(neverHit, neverHitPage);
+              return h("div", null,
+                h("div", { className: "dshi_items" }, pageData.items.map(function (node) {
+                  return h("div", { key: node.id, className: "dshi_item" },
+                    h("div", { className: "dshi_itemHead" },
+                      h("span", null, typeof node.title === "string" && node.title !== "" ? node.title : String(node.id))),
+                    h("span", { className: "dshi_hint" }, fbDaysText(node.createdAt)));
+                })),
+                pageBar(pageData.page, pageData.totalPages, setNeverHitPage, false));
+            })() : h("div", { className: "dshi_empty" },
               nodes.length === 0
                 ? "当前 scope 还没有 active 卡片：先用 spark_save 保存几张带触发词的卡片，再来看看命中情况。"
                 : "所有卡片都命中过至少一次投递包。")),
@@ -4254,13 +5677,78 @@ window.__ModuleLoader__.load({
       var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
       var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
       tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
+      // S4 列表①：最近变更每页 10 条（0.4）。wire 的 offset/limit 仍按整批
+      // TIMELINE_PAGE_SIZE=20 取（冻结用例钉死 offset=20/limit=20，不改协议）；
+      // 前端把每批切片成 LIST_PAGE_SIZE 的显示页：批内翻页纯本地，跨批才发请求。
+      var subPageState = useState(0);
+      var subPageRaw = subPageState[0];
+      var setSubPage = subPageState[1];
+      // 批缓存（评审 q-d294fa1570946fc4 ②）：跨批回退时若目标批就在本地缓存里，
+      // 直接复用、不重复发请求。只缓存最近一份（上一批）。放在本 tab useState
+      // 链末尾（合成测试的 useRef 不跨渲染持久，state 才行；既有用例只预置
+      // page 一个下标，末尾追加不挪任何老下标）。
+      var batchCacheState = useState(null);
+      var batchCache = batchCacheState[0];
+      var setBatchCache = batchCacheState[1];
+      // 最近一次成功加载的 offset（与批缓存配套：缓存键必须与「当前页面显示的批」
+      // 一致，命中回退时要一起同步，见 goToTimelinePage）。
+      var lastOffsetState = useState(0);
+      var lastLoadedOffset = lastOffsetState[0];
+      var setLastLoadedOffset = lastOffsetState[1];
+      // 缓存命中切批时跳过一次 load effect（setOffset 会触发 [offset] 依赖重取）。
+      // （真实宿主 useRef 跨渲染持久，成立；合成 stub 的 ref 每渲染即弃，测试
+      // 不覆盖缓存命中后的 effect 路径，不影响既有冻结用例。）
+      var skipLoadOnceRef = useRef(false);
       var load = async function (nextOffset) {
         var origin = tabGuard.mark();
         setBusy(true);
         setError(null);
         try {
-          var result = await props.dsh.call("getTimeline", props.sessionId, { offset: nextOffset, limit: TIMELINE_PAGE_SIZE });
-          if (tabGuard.isStale(origin)) return; // P1-2：会话已切换，丢弃旧响应
+          // 空批陷阱修复（0.4-REVIEW §2.4 问题 1 / P1#6；评审 attempt-2 阻塞 1）：
+          // offset>0 拉回空批（items 空数组且 hasMore!==true）说明按 offset 切片
+          // 已越过现存记录（历史缩短 / 扫描窗口前移）——空批≠「还没有任何变更」
+          // 也不是末页。旧实现直接 setPage(空批)：页码条随 items.length>0 消失 +
+          // 渲染误导性「还没有任何变更记录」，而「刷新」只重拉同 offset，用户只能
+          // 切 tab/会话脱困。现在在同一 try/finally 里用循环逐批回退（offset-20）
+          // 重拉，直到拉到非空批或落到首页；首页空批=真的没有任何变更，照旧渲染
+          // 引导文案。评审 attempt-2 阻塞 1：不能写成 `return load(fallback)`——
+          // async 函数里 return 一个 promise 会先求值再立刻执行 finally，外层
+          // setBusy(false) 在回退请求还在飞时就把 busy 复位，「刷新」可再点、
+          // 能并发第二次 load（tabGuard 只拦过期响应，不拦重复请求）。循环写法
+          // 保证 busy 只由最终落地的那次请求收尾；offset 严格递减，有限终止。
+          var landedOffset = nextOffset;
+          var result = null;
+          for (;;) {
+            result = await props.dsh.call("getTimeline", props.sessionId, { offset: landedOffset, limit: TIMELINE_PAGE_SIZE });
+            if (tabGuard.isStale(origin)) return; // P1-2：会话已切换，丢弃旧响应
+            var emptyBatch = result && typeof result === "object" && Array.isArray(result.items)
+              && result.items.length === 0 && result.hasMore !== true;
+            if (!emptyBatch || landedOffset === 0) break; // 非空批 / 首页空批（真无记录）/ 服务端声明还有更多 → 落地
+            // #54fe5d：下界钳——offset 现在恒为分批大小的倍数才侥幸不为负，加
+            // Math.max(0, …) 把负数一律钳到 0；钳到 0 后下一轮按 landedOffset===0
+            // 落地首页，不改步进语义与分批大小。
+            landedOffset = Math.max(0, landedOffset - TIMELINE_PAGE_SIZE);
+          }
+          if (landedOffset !== nextOffset) {
+            // 回退过：同步 offset 状态（页码条/绝对页号按落地批重算，后续翻页
+            // 数学一致），并用 skipLoadOnceRef 抑制 [offset] effect 的重复拉取
+            // （真实宿主 useRef 跨渲染持久）。
+            skipLoadOnceRef.current = true;
+            setOffset(landedOffset);
+          }
+          // 换了批次才把旧批入缓存（同 offset 的刷新不入）。缓存条目并入
+          // sessionId：tabGuard 只拦过期响应，拦不住本地缓存回放——不分会话的
+          // 话，切会话后回退一页会把上一会话的条目当缓存命中放出来（评审
+          // attempt-3 阻塞 A）。命中分支据此校验。
+          // 评审 attempt-2 需给证 3：缓存只收「未回退且 items 非空」的批——
+          // 回退链上绝不写缓存（旧实现闭包里的 page/lastLoadedOffset 在回退后
+          // 是已判定为空的批次/其陈旧内容，入缓存会被后续缓存命中回放）。
+          var fellBack = landedOffset !== nextOffset;
+          if (!fellBack && page !== null && lastLoadedOffset !== landedOffset
+            && result && typeof result === "object" && Array.isArray(result.items) && result.items.length > 0) {
+            setBatchCache({ sessionId: props.sessionId, offset: lastLoadedOffset, page: page });
+          }
+          setLastLoadedOffset(landedOffset);
           setPage(result && typeof result === "object" ? result : null);
         } catch (e) {
           if (tabGuard.isStale(origin)) return;
@@ -4271,12 +5759,56 @@ window.__ModuleLoader__.load({
           if (!tabGuard.isStale(origin)) setBusy(false);
         }
       };
-      useEffect(function () { load(offset); }, [props.sessionId, offset]);
+      useEffect(function () {
+        // 缓存命中切批（skipLoadOnceRef）只换页不重取；其余情况照常按 offset 拉取。
+        if (skipLoadOnceRef.current) { skipLoadOnceRef.current = false; return; }
+        load(offset);
+      }, [props.sessionId, offset]);
       var items = page && Array.isArray(page.items) ? page.items : [];
       var hasMore = Boolean(page && page.hasMore === true);
       var scanLimited = Boolean(page && page.scanLimited === true);
       var skipped = page && typeof page.skippedCorrupted === "number" ? page.skippedCorrupted : 0;
-      var pageNumber = Math.floor(offset / TIMELINE_PAGE_SIZE) + 1;
+      // S4 列表①：显示层分页。批内子页越界（跨批回退后上一批条目更少）按当前批
+      // 条目数钳回，绝不渲染空页。
+      var subPagesInBatch = Math.max(1, Math.ceil(items.length / LIST_PAGE_SIZE));
+      var subPage = Math.min(Math.max(0, subPageRaw), subPagesInBatch - 1);
+      var visibleItems = items.slice(subPage * LIST_PAGE_SIZE, (subPage + 1) * LIST_PAGE_SIZE);
+      var absolutePage = Math.floor(offset / LIST_PAGE_SIZE) + subPage + 1;
+      var hasLocalNext = (subPage + 1) * LIST_PAGE_SIZE < items.length;
+      var lastKnownPage = absolutePage + ((hasMore || hasLocalNext) ? 1 : 0);
+      var goToTimelinePage = function (target) {
+        var t = Math.min(Math.max(1, target), lastKnownPage);
+        if (t === absolutePage) return;
+        if (t === absolutePage + 1) {
+          if (hasLocalNext) { setSubPage(subPage + 1); return; }
+          setSubPage(0);
+          setOffset(offset + TIMELINE_PAGE_SIZE);
+          return;
+        }
+        // 回退到更早页：目标页所在批的 offset 是 TIMELINE_PAGE_SIZE 的整数倍；
+        // 同批直接切子页（本地，状态可回退）；跨批先查批缓存（命中即复用，
+        // 不重复请求），没有才发请求（limit 仍是整批 20）。
+        var targetOffset = (t - 1) * LIST_PAGE_SIZE;
+        var targetBatch = targetOffset - (targetOffset % TIMELINE_PAGE_SIZE);
+        var targetSub = (targetOffset - targetBatch) / LIST_PAGE_SIZE;
+        if (targetBatch === offset) { setSubPage(targetSub); return; }
+        var cached = batchCache;
+        // 命中前先校验会话：别的会话留下的缓存条目一律当未命中走真实请求
+        //（切会话后回退一页不得回放前一会话的条目，评审 attempt-3 阻塞 A）。
+        if (cached && cached.sessionId === props.sessionId && cached.offset === targetBatch && cached.page && typeof cached.page === "object") {
+          skipLoadOnceRef.current = true;
+          setPage(cached.page);
+          setSubPage(targetSub);
+          setOffset(targetBatch);
+          // 命中回退时把 lastLoadedOffset 一并同步为目标批：缓存键与页面内容
+          // 保持一致，随后点「刷新」不会把当前批错标成别的批（评审阻塞 3）。
+          setLastLoadedOffset(targetBatch);
+          return;
+        }
+        setSubPage(targetSub);
+        setOffset(targetBatch);
+      };
+      var pageNumber = absolutePage;
       return h("div", null,
         h("div", { className: "dshi_row", style: { marginBottom: 8 } },
           h("span", { className: "dshi_cardTitle" }, "最近变更"),
@@ -4290,7 +5822,7 @@ window.__ModuleLoader__.load({
           ? h("div", { className: "dshi_empty" },
               "这个作用域还没有任何变更记录。写一条人设 / 记忆核心、存一张闪回卡，或整理一次候选之后，这里就会按时间列出每一次改动；点上方「刷新」查看最新。")
           : null,
-        items.length > 0 ? h("div", { className: "dshi_items" }, items.map(function (item, index) {
+        items.length > 0 ? h("div", { className: "dshi_items" }, visibleItems.map(function (item, index) {
           var action = String((item && item.action) ?? "");
           var target = item && item.target && typeof item.target === "object" ? item.target : null;
           var type = String((target && target.type) ?? "");
@@ -4313,18 +5845,36 @@ window.__ModuleLoader__.load({
             h("div", { className: "dshi_hint" },
               "涉及对象：" + timelineTargetText(target) + (type === "core" ? "（核心记忆在「记忆内容」页查看）" : "")));
         })) : null,
-        items.length > 0 ? h("div", { className: "dshi_row" },
+        items.length > 0 ? h("div", { className: "dshi_pageBar" },
           h("button", {
             className: "dshi_btn",
-            disabled: busy || offset === 0,
-            onClick: function () { setOffset(Math.max(0, offset - TIMELINE_PAGE_SIZE)); }
+            disabled: busy || absolutePage <= 1,
+            onClick: function () { goToTimelinePage(absolutePage - 1); }
           }, "上一页"),
-          h("span", { className: "dshi_hint" }, "第 " + pageNumber + " 页（每页 " + TIMELINE_PAGE_SIZE + " 条）"),
+          (function () {
+            var nums = [];
+            for (var pi = 1; pi <= lastKnownPage; pi++) nums.push(pi);
+            return nums.map(function (n) {
+              return h("button", {
+                key: n,
+                className: "dshi_pageNum" + (n === absolutePage ? " dshi_pageNumOn" : ""),
+                disabled: busy || n === absolutePage,
+                onClick: function () { goToTimelinePage(n); }
+              }, String(n));
+            });
+          })(),
           h("button", {
             className: "dshi_btn",
-            disabled: busy || !hasMore,
-            onClick: function () { setOffset(offset + TIMELINE_PAGE_SIZE); }
-          }, "下一页")) : null);
+            disabled: busy || (!hasMore && !hasLocalNext),
+            onClick: function () { goToTimelinePage(absolutePage + 1); }
+          }, "下一页"),
+          // 页脚（评审 q-d294fa1570946fc4 ③）：给用户看的口径放前面（绝对页号 +
+          // 界面每页 10 条）；冻结用例钉死的「（每页 20 条）」字面放最后、弱化样式
+          // 并加 title 说明（底层单次读取 20 条），字面形式不许动。
+          h("span", { className: "dshi_hint" },
+            "第 " + absolutePage + " / " + lastKnownPage + " 页 · 界面每页显示 " + LIST_PAGE_SIZE + " 条"),
+          h("span", { className: "dshi_hint", title: "底层单次读取 20 条" },
+            "（每页 " + TIMELINE_PAGE_SIZE + " 条）")) : null);
     }
 
     var TABS = [
@@ -4453,6 +6003,31 @@ window.__ModuleLoader__.load({
       var workspaceState = useState("");
       var workspaceId = workspaceState[0];
       var setWorkspaceId = workspaceState[1];
+      // ── S4 选卡（0.4，评审 q-b8f480de923fa65d 拍板）────────────────────────
+      // 落点=面板 sticky 壳条（面板自己的「会话顶部」），形态对齐 .dshi_btn；
+      // 写目标=本会话 sessionPersonas 条目（{sessionId, persona} 两键，read-modify-
+      // write 单键 set，其余键原样保留；清卡=persona 写 null 不删条目）；
+      // defaultPersona 不在这条链上改（那是插件设置页「工作区默认卡」的事）。
+      // 注意：选卡 UI 的本地状态挂在既有 availability state 对象的附加字段
+      // availability.persona 上（open/draft/busy/error/switched），**不新增面板级
+      // useState**——ui-timeline / ui-memory / ui-readonly / ui-0.3 / client 五个
+      // 既有测试文件都把「面板恰好 9 个 useState」冻进 PANEL_STATES=9，多一个
+      // useState 会整体平移所有 tab 的状态下标。切会话时既有探测 effect 会整体
+      // 重写 availability，选卡行状态随之自动复位（不用另写 effect）。
+      var personaUi = availability && availability.persona && typeof availability.persona === "object"
+        ? availability.persona : {};
+      var personaCardOpen = personaUi.open === true;
+      var personaDraft = typeof personaUi.draft === "string" ? personaUi.draft : "";
+      var personaBusy = personaUi.busy === true;
+      var personaError = personaUi.error || null;
+      var personaSwitched = personaUi.switched === true;
+      // 局部更新 persona 子对象（函数式更新，保住 probing/done 等探测字段）。
+      var setPersonaUi = function (patch) {
+        setAvailability(function (prev) {
+          var base = prev && typeof prev === "object" ? prev : {};
+          return assign({}, base, { persona: assign({}, base.persona || {}, patch) });
+        });
+      };
       // 会话列表拉取的并发守卫（useRef 不占 useState 下标，老测试的 states[0..6] 不变）：
       // 首帧 effect 与「刷新」可能同时触发，只允许一个请求在飞。
       var sessionsRequestRef = useRef({ pending: false });
@@ -4643,6 +6218,81 @@ window.__ModuleLoader__.load({
         setProbeTick(probeTick + 1);
       };
 
+      // ── S4 选卡逻辑：当前卡名回显 + sessionPersonas 单键 read-modify-write ──
+      // 当前卡名来自 getStatus.scope（scopeId = persona 名；无卡 → 'global' 原样显示）。
+      var personaScopeNow = modeStatus && typeof modeStatus.scope === "string" && modeStatus.scope !== ""
+        ? modeStatus.scope
+        : "global";
+      // 一次写入尝试：每次都重读最新快照再算 next（CAS 重试不吃旧列表）。
+      // 只 set sessionPersonas 一个键，其余配置键原样保留（评审 B 硬约束）。
+      var personaWriteAttempt = async function (personaValue) {
+        var scope = props.dsh && typeof props.dsh.configScope === "function" ? props.dsh.configScope() : undefined;
+        if (!scope || typeof scope.mutate !== "function" || typeof scope.getSnapshot !== "function") {
+          var err = new Error("设置命名空间不可用（configForms 缺席），无法切换人设卡。");
+          err.code = "shiori/ui-unsupported";
+          throw err;
+        }
+        var snapshot = scope.getSnapshot();
+        var value = snapshot && snapshot.status === "ready" && snapshot.value && typeof snapshot.value === "object"
+          ? snapshot.value : null;
+        if (!value) {
+          var err2 = new Error("设置快照不可用（status=" + String(snapshot && snapshot.status) + "）。");
+          err2.code = "shiori/ui-scope";
+          throw err2;
+        }
+        var sid = String(sessionId);
+        var current = Array.isArray(value.sessionPersonas) ? value.sessionPersonas : [];
+        var index = -1;
+        for (var i = 0; i < current.length; i++) {
+          if (current[i] && String(current[i].sessionId) === sid) { index = i; break; }
+        }
+        // 条目只许 {sessionId, persona} 两键（config 严格拒绝未知键）；清卡=persona
+        // 写 null、保留条目（评审 B：避免并发写丢行）。
+        var entry = { sessionId: sid, persona: personaValue };
+        var next = current.slice();
+        if (index >= 0) next[index] = entry;
+        else next.push(entry);
+        return scope.mutate([{ op: "set", path: ["sessionPersonas"], value: next }], snapshot.revision);
+      };
+      // 写入 + 一次 CAS 重试：revision 冲突（mutate 返回 false 或抛错）重读快照重试
+      // 一次，仍失败把错误原文亮出来提示用户重试，绝不强行覆盖（评审 B/D）。
+      var personaWrite = async function (personaValue, isClear) {
+        setPersonaUi({ busy: true, error: null, switched: false }); // 新一次写入先清上一轮提示
+        try {
+          // B1：与 enableSave 同口径——mutate 恰好 ≤2 次（首次结果 !==true 才
+          // 重试一次，重读快照换 fence），第二次的原始错误文本拼进 conflict
+          // message，绝不第三次调用。P1#6：重试骨架改走公共 casMutate，
+          // conflict 文案 / code / cause 与原实现逐字等价。
+          await casMutate(function () { return personaWriteAttempt(personaValue); }, "shiori/ui-persona-conflict", function (ctx) {
+            return "设置刚被其他窗口修改（revision 冲突），已重试一次仍未成功；请点「切换」再试一次。"
+              + (ctx.lastError && ctx.lastError.message ? "（最近错误：" + ctx.lastError.message + "）" : "");
+          }, true);
+          // 「记忆已随人设卡切换」提示：组件内状态，只出一次（评审 D：不落 localStorage）；
+          // 切会话时探测 effect 重写 availability，提示随之复位。
+          setPersonaUi({ switched: true, open: false, busy: false });
+          // 成功后刷一次 getStatus，让壳条按钮的当前卡名回显跟上（评审 C）。
+          props.dsh.call("getStatus", sessionId, {}).then(function (status) {
+            if (status && typeof status === "object") setModeStatus(status);
+          }, function () { /* 回显刷新失败不打断：下一轮探测会再拉 */ });
+        } catch (e) {
+          // 失败把错误原文显示出来，不许静默吞掉（评审 C）；cause 存在时追
+          // 加「（原因：…）」（B2）。
+          setPersonaUi({ busy: false, error: { code: (e && e.code) || "shiori/ui-persona", message: (isClear ? "清除专属卡失败：" : "切换失败：") + ((e && e.message) || String(e)) + causeNoteOf(e) } });
+        }
+      };
+      // 切卡：输入框 trim，空串直接拒并提示「卡名不能为空」（评审 C）。
+      var personaSwitch = function () {
+        var persona = String(personaDraft ?? "").trim();
+        if (persona === "") {
+          setPersonaUi({ error: { code: "shiori/ui-persona-empty", message: "卡名不能为空。" } });
+          return;
+        }
+        personaWrite(persona, false);
+      };
+      // 清掉本会话专属卡：persona 写 null（保留条目），解析回落工作区默认链。
+      var personaClear = function () {
+        personaWrite(null, true);
+      };
       var mode = modeStatus && typeof modeStatus.mode === "string" ? modeStatus.mode : null;
       // F7 只读态：来自 getStatus.diagnostics.readonly（guard.status()；
       // inert/shadow/未 start 时为 null）。writable===false 才算只读（黄条判据）。
@@ -4736,11 +6386,18 @@ window.__ModuleLoader__.load({
         visibleSessions = filteredSessions;
       }
       var budgets = props.budgets;
+      // S2：main 槽位全屏模式——slots.register 的 inject 下发 workbench:true 时，
+      // 根容器追加 scope class（.dshi_rootMain，见 shiori.css 末尾）并标 data-main。
+      // 详情页 plugins.bundle.config 槽位没有该 prop，布局保持 860px 窄卡片不回归。
+      var workbench = !!props.workbench;
       // U8 sticky 壳条：工作区/会话选择器与 tab 栏包进一个 position:sticky 容器，
       // 随宿主面板滚动保持固定；三个提示行留在壳条之后不粘。壳条占据自身布局
       // 空间并有不透明底（--dshi-bg-card）+ 底边线，页面内容从壳条下方滚动，
       // 不会被遮死。
-      return h("div", { className: "dshi_root" },
+      // data-main 只在 workbench 模式输出（详情页根不挂该属性）。
+      var rootProps = { className: workbench ? "dshi_root dshi_rootMain" : "dshi_root" };
+      if (workbench) rootProps["data-main"] = "true";
+      return h("div", rootProps,
         h("div", { className: "dshi_hero" },
           h("span", { className: "dshi_logo" }, "栞"),
           h("div", { className: "dshi_heroText" },
@@ -4779,7 +6436,39 @@ window.__ModuleLoader__.load({
                       // 有标题显示标题（超长截断），无标题回退 sessionId；
                       // option 的 title 属性放完整 sessionId，便于悬停排查。
                       return h("option", { key: id, value: id, title: id }, sessionOptionLabel(item));
-                    })))),
+                    }))),
+            // S4 选卡按钮（评审 q-b8f480de923fa65d A）：壳条内的「会话顶部」，形态
+            // 对齐既有 .dshi_btn；显示当前卡名（getStatus.scope），global 原样显示；
+            // 窄屏卡名截断、全名走 title。不挤掉 / 不重排壳条既有按钮。
+            h("button", {
+              className: "dshi_btn",
+              "data-role": "persona-card-btn",
+              disabled: sessionId === "",
+              title: "当前记忆卡：" + personaScopeNow + "（点击切换，下一轮对话生效）",
+              onClick: function () {
+                // 再展开时复位上一轮的「已切换」提示与错误（评审 attempt-3 非阻塞：
+                // switched 提示不复位会一直挂着）。
+                setPersonaUi({ open: !personaCardOpen, draft: personaScopeNow === "global" ? "" : personaScopeNow, error: null, switched: false });
+              }
+            }, h("span", { className: "dshi_personaName" }, "记忆卡：" + personaScopeNow))),
+          // 选卡行（展开时）：输入卡名即切（scope 名 = persona 名，切卡=换整套记忆）；
+          // 「清除专属卡」把本会话条目的 persona 写成 null（回落默认解析链）。
+          personaCardOpen && sessionId !== "" ? h("div", { className: "dshi_personaRow", "data-role": "persona-card-row" },
+            h("label", { className: "dshi_label" }, "切换到卡名（切卡即换整套记忆，下一轮对话生效；老会话内容留在原 scope）",
+              h("input", {
+                className: "dshi_input",
+                value: personaDraft,
+                placeholder: "输入卡名（如 amber）",
+                onChange: function (event) { setPersonaUi({ draft: event.target.value }); }
+              })),
+            h("button", { className: "dshi_btn dshi_btnPrimary", disabled: personaBusy, onClick: personaSwitch }, personaBusy ? "切换中…" : "切换"),
+            h("button", {
+              className: "dshi_btn", disabled: personaBusy,
+              title: "清掉本会话的专属卡（条目保留、persona 置 null），回落工作区默认卡解析",
+              onClick: personaClear
+            }, "清除专属卡"),
+            h("button", { className: "dshi_btn", disabled: personaBusy, onClick: function () { setPersonaUi({ open: false }); } }, "取消"),
+            personaError ? ErrorBox(personaError) : null) : null,
           h("div", { className: "dshi_tabs" }, TABS.map(function (entry) {
             return h("button", {
               key: entry.id,
@@ -4790,6 +6479,8 @@ window.__ModuleLoader__.load({
               onClick: function () { setTab(entry.id); }
             }, entry.label);
           }))),
+        // S4 切卡提示：组件内状态，一次写入成功只出现一条（评审 D：不落 localStorage）。
+        personaSwitched ? h("div", { className: "dshi_ok", "data-role": "persona-switched" }, "记忆已随人设卡切换") : null,
         // 只有确定失败（null）才提示；undefined=首帧结果未出，不误报「不可用」。
         sessions === null
           ? h("div", { className: "dshi_hint" },
@@ -4827,7 +6518,9 @@ window.__ModuleLoader__.load({
                   tab === "candidates" && (modeStatus === null || mode === "active") ? h(CandidatesTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow }) : null,
                   tab === "topics" && (modeStatus === null || mode === "active") ? h(TopicsTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow, focusTarget: jumpRef.current && jumpRef.current.tab === "topics" ? jumpRef.current : null }) : null,
                   tab === "flashbacks" && (modeStatus === null || mode === "active") ? h(FlashbacksTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow }) : null,
-                  tab === "timeline" && (modeStatus === null || mode === "active") ? h(TimelineTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, onJump: jumpFromTimeline }) : null));
+                  // key=sessionId：切会话整组件重挂，分页/批缓存状态一并归零
+                  //（评审 attempt-3 阻塞 A 的宿主侧兜底；stub 直渲 tab 不走此路径）。
+                  tab === "timeline" && (modeStatus === null || mode === "active") ? h(TimelineTab, { key: sessionId, dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, onJump: jumpFromTimeline }) : null));
     }
 
     // ── F2 消息底部按钮（conversation.chat.assistant-actions 插槽）──────────
@@ -4926,6 +6619,31 @@ window.__ModuleLoader__.load({
           : null);
     }
 
+    // S2 侧边栏「记忆」图标：sidebar.panellist 槽位渲染，size 由宿主下发（默认 20，
+    // 侧边栏收窄时宿主会传更小值）。内联 SVG 线稿（评审 q-315cc6110122fd8d 拍板：
+    // client bundle 经 __ModuleLoader__ 注入拿不到自身资源 URL，img 引包内 icon.png
+    // 实机大概率 404，破图比不引用更难看；icon.png 仍留在包里供插件市场与配置页）。
+    // 描边参数与宿主图标同一套（viewBox 24 / stroke currentColor / 1.75 / round），
+    // 图形取「记忆」意象：摊开的书页 + 书脊（shiori=栞，书页签）。
+    function ShioriIcon(props) {
+      var size = typeof props.size === "number" && props.size > 0 ? props.size : 20;
+      return h("svg", {
+        className: "dshi_sideIcon",
+        width: size,
+        height: size,
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        strokeWidth: 1.75,
+        strokeLinecap: "round",
+        strokeLinejoin: "round",
+        "aria-hidden": true,
+        focusable: false,
+      },
+        h("path", { d: "M12 6c-1.8-1.6-4.6-2-8-2v14c3.4 0 6.2.4 8 2 1.8-1.6 4.6-2 8-2V4c-3.4 0-6.2.4-8 2z" }),
+        h("path", { d: "M12 6v14" }));
+    }
+
     // ── 客户端入口：$mount → 槽位注册，全部 disposer 逆序释放 ────────────────
     var inject = ["remote", "slots", "configForms"];
 
@@ -4971,6 +6689,41 @@ window.__ModuleLoader__.load({
         });
         if (typeof flashbackDisposer === "function") disposers.push(flashbackDisposer);
       } catch (flashbackSlotError) { /* 插槽不可用：静默跳过，不影响面板 */ }
+      // S2 侧边栏独立入口：main 全屏槽位 + sidebar.panellist 图标入口。
+      // 槽位写法照 dsh-email 的 workbench register 模板（lib/client.js:136-141）：
+      // main 槽位 inject 带 workbench:true，渲染复用现有 ShioriSection（PanelView），
+      // 由它自己切换全屏 scope class；sidebar.panellist 出「记忆」图标直达面板。
+      // 两个槽位都是可选增强——旧宿主缺槽位或注册抛错时静默跳过，详情页入口不受影响。
+      // 注册顺序仍以 plugins.bundle.config 收尾（「同一插槽上下文里最后一次
+      // register 获胜」的既有宿主与测试语义不变）。
+      var workbenchSlotReady = false;
+      try {
+        var mainDisposer = ctx.slots.inject("main", function () {
+          return ctx.slots.register(
+            { name: "main", key: "shiori", inject: function () { return { workbench: true }; } },
+            function (slotProps) {
+              return h(ShioriSection, assign({ dsh: api }, slotProps || {}));
+            });
+        });
+        if (typeof mainDisposer === "function") {
+          disposers.push(mainDisposer);
+          workbenchSlotReady = true;
+        }
+      } catch (mainSlotError) { /* main 槽位不可用：静默跳过，详情页入口照常 */ }
+      // 宿主缺 main 槽位时不挂侧边栏图标（评审 attempt-1 顺带项）：避免留下
+      // 点了没有落点的「记忆」死按钮——侧边栏入口只有面板槽位可用时才有意义。
+      if (workbenchSlotReady) {
+        try {
+          var sidebarDisposer = ctx.slots.inject("sidebar.panellist", function () {
+            return ctx.slots.register(
+              { name: "sidebar.panellist", id: "shiori", order: 60, label: "记忆" },
+              function (slotProps) {
+                return h(ShioriIcon, slotProps || {});
+              });
+          });
+          if (typeof sidebarDisposer === "function") disposers.push(sidebarDisposer);
+        } catch (sidebarSlotError) { /* 侧边栏槽位不可用：静默跳过 */ }
+      }
       var slotDisposer;
       try {
         slotDisposer = ctx.slots.inject("plugins.bundle.config", function () {

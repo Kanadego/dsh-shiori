@@ -8,7 +8,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -17,6 +17,10 @@ import { register, createRequire } from "node:module";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKQ = join(HERE, "..", "..");
 const TMP_ROOT = mkdtempSync(join(tmpdir(), "shiori-q-client-"));
+// 0.4-S1（reviewer P3）：测试入口统一注入 DSH_HOME=临时目录——缺省根会在
+// entry.apply → verifyPluginRoots 里真实 mkdir，不注入会在真实 ~/.dsh 建目录。
+// 仅加注入，不改任何用例。
+process.env.DSH_HOME = join(TMP_ROOT, "dsh-home");
 const NPM_GLOBAL = process.env.DSH_NPM_GLOBAL
   ?? join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "npm", "node_modules");
 const HOST_MODULES = process.env.DSH_HOST_MODULES ?? join(NPM_GLOBAL, "@deepseek-ai", "dsh", "node_modules");
@@ -60,16 +64,16 @@ function loadClientModule() {
 // bundle：形状、wire、CSS 一致性、安全约束
 // ---------------------------------------------------------------------------
 
-test("bundle：ModuleLoader 注册、导出 apply/inject、10 端点 wire 冻结", async () => {
+test("bundle：ModuleLoader 注册、导出 apply/inject、11 端点 wire 冻结（10 + destroyData）", async () => {
   const mod = loadClientModule();
   assert.deepEqual(Object.keys(mod).sort(), ["TYPERT_REMOTE", "apply", "ensureLosslessJson", "inject"]);
   assert.deepEqual(mod.inject, ["remote", "slots", "configForms"]);
   assert.equal(mod.TYPERT_REMOTE.package, "dsh-shiori");
 
-  const expected = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"];
+  const expected = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
   const endpoints = Object.keys(mod.TYPERT_REMOTE.methods).sort();
   assert.deepEqual(endpoints, [...expected].map((m) => `shiori/${m}`).sort());
-  assert.equal(mod.TYPERT_REMOTE.descriptors.length, 10);
+  assert.equal(mod.TYPERT_REMOTE.descriptors.length, 11);
 
   for (const descriptor of mod.TYPERT_REMOTE.descriptors) {
     assert.equal(descriptor.invocation.kind, "direct");
@@ -223,6 +227,7 @@ export const MANAGEMENT_METHODS = {
   previewPlan: { inputSchema: { type: "object", required: ["kind"] }, outputSchema: { type: "object" } },
   executePlan: { inputSchema: { type: "object", required: ["planId", "planDigest", "operationId", "confirmed"] }, outputSchema: { type: "object" } },
   getTimeline: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
+  destroyData: { inputSchema: { type: "object", required: ["confirm"] }, outputSchema: { type: "object" } },
 };
 const ALLOWED = {
   getStatus: [], getMemoryView: [], getGraph: [], listCandidates: [],
@@ -232,6 +237,7 @@ const ALLOWED = {
   previewPlan: ["kind", "candidateId", "proposal", "expectedQueueRevision", "operationId", "planId"],
   executePlan: ["planId", "planDigest", "operationId", "confirmed"],
   getTimeline: ["offset", "limit"],
+  destroyData: ["confirm"],
 };
 export function validateManagementPayload(name, payload) {
   if (!Object.prototype.hasOwnProperty.call(ALLOWED, name)) { const e = new Error("unknown method"); e.code = "INVALID_INPUT"; throw e; }
@@ -248,7 +254,7 @@ export async function createShioriPluginController(ctx, settings) {
   globalThis.__shioriQLastSettings = settings;
   const state = { created: true, started: 0, stopped: 0, settings };
   const management = {};
-  for (const method of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"]) {
+  for (const method of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"]) {
     management[method] = async (trustedContext, payload) => ({ method, trusted: { source: trustedContext.source, principal: trustedContext.principal.kind, sessionId: trustedContext.session && trustedContext.session.id, hasAgent: Boolean(trustedContext.agent), signalLike: Boolean(trustedContext.signal) }, payload });
   }
   return {
@@ -323,7 +329,7 @@ async function callAs(ctx, service, method, { principal = "owner", session = { i
 test("mountShioriRpc：真实 TypertRemoteService 挂载 + Remote 标记 + owner 授权 + trustedContext", async () => {
   const ctx = fakeCtx();
   const management = {};
-  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"]) {
+  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"]) {
     management[m] = async (trusted, payload) => ({ ok: true, method: m, trusted, payload });
   }
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
@@ -332,9 +338,9 @@ test("mountShioriRpc：真实 TypertRemoteService 挂载 + Remote 标记 + owner
 
   // 真实 Remote 标记（Gateway source-mode 发现路径）
   const markers = remoteMethods(service);
-  assert.equal(markers.length, 10);
+  assert.equal(markers.length, 11);
   assert.deepEqual(markers.map((m) => m.exportName ?? m.method).sort(),
-    ["analyze", "executePlan", "executeTool", "getGraph", "getMemoryView", "getStatus", "getTimeline", "listCandidates", "previewPlan", "reviewCandidate"].sort());
+    ["analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView", "getStatus", "getTimeline", "listCandidates", "previewPlan", "reviewCandidate"].sort());
 
   const out = await callAs(ctx, service, "getStatus");
   assert.equal(out.method, "getStatus");
@@ -351,7 +357,7 @@ test("授权：非 owner / 无 invocation / 非宿主 session 一律拒绝", asy
   const ctx = fakeCtx();
   const noop = async () => ({});
   const management = Object.fromEntries(
-    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"].map((m) => [m, noop]),
+    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"].map((m) => [m, noop]),
   );
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const service = ctx.get("shiori.panel");
@@ -366,7 +372,7 @@ test("code 透传：management 抛 INVALID_INPUT/REVISION_CONFLICT 时 RemoteErr
   const ctx = fakeCtx();
   const boom = (code) => async () => { const e = new Error("biz fail"); e.code = code; throw e; };
   const ok = async () => ({});
-  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"];
+  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
   const management = Object.fromEntries(methods.map((m) => [m, m === "reviewCandidate" ? boom("REVISION_CONFLICT") : ok]));
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const service = ctx.get("shiori.panel");
@@ -391,7 +397,7 @@ test("stop：禁新 → 排空在途；幂等；diagnostics 如实", async () =>
   const slow = async () => { await gate; return { slow: true }; };
   const ok = async () => ({});
   const management = Object.fromEntries(
-    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"].map((m) => [m, m === "getGraph" ? slow : ok]),
+    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"].map((m) => [m, m === "getGraph" ? slow : ok]),
   );
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const service = ctx.get("shiori.panel");
@@ -412,14 +418,14 @@ test("stop：禁新 → 排空在途；幂等；diagnostics 如实", async () =>
   assert.equal(diagnostics.namespace, "shiori");
   assert.equal(diagnostics.transport, "typert-gateway");
   assert.equal(diagnostics.ownerOnly, true);
-  assert.equal(diagnostics.methods.length, 10);
+  assert.equal(diagnostics.methods.length, 11);
 });
 
 test("diagnostics：宿主 typert 缺席时声明 UI unsupported（仅工具模式）", async () => {
   const ctx = fakeCtx({ typert: false });
   const ok = async () => ({});
   const management = Object.fromEntries(
-    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"].map((m) => [m, ok]),
+    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"].map((m) => [m, ok]),
   );
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const diagnostics = rpc.diagnostics();
@@ -430,7 +436,7 @@ test("diagnostics：宿主 typert 缺席时声明 UI unsupported（仅工具模�
 
 test("wire 契约校验：P protocol 方法集不一致或 management 缺方法时拒绝挂载", async () => {
   const ok = async () => ({});
-  const full = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"];
+  const full = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
   await assert.rejects(
     () => mountShioriRpc(fakeCtx(), { getStatus: ok }, {}),
     /management is missing methods/,
@@ -443,6 +449,50 @@ test("wire 契约校验：P protocol 方法集不一致或 management 缺方法�
     () => mountShioriRpc(null, Object.fromEntries(full.map((m) => [m, ok])), {}),
     /Cordis context/,
   );
+});
+
+test("wire 11 方法（0.4 S6 destroyData）：真实 protocol 第 11 位、schema 闭合、CONTRACT_METHODS 逐字一致", async () => {
+  // 真实 P protocol（零依赖纯 JSON 模块，synthetic 环境可直接 import）
+  const protocol = await import(pathToFileURL(join(WORKQ, "src", "plugin", "protocol.mjs")).href);
+  const names = Object.keys(protocol.MANAGEMENT_METHODS);
+  assert.equal(names.length, 11, "0.4 S6 起 wire 冻结为 11 个方法（10 + destroyData）");
+  assert.equal(names[10], "destroyData", "destroyData 是 MANAGEMENT_METHODS 第 11 位");
+  const schema = protocol.MANAGEMENT_METHODS.destroyData;
+  // 输入闭合：{ confirm: string }，required + additionalProperties:false
+  assert.deepEqual(schema.inputSchema.properties, { confirm: { type: "string" } });
+  assert.equal(schema.inputSchema.additionalProperties, false);
+  assert.deepEqual(schema.inputSchema.required, ["confirm"]);
+  // 输出闭合：{ deleted, files, bytes, dataRoot }
+  assert.deepEqual(schema.outputSchema.properties, {
+    deleted: { type: "boolean" },
+    files: { type: "integer", minimum: 0 },
+    bytes: { type: "integer", minimum: 0 },
+    dataRoot: { type: "string", minLength: 1 },
+  });
+  assert.equal(schema.outputSchema.additionalProperties, false);
+  assert.deepEqual(schema.outputSchema.required, ["deleted", "files", "bytes", "dataRoot"]);
+  // wire 层闭包校验：未知键拒 / 缺 confirm 拒
+  assert.throws(
+    () => protocol.validateManagementPayload("destroyData", { confirm: "x", rogue: 1 }),
+    (e) => e.code === "INVALID_INPUT",
+  );
+  assert.throws(
+    () => protocol.validateManagementPayload("destroyData", {}),
+    (e) => e.code === "INVALID_INPUT",
+  );
+  // CONTRACT_METHODS（client-rpc 冻结清单）与 MANAGEMENT_METHODS 逐字一致：
+  // 用真实 protocol 走挂载闸——缺 destroyData 的 management 被点名拒绝，
+  // 全 11 方法挂载通过（不一致时 mountShioriRpc 的 methodSetMismatch 会先炸）。
+  const { mountShioriRpc } = await import(pathToFileURL(join(WORKQ, "src", "plugin", "client-rpc.mjs")).href);
+  const noop = async () => ({});
+  const eleven = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
+  await assert.rejects(
+    () => mountShioriRpc(fakeCtx(), Object.fromEntries(eleven.filter((m) => m !== "destroyData").map((m) => [m, noop])), {}),
+    /management is missing methods: destroyData/,
+  );
+  const rpc = await mountShioriRpc(fakeCtx(), Object.fromEntries(eleven.map((m) => [m, noop])), {});
+  assert.deepEqual(rpc.diagnostics().methods, eleven);
+  await rpc.stop();
 });
 
 // ---------------------------------------------------------------------------
@@ -480,6 +530,42 @@ test("index apply：缺省配置为 inert shadow 挂载；非法配置整体失�
   await assert.rejects(() => entry.apply(fakeCtx(), { mode: "active" }), /allowActive/);
 });
 
+test("index apply：shadow 缺省配置注入路径——controller 拿到 verify 解析后的 canonical 默认根（junction 词法 ≠ realpath）", async () => {
+  // 把 DSH_HOME 指向 junction：normalize 补出的默认根是词法形式，只有经过
+  // verify 的真实 link 解析 + 回填（0.4-S1 注入路径），controller 才拿到
+  // canonical 形式——回填缺失或直传 normalized 时这里的相等断言变红。
+  // 同时断言 shadow 挂载的缺省双根已被 mkdir -p、模式是 shadow 而非 inert。
+  const { realpathSync } = await import("node:fs");
+  const base = join(TMP_ROOT, "inject-defaults");
+  const real = join(base, "real-home");
+  mkdirSync(real, { recursive: true });
+  const link = join(base, "link-home");
+  try {
+    symlinkSync(real, link, "dir");
+  } catch {
+    symlinkSync(real, link, "junction");
+  }
+  const previousHome = process.env.DSH_HOME;
+  process.env.DSH_HOME = link;
+  let cleanup;
+  try {
+    const ctx = fakeCtx();
+    cleanup = await entry.apply(ctx, {});
+    const captured = globalThis.__shioriQLastSettings;
+    assert.ok(captured, "synthetic controller captured settings");
+    assert.equal(captured.mode, "shadow", "缺省配置为 shadow（不是 inert 直传）");
+    assert.equal(captured.dataRoot, join(real, "shiori-data"), "缺省 dataRoot 以 verify 解析后的 canonical 形式注入");
+    assert.equal(captured.stateRoot, join(real, "shiori-state"));
+    assert.deepEqual(captured.rootsSource, { dataRoot: "default", stateRoot: "default" });
+    assert.equal(existsSync(join(real, "shiori-data")), true, "apply 阶段已把默认根 mkdir 就绪");
+    assert.equal(existsSync(join(real, "shiori-state")), true, "apply 阶段已把默认根 mkdir 就绪");
+  } finally {
+    if (cleanup) await cleanup();
+    if (previousHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previousHome;
+  }
+});
+
 test("index apply：mountShioriRpc 失败（management 缺方法）→ 停 controller 后原样抛出", async () => {
   // 直接对 client-rpc 断言（entry 会因 P stub controller 始终提供全方法，
   // 用 management 缺方法场景由 mountShioriRpc 层覆盖，entry 的 catch 分支以此为准）
@@ -502,7 +588,7 @@ const { Context: RealCordisContext } = cordisModule;
 function realCordisFixture(managementOverrides = {}) {
   const recorded = { signals: [], payloads: [], sessions: [] };
   const management = {};
-  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"]) {
+  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"]) {
     management[m] = async (trusted, payload) => {
       recorded.signals.push(trusted.signal);
       recorded.payloads.push(payload);
@@ -532,8 +618,9 @@ test("R2 回归：真实 Cordis receiver 下九个方法全部可用，trustedCo
     reviewCandidate: { candidateId: "c1", decision: "reviewed" },
     previewPlan: { kind: "organize" },
     executePlan: { planId: "p1", planDigest: "d1", operationId: "o1", confirmed: true },
+    destroyData: { confirm: "x" },
   };
-  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"]) {
+  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"]) {
     const out = await callViaCordisReceiver(callContext, m, { payload: samplePayloads[m] ?? {}, signal });
     assert.equal(out.method, m, `method ${m} must pass the real Cordis receiver`);
     assert.equal(out.source, "panel-rpc");
@@ -2540,7 +2627,7 @@ function wireRoundTrip(error) {
   return JSON.parse(JSON.stringify(envelope)); // gateway → JSON over the wire
 }
 
-const RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"];
+const RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
 const NOOP_MANAGEMENT = () => Object.fromEntries(RPC_METHODS.map((m) => [m, async () => ({})]));
 const REVIEW_PAYLOAD = { candidateId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", decision: "reviewed", expectedQueueRevision: 5, operationId: "op-1" };
 

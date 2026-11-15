@@ -1,7 +1,8 @@
 // 0.3 UI 四点改动的定向回归（各改动 ≥1 条断言，独立成文件，不动既有测试）：
 //   1. 图谱四角标签：画布边界纳入锚点判定 + 钳回画布渲染（不再被 viewBox 裁掉），
 //      「可见标签两两不相交、不压节点圆」承诺保持；
-//   2. 最近变更分页：TIMELINE_PAGE_SIZE 100 → 20；
+//   2. 最近变更分页：wire 批量 TIMELINE_PAGE_SIZE=20、界面每页 LIST_PAGE_SIZE=10
+//      （0.4 显示层分页：批内翻页纯本地、跨批才发请求）；
 //   3. 记忆上限两页同源同口径：MemoryTab 按 l1.hardCap（硬顶）显示，与状态页
 //      occupancy.l1HardCap 同一真值；L0 取 l0.budget，不再走 budgets.persona 兜底；
 //   4. 整理与遗忘页收敛为只做遗忘：整理入口 / 整理候选组 / 整理计划卡移除，
@@ -208,7 +209,7 @@ test("0.3-1 图谱：任何渲染出的标签矩形都完整落在 800×380 view
 });
 
 // ---------------------------------------------------------------------------
-// 改动 2：最近变更分页 100 → 20
+// 改动 2：最近变更分页（0.4：wire 批量 TIMELINE_PAGE_SIZE=20、界面每页 LIST_PAGE_SIZE=10）
 // ---------------------------------------------------------------------------
 
 function timelineItem() {
@@ -221,13 +222,22 @@ function pageDto(fields) {
   return Object.assign({ scope: "amber", items: [], hasMore: false, skippedCorrupted: 0, scanLimited: false }, fields);
 }
 
-test("0.3-2 最近变更：每页 20 条——请求 limit=20、翻页 offset 步进 20、页脚文案跟随常量", async () => {
+function countTimelineItems(tree) {
+  return flattenVNode(tree).filter((n) => n.props && n.props.className === "dshi_item").length;
+}
+
+test("0.3-2 最近变更：界面每页 10 条——整批请求 limit=20 只显示前 10 条、批内翻页纯本地不发请求、跨批才步进 offset=20、页脚文案跟随界面分页", async () => {
   const { host, renderTab } = await mountTabById("timeline", "TimelineTab");
   const calls = [];
+  // 整批 20 条（一批 = 两个显示页）：只有批内条目数 ≥ 11 才能真正鉴别
+  // 「界面每页 10 条」——批不满一页时旧冻结用例的批外请求路径也会被走到。
+  const items = Array.from({ length: 20 }, (_, i) => Object.assign(timelineItem(), {
+    target: { type: "spark", id: "abcd1234abcd1234abcd", title: "批内条目-" + String(i).padStart(2, "0") },
+  }));
   const dsh = {
     call: async (method, session, payload) => {
       calls.push(payload);
-      return pageDto({ items: [timelineItem()], hasMore: true });
+      return pageDto({ items, hasMore: true });
     },
   };
   // 首页：states 从空初始化（page=null → effect load(offset=0)），再重渲染读最新 state
@@ -235,19 +245,34 @@ test("0.3-2 最近变更：每页 20 条——请求 limit=20、翻页 offset �
   let tree = renderTab(dsh, "session-A", { effects: true });
   for (const fn of host.effects.splice(0)) fn();
   await flush();
-  assert.deepEqual(calls[0], { offset: 0, limit: 20 }, "首页以 limit=20 请求");
+  assert.deepEqual(calls[0], { offset: 0, limit: 20 }, "首页仍整批请求 limit=20（wire 协议不变）");
   tree = renderTab(dsh, "session-A");
-  assert.ok(collectText(tree).includes("（每页 20 条）"), "页脚文案跟随 TIMELINE_PAGE_SIZE");
+  assert.equal(countTimelineItems(tree), 10, "界面每页只显示 10 条（0.4 显示层分页）");
+  let text = collectText(tree);
+  assert.ok(text.includes("批内条目-00"), "首页显示第 1 条");
+  assert.ok(!text.includes("批内条目-10"), "首页不显示第 11 条");
+  assert.ok(text.includes("界面每页显示 10 条"), "页脚文案跟随界面每页 10 条");
 
-  // 翻页：下一页以 offset=20 请求
+  // 批内翻页：下一页纯本地切片，不发请求
   calls.length = 0;
   const next = findButton(tree, "下一页");
-  assert.ok(next && next.props.disabled !== true, "hasMore=true → 下一页可用");
+  assert.ok(next && next.props.disabled !== true, "有本地下一页 → 下一页可用");
   next.props.onClick();
+  tree = renderTab(dsh, "session-A");
+  assert.deepEqual(calls, [], "批内「下一页」纯本地切片，不发 RPC");
+  assert.equal(countTimelineItems(tree), 10, "第二显示页仍每页 10 条");
+  text = collectText(tree);
+  assert.ok(text.includes("批内条目-10"), "第二显示页展示第 11 条");
+  assert.ok(!text.includes("批内条目-00"), "第二显示页不再展示第 1 条");
+
+  // 跨批：再点一次「下一页」才以 offset=20 请求下一批
+  const next2 = findButton(tree, "下一页");
+  assert.ok(next2 && next2.props.disabled !== true, "批内页耗尽 → 下一页仍可用");
+  next2.props.onClick();
   tree = renderTab(dsh, "session-A", { effects: true });
   for (const fn of host.effects.splice(0)) fn();
   await flush();
-  assert.deepEqual(calls, [{ offset: 20, limit: 20 }], "下一页以 offset=20（每页 20 条）请求");
+  assert.deepEqual(calls, [{ offset: 20, limit: 20 }], "跨批翻页以 offset=20（整批 20 条）请求");
 });
 
 // ---------------------------------------------------------------------------

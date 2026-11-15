@@ -1,7 +1,8 @@
 // P4-N 定向测试：批量软归档 / 冷库列表 / 明确有用反馈（CONTRACTS §1/§3/§4）。
 //
 // 集成测试：复制当前项目生产 src/test/package 到临时 stage，不覆盖 store。
-// 只复制历史 G a2 loader 对照夹具，保留全部定向断言与内嵌 P0-P3 回归。
+// 只复制历史 G a2 loader 对照夹具，保留全部定向断言；内嵌 P0-P3 回归已拆至
+// test/forgetting/stage-regression.test.mjs（发版门禁层，用例未删）。
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -147,43 +148,9 @@ function assertArchivedSnapshot(before, after, executedAt) {
   }
 }
 
-/** 运行 stage 内旧测试（真实子进程 node --test）。 */
-/** 运行 stage 内旧测试（真实子进程 node --test）。
- * 须剥离子进程的 NODE_TEST_CONTEXT/NODE_TEST_TMP_DIR：否则父测试运行器
- * 会在子进程里留下「递归测试」标记，node --test 会跳过执行并只告警。 */
-function runNodeTest(files, timeoutMs = 300_000) {
-  const env = { ...process.env };
-  delete env.NODE_TEST_CONTEXT;
-  delete env.NODE_TEST_TMP_DIR;
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['--test', '--test-reporter=tap', ...files], { cwd: stage, env });
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { err += d; });
-    const timer = setTimeout(() => { child.kill(); }, timeoutMs);
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ code, out, err });
-    });
-  });
-}
-
-async function stageTestFiles(dirs) {
-  const files = [];
-  for (const d of dirs) {
-    const abs = path.join(stage, 'test', d);
-    for (const e of (await fsp.readdir(abs)).sort()) {
-      if (e.endsWith('.test.mjs')) files.push(path.join(abs, e));
-    }
-  }
-  return files;
-}
-
-function tapCounts(out) {
-  const grab = (re) => Number((out.match(re) || [])[1] ?? -1);
-  return { tests: grab(/^# tests (\d+)$/m), pass: grab(/^# pass (\d+)$/m), fail: grab(/^# fail (\d+)$/m) };
-}
+// 「真实旧回归」三条用例及其 stage 子进程三件套（runNodeTest / stageTestFiles /
+// tapCounts）已整体拆至 test/forgetting/stage-regression.test.mjs（发版门禁层，
+// npm run test:release 执行）；本文件保留壳自身的 forgetting 集成测试常规跑。
 
 // ---------------------------------------------------------------------------
 
@@ -1243,32 +1210,6 @@ describe('P4-N 已集成窄存储（temp stage 生产位置）', () => {
     });
   });
 
-  // ------------------------------------------------------------------
-  describe('真实旧回归（stage 生产位置运行 P0-P3 测试）', () => {
-    it('定向：stage test/sparks 全套通过（旧 API、LOCK_BUSY 跨进程锁、损坏 fail-closed）', async () => {
-      const files = await stageTestFiles(['sparks']);
-      const { code, out, err } = await runNodeTest(files, 240_000);
-      const counts = tapCounts(out);
-      assert.equal(code, 0, `旧 sparks 回归失败：\n${out.slice(-4000)}\n${err.slice(-2000)}`);
-      assert.ok(counts.tests > 0 && counts.fail === 0, `TAP 计数异常：${JSON.stringify(counts)}`);
-    });
-
-    it('定向：stage test/organize 全套通过（P3 方法保留 + G a2 冻结 loader 对照）', async () => {
-      const files = await stageTestFiles(['organize']);
-      const { code, out, err } = await runNodeTest(files, 240_000);
-      const counts = tapCounts(out);
-      assert.equal(code, 0, `旧 organize 回归失败：\n${out.slice(-4000)}\n${err.slice(-2000)}`);
-      assert.ok(counts.tests > 0 && counts.fail === 0, `TAP 计数异常：${JSON.stringify(counts)}`);
-    });
-
-    it('全量：stage npm test 等价（P0-P3 全部套件真实运行）', async () => {
-      const dirs = ['core', 'host', 'storage', 'service', 'integration', 'runtime', 'completion', 'acceptance', 'sparks', 'organize'];
-      const files = await stageTestFiles(dirs);
-      assert.ok(files.length >= 40, `stage 测试文件数量异常：${files.length}`);
-      const { code, out, err } = await runNodeTest(files, 420_000);
-      const counts = tapCounts(out);
-      assert.equal(code, 0, `全量旧回归失败：\n${out.slice(-6000)}\n${err.slice(-2000)}`);
-      assert.ok(counts.tests > 700 && counts.fail === 0, `TAP 计数异常：${JSON.stringify(counts)}`);
-    });
-  });
+  // 「真实旧回归（stage 生产位置运行 P0-P3 测试）」describe 块已拆至
+  // test/forgetting/stage-regression.test.mjs（发版门禁层，用例逐字原样搬移）。
 });

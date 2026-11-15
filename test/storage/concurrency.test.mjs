@@ -78,8 +78,12 @@ describe('跨进程锁互斥', () => {
     const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'shiori-lock-'));
     t.after(() => fsp.rm(dir, { recursive: true, force: true }).catch(() => {}));
     const ready = path.join(dir, 'ready');
+    const releaseFile = path.join(dir, 'release');
 
-    const holder = spawnNode('lock-holder.mjs', ['--root', root, '--ready', ready, '--hold-ms', '1500']);
+    // C-fix 打回项 B：hold-ms 撤回为 1500（只作兜底 deadline），改由 --release
+    // 文件放行——父进程断言完 LOCK_BUSY 后立刻写文件让 holder 提前释放，
+    // 用例耗时回到秒级，不再用「等满 10 秒」换稳定。
+    const holder = spawnNode('lock-holder.mjs', ['--root', root, '--ready', ready, '--hold-ms', '1500', '--release', releaseFile]);
     assert.ok(await waitForFile(ready), 'holder 未进入临界区');
 
     const store = await createFileStore(opts({ root, lockTimeoutMs: 400 }));
@@ -88,8 +92,13 @@ describe('跨进程锁互斥', () => {
       changes: [{ kind: 'core', expectedRevision: null, text: 'x\n' }],
     }), (err) => err.code === 'LOCK_BUSY');
 
-    await holder.promise; // 等子进程释放
-    const r = await store.commit({
+    await fsp.writeFile(releaseFile, 'go'); // 断言完立刻放行 holder 释放
+    await holder.promise; // 等子进程退出（锁已释放）
+    // C-fix C1：释放后的成功提交换独立 store、放大锁预算——它验证的是「释放后可
+    // 获取」这一性质，不是 400ms 延迟上限；负载下一次 acquire 的 fs 链可能超过
+    // 400ms。断言（成功、generation=1）一字未动。
+    const storeAfter = await createFileStore(opts({ root, lockTimeoutMs: 60_000 }));
+    const r = await storeAfter.commit({
       operationId: 'after-release', expectedGeneration: 0,
       changes: [{ kind: 'core', expectedRevision: null, text: 'x\n' }],
     });
@@ -105,13 +114,27 @@ describe('并发读写快照一致性', () => {
     t.after(() => fsp.rm(dir, { recursive: true, force: true }).catch(() => {}));
 
     const resultFile = path.join(dir, 'writer-result.json');
-    const writer = spawnNode('writer.mjs', ['--root', root, '--result', resultFile, '--count', '25']);
+    // 负载下写手一次完整运行（25 次翻转，每次 snapshot→commit 两段持锁）可能远超
+    // 读者单次 acquire 的默认 10s deadline——写手在两次翻转之间只留下极短的锁空窗，
+    // 读者按 50ms 重试完全可能在 10s 内抢不到一次空窗，此时抛 LOCK_BUSY 是
+    // fail-closed 的正确行为，不是被测性质被破坏。因此给读者放大的是「调度预算」：
+    // 读者把单次 acquire 的 deadline 抬到 60s（写手自身持有 20s，且写手每次翻转
+    // 之间必然释放锁），核心断言（每代完整、revision 一致、终态 gen=25、conflicts=0）
+    // 一字未动。整条用例仍有界：写手无论成败都会写 resultFile，若它被 spawnNode
+    // 安全网击杀导致 resultFile 永不出现，下方循环检测到子进程已退出会立即显式失败。
+    const writer = spawnNode('writer.mjs', ['--root', root, '--result', resultFile, '--count', '25'],
+      { timeoutMs: 240_000 });
 
-    const store = await createFileStore(opts({ root }));
+    const store = await createFileStore(opts({ root, lockTimeoutMs: 120_000 }));
     let reads = 0;
     for (;;) {
       const done = await fsp.access(resultFile).then(() => true, () => false);
       if (done) break;
+      // 有界兜底：写手子进程已退出但结果文件仍未出现（只可能是被安全网击杀），
+      // 显式失败而不是无限轮询挂死。
+      if (writer.child.exitCode !== null || writer.child.signalCode !== null) {
+        throw new Error(`写手子进程在写出结果前退出（signal=${writer.child.signalCode}），无法继续轮询`);
+      }
       const snap = await store.snapshot();
       // 核心判据：core 正文只能是完整一代的 'A\n' 或 'B\n'，绝无撕裂/空/中间态
       assert.ok(snap.core.text === 'A\n' || snap.core.text === 'B\n',

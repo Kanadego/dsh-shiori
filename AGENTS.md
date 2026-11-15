@@ -1,6 +1,6 @@
 # AGENTS.md — dsh-shiori
 
-> Quick-reference guide for AI coding agents working in or operating `dsh-shiori` (v0.3.1).
+> Quick-reference guide for AI coding agents working in or operating `dsh-shiori` (v0.4.0).
 > For user-facing quickstart see `README.md`; for full usage and install details see `docs/USAGE-GUIDE.md` and `docs/plugin/INSTALL.md`.
 
 ---
@@ -23,13 +23,13 @@
 
 ---
 
-## 2. How to Use the 16 Agent Tools
+## 2. How to Use the 17 Agent Tools
 
 ### 2.1 L0 Persona Card (2 tools)
 - `soul_read()` → returns `{ exists, persona, content, revision, stale }`.
 - `soul_update({ content, operationId? })` → CAS-protected replacement of the active persona card; takes effect on the next turn.
 
-### 2.2 L1 Core & L3 Topics (8 tools)
+### 2.2 L1 Core & L3 Topics (9 tools)
 - `memory_read({ topic? })` → omit `topic` to read full rendered L1 (`core` + derived index) and its `revision`; pass `topic: "<key>"` to read an L3 topic's full Markdown body.
 - `core_write({ content, expectedRevision, operationId? })` → replace L1 `core.md` body (do **not** include the derived topic index in `content`; pass `revision` from `memory_read()`).
 - `memory_append({ section, content, topic?, operationId? })` → append a dated section to L1 `core` (omit `topic`) or an existing L3 topic.
@@ -38,6 +38,7 @@
 - `topic_append({ topic, section, content, operationId? })` → append a dated section to an existing L3 topic.
 - `memory_list_topics()` → list all visible topics with character/byte counts and revisions.
 - `memory_search({ query, limit?, includeArchived? })` → lexical keyword search across visible topics (archived topics return summary-only entries with `state: "archived"`).
+- `group_manage({ action, key?, title?, summary?, order?, migrateTo?, operationId? })` → manage topic groups in the current scope: `action: "list"` (per-group topic counts, primary-group `group[0]` only), `"create"` / `"update"` metadata, `"delete"`. Deleting a non-empty group requires `migrateTo`: member topics are re-grouped in one commit, then the group entry is removed as a second step (a topic attached between the two commits may be left dangling — concurrency edge).
 
 ### 2.3 L2 Spark Atomic Cards (6 tools)
 - `spark_save({ title, content, triggers, vitality, summary?, entities?, links?, operationId? })` → save an atomic memory card (`50–150` chars recommended). Give `3–5` distinct natural wake phrases in `triggers`; `vitality` is `"evergreen"` or `"ephemeral"`.
@@ -51,7 +52,7 @@
 
 ## 3. Build, Test & Package Verification Commands
 
-`dsh-shiori` is written in pure ESM (`.mjs`) with zero build step. Run from repo root (`D:/AIagent/shiori`):
+`dsh-shiori` is written in pure ESM (`.mjs`) with zero build step. Run from the repository root:
 
 ```bash
 npm test                 # Run the full Node test suite across all 13 test directories
@@ -73,12 +74,12 @@ npm run verify:package   # Verify package exports, files whitelist, and tarball 
 - `src/sparks/` — L2 store (`store.mjs`), literal & entity spread matching (`match.mjs`), semantic recall (`semantic-recall.mjs`), turn attachment delivery (`delivery.mjs`), graph projection (`graph.mjs`).
 - `src/organize/` & `src/forgetting/` — L1 water-level analysis, organize proposal queue/executor, time-decay scoring, and cold archive search.
 - `src/semantic/` — Optional local embedding engine (`@huggingface/transformers`, default `Xenova/bge-small-zh-v1.5`, `provider: "none" | "local"`).
-- `src/plugin/` — Schemastery config & root verification (`config.mjs`), plugin lifecycle controller (`controller.mjs`), 16 tool schemas & TypeRT descriptors (`tool-schemas.mjs`, `typert-descriptors.mjs`), Web UI RPC (`client-rpc.mjs`).
+- `src/plugin/` — Schemastery config & root verification (`config.mjs`), plugin lifecycle controller (`controller.mjs`), 17 tool schemas & TypeRT descriptors (`tool-schemas.mjs`, `typert-descriptors.mjs`), Web UI RPC (`client-rpc.mjs`).
 - `client/index.js` — Browser Web UI client bundle (water-level bar, spark knowledge graph, organize queue review, topic browser).
 
 ### Hard Invariants (Do Not Break)
 
-1. **Separate `dataRoot` and `stateRoot`**: In active mode, both `dataRoot` and `stateRoot` must be explicit, canonical, non-nested absolute paths (`verifyPluginRoots` in `src/plugin/config.mjs`).
+1. **Separate `dataRoot` and `stateRoot`** (0.4-S1): The two roots resolve independently — a missing root defaults to `<DSH_HOME>/shiori-data` / `<DSH_HOME>/shiori-state` (`DSH_HOME` env, falling back to `~/.dsh`). Both roots must be canonical, non-nested absolute paths after real-link resolution (`verifyPluginRoots` in `src/plugin/config.mjs`), which also creates both directories at apply time (intentional, even in shadow mode). `mode` stays `shadow` unless `allowActive === true`; inert mounting is no longer triggered by missing roots.
 2. **CAS & Idempotency**: Every mutating operation goes through `service.mutate` with revision CAS and `operationId` idempotency. Never bypass the storage layer to overwrite files directly while the service is live.
 3. **Prompt Cache Stability**: L0 and L1 sections injected via `systemPrompt` must remain byte-identical within a turn; dynamic per-turn recalls (L2 sparks) are delivered exclusively as turn attachments (`src/sparks/delivery.mjs`).
 4. **DSH Value Schema DSL Rules (`src/plugin/tool-schemas.mjs`)**: Every `object` schema must explicitly declare `additionalProperties: true | false`; required fields use property-level `required: true` (no top-level `required` array); unions use `oneOf`.

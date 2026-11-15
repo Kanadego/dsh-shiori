@@ -8,6 +8,8 @@
 //   updated: "2026-10-24T00:00:00.000Z"
 //   scopeId: "amber"
 //   archivedAt: "2026-11-07T00:00:00.000Z"   ← 可选；空/缺省时整行省略
+//   group: ["dev", "self"]                   ← 可选（0.4 S3）；空数组/缺省时整行省略
+//   pinned: true                             ← 可选（0.4 S3）；false/缺省时整行省略
 //   ---
 //   <body 逐字节保留>
 //
@@ -21,6 +23,11 @@
 //   其余不得为空（与 A.validateTopic 的读写规则一致，R7）；
 // - archivedAt（归档标记，ISO 时间串）：可选字段，磁盘上有值即归档、
 //   删掉即恢复（真相只在专题文件本身，不另开账本）；老文件没有该字段 = 未归档；
+// - group（0.4 S3 分组）：可选，JSON 双引号字符串数组标量（如 ["dev","self"]，
+//   是 YAML 流序列的合法子集）；元素必须为非空字符串且不重复；缺省 = 未分组。
+//   group/pinned 不混入 meta 字符串记录，作为独立字段随解析结果返回
+//   （缺省补 [] / false），读取路径绝不写盘——老文件 front-matter 原样保留；
+// - pinned（0.4 S3 钉住标记）：可选，仅接受 plain 标量 true/false；缺省 = false；
 // - 解码后的值含孤立代理码元 → INVALID_STATE（无法无损再序列化）；
 // - 未知字段允许（前向兼容），但必须也是单行标量；
 // - 闭合 --- 之后的全部字节为 body，逐字保留（含 CRLF）。
@@ -34,8 +41,11 @@ const NON_EMPTY_FIELDS = ['key', 'title', 'updated', 'scopeId'];
 /**
  * 序列化 topic 文件字节。所有字符串先做可无损编码校验（R5）。
  * archivedAt 为可选归档标记（ISO 时间串）：空值/缺省时整行省略（= 未归档）。
+ * group（0.4 S3）为可选字符串数组（首个是主组）：空数组/缺省时整行省略（= 未分组）。
+ * pinned（0.4 S3）为可选布尔：false/缺省时整行省略（= 不钉住）。
  * @param {{key:string,title:string,summary:string,updated:string,scopeId:string,
- *          archivedAt?:string, extra?:Record<string,string>}} meta
+ *          archivedAt?:string, group?:string[], pinned?:boolean,
+ *          extra?:Record<string,string>}} meta
  * @param {string} body
  * @returns {Buffer}
  */
@@ -74,6 +84,38 @@ export function serializeTopicFile(meta, body) {
     lines.push(`archivedAt: ${JSON.stringify(value)}`);
     seen.add('archivedAt');
   }
+  // 分组（0.4 S3）：非空字符串数组输出为 JSON 数组标量（YAML 流序列子集）；
+  // 空数组/缺省省略（= 未分组），老文件不受影响。元素不得重复。
+  if (meta.group !== undefined && meta.group !== null) {
+    if (!Array.isArray(meta.group)) {
+      throw invalidInput('front-matter 字段 "group" 必须是字符串数组');
+    }
+    if (meta.group.length > 0) {
+      const groupSeen = new Set();
+      for (const el of meta.group) {
+        if (typeof el !== 'string' || el.length === 0) {
+          throw invalidInput('front-matter 字段 "group" 的元素必须是非空字符串');
+        }
+        if (hasLoneSurrogate(el)) {
+          throw invalidInput('front-matter 字段 "group" 含孤立代理码元，无法无损写入');
+        }
+        if (groupSeen.has(el)) {
+          throw invalidInput(`front-matter 字段 "group" 含重复组 key: "${el}"`);
+        }
+        groupSeen.add(el);
+      }
+      lines.push(`group: ${JSON.stringify(meta.group)}`);
+      seen.add('group');
+    }
+  }
+  // 钉住标记（0.4 S3）：true 时输出；false/缺省省略（= 不钉住）。
+  if (meta.pinned !== undefined && meta.pinned !== null && meta.pinned !== false) {
+    if (meta.pinned !== true) {
+      throw invalidInput('front-matter 字段 "pinned" 必须是布尔值 true/false');
+    }
+    lines.push('pinned: true');
+    seen.add('pinned');
+  }
   if (meta.extra) {
     for (const name of Object.keys(meta.extra).sort()) {
       if (!seen.has(name)) {
@@ -90,10 +132,48 @@ export function serializeTopicFile(meta, body) {
 }
 
 /**
+ * 解析 group 字段值（0.4 S3）：必须是 JSON 字符串数组标量（YAML 流序列子集）。
+ * 元素必须为非空字符串、不含孤立代理码元、不重复。
+ */
+function parseGroupArray(value, name) {
+  if (!value.startsWith('[')) {
+    throw invalidState(`front-matter 字段 "${name}" 必须是 JSON 字符串数组（如 ["dev","self"]）`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw invalidState(`front-matter 字段 "${name}" 的数组标量不是合法 JSON`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw invalidState(`front-matter 字段 "${name}" 必须是字符串数组`);
+  }
+  const out = [];
+  const seen = new Set();
+  for (const el of parsed) {
+    if (typeof el !== 'string' || el.length === 0) {
+      throw invalidState(`front-matter 字段 "${name}" 的元素必须是非空字符串`);
+    }
+    if (hasLoneSurrogate(el)) {
+      throw invalidState(`front-matter 字段 "${name}" 含孤立代理码元（无法无损处理）`);
+    }
+    if (seen.has(el)) {
+      throw invalidState(`front-matter 字段 "${name}" 含重复组 key: "${el}"`);
+    }
+    seen.add(el);
+    out.push(el);
+  }
+  return out;
+}
+
+/**
  * 解析 topic 文件字节。
  * @param {Buffer} raw 磁盘原始字节
- * @returns {{hasFrontMatter: true, meta: Record<string,string>, body: string}
- *          | {hasFrontMatter: false}}  无 front-matter 时返回 legacy 标记
+ * @returns {{hasFrontMatter: true, meta: Record<string,string>, body: string,
+ *            group: string[], pinned: boolean}
+ *          | {hasFrontMatter: false}}  无 front-matter 时返回 legacy 标记；
+ *          group/pinned 为 0.4 S3 新增读取口径：磁盘上没有该字段时补默认
+ *          [] / false（缺省读取，不回写磁盘，老文件 front-matter 原样保留）
  */
 export function parseTopicFile(raw) {
   const text = decodeUtf8Strict(raw, 'topic 文件');
@@ -128,6 +208,10 @@ export function parseTopicFile(raw) {
   const body = text.slice(bodyStart); // 逐字保留，含行尾风格
 
   const meta = {};
+  // 0.4 S3：group/pinned 是一等可选字段，不混入 meta 字符串记录；
+  // 磁盘上出现时解析为强类型（string[] / boolean），缺省补默认值。
+  let groupValue;
+  let pinnedValue;
   for (const line of metaLines) {
     if (line.trim() === '') {
       throw invalidState('front-matter 含空行，属不支持格式');
@@ -141,6 +225,27 @@ export function parseTopicFile(raw) {
     if (value === undefined) {
       // `field:`（裸空值）是 YAML null 语义，不属于本严格子集
       throw invalidState(`front-matter 字段 "${name}" 缺少值（空字符串请写 "..."）`);
+    }
+    if (name === 'group') {
+      if (groupValue !== undefined) {
+        throw invalidState('front-matter 字段重复: "group"');
+      }
+      groupValue = parseGroupArray(value, name);
+      continue;
+    }
+    if (name === 'pinned') {
+      if (pinnedValue !== undefined) {
+        throw invalidState('front-matter 字段重复: "pinned"');
+      }
+      if (value === 'true') {
+        pinnedValue = true;
+        continue;
+      }
+      if (value === 'false') {
+        pinnedValue = false;
+        continue;
+      }
+      throw invalidState(`front-matter 字段 "pinned" 必须是 true/false 布尔标量，收到: "${value.slice(0, 60)}"`);
     }
     if (value.startsWith('"')) {
       try {
@@ -182,5 +287,11 @@ export function parseTopicFile(raw) {
       throw invalidState(`front-matter 字段 "${field}" 不得为空`);
     }
   }
-  return { hasFrontMatter: true, meta, body };
+  return {
+    hasFrontMatter: true,
+    meta,
+    body,
+    group: groupValue ?? [],
+    pinned: pinnedValue ?? false,
+  };
 }

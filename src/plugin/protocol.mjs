@@ -180,6 +180,101 @@ const organizeProposal = {
   ],
 };
 
+// 0.4-S7 getGraph 三条路径的共用 schema 片段：缺省全量 / level=1 分簇 /
+// level=2 簇内。节点与边的形状三条路径一致（level=2 节点仍带命中字段），
+// 输出用 oneOf 表达（三支互斥：level 分支 required level，全量分支 required nodes）。
+const getGraphNodeItem = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    id: nonEmptyString,
+    title: { oneOf: [{ type: "string" }, { type: "null" }] },
+    summary: { oneOf: [{ type: "string" }, { type: "null" }] },
+    vitality: { oneOf: [{ type: "string" }, { type: "null" }] },
+    revision: { oneOf: [{ type: "integer" }, { type: "null" }] },
+    hitCount: { type: "integer", minimum: 0 },
+    lastHitAt: { oneOf: [{ type: "string" }, { type: "null" }] },
+    createdAt: { oneOf: [{ type: "string" }, { type: "null" }] },
+  },
+  required: ["id", "vitality"],
+};
+const getGraphEdgeItem = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    source: nonEmptyString,
+    target: nonEmptyString,
+    rel: { oneOf: [{ type: "string" }, { type: "null" }] },
+  },
+  required: ["source", "target"],
+};
+const getGraphDeliveries = {
+  type: "array",
+  maxItems: 20,
+  items: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      deliveryId: nonEmptyString,
+      at: nonEmptyString,
+      sessionId: nonEmptyString,
+      cards: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            sparkId: nonEmptyString,
+            // 命中触发词：老投递（富化字段落账前）如实给 null。
+            trigger: { oneOf: [{ type: "string" }, { type: "null" }] },
+            // 来源：seed=0 跳种子 / related=一跳关联；老投递给 null。
+            source: { oneOf: [{ enum: ["seed", "related"] }, { type: "null" }] },
+          },
+          required: ["sparkId", "trigger", "source"],
+        },
+      },
+    },
+    required: ["deliveryId", "at", "sessionId", "cards"],
+  },
+};
+const getGraphDeliveryStats = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    // 投递轮次：committed 终态的投递包数。
+    rounds: { type: "integer", minimum: 0 },
+    // 总投递张数：各投递包 delivered 卡片数之和（同一张卡重复进包会重复计）。
+    totalDelivered: { type: "integer", minimum: 0 },
+    // 去重后卡片数：全周期出现过的不同 sparkId 数。
+    uniqueCards: { type: "integer", minimum: 0 },
+  },
+  required: ["rounds", "totalDelivered", "uniqueCards"],
+};
+// level=1 的簇：key = 主实体（trim 非空）或 __unclustered__；label 展示名；
+// count ≥ 1（没有卡片的簇不会出现在输出里）；samples 最多 3 个标题。
+const getGraphClusterItem = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    key: nonEmptyString,
+    label: { type: "string" },
+    count: { type: "integer", minimum: 1 },
+    samples: { type: "array", maxItems: 3, items: { type: "string" } },
+  },
+  required: ["key", "label", "count", "samples"],
+};
+// level=2 顶部的簇头：key/label 与 level=1 同口径；未知簇 count=0、nodes/edges 空。
+const getGraphClusterHeader = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    key: { type: "string" },
+    label: { type: "string" },
+    count: { type: "integer", minimum: 0 },
+  },
+  required: ["key", "label", "count"],
+};
+
 // ─────────────────────────────────────────────────────────────
 // MANAGEMENT_METHODS：方法名 → {inputSchema, outputSchema}
 // ─────────────────────────────────────────────────────────────
@@ -276,87 +371,63 @@ export const MANAGEMENT_METHODS = Object.freeze({
   // 全量口径的吞吐统计：轮次 / 总投递张数 / 去重后卡片数；重复投递率由
   // 1 - uniqueCards/totalDelivered 计算，账本只覆盖 L2 开启期间）。
   getGraph: {
-    inputSchema: { type: "object", additionalProperties: false, properties: {} },
-    outputSchema: {
+    inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        scope: nonEmptyString,
-        nodes: {
-          type: "array",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              id: nonEmptyString,
-              title: { oneOf: [{ type: "string" }, { type: "null" }] },
-              summary: { oneOf: [{ type: "string" }, { type: "null" }] },
-              vitality: { oneOf: [{ type: "string" }, { type: "null" }] },
-              revision: { oneOf: [{ type: "integer" }, { type: "null" }] },
-              hitCount: { type: "integer", minimum: 0 },
-              lastHitAt: { oneOf: [{ type: "string" }, { type: "null" }] },
-              createdAt: { oneOf: [{ type: "string" }, { type: "null" }] },
-            },
-            required: ["id", "vitality"],
-          },
-        },
-        edges: {
-          type: "array",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              source: nonEmptyString,
-              target: nonEmptyString,
-              rel: { oneOf: [{ type: "string" }, { type: "null" }] },
-            },
-            required: ["source", "target"],
-          },
-        },
-        deliveries: {
-          type: "array",
-          maxItems: 20,
-          items: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              deliveryId: nonEmptyString,
-              at: nonEmptyString,
-              sessionId: nonEmptyString,
-              cards: {
-                type: "array",
-                items: {
-                  type: "object",
-                  additionalProperties: false,
-                  properties: {
-                    sparkId: nonEmptyString,
-                    // 命中触发词：老投递（富化字段落账前）如实给 null。
-                    trigger: { oneOf: [{ type: "string" }, { type: "null" }] },
-                    // 来源：seed=0 跳种子 / related=一跳关联；老投递给 null。
-                    source: { oneOf: [{ enum: ["seed", "related"] }, { type: "null" }] },
-                  },
-                  required: ["sparkId", "trigger", "source"],
-                },
-              },
-            },
-            required: ["deliveryId", "at", "sessionId", "cards"],
-          },
-        },
-        deliveryStats: {
+        // 0.4-S7 两级视图：缺省 = 全量兼容路径；1 = 分簇概览；2 = 簇内视图
+        // （cluster 选簇，缺省按未知簇给空结果，不抛错）。wire 的 10 方法清单不变。
+        level: { enum: [1, 2] },
+        cluster: { type: "string" },
+      },
+    },
+    outputSchema: {
+      oneOf: [
+        {
+          // 缺省全量兼容路径：candidates 页 id→title 映射与旧客户端继续走这条。
           type: "object",
           additionalProperties: false,
           properties: {
-            // 投递轮次：committed 终态的投递包数。
-            rounds: { type: "integer", minimum: 0 },
-            // 总投递张数：各投递包 delivered 卡片数之和（同一张卡重复进包会重复计）。
-            totalDelivered: { type: "integer", minimum: 0 },
-            // 去重后卡片数：全周期出现过的不同 sparkId 数。
-            uniqueCards: { type: "integer", minimum: 0 },
+            scope: nonEmptyString,
+            nodes: { type: "array", items: getGraphNodeItem },
+            edges: { type: "array", items: getGraphEdgeItem },
+            deliveries: getGraphDeliveries,
+            deliveryStats: getGraphDeliveryStats,
           },
-          required: ["rounds", "totalDelivered", "uniqueCards"],
+          required: ["scope", "nodes", "edges", "deliveries", "deliveryStats"],
         },
-      },
-      required: ["scope", "nodes", "edges", "deliveries", "deliveryStats"],
+        {
+          // level=1 分簇概览：clusters 按数量降序、同数量按 key 字典序；
+          // samples 最多 3 个标题；total = 全部入簇卡数。
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            scope: nonEmptyString,
+            level: { enum: [1] },
+            clusters: { type: "array", items: getGraphClusterItem },
+            total: { type: "integer", minimum: 0 },
+            deliveries: getGraphDeliveries,
+            deliveryStats: getGraphDeliveryStats,
+          },
+          required: ["scope", "level", "clusters", "total", "deliveries", "deliveryStats"],
+        },
+        {
+          // level=2 簇内视图：节点形状与全量一致（仍带命中字段）；边只保留
+          // 两端都在该簇内的；未知 cluster → count 0 + 空 nodes/edges。
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            scope: nonEmptyString,
+            level: { enum: [2] },
+            cluster: getGraphClusterHeader,
+            nodes: { type: "array", items: getGraphNodeItem },
+            edges: { type: "array", items: getGraphEdgeItem },
+            deliveries: getGraphDeliveries,
+            deliveryStats: getGraphDeliveryStats,
+          },
+          required: ["scope", "level", "cluster", "nodes", "edges", "deliveries", "deliveryStats"],
+        },
+      ],
     },
   },
 
@@ -575,6 +646,34 @@ export const MANAGEMENT_METHODS = Object.freeze({
         scanLimited: { type: "boolean" },
       },
       required: ["scope", "items", "hasMore", "skippedCorrupted", "scanLimited"],
+    },
+  },
+
+  // 0.4 S6 卸载与焚毁（wire 冻结 10 → 11 的唯一一次增项）：焚毁整个 dataRoot。
+  // 语义：confirm 必须等于当前 dataRoot 原文（面板按钮与命令行共用
+  // src/storage/purge.mjs，行为一致）；只删 dataRoot，stateRoot 与 DSH 配置
+  // 不动。安全校验（绝对路径 / 无 .. 段 / 与 stateRoot 不相交 / 非盘符根 /
+  // 非主目录 / 非仓库根 / 存在时必须是目录）在 purge 模块 fail-closed 执行，
+  // 违反按 INVALID_INPUT 拒绝；目录不存在返回 deleted:false 而不是抛错。
+  destroyData: {
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        confirm: { type: "string" },
+      },
+      required: ["confirm"],
+    },
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        deleted: { type: "boolean" },
+        files: { type: "integer", minimum: 0 },
+        bytes: { type: "integer", minimum: 0 },
+        dataRoot: nonEmptyString,
+      },
+      required: ["deleted", "files", "bytes", "dataRoot"],
     },
   },
 });

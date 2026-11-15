@@ -311,36 +311,9 @@ test("R7：合法快照恢复后重放行为正确", async () => {
   assert.equal(probe.epoch(), 8);
 });
 
-test("L4：跨 session 洪泛（4097 个会话）后，最早会话的水位仍保留——恢复重放不重复推进", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "shiori-probe-l4-"));
-  after(() => rm(dir, { recursive: true, force: true }));
-  const statePath = join(dir, "epoch.json");
-  const sink = createJsonFileSink(statePath);
-
-  const probe1 = createCompressProbe({ sink });
-  await probe1.restore();
-  await probe1.observe(compressEvent({ eventId: "s0:tool/ptc-dispatch:1", sessionId: "s0", seq: 1, blocksCreated: 2 }));
-  assert.equal(probe1.epoch(), 1);
-  // 4097 个不同 session 的 compress（都带 seq），超过旧版水位/集合全部上限
-  for (let i = 0; i < 4097; i += 1) {
-    await probe1.observe(compressEvent({
-      eventId: `sflood-${i}:tool/ptc-dispatch:5`,
-      sessionId: `sflood-${i}`,
-      seq: 5,
-      blocksCreated: 1,
-    }));
-  }
-  assert.equal(probe1.epoch(), 4098);
-
-  // 持久保存并恢复；重放最早会话的事件 → 水位仍在 → duplicate
-  const probe2 = createCompressProbe({ sink });
-  await probe2.restore();
-  assert.equal(probe2.epoch(), 4098);
-  const replay = await probe2.observe(compressEvent({ eventId: "s0:tool/ptc-dispatch:1", sessionId: "s0", seq: 1, blocksCreated: 2 }));
-  assert.equal(replay.advanced, false, "带真实 seq 的路径也不得因淘汰重新推进");
-  assert.equal(replay.reason, "duplicate");
-  assert.equal(probe2.epoch(), 4098);
-});
+// 「L4：跨 session 洪泛（4097 个会话）」用例已整体搬移至
+// test/release/compress-l4.test.mjs（发版门禁层，npm run test:release 执行）；
+// 本文件保留 L1-L3、R4/R7/P1/P2 与基本断言，用例一条未删。
 
 test("L4：forgetSession 显式归档会话——此后该会话压缩事件一律拒绝（fail-safe）", async () => {
   const dir = await mkdtemp(join(tmpdir(), "shiori-probe-exp-"));

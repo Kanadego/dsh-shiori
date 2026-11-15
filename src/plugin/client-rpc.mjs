@@ -45,7 +45,7 @@ export const RPC_SERVICE_KEY = "shiori.panel";
 const CONTRACT_METHODS = Object.freeze([
   "getStatus", "getMemoryView", "getGraph", "executeTool",
   "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan",
-  "getTimeline",
+  "getTimeline", "destroyData",
 ]);
 
 function methodSetMismatch(actual, expected) {
@@ -253,6 +253,11 @@ class ShioriPanelService extends TypertRemoteService {
     return dispatchShioriCall(this, "getTimeline", session, payload, signal);
   }
 
+  // 0.4 S6 卸载与焚毁：第 11 个管理方法（wire 冻结 10 → 11 的唯一一次增项）。
+  destroyData(session, payload, signal) {
+    return dispatchShioriCall(this, "destroyData", session, payload, signal);
+  }
+
   async stop() {
     return stopShioriPanelService(this);
   }
@@ -262,7 +267,7 @@ class ShioriPanelService extends TypertRemoteService {
   }
 }
 
-// 模块加载即打 Remote 标记：Gateway 由此发现全部端点（10 个：原 9 + getTimeline）。
+// 模块加载即打 Remote 标记：Gateway 由此发现全部端点（11 个：原 10 + destroyData）。
 for (const method of CONTRACT_METHODS) applyRemoteMarker(ShioriPanelService, method);
 
 /**

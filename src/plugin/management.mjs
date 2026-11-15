@@ -28,6 +28,7 @@ import { createForgetExecutor } from "../forgetting/executor.mjs";
 import { validateManagementPayload } from "./protocol.mjs";
 import { coreBudgetsOf } from "./config.mjs";
 import { createTimelineReader } from "../timeline/index.mjs";
+import { purgeDataRoot, PurgeSafetyError } from "../storage/purge.mjs";
 import { pinScope, sessionEvidenceFromRpc, rejectIdentityFields } from "./scope.mjs";
 
 const MAIN_SESSION_ACTOR = "main-session";
@@ -55,6 +56,12 @@ function fail(code, message, details) {
  * @param {(agent: object|null) => string|null} [deps.workspaceForAgent] 从宿主 agent 解析可信 workspace（只读）
  * @param {object} [deps.timelineReader] 已构造的时间线读取器（测试注入；省略则按 dataRoot 惰性创建）
  * @param {() => string} [deps.nowIso]
+ * @param {() => Promise<string[]>} [deps.invalidateScopeResources] scope 资源缓存失效入口
+ *   （0.4 S6 中-2：仅 destroyData 使用；async——复用 controller 的 closeAllScopes，
+ *   返回 Promise<string[]> 的 close 错误数组，调用方必须 await。存在性在删除之前
+ *   校验（review-rework a2 必修 1：校验后置会让「数据先删净、再抛错」），缺失时
+ *   destroyData fail-closed 拒绝且不删任何文件；await 后错误数组非空同样
+ *   INVALID_STATE 上报（review-rework a3 必修：不 await 会把失败静默吞掉））
  */
 export function createManagement(deps) {
   const {
@@ -228,8 +235,10 @@ export function createManagement(deps) {
 
   const management = {
     /**
-     * 状态：mode、当前可信 scope、占用 / 能力 / 诊断。
-     * 不返回完整数据根或其他卡正文。
+     * 状态：mode、当前可信 scope、占用 / 能力 / 诊断。0.4-S1 起 diagnostics 返回
+     * 解析后的两个根路径、根来源（rootsSource）与配置完成度信号
+     * （configurationState：needs-persona / needs-active / configured）；
+     * 仍不返回任何卡正文。
      */
     async getStatus(trustedContext, payload) {
       validateManagementPayload("getStatus", payload ?? {});
@@ -249,6 +258,19 @@ export function createManagement(deps) {
           ownerId: settings.ownerId,
           generation: generation(),
           started: isStarted(),
+          // 0.4-S1（wire 的 diagnostics 块 additionalProperties:true，纯增量）：
+          // apply 阶段解析后的两个根（默认落点或显式配置，一律已 mkdir -p）、
+          // 根来源（rootsSource：explicit=用户显式配置 / default=缺省解析）与
+          // 配置完成度信号。configurationState 与前端初始化卡片三行对齐：
+          // needs-persona = 人设卡未指定（defaultPersona null，最优先）；
+          // needs-active = 人设卡已配置但 mode 非 active（shadow 只读，待启用）；
+          // configured = active 且人设卡已配置。前端不再自行推断。
+          dataRoot: settings.dataRoot,
+          stateRoot: settings.stateRoot,
+          rootsSource: settings.rootsSource,
+          configurationState: settings.defaultPersona === null
+            ? "needs-persona"
+            : (settings.mode === "active" ? "configured" : "needs-active"),
           // P-C 诚实度（wire 的 diagnostics 块 additionalProperties:true，纯增量）：
           // 严格 codec 的实际状态——"strict" = 描述符已注册进宿主 typert registry；
           // "src" = 回退（reason 给出缺席/失败原因）。
@@ -315,17 +337,18 @@ export function createManagement(deps) {
       };
     },
 
-    /** 当前授权 scope 的 active 全图（真实 client 取数；不经模型工具返回整图）。 */
+    /** 当前授权 scope 的图谱视图（缺省全量；0.4-S7 起支持 level=1 分簇 / level=2 簇内）。 */
     async getGraph(trustedContext, payload) {
       validateManagementPayload("getGraph", payload ?? {});
       requireActiveDataAccess("getGraph");
       const scope = await scopeFromTrustedContext(trustedContext);
       const resources = await resourcesFor(scope.scopeId, sessionEvidenceFromRpc(trustedContext).agent);
       const records = await resources.sparkStore.listActive();
-      const { projectGraph, normalizeGraphRecords } = await import("../sparks/graph.mjs");
-      const projection = projectGraph({ scopeId: scope.scopeId, records: normalizeGraphRecords(records) });
+      const { projectGraph, clusterProjection, normalizeGraphRecords } = await import("../sparks/graph.mjs");
+      const normalized = normalizeGraphRecords(records);
       // F2 闪回命中可见性：投影节点只带 id/title/summary/vitality/revision，
       // 投递统计（hitCount/lastHitAt）与存续起点（createdAt）按 id 从卡片记录补回。
+      // 三条路径（缺省全量 / level=1 / level=2）共用：两级视图不丢命中统计。
       const hitMeta = new Map();
       for (const record of records) {
         if (record === null || typeof record !== "object" || typeof record.id !== "string") continue;
@@ -335,8 +358,24 @@ export function createManagement(deps) {
           createdAt: typeof record.createdAt === "string" ? record.createdAt : null,
         });
       }
+      // 节点出线口径：全量与 level=2 共用（level=1 无节点；簇内节点必须仍带命中字段）。
+      const nodeOut = (n) => {
+        const meta = hitMeta.get(n.id) ?? { hitCount: 0, lastHitAt: null, createdAt: null };
+        return {
+          id: n.id,
+          title: n.title ?? null,
+          summary: n.summary ?? null,
+          vitality: n.vitality ?? null,
+          revision: n.revision ?? null,
+          hitCount: meta.hitCount,
+          lastHitAt: meta.lastHitAt,
+          createdAt: meta.createdAt,
+        };
+      };
+      const edgeOut = (e) => ({ source: e.source, target: e.target, rel: e.rel ?? null });
       // F2：L2 投递账 → 最近投递明细（上限 20 条，只含元数据）+ 全量吞吐统计。
       // 账本只覆盖 L2 开启期间的记录（L2 关闭期无账可查），该口径由面板如实标注。
+      // 三条路径（缺省全量 / level=1 / level=2）共用：两级视图不丢投递账。
       const deliveries = [];
       const deliveryStats = { rounds: 0, totalDelivered: 0, uniqueCards: 0 };
       if (settings.l2.enabled) {
@@ -389,26 +428,42 @@ export function createManagement(deps) {
         deliveryStats.uniqueCards = unique.size;
         deliveryStats.rounds = Object.keys(committedMap).length;
       }
+      // 0.4-S7 两级视图：level 缺省走全量兼容路径（candidates 页与既有用例依赖），
+      // level=1/2 走 clusterProjection。deliveries/deliveryStats 三条路径口径一致。
+      if (payload?.level !== undefined) {
+        // clusterProjection 的返回体自带 schemaVersion/level/scopeId（纯函数独立成契约），
+        // 这里只取 clusters/total（level=1）与 cluster/nodes/edges（level=2）三项出线，
+        // wire 形状仍以本文件声明的 outputSchema 为准。
+        // cluster 只在 level=2 时生效（level=1 是簇概览，cluster 无意义——哪怕带了也忽略，
+        // 保证 {level:1, cluster:"任意"} 一定返回 clusters/total 齐全的 level=1 形状）。
+        // level=2 没带 cluster：不崩，按未知簇退化为空视图（key 为空串必不命中）。
+        const cluster = payload.level === 2 ? (payload.cluster ?? "") : undefined;
+        const projection = clusterProjection({ scopeId: scope.scopeId, records: normalized, cluster });
+        if (payload.level === 1) {
+          return {
+            scope: scope.scopeId,
+            level: 1,
+            clusters: projection.clusters,
+            total: projection.total,
+            deliveries,
+            deliveryStats,
+          };
+        }
+        return {
+          scope: scope.scopeId,
+          level: 2,
+          cluster: { key: projection.cluster.key, label: projection.cluster.label, count: projection.cluster.count },
+          nodes: projection.nodes.map(nodeOut),
+          edges: projection.edges.map(edgeOut),
+          deliveries,
+          deliveryStats,
+        };
+      }
+      const projection = projectGraph({ scopeId: scope.scopeId, records: normalized });
       return {
         scope: scope.scopeId,
-        nodes: projection.nodes.map((n) => {
-          const meta = hitMeta.get(n.id) ?? { hitCount: 0, lastHitAt: null, createdAt: null };
-          return {
-            id: n.id,
-            title: n.title ?? null,
-            summary: n.summary ?? null,
-            vitality: n.vitality ?? null,
-            revision: n.revision ?? null,
-            hitCount: meta.hitCount,
-            lastHitAt: meta.lastHitAt,
-            createdAt: meta.createdAt,
-          };
-        }),
-        edges: projection.edges.map((e) => ({
-          source: e.source,
-          target: e.target,
-          rel: e.rel ?? null,
-        })),
+        nodes: projection.nodes.map(nodeOut),
+        edges: projection.edges.map(edgeOut),
         deliveries,
         deliveryStats,
       };
@@ -963,6 +1018,74 @@ export function createManagement(deps) {
       // 在 items 里，深历史 ≠ 到底了）。它必须到达 wire，否则面板会把「窗口
       // 截断」当成「没有更多」，用户看到的时间线静默缺一段。
       return page;
+    },
+
+    /**
+     * 0.4 S6 卸载与焚毁（第 11 个管理方法，wire 唯一一次增项）：焚毁整个
+     * dataRoot（目录本身一并移除）。stateRoot 与 DSH 配置不动；不自动做
+     * plugin remove、失败不忽略错误继续。
+     *
+     * 门面顺序（fail-closed）：schema 校验 → 配置/数据访问守门 → 权限二次
+     * 核验（UNAUTHORIZED）→ confirm 必须等于当前 dataRoot 原文（INVALID_INPUT）
+     * → purge 模块安全校验（与命令行同一份实现；违反按 INVALID_INPUT 拒绝，
+     * details.rule 记具体规则）→ 删除 → scope 资源缓存失效（中-2）。
+     * 目录不存在返回 deleted:false（不抛错）。
+     *
+     * 期望根双重锁定：confirm 与 expectedRoot 都钉死在 settings.dataRoot
+     * （服务端解析的当前根，payload 里不带任何根字段），purge 模块再校验
+     * 「确认的根 = 删除的根」。
+     */
+    async destroyData(trustedContext, payload) {
+      validateManagementPayload("destroyData", payload);
+      requireConfigured();                    // inert → NOT_CONFIGURED
+      requireActiveDataAccess("destroyData"); // shadow → UNSUPPORTED；未 start → INVALID_STATE
+      assertHostWritable("destroyData");      // F7 只读宿主 → HOST_LOCKED（与写工具同口径）
+      // 权限：面板 RPC 授权只认 owner（与 Q 层同口径的二次核验，fail-closed；
+      // 直调/嵌入方绕过 Q 时在这里拦下）。
+      const principal = trustedContext?.principal;
+      if (!principal || principal.kind !== "owner") {
+        fail("UNAUTHORIZED", "destroyData requires an owner principal", {
+          principalKind: principal ? String(principal.kind) : null,
+        });
+      }
+      const expectedRoot = settings.dataRoot;
+      if (typeof payload.confirm !== "string" || payload.confirm !== expectedRoot) {
+        fail("INVALID_INPUT", "confirm 必须等于当前 dataRoot 原文（逐字符相等）", {
+          confirm: "must equal the current dataRoot exactly",
+        });
+      }
+      // 中-2（review-rework a1）+ 必修 1（review-rework a2）：依赖校验必须在
+      // purgeDataRoot 之前——校验后置会造成「数据已删净、然后才抛 INVALID_STATE」
+      // 的顺序错误（破坏性动作先做、校验后做）。fail-closed：生产 controller 必
+      // 注入 invalidateScopeResources；缺失时拒绝且删除根本不发生。
+      if (typeof deps.invalidateScopeResources !== "function") {
+        fail("INVALID_STATE", "destroyData requires deps.invalidateScopeResources (scope resource cache must be droppable after purge)", {});
+      }
+      // purge 共享模块（命令行与面板同一份实现）：安全校验 + 删除。
+      // PurgeSafetyError（fail-closed 拒绝，code=INVALID_INPUT，details.rule
+      // 记命中的具体规则）与 IO 失败都原样上抛——绝不忽略错误后假装成功。
+      const result = await purgeDataRoot(expectedRoot, {
+        expectedRoot,
+        stateRoot: settings.stateRoot,
+      });
+      // 焚毁成功后使 scope 资源缓存失效——缓存里的 sparkStore/service 全部指向
+      // 已删目录，不清掉的话后续访问会拿到旧缓存（内存中仍有已焚毁卡片的记录）。
+      // closeAllScopes 只关内存态并清缓存，下一次访问按需重建空资源。仅
+      // deleted:true 时需要；deleted:false（目录本就不存在）不动缓存。close
+      // 全程内存操作、不可能触盘失败；万一报错仍如实上抛（不静默吞掉让旧缓存
+      // 悄悄残留）。
+      if (result.deleted === true) {
+        // 必修（review-rework a3）：invalidateScopeResources 是 async（复用的
+        // closeAllScopes 返回 Promise<string[]>）——必须 await 拿到错误数组再
+        // 判定；不 await 的话拿到的是 Promise，Array.isArray 恒 false，清缓存
+        // 失败会被静默吞掉（检测成死代码）。万一报错仍如实上抛（不静默吞掉
+        // 让旧缓存悄悄残留）。
+        const closeErrors = await deps.invalidateScopeResources();
+        if (Array.isArray(closeErrors) && closeErrors.length > 0) {
+          fail("INVALID_STATE", `destroyData succeeded but scope resource invalidation failed: ${closeErrors.join("; ")}`, {});
+        }
+      }
+      return result;
     },
   };
 

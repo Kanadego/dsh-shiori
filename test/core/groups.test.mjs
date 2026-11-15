@@ -1,0 +1,547 @@
+// 0.4 S3 · 组清单（groups.json）数据层测试。
+// 夹具：临时 dataRoot（mkdtemp），每个用例独立目录，结束即清理；
+// 覆盖 dev-plan §S3.5 要求的四类场景：多组挂载、删组拒绝、迁移、group 不存在报错，
+// 外加 frontmatter 的 group/pinned 序列化/解析往返与默认模板契约。
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import {
+  GROUPS_VERSION,
+  DEFAULT_GROUPS_TEMPLATE,
+  defaultGroupsTemplate,
+  validateGroupKey,
+  validateGroupEntry,
+  validateGroupsData,
+  assertGroupsExist,
+  migrateGroupArray,
+  planGroupMigration,
+  groupsFilePath,
+  readGroups,
+  ensureGroupsFile,
+  writeGroups,
+  deleteGroup,
+} from "../../src/core/groups.mjs";
+import { serializeTopicFile, parseTopicFile } from "../../src/storage/frontmatter.mjs";
+
+async function makeRoot() {
+  return mkdtemp(path.join(tmpdir(), "shiori-groups-test-"));
+}
+
+async function cleanup(root) {
+  await rm(root, { recursive: true, force: true });
+}
+
+function assertCode(error, code, pattern) {
+  assert.equal(error.code, code, `期望 ${code}，实际 ${error.code}: ${error.message}`);
+  if (pattern) assert.match(error.message, pattern);
+  return true;
+}
+
+// ---------- 默认模板契约（§S3.2：随包常量，UI 与工具引同一份） ----------
+
+test("默认模板：四组固定 key/title/order，深冻结不可变", () => {
+  assert.deepEqual(
+    DEFAULT_GROUPS_TEMPLATE.map((g) => g.key),
+    ["dev", "self", "project", "life"],
+  );
+  assert.deepEqual(
+    DEFAULT_GROUPS_TEMPLATE.map((g) => g.title),
+    ["开发与配置", "自我与关系", "项目与工具", "生活与偏好"],
+  );
+  assert.deepEqual(DEFAULT_GROUPS_TEMPLATE.map((g) => g.order), [10, 20, 30, 40]);
+  for (const entry of DEFAULT_GROUPS_TEMPLATE) {
+    assert.equal(Object.isFrozen(entry), true);
+    for (const value of Object.values(entry)) {
+      if (typeof value === "string") assert.equal(Object.isFrozen(value), true);
+    }
+  }
+  assert.equal(Object.isFrozen(DEFAULT_GROUPS_TEMPLATE), true);
+});
+
+test("defaultGroupsTemplate 返回可变深拷贝，与常量内容一致", () => {
+  const copy = defaultGroupsTemplate();
+  assert.deepEqual(copy, DEFAULT_GROUPS_TEMPLATE);
+  assert.notEqual(copy, DEFAULT_GROUPS_TEMPLATE);
+  copy[0].title = "改过的标题";
+  assert.equal(DEFAULT_GROUPS_TEMPLATE[0].title, "开发与配置");
+});
+
+// ---------- 首次初始化与读取（§S3.2） ----------
+
+test("ensureGroupsFile 首次写入默认模板；再次调用幂等不覆盖", async () => {
+  const root = await makeRoot();
+  try {
+    const first = await ensureGroupsFile({ dataRoot: root, scopeId: "amber" });
+    assert.equal(first.created, true);
+    assert.equal(first.data.version, GROUPS_VERSION);
+    assert.deepEqual(first.data.groups, DEFAULT_GROUPS_TEMPLATE.map((g) => ({ ...g })));
+    // 落盘结构：{version, groups:[{key,title,summary,order}]}
+    const onDisk = JSON.parse(await readFile(groupsFilePath(root, "amber"), "utf8"));
+    assert.deepEqual(Object.keys(onDisk).sort(), ["groups", "version"]);
+    assert.equal(onDisk.version, 1);
+    assert.deepEqual(
+      onDisk.groups.map((g) => Object.keys(g).sort()),
+      DEFAULT_GROUPS_TEMPLATE.map(() => ["key", "order", "summary", "title"]),
+    );
+    // 幂等：created:false 且内容不变
+    const second = await ensureGroupsFile({ dataRoot: root, scopeId: "amber" });
+    assert.equal(second.created, false);
+    assert.deepEqual(second.data, first.data);
+    assert.equal(second.revision, first.revision);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("ensureGroupsFile 对 global scope 也可初始化（scopes/global/groups.json）", async () => {
+  const root = await makeRoot();
+  try {
+    const result = await ensureGroupsFile({ dataRoot: root, scopeId: "global" });
+    assert.equal(result.created, true);
+    assert.equal(
+      groupsFilePath(root, "global"),
+      path.join(root, "scopes", "global", "groups.json"),
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("readGroups 清单缺失抛 NOT_FOUND（读路径绝不写盘），root 相对路径被拒", async () => {
+  const root = await makeRoot();
+  try {
+    await assert.rejects(
+      readGroups({ dataRoot: root, scopeId: "amber" }),
+      (e) => assertCode(e, "NOT_FOUND", /组清单不存在/),
+    );
+    // 读路径不写盘：目录不应被创建
+    await assert.rejects(
+      readGroups({ dataRoot: root, scopeId: "amber" }),
+      (e) => assertCode(e, "NOT_FOUND", /ensureGroupsFile/),
+    );
+    await assert.rejects(
+      readGroups({ dataRoot: "not/absolute", scopeId: "amber" }),
+      (e) => assertCode(e, "INVALID_INPUT", /绝对路径/),
+    );
+    await assert.rejects(
+      readGroups({ dataRoot: path.join(root, "missing-root"), scopeId: "amber" }),
+      (e) => assertCode(e, "NOT_FOUND", /dataRoot 不存在/),
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("readGroups 读取手改损坏的清单：坏 JSON / 版本不符 / 组重复 显式 INVALID_STATE", async () => {
+  const root = await makeRoot();
+  try {
+    const file = groupsFilePath(root, "amber");
+    await ensureGroupsFile({ dataRoot: root, scopeId: "amber" });
+
+    await writeFile(file, "{ not json", "utf8");
+    await assert.rejects(
+      readGroups({ dataRoot: root, scopeId: "amber" }),
+      (e) => assertCode(e, "INVALID_STATE", /不是合法 JSON/),
+    );
+
+    await writeFile(file, JSON.stringify({ version: 2, groups: [] }), "utf8");
+    await assert.rejects(
+      readGroups({ dataRoot: root, scopeId: "amber" }),
+      (e) => assertCode(e, "INVALID_STATE", /version 必须是 1/),
+    );
+
+    await writeFile(file, JSON.stringify({
+      version: 1,
+      groups: [
+        { key: "dev", title: "A", summary: "", order: 10 },
+        { key: "dev", title: "B", summary: "", order: 20 },
+      ],
+    }), "utf8");
+    await assert.rejects(
+      readGroups({ dataRoot: root, scopeId: "amber" }),
+      (e) => assertCode(e, "INVALID_STATE", /组 key 重复: "dev"/),
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
+// ---------- 写入 CAS（§S3.2：原子写 + 与 topic 同一把锁） ----------
+
+test("writeGroups CAS：新建必须 expectedRevision=null；哈希不符抛 REVISION_CONFLICT", async () => {
+  const root = await makeRoot();
+  try {
+    const groups = [{ key: "dev", title: "开发与配置", summary: "", order: 10 }];
+    await assert.rejects(
+      writeGroups({ dataRoot: root, scopeId: "amber", groups, expectedRevision: undefined }),
+      (e) => assertCode(e, "INVALID_INPUT", /expectedRevision 必须显式提供/),
+    );
+    await writeGroups({ dataRoot: root, scopeId: "amber", groups, expectedRevision: null });
+    const { revision } = await readGroups({ dataRoot: root, scopeId: "amber" });
+    // 用 null 覆盖已有文件 → 冲突
+    await assert.rejects(
+      writeGroups({ dataRoot: root, scopeId: "amber", groups, expectedRevision: null }),
+      (e) => assertCode(e, "REVISION_CONFLICT", /CAS 失败/),
+    );
+    // 哈希不符 → 冲突
+    await assert.rejects(
+      writeGroups({ dataRoot: root, scopeId: "amber", groups, expectedRevision: "0".repeat(64) }),
+      (e) => assertCode(e, "REVISION_CONFLICT", /CAS 失败/),
+    );
+    // 正确哈希 → 成功且 revision 前进
+    const updated = await writeGroups({
+      dataRoot: root, scopeId: "amber",
+      groups: [...groups, { key: "life", title: "生活与偏好", summary: "", order: 40 }],
+      expectedRevision: revision,
+    });
+    assert.notEqual(updated.revision, revision);
+    assert.equal(updated.data.groups.length, 2);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("writeGroups 并发同哈希：共享锁串行化 + CAS，恰好一个成功", async () => {
+  const root = await makeRoot();
+  try {
+    await ensureGroupsFile({ dataRoot: root, scopeId: "amber" });
+    const { revision } = await readGroups({ dataRoot: root, scopeId: "amber" });
+    const groups = [{ key: "dev", title: "开发与配置", summary: "", order: 10 }];
+    const results = await Promise.allSettled([
+      writeGroups({ dataRoot: root, scopeId: "amber", groups, expectedRevision: revision }),
+      writeGroups({ dataRoot: root, scopeId: "amber", groups, expectedRevision: revision }),
+    ]);
+    const states = results.map((r) => r.status);
+    assert.deepEqual(states.sort(), ["fulfilled", "rejected"]);
+    const failed = results.find((r) => r.status === "rejected").reason;
+    assert.equal(failed.code, "REVISION_CONFLICT");
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("writeGroups 形状校验：坏 key/缺字段/重复 key 拒绝且不落盘", async () => {
+  const root = await makeRoot();
+  try {
+    const cases = [
+      { groups: [{ title: "T", summary: "", order: 1 }], pattern: /缺少必填字段 "key"/ },
+      { groups: [{ key: "dev", title: "", summary: "", order: 1 }], pattern: /title 必须是非空字符串/ },
+      { groups: [{ key: "dev", title: "T", summary: 5, order: 1 }], pattern: /summary 必须是字符串/ },
+      { groups: [{ key: "dev", title: "T", summary: "", order: "10" }], pattern: /order 必须是有限数字/ },
+      { groups: [{ key: "bad<key", title: "T", summary: "", order: 1 }], pattern: /不符合 key 规范/ },
+      {
+        groups: [
+          { key: "dev", title: "A", summary: "", order: 1 },
+          { key: "dev", title: "B", summary: "", order: 2 },
+        ],
+        pattern: /组 key 重复: "dev"/,
+        code: "INVALID_STATE", // 与读路径同一校验实现，重复 key = 数据错误
+      },
+    ];
+    for (const { groups, pattern, code = "INVALID_INPUT" } of cases) {
+      await assert.rejects(
+        writeGroups({ dataRoot: root, scopeId: "amber", groups, expectedRevision: null }),
+        (e) => assertCode(e, code, pattern),
+      );
+    }
+    // 全部失败后磁盘上仍无文件（校验先于落盘）
+    await assert.rejects(
+      readGroups({ dataRoot: root, scopeId: "amber" }),
+      (e) => assertCode(e, "NOT_FOUND"),
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
+// ---------- 校验助手 ----------
+
+test("validateGroupKey / validateGroupEntry / validateGroupsData / assertGroupsExist", () => {
+  assert.equal(validateGroupKey("dev"), "dev");
+  assert.throws(() => validateGroupKey(""), (e) => assertCode(e, "INVALID_INPUT", /非空字符串/));
+  assert.throws(() => validateGroupKey("bad:key"), (e) => assertCode(e, "INVALID_INPUT", /key 规范/));
+
+  const entry = validateGroupEntry({ key: "dev", title: "开发与配置", summary: "s", order: 10 }, "g[0]");
+  assert.deepEqual(entry, { key: "dev", title: "开发与配置", summary: "s", order: 10 });
+  // 未知字段读取时容忍，归一化时丢弃（前向兼容）
+  assert.deepEqual(
+    validateGroupEntry({ key: "dev", title: "T", summary: "", order: 1, extra: "x" }, "g[0]"),
+    { key: "dev", title: "T", summary: "", order: 1 },
+  );
+
+  const data = validateGroupsData({ version: 1, groups: [{ key: "dev", title: "T", summary: "", order: 1 }] });
+  assert.deepEqual(data, { version: 1, groups: [{ key: "dev", title: "T", summary: "", order: 1 }] });
+
+  assertGroupsExist(data, ["dev"]);
+  assert.throws(
+    () => assertGroupsExist(data, ["dev", "ghost"]),
+    (e) => assertCode(e, "INVALID_INPUT", /"ghost" 不存在，请先建组/),
+  );
+});
+
+// ---------- 删组与迁移（§S3.3 delete / §S3.5） ----------
+
+test("migrateGroupArray：toKey 顶替原位置保主组语义；非成员返回 null", () => {
+  // 主组被迁：life 顶替 dev 的主组位
+  assert.deepEqual(migrateGroupArray(["dev", "self"], "dev", "life"), ["life", "self"]);
+  // 兼属组被迁：主组不变
+  assert.deepEqual(migrateGroupArray(["self", "dev"], "dev", "life"), ["self", "life"]);
+  // toKey 已在剩余组里：不重复添加
+  assert.deepEqual(migrateGroupArray(["dev", "life"], "dev", "life"), ["life"]);
+  // 不给 toKey：只摘出
+  assert.deepEqual(migrateGroupArray(["dev", "self"], "dev"), ["self"]);
+  assert.equal(migrateGroupArray(["self"], "dev", "life"), null);
+});
+
+test("planGroupMigration：只为成员产计划，非成员跳过", () => {
+  const topics = [
+    { key: "t1", group: ["dev", "self"] },
+    { key: "t2", group: ["self"] },
+    { key: "t3", group: [] },
+    { key: "t4" }, // group 缺省 = []（读取口径）
+  ];
+  assert.deepEqual(planGroupMigration(topics, "dev", "life"), [
+    { topicKey: "t1", group: ["life", "self"] },
+  ]);
+  assert.deepEqual(planGroupMigration(topics, "self"), [
+    { topicKey: "t1", group: ["dev"] },
+    { topicKey: "t2", group: [] },
+  ]);
+  assert.throws(
+    () => planGroupMigration(topics, "dev", "dev"),
+    (e) => assertCode(e, "INVALID_INPUT", /migrateTo 不能等于/),
+  );
+});
+
+test("deleteGroup：组不存在报可读 NOT_FOUND；migrateTo 不存在 / 等于自身 报 INVALID_INPUT", async () => {
+  const root = await makeRoot();
+  try {
+    await ensureGroupsFile({ dataRoot: root, scopeId: "amber" });
+    await assert.rejects(
+      deleteGroup({ dataRoot: root, scopeId: "amber", key: "ghost", topics: [] }),
+      (e) => assertCode(e, "NOT_FOUND", /组 "ghost" 不存在.*现有组: dev, self, project, life/),
+    );
+    await assert.rejects(
+      deleteGroup({ dataRoot: root, scopeId: "amber", key: "life", migrateTo: "ghost", topics: [] }),
+      (e) => assertCode(e, "INVALID_INPUT", /migrateTo 指向的组 "ghost" 不存在/),
+    );
+    await assert.rejects(
+      deleteGroup({ dataRoot: root, scopeId: "amber", key: "life", migrateTo: "life", topics: [] }),
+      (e) => assertCode(e, "INVALID_INPUT", /migrateTo 不能等于/),
+    );
+    // 全部失败后清单原样（四组俱在）
+    const { data } = await readGroups({ dataRoot: root, scopeId: "amber" });
+    assert.equal(data.groups.length, 4);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("deleteGroup：组内仍有 topic 且未给 migrateTo 一律拒绝（§S3.5）", async () => {
+  const root = await makeRoot();
+  try {
+    await ensureGroupsFile({ dataRoot: root, scopeId: "amber" });
+    const topics = [
+      { key: "topic-a", group: ["dev", "self"] },
+      { key: "topic-b", group: ["dev"] },
+      { key: "topic-c", group: ["self"] },
+    ];
+    await assert.rejects(
+      deleteGroup({ dataRoot: root, scopeId: "amber", key: "dev", topics }),
+      (e) => assertCode(e, "INVALID_STATE", /内仍有 2 个 topic（topic-a, topic-b）.*migrateTo/),
+    );
+    // 清单未被动过
+    const { data } = await readGroups({ dataRoot: root, scopeId: "amber" });
+    assert.equal(data.groups.length, 4);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("deleteGroup：空组直接删；给 migrateTo 时删组并返回迁移计划", async () => {
+  const root = await makeRoot();
+  try {
+    await ensureGroupsFile({ dataRoot: root, scopeId: "amber" });
+    const topics = [
+      { key: "topic-a", group: ["dev", "self"] },
+      { key: "topic-b", group: ["dev"] },
+      { key: "topic-c", group: ["self"] },
+    ];
+    // 空组（无成员）直接删
+    const empty = await deleteGroup({
+      dataRoot: root, scopeId: "amber", key: "project", topics, expectedRevision: undefined,
+    });
+    assert.deepEqual(empty.members, []);
+    assert.deepEqual(empty.migration, []);
+    assert.equal(empty.data.groups.length, 3);
+
+    // 给 migrateTo：删组 + 迁移计划（主组语义保持）
+    const { revision } = await readGroups({ dataRoot: root, scopeId: "amber" });
+    const migrated = await deleteGroup({
+      dataRoot: root, scopeId: "amber", key: "dev", migrateTo: "life", topics, expectedRevision: revision,
+    });
+    assert.deepEqual(migrated.members, ["topic-a", "topic-b"]);
+    assert.deepEqual(migrated.migration, [
+      { topicKey: "topic-a", group: ["life", "self"] }, // life 顶替 dev 的主组位
+      { topicKey: "topic-b", group: ["life"] },
+    ]);
+    assert.deepEqual(migrated.data.groups.map((g) => g.key), ["self", "life"]);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test("deleteGroup 可选 CAS：expectedRevision 不符时拒绝删除", async () => {
+  const root = await makeRoot();
+  try {
+    await ensureGroupsFile({ dataRoot: root, scopeId: "amber" });
+    await assert.rejects(
+      deleteGroup({
+        dataRoot: root, scopeId: "amber", key: "dev", topics: [],
+        expectedRevision: "0".repeat(64),
+      }),
+      (e) => assertCode(e, "REVISION_CONFLICT", /CAS 失败/),
+    );
+  } finally {
+    await cleanup(root);
+  }
+});
+
+// ---------- 路径助手 ----------
+
+test("groupsFilePath：scope 目录语义校验复用 paths 层，非法 scopeId 被拒", () => {
+  const root = path.join(tmpdir(), "whatever-root");
+  assert.equal(
+    groupsFilePath(root, "amber"),
+    path.join(root, "scopes", "amber", "groups.json"),
+  );
+  assert.throws(() => groupsFilePath(root, "bad<scope>"), (e) => assertCode(e, "INVALID_INPUT"));
+  assert.throws(() => groupsFilePath(root, ""), (e) => assertCode(e, "INVALID_INPUT"));
+});
+
+// ---------- frontmatter：group/pinned 序列化与解析（0.4 S3 新增可选字段） ----------
+
+function makeMeta(overrides = {}) {
+  return {
+    key: "topic-key",
+    title: "标题",
+    summary: "摘要",
+    updated: "2026-11-13T00:00:00.000Z",
+    scopeId: "amber",
+    ...overrides,
+  };
+}
+
+test("frontmatter 往返：group 数组 + pinned=true 序列化后可无损解析", () => {
+  const buffer = serializeTopicFile({ ...makeMeta(), group: ["dev", "self"], pinned: true }, "正文");
+  const text = buffer.toString("utf8");
+  assert.match(text, /^group: \["dev","self"\]$/m);
+  assert.match(text, /^pinned: true$/m);
+  const parsed = parseTopicFile(buffer);
+  assert.deepEqual(parsed.group, ["dev", "self"]);
+  assert.equal(parsed.pinned, true);
+  assert.equal(parsed.body, "正文");
+  assert.equal(parsed.meta.key, "topic-key");
+});
+
+test("frontmatter 缺省：老文件没有 group/pinned 时解析补 [] / false，且字节里没有新行", () => {
+  const buffer = serializeTopicFile(makeMeta(), "正文");
+  const text = buffer.toString("utf8");
+  assert.doesNotMatch(text, /^group:/m);
+  assert.doesNotMatch(text, /^pinned:/m);
+  const parsed = parseTopicFile(buffer);
+  assert.deepEqual(parsed.group, []);
+  assert.equal(parsed.pinned, false);
+  // 老文件 front-matter 原样保留（缺省读取不回写）
+  assert.equal(parsed.meta.title, "标题");
+});
+
+test("frontmatter 解析：手写文件含空格数组 / pinned:false / archivedAt 共存均按口径读取", () => {
+  const raw = [
+    "---",
+    'key: "k"',
+    'title: "t"',
+    'summary: ""',
+    'updated: "2026-11-13T00:00:00.000Z"',
+    'scopeId: "amber"',
+    'archivedAt: "2026-11-13T00:00:00.000Z"',
+    'group: ["dev", "self"]',
+    "pinned: false",
+    "---",
+    "正文",
+    "",
+  ].join("\n");
+  const parsed = parseTopicFile(Buffer.from(raw, "utf8"));
+  assert.deepEqual(parsed.group, ["dev", "self"]);
+  assert.equal(parsed.pinned, false);
+  assert.equal(parsed.meta.archivedAt, "2026-11-13T00:00:00.000Z");
+  // group/pinned 是一等字段，不混入 meta 字符串记录
+  assert.equal(parsed.meta.group, undefined);
+  assert.equal(parsed.meta.pinned, undefined);
+});
+
+test("frontmatter 解析：group/pinned 非法形态显式 INVALID_STATE", async () => {
+  const base = [
+    "---",
+    'key: "k"',
+    'title: "t"',
+    'summary: ""',
+    'updated: "2026-11-13T00:00:00.000Z"',
+    'scopeId: "amber"',
+  ];
+  const cases = [
+    [["group: dev"], /字段 "group" 必须是 JSON 字符串数组/],
+    [["group: [dev]"], /数组标量不是合法 JSON/],
+    [["group: []"], null], // 空数组合法 = 未分组
+    [["group: {}"], /必须是 JSON 字符串数组/],
+    [["group: [1]"], /元素必须是非空字符串/],
+    [["group: [\"\"]"], /元素必须是非空字符串/],
+    [["group: [\"a\",\"a\"]"], /含重复组 key: "a"/],
+    [["group: [\"a\"]", "group: [\"b\"]"], /字段重复: "group"/],
+    [["pinned: yes"], /字段 "pinned" 必须是 true\/false 布尔标量/],
+    [["pinned: \"true\""], /字段 "pinned" 必须是 true\/false 布尔标量/],
+    [["pinned: true", "pinned: false"], /字段重复: "pinned"/],
+    [["pinned: 1"], /字段 "pinned" 必须是 true\/false 布尔标量/],
+  ];
+  for (const [lines, pattern] of cases) {
+    const raw = [...base, ...lines, "---", "正文"].join("\n");
+    if (pattern) {
+      assert.throws(
+        () => parseTopicFile(Buffer.from(raw, "utf8")),
+        (e) => assertCode(e, "INVALID_STATE", pattern),
+      );
+    } else {
+      const parsed = parseTopicFile(Buffer.from(raw, "utf8"));
+      assert.deepEqual(parsed.group, []);
+    }
+  }
+});
+
+test("frontmatter 序列化：group/pinned 非法入参显式拒绝；空数组/省略不落行", () => {
+  assert.throws(
+    () => serializeTopicFile({ ...makeMeta(), group: "dev" }, ""),
+    (e) => assertCode(e, "INVALID_INPUT", /"group" 必须是字符串数组/),
+  );
+  assert.throws(
+    () => serializeTopicFile({ ...makeMeta(), group: ["a", "a"] }, ""),
+    (e) => assertCode(e, "INVALID_INPUT", /含重复组 key/),
+  );
+  assert.throws(
+    () => serializeTopicFile({ ...makeMeta(), group: ["a", 1] }, ""),
+    (e) => assertCode(e, "INVALID_INPUT", /元素必须是非空字符串/),
+  );
+  assert.throws(
+    () => serializeTopicFile({ ...makeMeta(), pinned: "true" }, ""),
+    (e) => assertCode(e, "INVALID_INPUT", /"pinned" 必须是布尔值/),
+  );
+  // 空数组 / pinned:false / 缺省 → 整行省略
+  for (const meta of [makeMeta(), { ...makeMeta(), group: [] }, { ...makeMeta(), pinned: false }]) {
+    const text = serializeTopicFile(meta, "").toString("utf8");
+    assert.doesNotMatch(text, /^group:/m);
+    assert.doesNotMatch(text, /^pinned:/m);
+  }
+});

@@ -277,6 +277,128 @@ export function projectGraph({ scopeId, records } = {}) {
   };
 }
 
+// ── 0.4-S7 两级聚类投影（闪回图谱方案 B）───────────────────────────────────
+//
+// 30 张卡的全图首屏是一团线，两级视图把「看图」拆成两步：首屏只画簇圆
+// （level=1），点开某个簇再画簇内的节点与连线（level=2）。簇的划分规则只有
+// 一条：卡片的主实体（entities[0]，与客户端聚类着色同源）；没有实体的卡
+// 归入 __unclustered__（未分类）。本函数是纯函数：零副作用、不读盘、同一
+// 输入输出逐字节一致（排序全部走 compareStrings / 既有 id 排序）。
+
+/** 没有主实体的卡归入这个 key（label 固定为「未分类」）。 */
+const UNCLUSTERED_KEY = "__unclustered__";
+const UNCLUSTERED_LABEL = "未分类";
+
+/** 两级投影输出的 schema 版本（闭包契约：未知新增字段必须升版）。 */
+const CLUSTER_PROJECTION_SCHEMA_VERSION = 1;
+
+/** 主实体簇 key：与 projectGraph 节点的 entities[0] 同源（trim 非空字符串）。
+ *  entities 缺失 / 非数组 / 元素全是脏值时，projectGraph 的投影已把它们归一成
+ *  []，这里静默落到 UNCLUSTERED_KEY——不抛错、不猜测、不另立桶。 */
+function clusterKeyOfNode(node) {
+  return node.entities.length > 0 ? node.entities[0] : UNCLUSTERED_KEY;
+}
+
+function clusterLabelOf(key) {
+  return key === UNCLUSTERED_KEY ? UNCLUSTERED_LABEL : key;
+}
+
+/**
+ * 两级聚类投影（闪回图谱方案 B，面板专用；模型工具链不走这里）。
+ *
+ * @param {object} input
+ * @param {string} input.scopeId 可信 scope（工厂注入，不由数据决定）
+ * @param {Array} input.records 待投影的 public record 数组（同 projectGraph 口径）
+ * @param {string} [input.cluster] 缺省 = level 1（分簇概览）；给了字符串 = level 2（簇内视图）
+ * @returns {object}
+ *   level 1：{ schemaVersion, level: 1, scopeId, clusters, total }。clusters 按数量降序、
+ *   同数量按 key 字典序；每簇 { key, label, count, samples }，samples 最多 3 个标题
+ *   （按 id 序取，只有非空字符串标题计入）。
+ *   level 2：{ schemaVersion, level: 2, scopeId, cluster: { key, label, count }, nodes, edges }。
+ *   nodes 形状与 projectGraph 的节点一致（复用其投影与过滤逻辑，degree 重算为簇内度数）；
+ *   edges 只保留两端都在该簇内的（沿用 projectGraph 的排序与折叠结果）；
+ *   未知 cluster 不抛错：返回空 nodes/edges + count 0。
+ */
+export function clusterProjection({ scopeId, records, cluster } = {}) {
+  if (!nonEmptyString(scopeId)) {
+    return fail("INVALID_INPUT", "clusterProjection requires a non-empty string scopeId from a trusted source", {
+      scopeId: typeof scopeId,
+    });
+  }
+  if (!Array.isArray(records)) {
+    return fail("INVALID_INPUT", "clusterProjection requires records to be an array (use normalizeGraphRecords for store payloads)", {
+      records: Array.isArray(records) ? "array" : typeof records,
+    });
+  }
+  // cluster 缺省 / null → level 1；给了必须是字符串（协议层已约束，这里兜底）。
+  if (cluster !== undefined && cluster !== null && typeof cluster !== "string") {
+    return fail("INVALID_INPUT", "clusterProjection requires cluster to be a string when provided", {
+      cluster: typeof cluster,
+    });
+  }
+
+  // 单一事实来源：过滤 / 去重 / 边折叠全部复用 projectGraph，不复制一份字段。
+  const projection = projectGraph({ scopeId, records });
+
+  if (cluster === undefined || cluster === null) {
+    const byKey = new Map();
+    for (const node of projection.nodes) {
+      const key = clusterKeyOfNode(node);
+      let bucket = byKey.get(key);
+      if (bucket === undefined) {
+        bucket = { key, label: clusterLabelOf(key), count: 0, samples: [] };
+        byKey.set(key, bucket);
+      }
+      bucket.count += 1;
+      // samples 是「id 序前 3 个非空标题」，标题允许重复：4 张同名卡会出 3 个相同
+      // 标题（客户端原样渲染，不在这里去重——去重会伪造样本多样性）。
+      if (bucket.samples.length < 3 && typeof node.title === "string" && node.title.length > 0) {
+        bucket.samples.push(node.title);
+      }
+    }
+    const clusters = [...byKey.values()]
+      .sort((a, b) => b.count - a.count || compareStrings(a.key, b.key));
+    return {
+      schemaVersion: CLUSTER_PROJECTION_SCHEMA_VERSION,
+      level: 1,
+      scopeId,
+      clusters,
+      total: projection.nodes.length,
+    };
+  }
+
+  // level 2：簇内视图。未知 cluster（数据里不存在该 key）不抛错，空返回。
+  const members = projection.nodes.filter((node) => clusterKeyOfNode(node) === cluster);
+  const clusterOut = { key: cluster, label: clusterLabelOf(cluster), count: members.length };
+  if (members.length === 0) {
+    return {
+      schemaVersion: CLUSTER_PROJECTION_SCHEMA_VERSION,
+      level: 2,
+      scopeId,
+      cluster: clusterOut,
+      nodes: [],
+      edges: [],
+    };
+  }
+  const nodes = members.map((node) => ({ ...node, degree: 0 }));
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  // projectGraph 的 edges 已按 (source, target, rel) 排序；过滤保序，无需再排。
+  const edges = projection.edges
+    .filter((edge) => nodeById.has(edge.source) && nodeById.has(edge.target));
+  for (const edge of edges) {
+    nodeById.get(edge.source).degree += 1;
+    nodeById.get(edge.target).degree += 1;
+  }
+  return {
+    schemaVersion: CLUSTER_PROJECTION_SCHEMA_VERSION,
+    level: 2,
+    scopeId,
+    cluster: clusterOut,
+    nodes,
+    edges,
+  };
+}
+
 /**
  * 模型侧回执：只有面板句柄与节点/边规模摘要（DESIGN §4.3.5「模型侧调用只返
  * 面板句柄 / 规模摘要」）。不含任何节点 id、标题、正文；详情必须 spark_read(id)。

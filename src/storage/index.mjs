@@ -3,3 +3,6 @@
 
 export { createFileStore } from './store.mjs';
 export { StorageError } from './errors.mjs';
+// 0.4 S3 组清单：groups.json 物理路径助手（读写实现在 src/core/groups.mjs，
+// 锁与原子写复用本目录 lockfile/fsutil 的现成实现）。
+export { groupsFilePath } from './paths.mjs';

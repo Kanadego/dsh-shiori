@@ -3,7 +3,7 @@
 // 契约（CONTRACTS §8）：真实 DSH 0.2.1-rc.2 工具 runner 必须检查全部成功输出
 // （特别 topic_append 写成功后返回成功）；禁止只 mock defineTool 成功就称输出
 // 校验通过。本文件用本机已安装的真实 @deepseek-ai/dsh-tools：
-// - 真实 defineTool 编译 16 工具的 output schema（assertSupportedJsonSchema 子集
+// - 真实 defineTool 编译 17 工具的 output schema（assertSupportedJsonSchema 子集
 //   检查在 defineTool 内部执行——schema 非法即抛错）；
 // - 真实 validateJsonSchemaValue（与 runner createSuccessResult 同一校验函数，
 //   dsh-tools lib/index.js:3640）逐工具校验成功输出；
@@ -23,7 +23,7 @@ import { existsSync } from "node:fs";
 import { createShioriService } from "../../src/service/index.mjs";
 import { createPersonaAdapter } from "../../src/plugin/persona.mjs";
 import { openSparkStore } from "../../src/sparks/store.mjs";
-import { createCompatTools, createTopicCreateTool } from "../../src/host/tools.mjs";
+import { createCompatTools, createTopicCreateTool, createGroupManageTool } from "../../src/host/tools.mjs";
 import { createSparkTools } from "../../src/sparks/tools.mjs";
 import { TOOL_NAMES, TOOL_OUTPUT_SCHEMAS, renderToolOutput } from "../../src/plugin/tool-schemas.mjs";
 import { createDshBindings } from "../../src/plugin/bindings.mjs";
@@ -59,7 +59,7 @@ try {
   }
 }
 
-test("真实 defineTool：16 工具 output schema 编译（子集非法即抛）+ 真实 runner 校验函数验证成功输出", async (t) => {
+test("真实 defineTool：17 工具 output schema 编译（子集非法即抛）+ 真实 runner 校验函数验证成功输出", async (t) => {
   if (!dshTools) {
     t.skip("real @deepseek-ai/dsh-tools not resolvable on this machine (RESULT.json marks this check not-run)");
     return;
@@ -77,9 +77,11 @@ test("真实 defineTool：16 工具 output schema 编译（子集非法即抛）
   const tools = [
     ...createCompatTools({ service, getSessionInfo: () => ({ sessionId: null, scopeId: "amber" }) }),
     createTopicCreateTool({ service, getSessionInfo: () => ({ sessionId: null, scopeId: "amber" }) }),
+    // S3：第 17 个工具（组清单管理；直接绑真实 service 与磁盘 groups.json）。
+    createGroupManageTool({ service, dataRoot, scopeId: "amber" }),
     ...createSparkTools({ scopeId: "amber", store: sparkStore }).tools,
   ];
-  assert.equal(tools.length, 16);
+  assert.equal(tools.length, 17);
   assert.deepEqual(tools.map((x) => x.name).sort(), [...TOOL_NAMES].sort());
 
   const compiled = new Map();
@@ -100,7 +102,7 @@ test("真实 defineTool：16 工具 output schema 编译（子集非法即抛）
     assert.equal(defined.name, tool.name);
     compiled.set(tool.name, defined);
   }
-  assert.equal(compiled.size, 16);
+  assert.equal(compiled.size, 17);
 
   // 真实 defineTool 保留 output.render：对每个工具断言返回值形状（数组 / text block /
   // 可 JSON 还原原 value）——宿主 createSuccessResult 直接吃这个返回值。
@@ -144,7 +146,7 @@ test("真实 defineTool：16 工具 output schema 编译（子集非法即抛）
     assert.deepEqual(violations, [], `${name} output must pass the real runner schema: ${JSON.stringify(violations)}`);
   }
 
-  // 4) 全部 16 工具成功输出逐一过真实校验（读分支走真实读；写分支走真实 CAS 写）。
+  // 4) 全部 17 工具成功输出逐一过真实校验（读分支走真实读；写分支走真实 CAS 写）。
   const sparkSaved = await compiled.get("spark_save").execute(
     { title: "真实卡", content: "内容。", triggers: ["真实词"], vitality: "evergreen" },
     { agent: { session: { id: "s-real" } } },
@@ -157,6 +159,9 @@ test("真实 defineTool：16 工具 output schema 编译（子集非法即抛）
     ["memory_append", { section: "段", content: "追加正文。" }],
     ["memory_rewrite", { content: "重写正文。" }],
     ["core_write", null], // revision 动态获取
+    // S3：group_manage 真实建组 + 列举（groups.json 走真实 CAS 写）。
+    ["group_manage", { action: "create", key: "dev", title: "开发与配置", summary: "DSH / 插件 / 发版", order: 10 }],
+    ["group_manage", { action: "list" }],
     ["spark_read", null],
     ["spark_update", null],
     ["spark_graph", {}],
@@ -289,7 +294,7 @@ function fakeTypertCtx() {
   return { ctx, services };
 }
 
-test("P-C 严格描述符：真实 TypertRegistry 接受 10 端点注册 → local.get 全 strict；dispose→hasSeen→重注册；重复注册 adopt；无 typert 回退 SRC", async (t) => {
+test("P-C 严格描述符：真实 TypertRegistry 接受 11 端点注册（10 + destroyData，0.4 S6）→ local.get 全 strict；dispose→hasSeen→重注册；重复注册 adopt；无 typert 回退 SRC", async (t) => {
   const registryMod = await loadTypertRegistry();
   if (!registryMod) {
     t.skip("real @deepseek-ai/dsh-typert-registry not resolvable on this machine (RESULT.json marks this check not-run)");
@@ -315,7 +320,7 @@ test("P-C 严格描述符：真实 TypertRegistry 接受 10 端点注册 → loc
   assert.equal(typeof reg.disposer, "function");
 
   const methods = Object.keys(MANAGEMENT_METHODS);
-  assert.equal(methods.length, 10);
+  assert.equal(methods.length, 11);
   for (const method of methods) {
     const descriptor = typert.local.get(`shiori/${method}`);
     assert.ok(descriptor, `endpoint shiori/${method} must be registered`);
@@ -447,7 +452,7 @@ async function bootRealEntry({ extraServices = null, timeoutMs = 10000 } = {}) {
   return { panel, tools, cleanup };
 }
 
-test("B-P2 真实入口 boot：index.mjs apply + 真实 Cordis fiber（不注入 typert）→ 插件激活、16 工具注册、typertRpc 如实回退 src", async (t) => {
+test("B-P2 真实入口 boot：index.mjs apply + 真实 Cordis fiber（不注入 typert）→ 插件激活、17 工具注册、typertRpc 如实回退 src", async (t) => {
   const cordis = await loadCordis();
   if (!cordis) { t.skip("real cordis not resolvable on this machine (RESULT.json marks this check not-run)"); return; }
   if (!existsSync(ENTRY_PATH)) {
@@ -461,8 +466,8 @@ test("B-P2 真实入口 boot：index.mjs apply + 真实 Cordis fiber（不注入
     const diag = panel.diagnostics();
     assert.equal(diag.service, "shiori.panel");
     assert.equal(diag.closed, false);
-    // 16 工具经真实 bindings + 真实 defineTool 注册进宿主 tools 服务。
-    assert.equal(tools.registered.length, 16);
+    // 17 工具经真实 bindings + 真实 defineTool 注册进宿主 tools 服务。
+    assert.equal(tools.registered.length, 17);
     // typertRpc 走"registry 缺席"分支（ctx.get 可选读取返回 undefined），
     // 而不是被调用点 try/catch 接住的异常——reason 必须逐字是缺席语义。
     const status = await panel.management.getStatus(
@@ -498,7 +503,7 @@ test("B-P2 真实入口 boot：注入 typert 但 register 抛错 → start 仍�
     },
   });
   try {
-    assert.equal(tools.registered.length, 16, "register 抛错不得阻断 16 工具注册");
+    assert.equal(tools.registered.length, 17, "register 抛错不得阻断 17 工具注册");
     const status = await panel.management.getStatus(
       { session: { id: "boot-probe-s2" }, source: "panel-rpc" }, {},
     );

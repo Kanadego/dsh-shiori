@@ -14,6 +14,12 @@
 //   实测配置一致（q8 短文本 p95 3.98ms，512 维）。
 
 // 本模块不引入宿主依赖；fail 与 index.mjs 同风格（可序列化 .code + .details）。
+// S5：模型下载（progress_callback 驱动）也住本模块——它同样是 transformers.js
+// 运行时之上的薄层，与 embed 共享同一套懒加载/环境配置口径；测试经
+// loadTransformers 注入假模块，绝不真下载（F1b 铁律不变）。
+import { existsSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+
 function fail(code, message, details) {
   const error = new Error(message);
   error.name = "ShioriError";
@@ -46,11 +52,15 @@ function unavailable(message, cause) {
  *   fp32 91MB/精度基线（spike §四.1）。默认 fp32 由配置线决定，本函数不再改写。
  * @param {string} [options.cacheDir=""]  模型缓存目录；空字符串 = 不设置 env.cacheDir
  *   （transformers.js 用它自己的默认缓存位置）。生产路径的空串承诺
- *   （「用 <stateRoot>/semantic/models」）由 controller 在构造 provider 前解析
+ *   （「用 <dataRoot>/models」——0.4-S5 起模型跟业务数据走，升级插件、重装包
+ *   都不用重下）由 controller 在构造 provider 前解析
  *   （见 controller.mjs semanticProviderConfig）：只有 controller 同时知道
- *   stateRoot 与配置，本模块不猜路径。测试/评测脚本可显式传 cacheDir。
+ *   dataRoot 与配置，本模块不猜路径。测试/评测脚本可显式传 cacheDir。
  * @param {string} [options.mirror]  HuggingFace 镜像 host（如 "https://hf-mirror.com/"）；
  *   缺省不设置（直连 huggingface.co，国内环境一般不可达，配置线默认填镜像）。
+ * @param {() => Promise<object>} [options.loadTransformers]  运行时加载器；缺省
+ *   动态 import("@huggingface/transformers")。仅测试注入假模块用（与
+ *   createLocalModelDownloader 的同名参数同口径），默认行为逐字不变。
  * @returns {{kind:"local", dims:number, embed(text:string):Promise<Float32Array>}}
  *   冻结的 provider 对象（契约形状与 F1a 一致，零额外字段）。
  * @throws {Error} code="INVALID_INPUT"：必填参数缺失或非法（创建期即可诊断）。
@@ -64,6 +74,7 @@ export function createLocalEmbeddingProvider({
   dtype = "fp32",
   cacheDir = "",
   mirror,
+  loadTransformers = () => import("@huggingface/transformers"),
 } = {}) {
   if (typeof model !== "string" || model.length === 0) {
     fail("INVALID_INPUT", "createLocalEmbeddingProvider: model must be a non-empty string (full repo id org/name)", {
@@ -95,7 +106,7 @@ export function createLocalEmbeddingProvider({
     let transformers;
     try {
       // 懒加载核心：首次 embed 才 import。模块缺失（依赖没装 / 被裁剪）在这里暴露。
-      transformers = await import("@huggingface/transformers");
+      transformers = await loadTransformers();
     } catch (cause) {
       throw unavailable(
         "本地 embedding 运行时（@huggingface/transformers）加载失败：插件依赖可能未完整安装。"
@@ -140,7 +151,12 @@ export function createLocalEmbeddingProvider({
       // 归一化后余弦即点积，但召回层仍走通用 cosineSimilarity 保持单一实现。
       output = await extractor(text, { pooling: "mean", normalize: true });
     } catch (cause) {
-      throw unavailable(`本地 embedding 推理失败（model: ${model}）：${cause instanceof Error ? cause.message : String(cause)}`, cause);
+      // C-fix C5：与下方归因处（:479 一带）同一口径——普通对象抛错优先取
+      // .message，不许丢成 "[object Object]"。
+      throw unavailable(
+        `本地 embedding 推理失败（model: ${model}）：${typeof cause?.message === "string" ? cause.message : String(cause)}`,
+        cause,
+      );
     }
     const data = output?.data;
     const isVectorLike = data instanceof Float32Array || data instanceof Float64Array
@@ -158,4 +174,421 @@ export function createLocalEmbeddingProvider({
   }
 
   return Object.freeze({ kind: "local", dims, embed });
+}
+
+// ─────────────────────────────────────────────────────────
+// S5 · 模型下载（面板「下载模型」按钮的服务端实现层）
+// ─────────────────────────────────────────────────────────
+//
+// 边界：
+// - 下载本身就是一次 pipeline("feature-extraction") 构造：transformers.js 的
+//   progress_callback（五态 initiate/download/progress/done/ready）是唯一的
+//   进度来源，本模块不自己写下载器、不发自己的 HTTP 请求。
+// - 多源回退（镜像失败回落官方源）在本模块逐源尝试；env.remoteHost 是模块级
+//   全局单例，每次尝试前整体重设（与 initExtractor 同口径）。
+// - 取消是协作式的：progress_callback 里查 isCancelled() 并抛
+//   code="DOWNLOAD_CANCELLED" 的哨兵错误，让 pipeline 构造 promise 以异常收场；
+//   pipeline 落定后再查一次 isCancelled()（兜底 callback 抛错未被透传的运行时）。
+// - 下载完成 ≠ 可用：必须通过「文件名齐全 + 真实推理维度」双校验才返回 done，
+//   controller 侧据此才放行建索引（S5 验收 c 条）。
+// - 进度聚合（S5 验收 e 条）：一条 pipeline 会拉多个文件（config/tokenizer/onnx），
+//   事件按 file 去重、按 total 字节加权，避免进度条来回跳。
+
+/** 取消哨兵错误码（controller 据此把任务态标为 cancelled 而不是 error）。 */
+export const DOWNLOAD_CANCELLED = "DOWNLOAD_CANCELLED";
+
+/**
+ * 可选依赖缺失错误码（0.4-S5 复审 P1）：@huggingface/transformers 没装与
+ * 「全部下载源不可达」是两类故障——前者与网络无关，混在逐源回退里被汇总成
+ * 「全部下载源均失败」会把用户引去查网络。controller 据此把 installHint /
+ * 前端报错卡片的归因文案改准（依赖缺失 → 先 npm install，不是查网络）。
+ */
+export const DOWNLOAD_DEPENDENCY_MISSING = "DOWNLOAD_DEPENDENCY_MISSING";
+
+/**
+ * 运行时加载失败错误码（0.4 收账遗留 1）：依赖已装、但 import 仍失败
+ * （EACCES / 版本不兼容 / 包内部报错等）。它不是「缺依赖」——照旧把这类
+ * 错误归成 DOWNLOAD_DEPENDENCY_MISSING 会引导用户去 npm i（装了也没用）。
+ * 只有模块确实找不到（isModuleNotFoundError）才归缺依赖；其余加载失败归此码。
+ */
+export const DOWNLOAD_RUNTIME_LOAD_FAILED = "DOWNLOAD_RUNTIME_LOAD_FAILED";
+
+/**
+ * 从「Cannot find module/package」类 message 里取真正缺失的模块标识
+ * （引号内外都兼容；解析不出返回 null）。用于把归因文案写到点子上：
+ * 缺的是谁就写谁，不许一律写 @huggingface/transformers。
+ */
+function missingSpecifierOf(message) {
+  if (typeof message !== "string") return null;
+  const match = message.match(/Cannot find (?:module|package)\s+'?([^'\s]+)'?/i);
+  return match === null ? null : match[1];
+}
+
+/** 错误是否为 Node 模块解析失败（ERR_MODULE_NOT_FOUND / MODULE_NOT_FOUND / 同义 message）。 */
+function isModuleNotFoundError(error) {
+  if (error === null || typeof error !== "object") return false;
+  if (error.code === "ERR_MODULE_NOT_FOUND" || error.code === "MODULE_NOT_FOUND") return true;
+  const message = typeof error.message === "string" ? error.message : "";
+  return message.includes("Cannot find module") || message.includes("Cannot find package");
+}
+
+/**
+ * 判断加载错误是不是「@huggingface/transformers 本身没装」（缺可选依赖）：
+ * 模块解析失败，且 message 指名的缺失模块就是它自己。包已装但内部缺模块、
+ * 包存在但入口缺失——缺失的不是它自己——不归此类（复审 P2-1）：那两种形态
+ * 归运行时加载失败，文案指出 message 里真正的模块名，不许把责任指错包
+ * （用户照「npm i @huggingface/transformers」去装也修不好）。
+ * code 命中但 message 解析不出模块名时保守按「包本身缺失」归因——指不出
+ * 真凶时宁可走通用缺依赖文案，不冒充能指出真凶。
+ */
+function isTransformersPackageMissing(error) {
+  if (!isModuleNotFoundError(error)) return false;
+  const specifier = missingSpecifierOf(typeof error.message === "string" ? error.message : "");
+  if (specifier === null) return true;
+  return specifier === "@huggingface/transformers"
+    || specifier.startsWith("@huggingface/transformers/");
+}
+
+/**
+ * 原始错误的单行可读摘要（0.4 收账遗留 1 + 复审 P3-1）：对象抛出优先取
+ * .message，没有则 JSON.stringify 兜底（绝不丢成 "[object Object]"）；
+ * error.cause 链的 message 一并带上（有界防环）；message 本不含堆栈帧，
+ * 不做帧过滤；截断到约 200 字符并以「…」结尾示意截断。
+ */
+function errorDigest(error) {
+  const describe = (e) => {
+    if (e === null || typeof e !== "object") return String(e);
+    if (typeof e.message === "string" && e.message.length > 0) return e.message;
+    try {
+      const json = JSON.stringify(e);
+      return json === undefined ? Object.prototype.toString.call(e) : json;
+    } catch {
+      return Object.prototype.toString.call(e); // 环形引用等 stringify 失败：至少给出类型
+    }
+  };
+  const parts = [];
+  const seen = new Set();
+  for (let cur = error; cur !== undefined && cur !== null && parts.length < 5; cur = cur.cause) {
+    if (seen.has(cur)) break; // cause 自引用成环：见好就收
+    seen.add(cur);
+    parts.push(describe(cur));
+  }
+  // P3-4（B 批收账）：分段截断——先 join 整串再整体截 200，外层 message 很长时
+  // cause 段被整段截掉，「带上 cause」实际失效。每段先压成单行再各自限量。
+  // C-fix C2：额度按剩余空间分配——非末段额度 = min(基础额度, 200 − 已用 −
+  // 后续每层的预留（分隔符 4 + 最小特征片段 8）)，深链的中间段给深层让位，
+  // 保证 4 层以上 cause 链每层都至少露出约 7 字符的特征片段，不再整段消失。
+  // 末段不做剩余额度收缩（保留基础额度），超出 200 的尾量交给下面的整串
+  // 兜底截断——兜底因此始终活跃（C3 用例钉住它）。1～2 层链与旧行为逐字一致：
+  // 外段 200−12 ≥ 120 恒取基础额度 120。
+  const LIMIT = 200;
+  const SEP = "；起因：";
+  const RESERVE_PER_LAYER = SEP.length + 8;
+  const cap = (text, limit) => (text.length > limit ? text.slice(0, limit) + "…" : text);
+  let used = 0;
+  const singleLine = parts
+    .map((text, index) => {
+      const flat = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .join("；");
+      const base = index === 0 ? 120 : 40;
+      const sepLen = index > 0 ? SEP.length : 0;
+      const isLast = index === parts.length - 1;
+      const budget = isLast
+        ? base
+        : Math.max(1, Math.min(base, LIMIT - used - sepLen - RESERVE_PER_LAYER * (parts.length - 1 - index)));
+      const segment = cap(flat, budget);
+      used += sepLen + segment.length;
+      return segment;
+    })
+    .join(SEP);
+  return singleLine.length > LIMIT ? singleLine.slice(0, LIMIT) + "…" : singleLine;
+}
+
+/** dtype → ONNX 权重文件名（transformers.js 按 dtype 选择对应量化文件）。 */
+const ONNX_FILE_BY_DTYPE = Object.freeze({
+  fp32: "onnx/model.onnx",
+  fp16: "onnx/model_fp16.onnx",
+  q8: "onnx/model_quantized.onnx",
+});
+
+/**
+ * 一次完整安装必须落盘的文件清单（相对 <cacheDir>/<org>/<model>/ 的路径）。
+ * config.json + tokenizer.json 是 feature-extraction pipeline 的硬依赖；
+ * ONNX 权重按 dtype 选定。
+ */
+export function expectedModelFiles(dtype) {
+  if (!Object.hasOwn(ONNX_FILE_BY_DTYPE, dtype)) {
+    fail("INVALID_INPUT", `expectedModelFiles: dtype must be one of fp32|fp16|q8, got ${String(dtype)}`, {
+      dtype,
+    });
+  }
+  return ["config.json", "tokenizer.json", ONNX_FILE_BY_DTYPE[dtype]];
+}
+
+/** 模型在本机缓存里的目录：<cacheDir>/<org>/<model>/（transformers.js 的落盘布局）。 */
+export function localModelDir(cacheDir, model) {
+  if (typeof cacheDir !== "string" || cacheDir.length === 0) {
+    fail("INVALID_INPUT", `localModelDir: cacheDir must be a non-empty string, got ${String(cacheDir)}`, {});
+  }
+  // P0#3（0.4 审查报告）防御层：config 已拦一层（手动目录必须绝对路径 + 拒 ..），
+  // 这里在目录解析处同步再拒一次——挡「绕过 config 直接调本模块」（controller 直构
+  // / 评测脚本 / 测试）把相对路径或 ../ 逃逸写法喂进 transformers.js 落盘布局。
+  if (!isAbsolute(cacheDir)) {
+    fail("INVALID_INPUT", `localModelDir: cacheDir must be an absolute path, got "${cacheDir}"`, {});
+  }
+  if (cacheDir.split(/[\\/]+/).includes("..")) {
+    fail("INVALID_INPUT", `localModelDir: cacheDir must not contain ".." path segments, got "${cacheDir}"`, {});
+  }
+  if (typeof model !== "string" || model.split("/").length !== 2 || model.split("/").some((p) => p.length === 0)) {
+    fail("INVALID_INPUT", `localModelDir: model must be a full repo id (org/name), got ${String(model)}`, { model });
+  }
+  return join(cacheDir, ...model.split("/"));
+}
+
+/** expectedModelFiles 里的相对路径展开成绝对路径。 */
+function absoluteModelFile(cacheDir, model, relativeFile) {
+  return join(localModelDir(cacheDir, model), ...relativeFile.split("/"));
+}
+
+/**
+ * 模型是否已完整安装（全部期望文件存在）。只做存在性检查，不校验内容——
+ * 内容校验（维度）在下载收尾的真实推理里做，这条轻检查供getStatus高频读取。
+ * 任何 fs 异常（权限等）按「未安装」处理，绝不抛——诊断路径不许炸。
+ */
+export function isLocalModelInstalled({ cacheDir, model, dtype }) {
+  try {
+    for (const file of expectedModelFiles(dtype)) {
+      if (!existsSync(absoluteModelFile(cacheDir, model, file))) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 创建进度聚合器：按 file 去重（每文件只保留最新 loaded/total）、按 total 字节
+ * 加权求整体百分比。push() 吃 transformers.js 的 progress_callback 事件
+ * （{status, file, loaded, total}），snapshot() 返回整体快照。
+ * 未知 total 的文件只累计已下载字节，不参与百分比分母（分母失真比不显示更糟）。
+ */
+export function createModelProgressAggregator() {
+  const files = new Map(); // file → { loaded, total, done }
+  function push(event) {
+    if (event === null || typeof event !== "object") return;
+    const file = event.file;
+    if (typeof file !== "string" || file.length === 0) return; // ready 等无文件事件
+    let entry = files.get(file);
+    if (entry === undefined) {
+      entry = { loaded: 0, total: null, done: false };
+      files.set(file, entry);
+    }
+    const status = event.status;
+    if (status === "progress") {
+      if (typeof event.loaded === "number" && Number.isFinite(event.loaded) && event.loaded >= 0) {
+        entry.loaded = event.loaded;
+      }
+      if (typeof event.total === "number" && Number.isFinite(event.total) && event.total > 0) {
+        entry.total = event.total;
+      }
+    } else if (status === "done") {
+      entry.done = true;
+      if (entry.total !== null) entry.loaded = entry.total;
+    }
+    // initiate / download / ready：只登记文件，不动进度。
+  }
+  function snapshot() {
+    let loadedBytes = 0;
+    let loadedKnown = 0;
+    let totalBytes = 0;
+    let filesDone = 0;
+    for (const entry of files.values()) {
+      loadedBytes += entry.loaded;
+      if (entry.total !== null) {
+        loadedKnown += entry.loaded;
+        totalBytes += entry.total;
+      }
+      if (entry.done) filesDone += 1;
+    }
+    const percent = totalBytes > 0 ? Math.min(100, Math.round((loadedKnown / totalBytes) * 100)) : null;
+    return { percent, loadedBytes, totalBytes, filesDone, filesTotal: files.size };
+  }
+  return { push, snapshot };
+}
+
+/**
+ * 创建本地模型下载器（S5）。download() 单次调用内逐源尝试：每个源重设
+ * env.remoteHost → pipeline 构造（progress_callback 驱动进度与协作取消）→
+ * 文件名齐全校验 → 真实推理维度校验；某源失败记入 attempts 并继续下一源，
+ * 全部失败返回 {ok:"error"}（controller 负责把可读报错卡片数据写进诊断）。
+ *
+ * @param {object} options
+ * @param {string} options.model  完整仓库 id（org/name）。
+ * @param {number} options.dims   期望输出维度（下载后真实推理校验）。
+ * @param {"fp32"|"fp16"|"q8"} options.dtype  ONNX 精度（决定下载哪个权重文件）。
+ * @param {string} options.cacheDir  非空缓存根目录（transformers.js env.cacheDir）。
+ * @param {string[]} options.mirrors  源列表（按顺序尝试；如 [镜像, 官方源]）。
+ * @param {() => Promise<object>} [options.loadTransformers]  运行时加载器；缺省
+ *   动态 import("@huggingface/transformers")。测试注入假模块，绝不真下载。
+ * @returns {{download(options: {
+ *   onProgress?: (snapshot) => void,
+ *   onPhase?: (phase: "downloading"|"verifying") => void,
+ *   onSource?: (source: string) => void,
+ *   isCancelled?: () => boolean,
+ * }): Promise<{ok:"done"|"cancelled"|"error", source?, attempts?, error?}>}}
+ */
+export function createLocalModelDownloader({
+  model,
+  dims,
+  dtype,
+  cacheDir,
+  mirrors,
+  loadTransformers,
+} = {}) {
+  if (typeof model !== "string" || model.split("/").length !== 2 || model.split("/").some((p) => p.length === 0)) {
+    fail("INVALID_INPUT", `createLocalModelDownloader: model must be a full repo id (org/name), got ${String(model)}`, {
+      model,
+    });
+  }
+  if (!Number.isInteger(dims) || dims <= 0) {
+    fail("INVALID_INPUT", `createLocalModelDownloader: dims must be a positive integer, got ${String(dims)}`, { dims });
+  }
+  if (!DTYPES.has(dtype)) {
+    fail("INVALID_INPUT", `createLocalModelDownloader: dtype must be one of fp32|fp16|q8, got ${String(dtype)}`, { dtype });
+  }
+  if (typeof cacheDir !== "string" || cacheDir.length === 0) {
+    fail("INVALID_INPUT", `createLocalModelDownloader: cacheDir must be a non-empty string, got ${String(cacheDir)}`, {});
+  }
+  if (!Array.isArray(mirrors) || mirrors.length === 0 || mirrors.some((m) => typeof m !== "string" || m.length === 0)) {
+    fail("INVALID_INPUT", "createLocalModelDownloader: mirrors must be a non-empty array of non-empty strings", {});
+  }
+
+  function cancelledError() {
+    const error = new Error("模型下载已被用户取消。");
+    error.name = "ShioriError";
+    error.code = DOWNLOAD_CANCELLED;
+    return error;
+  }
+  const isCancelError = (error) => error !== null && typeof error === "object" && error.code === DOWNLOAD_CANCELLED;
+
+  async function download({ onProgress, onPhase, onSource, isCancelled } = {}) {
+    const cancelled = () => typeof isCancelled === "function" && isCancelled() === true;
+    const attempts = [];
+    if (cancelled()) return { ok: "cancelled", attempts };
+    // 运行时加载单独做一次、放在逐源循环之外（0.4-S5 复审 P1）：模块缺失
+    // （ERR_MODULE_NOT_FOUND，可选依赖没装）与「网络不可达」是两类故障——
+    // 放进逐源 try 里会被每个源各记一笔、最终汇总成「全部下载源均失败」，
+    // 把用户引去查网络。这里一次定归因：缺失即返回依赖缺失错误码，不进源循环。
+    let transformers;
+    try {
+      transformers = typeof loadTransformers === "function"
+        ? await loadTransformers()
+        : await import("@huggingface/transformers");
+    } catch (cause) {
+      // 0.4 收账遗留 1 + 复审 P2-1：加载失败分三类归因——
+      // ① 包本身没装（缺失的模块就是 @huggingface/transformers 自己）：缺依赖，
+      //    引导 npm i；
+      // ② 包已装但内部缺模块 / 入口缺失（Cannot find 的不是它自己）：运行时
+      //    加载失败，文案指出 message 里真正的模块名——npm i @huggingface/transformers
+      //    修不好，把责任指错包只会误导用户；
+      // ③ 其余（EACCES / 版本不兼容 / 包内部报错等）：运行时加载失败。
+      // 三类都把原始错误摘要带出去（见 errorDigest），不许吞成一句模板话。
+      if (isTransformersPackageMissing(cause)) {
+        return {
+          ok: "error",
+          code: DOWNLOAD_DEPENDENCY_MISSING,
+          attempts,
+          error: "缺少可选依赖 @huggingface/transformers（未随插件包安装）。这不是网络问题，"
+            + "无需检查下载源——请在插件目录执行 npm i @huggingface/transformers 后重试。"
+            + `（原始错误：${errorDigest(cause)}）`,
+        };
+      }
+      // P3-1（B 批收账）：普通对象抛错也读 .message（真实世界有库直接 throw
+      // 普通对象）——String(cause) 会丢成 "[object Object]"，missingSpecifierOf
+      // 解析不出真名，主句退化为不点名的通用文案。
+      const missing = missingSpecifierOf(typeof cause?.message === "string" ? cause.message : String(cause));
+      if (missing !== null) {
+        return {
+          ok: "error",
+          code: DOWNLOAD_RUNTIME_LOAD_FAILED,
+          attempts,
+          error: `可选依赖 @huggingface/transformers 已安装，但它缺少的模块或入口文件「${missing}」加载失败`
+            + "（内部依赖缺失或入口缺失；不是网络问题）。npm i @huggingface/transformers 不一定解决——"
+            + "请按错误信息修复该模块（如重装插件依赖）后重试。"
+            + `（原始错误：${errorDigest(cause)}）`,
+        };
+      }
+      return {
+        ok: "error",
+        code: DOWNLOAD_RUNTIME_LOAD_FAILED,
+        attempts,
+        error: "可选依赖 @huggingface/transformers 已安装，但运行时加载失败（不是网络问题，也不是缺依赖）。"
+          + "请先查看错误信息，修复依赖环境（文件权限、版本兼容等）后重试。"
+          + `（原始错误：${errorDigest(cause)}）`,
+      };
+    }
+    for (const mirror of mirrors) {
+      if (cancelled()) return { ok: "cancelled", attempts };
+      onSource?.(mirror);
+      onPhase?.("downloading");
+      let extractor = null;
+      try {
+        const { pipeline, env } = transformers;
+        // env 是该模块的全局单例：每次尝试整体重设（与 initExtractor 同口径），
+        // 失败回落官方源时 remoteHost 被换成官方地址。
+        env.allowLocalModels = true;
+        env.cacheDir = cacheDir;
+        env.remoteHost = mirror;
+        const aggregator = createModelProgressAggregator();
+        const progress_callback = (event) => {
+          aggregator.push(event);
+          onProgress?.(aggregator.snapshot());
+          if (cancelled()) throw cancelledError(); // 协作取消：让 pipeline promise 异常收场
+        };
+        extractor = await pipeline("feature-extraction", model, { dtype, progress_callback });
+        // 兜底：progress_callback 抛哨兵未被运行时透传时，落定后再查一次。
+        if (cancelled()) return { ok: "cancelled", attempts };
+        // 校验一：文件名齐全（半截下载在这里拦下，不许冒充安装完成）。
+        const modelDir = localModelDir(cacheDir, model);
+        const missing = expectedModelFiles(dtype)
+          .filter((file) => !existsSync(absoluteModelFile(cacheDir, model, file)));
+        if (missing.length > 0) {
+          throw new Error(
+            `模型文件缺失：${missing.join("、")}（目录 ${modelDir}）。可能是下载被中断，请重新下载。`,
+          );
+        }
+        // 校验二：真实推理维度（通过才允许建索引；同时把 ONNX 原生库可用性一起验掉）。
+        onPhase?.("verifying");
+        const output = await extractor("shiori 下载校验", { pooling: "mean", normalize: true });
+        const actual = output?.data?.length;
+        if (actual !== dims) {
+          throw new Error(
+            `模型输出维度校验失败：期望 ${dims} 维，实际 ${actual === undefined ? "未知" : actual}。`
+            + `模型「${model}」与配置的 semantic.local.dims 不符，请修正 dims 或更换模型。`,
+          );
+        }
+        return { ok: "done", source: mirror, attempts };
+      } catch (error) {
+        if (isCancelError(error) || cancelled()) return { ok: "cancelled", attempts };
+        attempts.push({
+          source: mirror,
+          // C-fix C5：普通对象抛错同样优先取 .message（与 :479 同口径），
+          // String(error) 会丢成 "[object Object]"。
+          error: typeof error?.message === "string" ? error.message : String(error),
+        });
+        // 换下一源重试；全部失败在循环外统一汇报。
+      }
+    }
+    const detail = attempts.map((a) => `源 ${a.source}：${a.error}`).join("；");
+    return {
+      ok: "error",
+      attempts,
+      error: `全部下载源均失败（共 ${mirrors.length} 个）。${detail}`,
+    };
+  }
+
+  return Object.freeze({ download });
 }

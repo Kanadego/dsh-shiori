@@ -12,6 +12,7 @@ import {
   pinScope, rejectIdentityFields, sessionEvidenceFromExec,
 } from "../../src/plugin/scope.mjs";
 import { createPersonaAdapter } from "../../src/plugin/persona.mjs";
+import { defaultPluginRoots } from "../../src/plugin/config.mjs";
 
 const baseSettings = {
   mode: "shadow",
@@ -38,19 +39,23 @@ test("settings：缺省值（shadow / local / 两 root null / 模块全关）", 
   assert.deepEqual(s.forgetting.policy, { baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 });
 });
 
-test("settings：未知键拒绝；active 必须 allowActive；root 必须成对且绝对", () => {
+test("settings：未知键拒绝；active 必须 allowActive；root 绝对且缺根独立补默认（0.4-S1）", () => {
   assert.throws(() => validateControllerSettings({ ...baseSettings, extra: 1 }), (e) => e.code === "INVALID_INPUT");
   assert.throws(() => validateControllerSettings({ ...baseSettings, mode: "active" }), (e) => e.code === "INVALID_INPUT");
-  assert.throws(
-    () => validateControllerSettings({ ...baseSettings, dataRoot: "D:/x" }),
-    (e) => e.code === "INVALID_INPUT" && /both/.test(e.message),
-  );
+  // 0.4-S1：单根配置合法——缺省根独立补 DSH_HOME 默认（不再要求成对齐给）
+  const onlyData = validateControllerSettings({ ...baseSettings, dataRoot: "D:/x" });
+  assert.equal(onlyData.dataRoot, "D:/x");
+  assert.equal(onlyData.stateRoot, defaultPluginRoots().stateRoot);
+  assert.equal(onlyData.rootsSource.dataRoot, "explicit");
+  assert.equal(onlyData.rootsSource.stateRoot, "default");
   assert.throws(
     () => validateControllerSettings({ ...baseSettings, dataRoot: "relative/x", stateRoot: "D:/s" }),
     (e) => e.code === "INVALID_INPUT",
   );
   const ok = validateControllerSettings({ ...baseSettings, dataRoot: "D:/tmp-data", stateRoot: "D:/tmp-state" });
   assert.equal(ok.dataRoot, "D:/tmp-data");
+  assert.equal(ok.rootsSource.dataRoot, "explicit");
+  assert.equal(ok.rootsSource.stateRoot, "explicit");
 });
 
 test("settings：预算超生产安全上限拒绝（persona 60001 / spark 601 / seed 4）", () => {

@@ -346,11 +346,11 @@ const STUB_CONTROLLER = `// SYNTHETIC TEST STUB — slot Q single-slot smoke ver
 // Stands in for P's src/plugin/controller.mjs (single-slot mode only). With explicit
 // roots + allowActive it writes a start marker under dataRoot to prove real
 // mounting under the host and to demonstrate that remove preserves data.
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 export async function createShioriPluginController(ctx, settings) {
   const state = { started: 0, stopped: 0, mode: settings.mode, dataRoot: settings.dataRoot };
-  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline"];
+  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
   const management = Object.fromEntries(methods.map((method) => [
     method,
     async () => ({ mode: state.mode, method, synthetic: true, started: state.started, stopped: state.stopped }),
@@ -361,8 +361,14 @@ export async function createShioriPluginController(ctx, settings) {
       state.started += 1;
       if (state.mode === "active" && state.dataRoot) {
         await mkdir(state.dataRoot, { recursive: true });
-        await writeFile(join(state.dataRoot, "shiori-smoke-start-marker.txt"),
-          "SYNTHETIC controller start #" + state.started + "\\n", "utf8");
+        // marker 先写临时文件再 rename：文件对轮询方（boot 的 existsSync 轮询）
+        // 原子可见。直接 writeFile 时 open→write 之间文件已存在但内容为空，
+        // 轮询恰好落进该窗口就会读到空串、令 assert.match 假红（满载并发下
+        // 偶发）。rename 同目录原子生效，可见即完整。
+        const marker = join(state.dataRoot, "shiori-smoke-start-marker.txt");
+        const tmp = marker + ".tmp";
+        await writeFile(tmp, "SYNTHETIC controller start #" + state.started + "\\n", "utf8");
+        await rename(tmp, marker);
       }
     },
     async stop() { state.stopped += 1; },
@@ -384,6 +390,7 @@ export const MANAGEMENT_METHODS = {
   previewPlan: { inputSchema: { type: "object", required: ["kind"] }, outputSchema: { type: "object" } },
   executePlan: { inputSchema: { type: "object", required: ["planId", "planDigest", "operationId", "confirmed"] }, outputSchema: { type: "object" } },
   getTimeline: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
+  destroyData: { inputSchema: { type: "object", required: ["confirm"] }, outputSchema: { type: "object" } },
 };
 const ALLOWED = {
   getStatus: [], getMemoryView: [], getGraph: [], listCandidates: [],
@@ -393,6 +400,7 @@ const ALLOWED = {
   previewPlan: ["kind", "candidateId", "proposal", "expectedQueueRevision", "operationId", "planId"],
   executePlan: ["planId", "planDigest", "operationId", "confirmed"],
   getTimeline: ["offset", "limit"],
+  destroyData: ["confirm"],
 };
 export function validateManagementPayload(name, payload) {
   const fail = (message) => { const e = new Error(message); e.code = "INVALID_INPUT"; throw e; };

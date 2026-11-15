@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -54,9 +54,9 @@ async function setup(t) {
 
 // ── protocol（纯 JSON 层）────────────────────────────────────
 
-test("protocol：10 个方法全覆盖；闭包拒绝未知键；queueRevision/planDigest/operationId 规则", () => {
+test("protocol：11 个方法全覆盖（10 + destroyData，0.4 S6）；闭包拒绝未知键；queueRevision/planDigest/operationId 规则", () => {
   assert.deepEqual([...MANAGEMENT_METHOD_NAMES].sort(), [
-    "analyze", "executePlan", "executeTool", "getGraph", "getMemoryView",
+    "analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView",
     "getStatus", "getTimeline", "listCandidates", "previewPlan", "reviewCandidate",
   ].sort());
   for (const name of MANAGEMENT_METHOD_NAMES) {
@@ -1426,3 +1426,362 @@ test("P2-B3：旧形状兼容（store kind organize + plan.kind archive-topic）
   assert.match(raw, /archivedAt: "/);
 });
 
+
+// ── group_manage list 主组口径（0.4 审查 P0#2，用户 2026-11-14 拍板）──────────
+// 一个 topic 可挂多组，但组行计数只认主组 t.group[0]——退化成遍历整个 group
+// 数组时，多组 topic 会在每个挂载组重复 +1，组计数总和虚高。
+
+import { createGroupManageTool } from "../../src/host/tools.mjs";
+import { ensureGroupsFile } from "../../src/core/groups.mjs";
+
+test("group_manage list 主组口径：多组 topic 只计入主组 t.group[0]，非主组不重复计数", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-groupcount-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  const service = {
+    async listTopics() {
+      return [
+        { key: "t-a", group: ["dev"] },                    // 主组 dev
+        { key: "t-b", group: ["life", "dev"] },            // 主组 life
+        { key: "t-c", group: ["dev", "life", "self"] },    // 主组 dev
+      ];
+    },
+    async mutate() { throw new Error("list 计数用例不触写路径"); },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  const out = await tool.execute({ action: "list" });
+  const dev = out.groups.find((g) => g.key === "dev");
+  const life = out.groups.find((g) => g.key === "life");
+  assert.equal(dev.topics, 2, "dev 主组计 t-a + t-c（t-b 主组是 life，不重复计入 dev）");
+  assert.equal(life.topics, 1, "life 主组只计 t-b（t-c 挂了 life 但主组是 dev，不重复计）");
+});
+
+// group 字段畸形（0.4 P0 交叉审查补钉）：实现只认 t.group[0]（数组首元素），
+// 空数组 / 缺失 / 非数组都没有合法主组——一律不计入任何组，组计数总和必须
+// 等于「有主组的 topic 数」，退化实现会把畸形挂载错算进某些组或整体虚增。
+test("group_manage list 边界口径：group 空数组 / 缺失 / 非数组一律不计入任何组", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-groupedge-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  const service = {
+    async listTopics() {
+      return [
+        { key: "t-ok", group: ["dev"] },              // 正常主组（对照组：证明计数仍在工作）
+        { key: "t-multi", group: ["dev", "life"] },   // 双挂：主组 dev、副组 life——副组不计数
+        { key: "t-empty", group: [] },                // 空数组：无主组
+        { key: "t-missing" },                         // 字段缺失：无主组
+        { key: "t-str", group: "dev" },               // 非数组字符串：不是合法挂载
+        { key: "t-null", group: null },               // null：不是合法挂载
+      ];
+    },
+    async mutate() { throw new Error("list 计数用例不触写路径"); },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  const out = await tool.execute({ action: "list" });
+  const dev = out.groups.find((g) => g.key === "dev");
+  const life = out.groups.find((g) => g.key === "life");
+  // 钉的行为：只有主组 t.group[0] 进计数——t-multi 双挂只给 dev +1，副组 life 为 0
+  //（计数退化为遍历整个 group 数组的旧实现会得出 life=1、total=3，本用例必红）；
+  // 畸形 group（空数组/缺失/非数组）没有合法主组，同样不把任何组计数撑起来。
+  assert.equal(dev.topics, 2, "dev 计 t-ok + t-multi（t-multi 副组挂 life，不重复计入 life）");
+  assert.equal(life.topics, 0, "life 只被 t-multi 副组挂着，计数为 0");
+  const total = out.groups.reduce((sum, g) => sum + g.topics, 0);
+  assert.equal(total, 2, "组计数总和 = 有主组的 topic 数（t-ok + t-multi；守恒：副组与畸形挂载不虚增）");
+});
+
+// ── 0.4 S6 卸载与焚毁（destroyData，第 11 个管理方法）────────────────────────
+// 只删 dataRoot：stateRoot 与 DSH 配置不动；confirm 必须等于当前 dataRoot 原文；
+// 目录不存在返回 deleted:false 而不是抛错；安全校验与删除走 src/storage/purge.mjs
+// 共享模块（与命令行 bin/admin.mjs 同一份实现）。
+
+test("destroyData：confirm 正确删净 dataRoot（目录消失、stateRoot 完好）", async (t) => {
+  const { controller, base, trusted } = await setup(t);
+  const dataRoot = path.join(base, "data");
+  const stateRoot = path.join(base, "state");
+  // 铺数据：dataRoot 下写文件（含 topic 布局），stateRoot 写一个哨兵文件。
+  await mkdir(path.join(dataRoot, "scopes", "amber", "topics"), { recursive: true });
+  await writeFile(path.join(dataRoot, "scopes", "amber", "topics", "t1.md"), "topic one", "utf8");
+  await writeFile(path.join(dataRoot, "persona", "amber.md"), "L0", "utf8");
+  await mkdir(path.join(stateRoot, "tool-ops"), { recursive: true });
+  await writeFile(path.join(stateRoot, "tool-ops", "a.json"), "{}", "utf8");
+
+  const ownerTrusted = { ...trusted, principal: { kind: "owner" } };
+  const result = await controller.management.destroyData(ownerTrusted, { confirm: dataRoot });
+  assert.equal(result.deleted, true);
+  // start 阶段可能已写入插件自身的初始化文件（scope 目录等），至少包含我们铺的 2 个
+  assert.ok(result.files >= 2, `删除计数应覆盖铺入的文件（实际 ${result.files}）`);
+  assert.ok(result.bytes >= "topic one".length + "L0".length, "字节计数覆盖铺入内容");
+  assert.equal(typeof result.dataRoot, "string");
+  assert.ok(result.dataRoot.length > 0);
+  await assert.rejects(() => stat(dataRoot), { code: "ENOENT" }, "dataRoot 目录本身一并移除");
+  // stateRoot 完好：哨兵文件原样
+  assert.equal(await readFile(path.join(stateRoot, "tool-ops", "a.json"), "utf8"), "{}");
+});
+
+test("destroyData：confirm 错误被拒（INVALID_INPUT）且目录完好", async (t) => {
+  const { controller, base, trusted } = await setup(t);
+  const dataRoot = path.join(base, "data");
+  await writeFile(path.join(dataRoot, "keep.txt"), "keep", "utf8");
+  const ownerTrusted = { ...trusted, principal: { kind: "owner" } };
+  for (const bad of [`${dataRoot}/`, dataRoot.toUpperCase(), " ", ""]) {
+    await assert.rejects(
+      () => controller.management.destroyData(ownerTrusted, { confirm: bad }),
+      (e) => e.code === "INVALID_INPUT",
+      `confirm="${bad}" 必须被拒（原文逐字符比对，不 trim、不忽略大小写）`,
+    );
+  }
+  assert.equal(await readFile(path.join(dataRoot, "keep.txt"), "utf8"), "keep", "目录完好未删");
+  // 非 owner principal → UNAUTHORIZED（权限错误码）
+  await assert.rejects(
+    () => controller.management.destroyData({ ...trusted, principal: { kind: "guest" } }, { confirm: dataRoot }),
+    (e) => e.code === "UNAUTHORIZED",
+  );
+  await assert.rejects(
+    () => controller.management.destroyData({ ...trusted }, { confirm: dataRoot }),
+    (e) => e.code === "UNAUTHORIZED",
+  );
+  assert.equal(await readFile(path.join(dataRoot, "keep.txt"), "utf8"), "keep");
+});
+
+test("destroyData：目录不存在返回 deleted:false（不抛错）；幂等重删同根", async (t) => {
+  const { controller, base, trusted } = await setup(t);
+  const dataRoot = path.join(base, "data");
+  const ownerTrusted = { ...trusted, principal: { kind: "owner" } };
+  await writeFile(path.join(dataRoot, "gone.txt"), "x", "utf8");
+  const first = await controller.management.destroyData(ownerTrusted, { confirm: dataRoot });
+  assert.equal(first.deleted, true);
+  // 目录已不存在：deleted:false，不抛错
+  const second = await controller.management.destroyData(ownerTrusted, { confirm: dataRoot });
+  assert.equal(second.deleted, false);
+  assert.equal(second.files, 0);
+  assert.equal(second.bytes, 0);
+});
+
+// 中-2（review-rework a1）：焚毁后 scope 资源缓存必须失效——controller 的
+// ctrl.scopes 缓存里 sparkStore 指向已删目录；不清掉，后续访问会从内存旧缓存
+// 拿到已焚毁卡片的记录。destroyData 成功后调 controller 的 closeAllScopes
+// 清理入口，下一次访问按需重建空资源。
+test("destroyData：焚毁后 scope 资源缓存失效——立刻再走资源路径不得拿到旧缓存", async (t) => {
+  const { controller, base, trusted } = await setup(t);
+  const dataRoot = path.join(base, "data");
+  // 铺两张 spark 卡（落盘 + 进 scope 资源缓存）
+  await controller.management.executeTool(trusted, {
+    name: "spark_save", args: { title: "卡A", content: "内容A", triggers: ["词A"], vitality: "evergreen" },
+  });
+  await controller.management.executeTool(trusted, {
+    name: "spark_save", args: { title: "卡B", content: "内容B", triggers: ["词B"], vitality: "evergreen" },
+  });
+  const graphBefore = await controller.management.getGraph(trusted, {});
+  assert.ok(graphBefore.nodes.length >= 2, "焚毁前卡片在图上（对照组：缓存路径在工作）");
+
+  const ownerTrusted = { ...trusted, principal: { kind: "owner" } };
+  const result = await controller.management.destroyData(ownerTrusted, { confirm: dataRoot });
+  assert.equal(result.deleted, true);
+
+  // 立刻再走需要资源的路径：必须重建空资源，不得复用指向已删目录的旧缓存
+  //（退化实验：去掉 controller 的 invalidateScopeResources 注入，这里会拿到
+  // 旧缓存里的 2 张卡 → 本用例变红）。
+  const graphAfter = await controller.management.getGraph(trusted, {});
+  assert.equal(graphAfter.nodes.length, 0, "旧缓存若未失效，这里会拿到已焚毁卡片的旧记录");
+  const listed = await controller.management.listCandidates(trusted, {});
+  assert.equal(listed.items.length, 0, "候选队列同样按重建后的空资源给出");
+});
+
+// 必修 1/2（review-rework a2）：invalidateScopeResources 的存在性校验必须在
+// purgeDataRoot 之前——校验后置会造成「数据已删净、然后才抛 INVALID_STATE」
+// 的顺序错误（破坏性动作先做、校验后做）。本用例锁住顺序：dep 缺失时
+// destroyData 必须被拒，且 dataRoot 与两个哨兵文件逐字节完好（删除根本没发生）。
+// 退化实验：把校验挪回 purge 之后，哨兵会被删、本用例红。
+test("destroyData：invalidateScopeResources 缺失时在删除之前拒绝——dataRoot 与哨兵原样保留", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-destroydep-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await mkdir(path.join(base, "state"), { recursive: true });
+  await mkdir(path.join(base, "data"), { recursive: true });
+  await writeFile(path.join(base, "data", "sentinel-a.txt"), "A-bytes", "utf8");
+  await writeFile(path.join(base, "data", "sentinel-b.txt"), "B-bytes", "utf8");
+  const state = createStateStore({ stateRoot: path.join(base, "state") });
+  const settings = {
+    mode: "active", allowActive: true,
+    dataRoot: path.join(base, "data"), stateRoot: path.join(base, "state"),
+    ownerId: "local", defaultPersona: "amber",
+    sessionPersonas: [], workspacePersonas: [],
+    budgets: { persona: { maxChars: 12000 }, core: { targetChars: 2000, hardCapChars: 4000 } },
+    l2: { enabled: false }, organize: { enabled: true },
+    forgetting: { enabled: true, policy: normalizeForgetPolicy({}) },
+  };
+  const { management } = createManagement({
+    settings,
+    dataRoot: settings.dataRoot,
+    state,
+    resourcesFor: async () => { throw new Error("not used"); },
+    isStarted: () => true,
+    generation: () => 1,
+    registerGrant: () => { throw new Error("not used"); },
+    executeToolForScope: async () => { throw new Error("not used"); },
+    nowIso: () => new Date().toISOString(),
+    // 故意不注入 invalidateScopeResources（必修 2 的被测前提）
+  });
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc", principal: { kind: "owner" } };
+  await assert.rejects(
+    () => management.destroyData(trusted, { confirm: settings.dataRoot }),
+    (e) => e.code === "INVALID_STATE",
+    "dep 缺失必须在删除之前拒绝",
+  );
+  // 数据原样：dataRoot 在、两个哨兵逐字节完好（校验后置的退化实现会先删净再抛错）
+  assert.equal(await readFile(path.join(base, "data", "sentinel-a.txt"), "utf8"), "A-bytes");
+  assert.equal(await readFile(path.join(base, "data", "sentinel-b.txt"), "utf8"), "B-bytes");
+});
+
+// 必修（review-rework a3）：invalidateScopeResources 是 async（复用的
+// closeAllScopes 返回 Promise<string[]>）——destroyData 必须 await 错误数组再
+// 判定；不 await 拿到的是 Promise，Array.isArray 恒 false，清缓存失败被静默
+// 吞掉（检测成死代码）。注入 async 失败源，锁住「失败必须如实上抛」。
+test("destroyData：invalidateScopeResources async 失败（[boom]）必须 INVALID_STATE 且错误信息带 boom", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-destroyclose-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await mkdir(path.join(base, "state"), { recursive: true });
+  await mkdir(path.join(base, "data"), { recursive: true });
+  await writeFile(path.join(base, "data", "gone.txt"), "x", "utf8");
+  const state = createStateStore({ stateRoot: path.join(base, "state") });
+  const settings = {
+    mode: "active", allowActive: true,
+    dataRoot: path.join(base, "data"), stateRoot: path.join(base, "state"),
+    ownerId: "local", defaultPersona: "amber",
+    sessionPersonas: [], workspacePersonas: [],
+    budgets: { persona: { maxChars: 12000 }, core: { targetChars: 2000, hardCapChars: 4000 } },
+    l2: { enabled: false }, organize: { enabled: true },
+    forgetting: { enabled: true, policy: normalizeForgetPolicy({}) },
+  };
+  const { management } = createManagement({
+    settings,
+    dataRoot: settings.dataRoot,
+    state,
+    resourcesFor: async () => { throw new Error("not used"); },
+    isStarted: () => true,
+    generation: () => 1,
+    registerGrant: () => { throw new Error("not used"); },
+    executeToolForScope: async () => { throw new Error("not used"); },
+    nowIso: () => new Date().toISOString(),
+    // async 失败源：close 错误数组非空
+    invalidateScopeResources: async () => ["boom"],
+  });
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc", principal: { kind: "owner" } };
+  await assert.rejects(
+    () => management.destroyData(trusted, { confirm: settings.dataRoot }),
+    (e) => e.code === "INVALID_STATE" && String(e.message).includes("boom"),
+    "async 清缓存失败必须 await 后如实上抛（不 await 会拿到 Promise、错误被吞）",
+  );
+});
+
+// ── 0.4-S7 getGraph 两级视图：缺省全量兼容路径 / level=1 分簇 / level=2 簇内 ──
+// 夹具沿用内存 fixture（不触盘）；scope 解析与 ui-flashbacks 同口径（trusted session）。
+
+test("S7 getGraph：level=1 分簇概览（clusters/total 出线、无 nodes/edges）、level=2 簇内节点仍带 hitCount/lastHitAt/createdAt", async () => {
+  const { createManagement } = await import("../../src/plugin/management.mjs");
+  const NOW = Date.now();
+  const DAY = 86400000;
+  const cards = [
+    { id: "g1", scopeId: "global", state: "active", title: "甲一", summary: null, vitality: "evergreen", revision: 1, triggers: [], entities: ["项目甲"], links: [{ target: "g2" }], content: "c", hitCount: 3, lastHitAt: new Date(NOW - 60_000).toISOString(), createdAt: new Date(NOW - 5 * DAY).toISOString() },
+    { id: "g2", scopeId: "global", state: "active", title: "甲二", summary: null, vitality: "ephemeral", revision: 1, triggers: [], entities: ["项目甲"], links: [{ target: "g1", rel: "related" }], content: "c", hitCount: 0, lastHitAt: null, createdAt: new Date(NOW - DAY).toISOString() },
+    { id: "g3", scopeId: "global", state: "active", title: "乙卡", summary: null, vitality: "evergreen", revision: 1, triggers: [], entities: ["项目乙"], links: [], content: "c", hitCount: 1, lastHitAt: new Date(NOW - 90_000).toISOString(), createdAt: null },
+    { id: "g4", scopeId: "global", state: "active", title: "散卡", summary: null, vitality: "ephemeral", revision: 1, triggers: [], entities: [], links: [], content: "c", hitCount: 0, lastHitAt: null, createdAt: null },
+  ];
+  const ledger = { pending: {}, accepted: {}, committed: {}, hits: {} };
+  const build = () => createManagement({
+    settings: {
+      mode: "active", ownerId: "local", defaultPersona: null, sessionPersonas: [], workspacePersonas: [],
+      organize: { enabled: true }, forgetting: { enabled: true }, l2: { enabled: true },
+      dataRoot: path.join(tmpdir(), "shiori-s7-nonexistent-data"),
+      stateRoot: path.join(tmpdir(), "shiori-s7-nonexistent-state"),
+      budgets: {},
+    },
+    dataRoot: path.join(tmpdir(), "shiori-s7-nonexistent-data"),
+    state: { l2Store: { diagnostics: async () => ledger } },
+    resourcesFor: async () => ({ sparkStore: { listActive: async () => cards } }),
+    isStarted: () => true,
+    generation: () => 1,
+    registerGrant: () => ({}),
+    executeToolForScope: async () => ({}),
+  }).management;
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
+
+  // ① 缺省：全量兼容路径（candidates 页 id→title 映射与既有用例依赖），不带 level 字段。
+  const full = await build().getGraph(trusted, {});
+  assert.deepEqual(Object.keys(full).sort(),
+    ["deliveries", "deliveryStats", "edges", "nodes", "scope"], "缺省响应不含 level/clusters/cluster 键");
+  assert.equal(full.nodes.find((n) => n.id === "g1").hitCount, 3, "全量路径命中统计照常");
+
+  // ② level=1：clusters/total 出线，nodes/edges 不出线；投递账与吞吐统计不丢。
+  const l1 = await build().getGraph(trusted, { level: 1 });
+  assert.deepEqual(Object.keys(l1).sort(),
+    ["clusters", "deliveries", "deliveryStats", "level", "scope", "total"], "level=1 响应形状");
+  assert.equal(l1.level, 1);
+  assert.equal(l1.total, 4);
+  assert.deepEqual(l1.clusters.map((c) => [c.key, c.count]), [
+    ["项目甲", 2], ["__unclustered__", 1], ["项目乙", 1],
+  ], "count 降序、同数按 key 字典序（UTF-16 码元：下划线在汉字之前）");
+  assert.deepEqual(l1.clusters[0].samples, ["甲一", "甲二"], "samples 最多 3 个标题");
+  assert.equal(l1.clusters[1].label, "未分类", "无实体簇 label 固定「未分类」");
+  assert.deepEqual(l1.deliveryStats, { rounds: 0, totalDelivered: 0, uniqueCards: 0 });
+
+  // ③ level=2：簇内节点与边；节点仍带 hitCount/lastHitAt/createdAt（命中统计不丢）。
+  const l2 = await build().getGraph(trusted, { level: 2, cluster: "项目甲" });
+  assert.deepEqual(Object.keys(l2).sort(),
+    ["cluster", "deliveries", "deliveryStats", "edges", "level", "nodes", "scope"], "level=2 响应形状");
+  assert.equal(l2.level, 2);
+  assert.deepEqual(l2.cluster, { key: "项目甲", label: "项目甲", count: 2 });
+  assert.deepEqual(l2.nodes.map((n) => n.id), ["g1", "g2"]);
+  for (const node of l2.nodes) {
+    assert.ok(Object.hasOwn(node, "hitCount"), "hitCount 必须在");
+    assert.ok(Object.hasOwn(node, "lastHitAt"), "lastHitAt 必须在");
+    assert.ok(Object.hasOwn(node, "createdAt"), "createdAt 必须在");
+  }
+  const g1 = l2.nodes.find((n) => n.id === "g1");
+  assert.equal(g1.hitCount, 3);
+  assert.equal(typeof g1.lastHitAt, "string");
+  assert.equal(typeof g1.createdAt, "string");
+  assert.deepEqual(l2.edges, [{ source: "g1", target: "g2", rel: "related" }], "跨簇边不进 level=2（互逆折叠 rel 取字典序较小者）");
+
+  // ④ level=2 未知簇：不抛错，空 nodes/edges + count 0。
+  const miss = await build().getGraph(trusted, { level: 2, cluster: "不存在" });
+  assert.deepEqual(miss.cluster, { key: "不存在", label: "不存在", count: 0 });
+  assert.deepEqual(miss.nodes, []);
+  assert.deepEqual(miss.edges, []);
+
+  // ⑤ level=2 没带 cluster：退化为未知簇空视图（不崩）。
+  const noCluster = await build().getGraph(trusted, { level: 2 });
+  assert.equal(noCluster.cluster.count, 0);
+  assert.deepEqual(noCluster.nodes, []);
+
+  // ⑥ P1（rework）：level=1 带了 cluster 也必须忽略——返回 level=1 完整形状
+  // （clusters/total 齐全），不许退化成只剩 deliveries/deliveryStats 的残缺响应。
+  const l1WithCluster = await build().getGraph(trusted, { level: 1, cluster: "项目甲" });
+  assert.equal(l1WithCluster.level, 1, "level 仍是 1（cluster 被忽略，不串到 level=2 分支）");
+  assert.ok(Array.isArray(l1WithCluster.clusters) && l1WithCluster.clusters.length > 0,
+    "clusters 必须齐全（旧实现读 projection.clusters 得 undefined，本断言必红）");
+  assert.equal(l1WithCluster.total, 4, "total 必须齐全");
+  assert.equal(Object.hasOwn(l1WithCluster, "nodes"), false, "level=1 不出 nodes");
+});
+
+test("S7 protocol：getGraph 输入新增可选 level/cluster；非法 level 被拒（wire 11 方法：S6 的 destroyData 已并入）", () => {
+  // 合法形状
+  for (const ok of [{}, { level: 1 }, { level: 2, cluster: "x" }, { cluster: "x" }]) {
+    validateManagementPayload("getGraph", ok);
+  }
+  // 非法形状一律 INVALID_INPUT
+  for (const bad of [
+    { level: 3 }, { level: 0 }, { level: "1" }, { level: null },
+    { cluster: 42 }, { cluster: null }, { level: 1, rogue: true },
+  ]) {
+    assert.throws(
+      () => validateManagementPayload("getGraph", bad),
+      (e) => e.code === "INVALID_INPUT",
+      `应拒绝：${JSON.stringify(bad)}`,
+    );
+  }
+  // wire 方法清单：S6 并入后为 11（destroyData 第 11 位）；S7 只给 getGraph 加可选字段。
+  assert.deepEqual([...MANAGEMENT_METHOD_NAMES].sort(), [
+    "analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView",
+    "getStatus", "getTimeline", "listCandidates", "previewPlan", "reviewCandidate",
+  ].sort());
+});

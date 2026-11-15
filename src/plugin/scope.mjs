@@ -13,7 +13,7 @@
 
 import path from "node:path";
 import { DEFAULT_CONFIG, validateConfig } from "../core/index.mjs";
-import { normalizeSemantic } from "./config.mjs";
+import { normalizeSemantic, defaultPluginRoots } from "./config.mjs";
 import { normalizeForgetPolicy } from "../forgetting/decay.mjs";
 import { GLOBAL_SCOPE_ID } from "../core/topics.mjs";
 
@@ -33,7 +33,7 @@ const isPlainRecord = (v) =>
 
 /** settings 顶层键（与冻结契约 §2 完全一致；未知键拒绝）。 */
 const SETTINGS_KEYS = [
-  "mode", "allowActive", "dataRoot", "stateRoot", "ownerId",
+  "mode", "allowActive", "dataRoot", "stateRoot", "rootsSource", "ownerId",
   "defaultPersona", "sessionPersonas", "workspacePersonas",
   "budgets", "semantic", "l2", "organize", "forgetting",
 ];
@@ -133,14 +133,35 @@ export function validateControllerSettings(raw) {
     fail("INVALID_INPUT", 'active mode requires settings.allowActive === true', {});
   }
 
-  const dataRoot = raw.dataRoot ?? null;
-  const stateRoot = raw.stateRoot ?? null;
+  // 0.4-S1（reviewer P2②）：各根独立解析——只显式给一个根时，另一个补 DSH_HOME
+  // 默认（与 normalizePluginConfig 同语义），不再要求「必须齐给或全缺」；双根皆 null
+  // 仍允许（inert 兼容路径，仅供直构/嵌入方，apply 路径不可达）。rootsSource 由
+  // normalize 传入；直构缺省时按「显式给值=explicit、缺省/补默认=default」现推。
+  let rootsSource = raw.rootsSource;
+  if (rootsSource !== undefined) {
+    if (!isPlainRecord(rootsSource)
+      || (rootsSource.dataRoot !== "explicit" && rootsSource.dataRoot !== "default")
+      || (rootsSource.stateRoot !== "explicit" && rootsSource.stateRoot !== "default")) {
+      fail("INVALID_INPUT", 'settings.rootsSource must be { dataRoot: "explicit" | "default", stateRoot: "explicit" | "default" }', {});
+    }
+  }
+  let dataRoot = raw.dataRoot ?? null;
+  let stateRoot = raw.stateRoot ?? null;
+  if (rootsSource === undefined) {
+    rootsSource = {
+      dataRoot: dataRoot !== null ? "explicit" : "default",
+      stateRoot: stateRoot !== null ? "explicit" : "default",
+    };
+  }
   if (dataRoot !== null) requireAbsoluteRoot(dataRoot, "dataRoot");
   if (stateRoot !== null) requireAbsoluteRoot(stateRoot, "stateRoot");
-  if ((dataRoot === null) !== (stateRoot === null)) {
-    fail("INVALID_INPUT",
-      "settings.dataRoot and settings.stateRoot must both be provided or both be null "
-      + "(active, or any configured root, requires both explicit absolute roots)", {});
+  if (dataRoot === null && stateRoot !== null) {
+    dataRoot = requireAbsoluteRoot(defaultPluginRoots().dataRoot, "dataRoot");
+    rootsSource = { ...rootsSource, dataRoot: "default" };
+  }
+  if (stateRoot === null && dataRoot !== null) {
+    stateRoot = requireAbsoluteRoot(defaultPluginRoots().stateRoot, "stateRoot");
+    rootsSource = { ...rootsSource, stateRoot: "default" };
   }
   if (dataRoot !== null && mode !== "active") {
     // shadow 配置了 root：允许只读预览挂载（诊断可见），但必须显式知道这是 shadow。
@@ -230,6 +251,7 @@ export function validateControllerSettings(raw) {
     allowActive,
     dataRoot,
     stateRoot,
+    rootsSource: Object.freeze(rootsSource),
     ownerId,
     defaultPersona,
     sessionPersonas: Object.freeze(sessionPersonas.map((e) => Object.freeze(e))),

@@ -329,3 +329,284 @@ test("core 正文自带派生索引一律拒绝：core_write / memory_rewrite / 
   assert.ok((await service.readTopic("proj-x")).body.includes("主题记忆索引"));
   await bridge.stop();
 });
+
+// ---------------------------------------------------------------------------
+// S3 分组（0.4）：topic_create / topic_append 的可选 group、memory_read /
+// memory_list_topics 反映 group/pinned、group_manage 四个 action。
+// group_manage 直接用真实 createGroupManageTool + 真实 groups.json（临时 root）+
+// createFakeService（真实 CAS 语义的 topic 内存账）；不经过 host bridge。
+// ---------------------------------------------------------------------------
+
+import { promises as fsp } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createGroupManageTool, createTopicCreateTool } from "../../src/host/tools.mjs";
+import { ensureGroupsFile, groupsFilePath } from "../../src/core/groups.mjs";
+
+async function makeGroupFixture(t, initial = {}) {
+  const base = await fsp.mkdtemp(path.join(os.tmpdir(), "shiori-s3-groupmanage-"));
+  t.after(async () => {
+    await fsp.rm(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {});
+  });
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  const service = createFakeService({
+    scopeId: "amber",
+    topics: [
+      { key: "proj-x", title: "项目X", summary: "排障手册", body: "内容", group: ["dev"] },
+      { key: "diary", title: "日记", summary: "生活记录", body: "内容", group: ["life"] },
+    ],
+    ...initial,
+  });
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  return { base, service, tool };
+}
+
+test("S3 topic_create：可选 group 写入 front-matter；超软上限只给 warning 不报错", async (t) => {
+  const base = await fsp.mkdtemp(path.join(os.tmpdir(), "shiori-s3-create-"));
+  t.after(async () => {
+    await fsp.rm(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {});
+  });
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  const baseService = createFakeService({ scopeId: "amber" });
+  // topic_create 的可见性探测以 NOT_FOUND 判「不存在」（真实 service 语义）；
+  // fake service 缺 topic 抛 INVALID_STATE，这里对齐真实 code。
+  const service = {
+    ...baseService,
+    async readTopic(key) {
+      try {
+        return await baseService.readTopic(key);
+      } catch {
+        const error = new Error(`topic "${key}" does not exist`);
+        error.code = "NOT_FOUND";
+        throw error;
+      }
+    },
+  };
+  // topic_create 不在 host bridge 的 9 兼容工具集里，直接用真实工厂装配。
+  const tool = createTopicCreateTool({ service, getSessionInfo: () => ({ sessionId: null, scopeId: "amber" }) });
+  // fake service 的 mutate 把 change.topic 展开进 topic 记录（含 group）。
+  const receipt = await tool.execute({
+    topic: "grouped", title: "有组专题", summary: "带组创建", group: ["dev", "self"],
+  });
+  assert.equal(receipt.created, true);
+  const topic = await service.readTopic("grouped");
+  assert.deepEqual(topic.group, ["dev", "self"]);
+  assert.equal(receipt.warning, undefined, "2 组不超软上限，无 warning");
+
+  // 4 组 > 软上限 3：仍成功，回执带 warning 文本。
+  const receipt4 = await tool.execute({
+    topic: "many", title: "多组专题", summary: "超软上限", group: ["dev", "self", "project", "life"],
+  });
+  assert.equal(receipt4.created, true);
+  assert.ok(typeof receipt4.warning === "string" && /软上限/.test(receipt4.warning));
+});
+
+test("S3 topic_append：缺省保持原组；显式 group 改挂组并给软上限 warning", async (t) => {
+  const { service } = await makeGroupFixture(t);
+  const host = createFakeHost();
+  const bridge = createHostBridge({ host, service, mode: "active", config: ACTIVE_CONFIG });
+  await bridge.start();
+  // 缺省：append 不带 group → topic 记录保持原组（fake service 展开语义）。
+  await host.tools.get("topic_append").execute({ topic: "proj-x", section: "新段", content: "追加" });
+  const appended = await service.readTopic("proj-x");
+  assert.deepEqual(appended.group, ["dev"], "缺省保持原组");
+  const lastChange = service.mutateLog.at(-1).request.changes[0];
+  assert.equal(lastChange.topic.group, undefined, "append 缺省不发 group（由 service 继承）");
+
+  // 显式改挂组（1 组 → 4 组）→ warning。
+  const receipt = await host.tools.get("topic_append").execute({
+    topic: "proj-x", section: "再段", content: "再追加",
+    group: ["dev", "self", "project", "life"],
+  });
+  assert.ok(receipt.warning && /软上限/.test(receipt.warning));
+  assert.deepEqual((await service.readTopic("proj-x")).group, ["dev", "self", "project", "life"]);
+  await bridge.stop();
+});
+
+test("S3 memory_read / memory_list_topics：返回体反映 group 与 pinned", async (t) => {
+  const { service } = await makeGroupFixture(t);
+  const host = createFakeHost();
+  const bridge = createHostBridge({ host, service, mode: "active", config: ACTIVE_CONFIG });
+  await bridge.start();
+  const read = await host.tools.get("memory_read").execute({ topic: "proj-x" });
+  assert.deepEqual(read.group, ["dev"]);
+  assert.equal(read.pinned, false);
+  const listed = await host.tools.get("memory_list_topics").execute({});
+  const row = listed.topics.find((x) => x.key === "diary");
+  assert.deepEqual(row.group, ["life"]);
+  assert.equal(row.pinned, false);
+  // core 读分支也有确定的缺省形状（group [] / pinned false）。
+  const core = await host.tools.get("memory_read").execute({});
+  assert.deepEqual(core.group, []);
+  assert.equal(core.pinned, false);
+  await bridge.stop();
+});
+
+test("S3 group_manage list：组清单 + 各组 topic 计数", async (t) => {
+  const { tool } = await makeGroupFixture(t);
+  const out = await tool.execute({ action: "list" });
+  assert.equal(out.scope, "amber");
+  assert.equal(out.action, "list");
+  assert.ok(typeof out.revision === "string" && out.revision.length > 0);
+  const dev = out.groups.find((g) => g.key === "dev");
+  assert.equal(dev.topics, 1, "dev 组挂 1 个 topic");
+  assert.equal(dev.title, "开发与配置");
+  assert.equal(out.groups.length, 4, "默认模板四组");
+});
+
+test("S3 group_manage create：建组成功；key 冲突报错", async (t) => {
+  const { tool } = await makeGroupFixture(t);
+  const out = await tool.execute({ action: "create", key: "hobby", title: "兴趣", summary: "副业", order: 50 });
+  assert.equal(out.created, true);
+  assert.ok(typeof out.revision === "string");
+  const listed = await tool.execute({ action: "list" });
+  assert.ok(listed.groups.some((g) => g.key === "hobby"));
+
+  await assert.rejects(
+    () => tool.execute({ action: "create", key: "hobby", title: "重复", summary: "x", order: 60 }),
+    (e) => isCodedError(e) && e.code === "INVALID_INPUT" && /already exists/.test(e.message),
+  );
+  await assert.rejects(
+    () => tool.execute({ action: "create", key: "a/b", title: "非法", summary: "", order: 1 }),
+    (e) => isCodedError(e) && e.code === "INVALID_INPUT",
+  );
+});
+
+test("S3 group_manage update：改元信息；组不存在报错", async (t) => {
+  const { tool } = await makeGroupFixture(t);
+  const out = await tool.execute({ action: "update", key: "dev", title: "开发配置新名", order: 15 });
+  assert.equal(out.updated, true);
+  const listed = await tool.execute({ action: "list" });
+  const dev = listed.groups.find((g) => g.key === "dev");
+  assert.equal(dev.title, "开发配置新名");
+  assert.equal(dev.order, 15);
+  assert.equal(dev.summary, "DSH / 插件 / 发版 / 沙箱", "未给 summary 保持原值");
+
+  await assert.rejects(
+    () => tool.execute({ action: "update", key: "ghost", title: "x" }),
+    (e) => isCodedError(e) && e.code === "INVALID_INPUT" && /does not exist/.test(e.message),
+  );
+});
+
+test("S3 group_manage delete：非空组漏 migrateTo → INVALID_STATE 并列出成员", async (t) => {
+  const { tool, service } = await makeGroupFixture(t);
+  await assert.rejects(
+    () => tool.execute({ action: "delete", key: "dev" }),
+    (e) => {
+      if (!isCodedError(e)) return false;
+      assert.equal(e.code, "INVALID_STATE");
+      assert.match(e.message, /proj-x/);
+      assert.ok(Array.isArray(e.details?.members) && e.details.members.includes("proj-x"));
+      return true;
+    },
+  );
+  // 组仍在、成员组挂载未变（拒绝发生在任何写入前）。
+  const listed = await tool.execute({ action: "list" });
+  assert.ok(listed.groups.some((g) => g.key === "dev"));
+  assert.deepEqual((await service.readTopic("proj-x")).group, ["dev"]);
+  assert.equal(service.mutateLog.length, 0, "拒绝时不得有 topic 写入");
+});
+
+test("S3 group_manage delete + migrateTo：同一提交先改 topic 再删组，无悬空 key", async (t) => {
+  const { tool, service, base } = await makeGroupFixture(t);
+  const out = await tool.execute({ action: "delete", key: "dev", migrateTo: "project" });
+  assert.equal(out.deleted, true);
+  assert.deepEqual(out.migrated, [{ topicKey: "proj-x", group: ["project"] }], "key 顶替原位置（保主组语义）");
+  assert.ok(typeof out.revision === "string");
+
+  // topic 迁移是同一提交（一次 mutate、一条 change），组条目随后删除。
+  assert.equal(service.mutateLog.length, 1);
+  assert.equal(service.mutateLog[0].request.changes.length, 1);
+  assert.deepEqual(service.mutateLog[0].request.changes[0].topic.group, ["project"]);
+
+  // 磁盘 groups.json：dev 已删、project 仍在。
+  const raw = JSON.parse(await fsp.readFile(groupsFilePath(base, "amber"), "utf8"));
+  assert.ok(!raw.groups.some((g) => g.key === "dev"));
+  assert.ok(raw.groups.some((g) => g.key === "project"));
+  // 无悬空 key：没有任何 topic 还挂着 dev。
+  for (const topic of await service.listTopics()) {
+    assert.ok(!topic.group.includes("dev"), `topic ${topic.key} 不得再挂已删除的组`);
+  }
+  const listed = await tool.execute({ action: "list" });
+  assert.equal(listed.groups.find((g) => g.key === "dev"), undefined);
+});
+
+test("S3 group_manage delete：空组直接删；migrateTo 指向不存在组报错；migrateTo=自身报错", async (t) => {
+  const { tool } = await makeGroupFixture(t);
+  const out = await tool.execute({ action: "delete", key: "project" }); // 无成员
+  assert.equal(out.deleted, true);
+  assert.deepEqual(out.migrated, []);
+  const listed = await tool.execute({ action: "list" });
+  assert.equal(listed.groups.find((g) => g.key === "project"), undefined);
+
+  await assert.rejects(
+    () => tool.execute({ action: "delete", key: "life", migrateTo: "project" }),
+    (e) => isCodedError(e) && e.code === "INVALID_INPUT" && /project/.test(e.message),
+  );
+  await assert.rejects(
+    () => tool.execute({ action: "delete", key: "life", migrateTo: "life" }),
+    (e) => isCodedError(e) && e.code === "INVALID_INPUT" && /migrateTo/.test(e.message),
+  );
+  await assert.rejects(
+    () => tool.execute({ action: "delete", key: "ghost" }),
+    (e) => isCodedError(e) && e.code === "INVALID_INPUT" && /does not exist/.test(e.message),
+  );
+});
+
+// 0.4 补丁（账本 #4846d2 / review a1 打回项 1）：迁移提交与组条目删除之间存在
+// 并发窗口——topic 改挂已在 service.mutate 里生效、groups.json 却被并发改动导致
+// deleteGroup 的 CAS 失败。此时错误文案必须写明「迁移已生效，重试幂等」，不能
+// 让调用方误判成整体失败；非 CAS 错误（如清单被并发删除）则原样上抛、不被改写。
+
+test("S3 group_manage delete + migrateTo：迁移提交后 groups.json 被并发改动 → REVISION_CONFLICT 文案标注「迁移已生效，重试幂等」", async (t) => {
+  const { tool, service, base } = await makeGroupFixture(t);
+  const file = groupsFilePath(base, "amber");
+  // 并发写手：迁移 mutate 提交成功后立刻手改磁盘 groups.json（模拟另一宿主在
+  // 同一窗口期写入），使 action 开头读到的 revision 与磁盘真值错开，deleteGroup
+  // 的 CAS 必失败——走的是真实 deleteGroup 代码路径，不桩库函数。
+  const innerMutate = service.mutate.bind(service);
+  service.mutate = async (request) => {
+    const receipt = await innerMutate(request);
+    const raw = JSON.parse(await fsp.readFile(file, "utf8"));
+    const victim = raw.groups.find((g) => g.key === "life");
+    victim.title = `${victim.title}（并发改动）`;
+    await fsp.writeFile(file, JSON.stringify(raw), "utf8");
+    return receipt;
+  };
+  await assert.rejects(
+    () => tool.execute({ action: "delete", key: "dev", migrateTo: "project" }),
+    (e) => {
+      if (!isCodedError(e)) return false;
+      assert.equal(e.code, "REVISION_CONFLICT");
+      assert.match(e.message, /迁移已生效，重试幂等/, "CAS 失败且已有迁移时必须标注重试幂等");
+      assert.match(e.message, /"project"/, "文案指明迁移目标组");
+      return true;
+    },
+  );
+  // 迁移已生效：组内 topic 的改挂在 topic 账里已提交（重试幂等的语义前提）。
+  assert.deepEqual((await service.readTopic("proj-x")).group, ["project"]);
+});
+
+test("S3 group_manage delete + migrateTo：非 CAS 错误（清单被并发删除 → NOT_FOUND）原样上抛，文案不被改写", async (t) => {
+  const { tool, service, base } = await makeGroupFixture(t);
+  const file = groupsFilePath(base, "amber");
+  // 并发删手：迁移提交后删掉 groups.json——deleteGroup 读不到清单抛 NOT_FOUND，
+  // code 不是 REVISION_CONFLICT，即使 migrated 非空也不得附加幂等文案。
+  const innerMutate = service.mutate.bind(service);
+  service.mutate = async (request) => {
+    const receipt = await innerMutate(request);
+    await fsp.unlink(file);
+    return receipt;
+  };
+  await assert.rejects(
+    () => tool.execute({ action: "delete", key: "dev", migrateTo: "project" }),
+    (e) => {
+      // NOT_FOUND 是 storage 层补充码（host/errors.mjs 的 CODES 五元组之外），
+      // 这里直接断言 code，不经过 isCodedError。
+      assert.equal(e.code, "NOT_FOUND");
+      assert.doesNotMatch(e.message, /迁移已生效，重试幂等/, "非 CAS 错误不被改写");
+      return true;
+    },
+  );
+  assert.deepEqual((await service.readTopic("proj-x")).group, ["project"]);
+});

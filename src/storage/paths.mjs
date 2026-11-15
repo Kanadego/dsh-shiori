@@ -133,6 +133,16 @@ export function validateOperationId(operationId) {
 }
 
 /**
+ * groups.json 物理路径（0.4 S3 组清单）：与 topic 文件同 scope 目录，
+ * scope 私有、不跨人设共享。scopeId 复用本模块强化校验（目录名语义），
+ * 拼接结果经 joinUnder 确认不越出管理根。
+ */
+export function groupsFilePath(rootReal, scopeId) {
+  validateScopeId(scopeId);
+  return joinUnder(rootReal, 'scopes', scopeId, 'groups.json');
+}
+
+/**
  * 校验 dir 下不存在与 filename 大小写不同但忽略大小写相同的文件。
  * Windows 文件系统不区分大小写，两个仅大小写不同的 key 会互相覆盖
  *（R9：Windows 大小写别名碰撞在物理层拒绝）。

@@ -33,6 +33,9 @@ await import(pathToFileURL(join(WORKQ, "client", "index.js")).href);
 function makeStatefulReact() {
   const states = [];
   const cursor = { v: 0 };
+  // S7-rework P2：记录 useEffect 回调（不自动执行）——切会话复位逻辑要手动跑。
+  // 既有用例不读 effects，行为与原 `useEffect: () => {}` 完全一致。
+  const effects = [];
   const react = {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
     Fragment: "fragment",
@@ -41,11 +44,11 @@ function makeStatefulReact() {
       if (!(i in states)) states[i] = typeof initial === "function" ? initial() : initial;
       return [states[i], (v) => { states[i] = typeof v === "function" ? v(states[i]) : v; }];
     },
-    useEffect: () => {},
+    useEffect: (fn) => { effects.push(fn); },
     useMemo: (fn) => fn(),
     useRef: () => ({ current: null }),
   };
-  return { react, states, cursor };
+  return { react, states, cursor, effects };
 }
 
 function loadModule(host) {
@@ -428,4 +431,281 @@ test("F2 按钮：宿主 ctx 冻结时 apply 不抛（插槽照常注册）；�
   assert.ok(registered2["plugins.bundle.config"], "插槽缺席时面板插槽仍注册");
   assert.equal(registered2["conversation.chat.assistant-actions"], undefined, "消息按钮插槽未注册");
   await cleanup2();
+});
+
+// ---------------------------------------------------------------------------
+// g) 0.4-S7 闪回图谱两级视图：首屏只渲染簇圆、点簇进二级、返回复位、
+//    空簇不渲染、单卡簇降级为点。GraphTab useState 顺序：
+//    graph / error / selected / view / hoverId / search / searchMiss /
+//    tabGuard / activeCluster（S7 新增，追加在既有 8 个之后）。
+// ---------------------------------------------------------------------------
+
+const GRAPH_TAB_PRESET_STATES = (graph) =>
+  [graph, null, null, { x: 0, y: 0, k: 1 }, null, "", false, { sessionId: "session-A", gen: 0 }, null];
+
+function graphLevel1Fixture() {
+  return {
+    scope: "amber",
+    level: 1,
+    clusters: [
+      { key: "项目甲", label: "项目甲", count: 3, samples: ["卡一", "卡二", "卡三"] },
+      { key: "项目乙", label: "项目乙", count: 2, samples: ["卡四", "卡五"] },
+      { key: "__unclustered__", label: "未分类", count: 1, samples: ["散卡"] },
+      { key: "ghost", label: "幽灵簇", count: 0, samples: [] }, // 空簇：客户端必须不渲染
+    ],
+    total: 6,
+  };
+}
+
+function graphLevel2Fixture() {
+  return {
+    scope: "amber",
+    level: 2,
+    cluster: { key: "项目甲", label: "项目甲", count: 2 },
+    nodes: [
+      { id: "spk-1", title: "卡一", summary: null, vitality: "evergreen", revision: 1, hitCount: 2, lastHitAt: new Date(Date.now() - 60_000).toISOString(), createdAt: null },
+      { id: "spk-2", title: "卡二", summary: null, vitality: "ephemeral", revision: 1, hitCount: 0, lastHitAt: null, createdAt: null },
+    ],
+    edges: [{ source: "spk-1", target: "spk-2", rel: null }],
+    deliveries: [],
+    deliveryStats: { rounds: 0, totalDelivered: 0, uniqueCards: 0 },
+  };
+}
+
+async function flushAsync() {
+  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function mountGraphTabForS7(host) {
+  const sectionTree = await mountSection(host, ["graph", "session-A", "", null, { mode: "active" }]);
+  const tab = findComponent(sectionTree, "GraphTab");
+  assert.ok(tab, "GraphTab reached through real slot render");
+  return tab;
+}
+
+test("S7 图谱首屏：只渲染簇圆（无卡节点）、簇旁标 label 与 count、空簇不渲染、单卡簇降级为点", async () => {
+  const host = makeStatefulReact();
+  const tab = await mountGraphTabForS7(host);
+  const calls = [];
+  const dsh = { call: async (method, session, payload) => { calls.push({ method, session, payload }); return {}; } };
+
+  host.states.length = 0;
+  host.states.push(...GRAPH_TAB_PRESET_STATES(graphLevel1Fixture()));
+  host.cursor.v = 0;
+  const tree = tab.type({ dsh, sessionId: "session-A" });
+  const text = collectText(tree);
+
+  assert.ok(text.includes("项目甲"), "簇 label 渲染");
+  assert.ok(text.includes("3 张"), "count 与卡数文案渲染");
+  assert.ok(text.includes("未分类"), "未分类簇 label");
+  assert.equal(text.includes("幽灵簇"), false, "空簇不渲染");
+
+  const nodeGs = flattenVNode(tree).filter((n) => n.type === "g" && String(n.props.key || "").startsWith("spk-"));
+  assert.equal(nodeGs.length, 0, "首屏不渲染任何卡节点（只有簇圆）");
+
+  const circles = flattenVNode(tree).filter((n) => n.type === "circle");
+  assert.equal(circles.length, 3, "只渲染三个簇圆（count=0 的空簇被过滤）");
+  const dots = circles.filter((c) => c.props.style && c.props.style.stroke === "none");
+  assert.equal(dots.length, 1, "单卡簇（未分类 count=1）降级为一个点：不画簇圆边框");
+  assert.equal(dots[0].props.r, 5, "单卡簇点的半径是小点");
+  for (const c of circles) {
+    if (c.props.style && c.props.style.stroke === "none") continue;
+    assert.ok(Number(c.props.r) > 10, "普通簇圆大小按 count（半径大于点的半径）");
+  }
+  // 首屏「刷新」走 level=1：payload 只带 level，不带 cluster。
+  findButton(tree, "刷新").props.onClick();
+  await flushAsync();
+  assert.deepEqual(calls[0], { method: "getGraph", session: "session-A", payload: { level: 1 } },
+    "首屏/刷新只拉 level=1");
+});
+
+test("S7 图谱点簇进二级：getGraph level=2 带簇名、面包屑「全部 › 簇名」、返回复位回首屏", async () => {
+  const host = makeStatefulReact();
+  const tab = await mountGraphTabForS7(host);
+  const calls = [];
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      return payload && payload.level === 2 ? graphLevel2Fixture() : graphLevel1Fixture();
+    },
+  };
+
+  host.states.length = 0;
+  host.states.push(...GRAPH_TAB_PRESET_STATES(graphLevel1Fixture()));
+  host.cursor.v = 0;
+  let tree = tab.type({ dsh, sessionId: "session-A" });
+
+  // 点簇「项目甲」→ 拉 level=2。
+  const clusterG = flattenVNode(tree).find(
+    (n) => n.type === "g" && n.props && String(n.props["aria-label"] || "").indexOf("项目甲") >= 0);
+  assert.ok(clusterG, "簇圆可点（aria-label 可定位）");
+  clusterG.props.onPointerUp();
+  await flushAsync();
+
+  assert.deepEqual(calls[calls.length - 1].payload, { level: 2, cluster: "项目甲" }, "点簇拉 level=2 并带簇 key");
+  assert.equal(host.states[8], "项目甲", "activeCluster state 记下簇 key");
+  assert.deepEqual(host.states[3], { x: 0, y: 0, k: 1 }, "进簇复位视口");
+  assert.equal(host.states[2], null, "进簇清空选中");
+
+  host.cursor.v = 0;
+  tree = tab.type({ dsh, sessionId: "session-A" });
+  const text = collectText(tree);
+  assert.ok(text.includes("全部 › 项目甲"), "面包屑「全部 › 簇名」");
+  const nodeGs = flattenVNode(tree).filter((n) => n.type === "g" && String(n.props.key || "").startsWith("spk-"));
+  assert.equal(nodeGs.length, 2, "二级渲染簇内卡节点");
+  assert.equal(flattenVNode(tree).some((n) => n.type === "line"), true, "二级渲染簇内连线");
+  assert.equal(text.includes("3 张"), false, "二级不再渲染簇圆计数");
+
+  // 返回：复位回首屏簇圆（selected / 视口 / activeCluster 全部复位）。
+  findButton(tree, "返回").props.onClick();
+  await flushAsync();
+  assert.deepEqual(calls[calls.length - 1].payload, { level: 1 }, "返回重拉 level=1");
+  assert.equal(host.states[8], null, "activeCluster 复位");
+  assert.equal(host.states[2], null, "选中复位");
+  assert.deepEqual(host.states[3], { x: 0, y: 0, k: 1 }, "视口复位");
+
+  host.cursor.v = 0;
+  tree = tab.type({ dsh, sessionId: "session-A" });
+  assert.ok(collectText(tree).includes("3 张"), "回首屏重新渲染簇圆");
+  assert.equal(flattenVNode(tree).filter((n) => n.type === "g" && String(n.props.key || "").startsWith("spk-")).length, 0,
+    "首屏不再有卡节点");
+});
+
+// 回归守卫（#3e8717）：返回首屏只复位选中/视口/簇状态并重拉 level=1，
+// 不得先把图谱 state 清空（setGraph(null)）——清了会出现一帧空图谱。
+// 断言按 fixture 对象身份查 states 全槽，不锁 useState 下标，也不锁渲染分支。
+test("S7 回归守卫：返回首屏后图谱不被清空（backToAll 不得 setGraph(null)）", async () => {
+  const host = makeStatefulReact();
+  const tab = await mountGraphTabForS7(host);
+  const level1 = graphLevel1Fixture();
+  const level2 = graphLevel2Fixture();
+  const dsh = {
+    call: async (method, session, payload) => (payload && payload.level === 2 ? level2 : level1),
+  };
+
+  host.states.length = 0;
+  host.states.push(...GRAPH_TAB_PRESET_STATES(level1));
+  host.cursor.v = 0;
+  let tree = tab.type({ dsh, sessionId: "session-A" });
+
+  // 进簇拿到 level=2 帧。
+  const clusterG = flattenVNode(tree).find(
+    (n) => n.type === "g" && n.props && String(n.props["aria-label"] || "").indexOf("项目甲") >= 0);
+  assert.ok(clusterG, "簇圆可点（aria-label 可定位）");
+  clusterG.props.onPointerUp();
+  await flushAsync();
+  assert.ok(host.states.includes(level2), "进簇后持有 level=2 图谱帧");
+
+  host.cursor.v = 0;
+  tree = tab.type({ dsh, sessionId: "session-A" });
+  const backBtn = findButton(tree, "返回");
+  assert.ok(backBtn, "二级视图有「返回」按钮");
+  backBtn.props.onClick();
+  // 点击后、flush 前断言：同步阶段图谱 state 仍持有上一帧数据，不出现被清空的 null。
+  assert.ok(host.states.includes(level2), "返回后仍持有上一帧图谱数据，不被清空");
+  await flushAsync();
+  assert.ok(host.states.includes(level1), "返回重拉后持有 level=1 帧（首屏数据在位）");
+});
+
+test("S7 图谱时间线跳转 focusTarget：走不带 level 的全量兼容路径，节点视图照常", async () => {
+  const host = makeStatefulReact();
+  const tab = await mountGraphTabForS7(host);
+  const calls = [];
+  const fullGraph = {
+    scope: "amber",
+    nodes: [
+      { id: "spk-1", title: "跳转目标卡", summary: null, vitality: "evergreen", revision: 1, hitCount: 1, lastHitAt: null, createdAt: null },
+      { id: "spk-2", title: "邻卡", summary: null, vitality: "ephemeral", revision: 1, hitCount: 0, lastHitAt: null, createdAt: null },
+    ],
+    edges: [{ source: "spk-1", target: "spk-2", rel: null }],
+    deliveries: [],
+    deliveryStats: { rounds: 0, totalDelivered: 0, uniqueCards: 0 },
+  };
+  const dsh = { call: async (method, session, payload) => { calls.push({ method, session, payload }); return fullGraph; } };
+
+  host.states.length = 0;
+  host.states.push(...GRAPH_TAB_PRESET_STATES(fullGraph));
+  host.cursor.v = 0;
+  // focusTarget 在途（时间线跳转）：即使预置的是带 clusters 的数据也不渲染簇。
+  host.states[0] = { ...graphLevel1Fixture(), nodes: fullGraph.nodes, edges: fullGraph.edges };
+  const tree = tab.type({
+    dsh, sessionId: "session-A",
+    focusTarget: { type: "spark", id: "spk-1", seq: 1 },
+  });
+  const text = collectText(tree);
+  assert.ok(text.includes("跳转目标卡"), "节点视图渲染（跳转路径不破）");
+  assert.equal(flattenVNode(tree).filter((n) => n.type === "circle").length, 2,
+    "focusTarget 在途不渲染簇圆（走全量节点视图）");
+  // 刷新走兼容路径：payload 不带 level（与 candidates 页全量调用同一形状）。
+  findButton(tree, "刷新").props.onClick();
+  await flushAsync();
+  assert.deepEqual(calls[0], { method: "getGraph", session: "session-A", payload: {} },
+    "focusTarget 在途的刷新走全量兼容路径");
+});
+
+test("S7-rework P4：level=2 簇为空 → 空态文案是「该簇暂无卡片」，不冒充「scope 无 active 卡」", async () => {
+  const host = makeStatefulReact();
+  const tab = await mountGraphTabForS7(host);
+  const emptyLevel2 = {
+    scope: "amber",
+    level: 2,
+    cluster: { key: "幽灵簇", label: "幽灵簇", count: 0 },
+    nodes: [],
+    edges: [],
+    deliveries: [],
+    deliveryStats: { rounds: 0, totalDelivered: 0, uniqueCards: 0 },
+  };
+  host.states.length = 0;
+  host.states.push(...GRAPH_TAB_PRESET_STATES(emptyLevel2));
+  // GraphTab useState 第 9 个是 activeCluster（S7 新增）：预置为已进簇状态。
+  host.states[8] = "幽灵簇";
+  host.cursor.v = 0;
+  const tree = tab.type({ dsh: { call: async () => emptyLevel2 }, sessionId: "session-A" });
+  const text = collectText(tree);
+  assert.ok(text.includes("该簇（幽灵簇）暂无卡片"), "空簇按 clusterLabel 给专属空态");
+  assert.equal(text.includes("当前 scope 无 active 卡"), false, "不冒充 scope 级空态");
+});
+
+test("S7-rework P2：A 会话进簇 → 切到 B —— 首个请求必须是 level=1 且不带 cluster，面包屑回「全部」", async () => {
+  const host = makeStatefulReact();
+  const tab = await mountGraphTabForS7(host);
+  const calls = [];
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push({ method, session, payload });
+      return payload && payload.level === 2 ? graphLevel2Fixture() : graphLevel1Fixture();
+    },
+  };
+
+  host.states.length = 0;
+  host.states.push(...GRAPH_TAB_PRESET_STATES(graphLevel1Fixture()));
+  host.cursor.v = 0;
+  let tree = tab.type({ dsh, sessionId: "session-A" });
+  host.effects.length = 0; // 挂载期的 effect 由预置 state 覆盖，不跑
+
+  // A 会话进簇「项目甲」→ level=2。
+  const clusterG = flattenVNode(tree).find(
+    (n) => n.type === "g" && n.props && String(n.props["aria-label"] || "").indexOf("项目甲") >= 0);
+  assert.ok(clusterG, "A 会话簇圆可点");
+  clusterG.props.onPointerUp();
+  await flushAsync();
+  assert.deepEqual(calls.at(-1).payload, { level: 2, cluster: "项目甲" }, "A 进簇发的是 level=2");
+  assert.equal(host.states[8], "项目甲", "A 会话 activeCluster 记下簇 key");
+
+  // 切到 B：重渲染（props.sessionId 变化），手动跑本轮注册的 effects（模拟 React 重跑）。
+  host.cursor.v = 0;
+  tree = tab.type({ dsh, sessionId: "session-B" });
+  for (const effect of host.effects.splice(0)) effect();
+  await flushAsync();
+
+  assert.deepEqual(calls.at(-1), { method: "getGraph", session: "session-B", payload: { level: 1 } },
+    "切会话后的首个请求是 level=1 且不带 cluster（P2 修复点；旧实现会带 {level:2,cluster:旧簇名}，必红）");
+  assert.equal(host.states[8], null, "activeCluster 已随切会话复位");
+  host.cursor.v = 0;
+  tree = tab.type({ dsh, sessionId: "session-B" });
+  const text = collectText(tree);
+  assert.equal(text.includes("全部 › 项目甲"), false, "面包屑不再挂旧簇名");
+  assert.ok(text.includes("3 张"), "B 会话首屏重新渲染簇圆（level=1 到货）");
 });

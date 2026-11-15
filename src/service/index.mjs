@@ -87,7 +87,12 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
       generation, issuedAt, projectionHash,
       // archivedAt 进入 token meta：append/rewrite 等 payload 不带归档字段的写路径
       // 靠它继承现有归档标记（undefined 在 JSON 编码时省略 = 未归档）。
-      meta: kind === 'topic' ? { title: item.title, summary: item.summary, updated: item.updated, archivedAt: item.archivedAt } : null });
+      // S3：group/pinned 同样进 token meta——append/rewrite 缺省继承原组与钉住
+      // 标记（append 不改组；改组必须显式给 group）。
+      meta: kind === 'topic' ? {
+        title: item.title, summary: item.summary, updated: item.updated,
+        archivedAt: item.archivedAt, group: item.group ?? [], pinned: item.pinned ?? false,
+      } : null });
   }
   function parseToken(value, kind, key) {
     const t = decode(value);
@@ -111,6 +116,15 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
         fail('INVALID_INPUT', 'archivedAt must be a canonical UTC ISO 8601 string '
           + '(e.g. "2026-11-07T00:00:00.000Z")');
       }
+      // S3：group/pinned 可选（旧版 token 无此字段，按缺省 [] / false 继承）；
+      // 有值时必须是字符串数组 / 布尔。
+      if (t.meta.group !== undefined
+        && (!Array.isArray(t.meta.group) || t.meta.group.some((g) => typeof g !== 'string' || g.length === 0))) {
+        fail('INVALID_INPUT', 'token metadata group must be an array of non-empty strings when present');
+      }
+      if (t.meta.pinned !== undefined && typeof t.meta.pinned !== 'boolean') {
+        fail('INVALID_INPUT', 'token metadata pinned must be a boolean when present');
+      }
     }
     return t;
   }
@@ -132,7 +146,11 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
         }
       }
       if (t.kind === 'topic' && item && (item.title !== t.meta.title || item.summary !== t.meta.summary || item.updated !== t.meta.updated
-        || (item.archivedAt ?? null) !== (t.meta.archivedAt ?? null))) {
+        || (item.archivedAt ?? null) !== (t.meta.archivedAt ?? null)
+        // S3：group/pinned 也参与「源未变」判定——读后被第三方改组/改钉住，
+        // 陈旧 token 一律冲突（数组按 JSON 序列化比较，顺序敏感与主组语义一致）。
+        || JSON.stringify(item.group ?? []) !== JSON.stringify(t.meta.group ?? [])
+        || (item.pinned ?? false) !== (t.meta.pinned ?? false))) {
         fail('REVISION_CONFLICT', 'topic metadata does not match revision token');
       }
       const target = scope === activeScopeId ? revision : null;
@@ -238,8 +256,19 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
       const base = { kind: c.kind, expectedRevision: token ? token.targetRevision : c.expectedRevision };
       if (c.kind === 'core') return { ...base, text: text(c.text, 'core text') };
       record(c.topic, 'topic metadata'); noScope(c.topic);
-      if (Object.keys(c.topic).some(k => !['title', 'summary', 'updated', 'archivedAt'].includes(k))) {
-        fail('INVALID_INPUT', 'topic metadata accepts title/summary/updated/archivedAt only');
+      // S3：topic metadata 白名单扩 group/pinned（0.4 分组接线）。
+      if (Object.keys(c.topic).some(k => !['title', 'summary', 'updated', 'archivedAt', 'group', 'pinned'].includes(k))) {
+        fail('INVALID_INPUT', 'topic metadata accepts title/summary/updated/archivedAt/group/pinned only');
+      }
+      // S3 形状校验：group 必须是非空字符串数组（null/undefined = 继承/清空语义
+      // 见下方归一化）；pinned 必须是布尔。组 key 是否存在于 groups.json 由
+      // store.commit 的组存在性校验把关（service 不重复建组逻辑）。
+      if (c.topic.group !== undefined && c.topic.group !== null
+        && (!Array.isArray(c.topic.group) || c.topic.group.some((g) => typeof g !== 'string' || g.length === 0))) {
+        fail('INVALID_INPUT', 'topic.group must be an array of non-empty strings when present');
+      }
+      if (c.topic.pinned !== undefined && c.topic.pinned !== null && typeof c.topic.pinned !== 'boolean') {
+        fail('INVALID_INPUT', 'topic.pinned must be a boolean when present');
       }
       // archivedAt：undefined/null 合法；字符串必须是规范 UTC ISO 串（A1/P2-1）。
       if (c.topic.archivedAt !== undefined && c.topic.archivedAt !== null) {
@@ -272,6 +301,13 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
         // 省略该字段）；字符串 → 原样写入归档时间（已在上方校验）。
         archivedAt: c.topic.archivedAt === undefined ? token?.meta.archivedAt
           : c.topic.archivedAt === null ? '' : c.topic.archivedAt,
+        // S3 分组语义：payload 未带 → 继承 token 里的现有 group/pinned（append/rewrite
+        // 缺省保持原组、不静默取消钉住；创建时无 token → 未分组/不钉住）；显式 null →
+        // 清空（group: [] / pinned: false）；数组/布尔 → 原样写入（组存在性由 store 校验）。
+        group: c.topic.group === undefined ? (token?.meta.group ?? [])
+          : c.topic.group === null ? [] : c.topic.group,
+        pinned: c.topic.pinned === undefined ? (token?.meta.pinned ?? false)
+          : c.topic.pinned === null ? false : c.topic.pinned,
       } };
     });
     const generations = new Set(tokens.map(t => t.generation));

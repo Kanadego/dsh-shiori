@@ -110,10 +110,25 @@ async function removeGuard(root) {
 
 async function underGuard(root, deadline, retryMs, action) {
   const guardPath = path.join(root, GUARD_NAME);
+  let transient = 0;
   for (;;) {
     try { await fsp.mkdir(guardPath); break; }
     catch (err) {
-      if (err.code !== 'EEXIST') throw busy(root, 'guard-acquire', 'Cannot acquire guard', err);
+      if (err.code !== 'EEXIST') {
+        // C-fix C1（评审授权）：Windows 下 guard 高频 rmdir→mkdir 翻转会撞
+        // delete-pending 窗口，mkdir 瞬时返回 EPERM/EACCES/EBUSY 而非
+        // EEXIST/ENOENT——那是 OS 抖动，不是「guard 被占」。与 removeGuard 的
+        // transientRemoval 同口径做有界重试（至多 4 次且受同一 deadline 约束，
+        // 间隔按 retryMs 略作退避），不给无限等待。EEXIST 的「guard 被占」
+        // 语义与 fail-closed 判定不动；持续性权限故障到界仍抛 LOCK_BUSY，
+        // details.ioCode 保留真实 code，绝不吞成「等一等就好」。
+        if (transientRemoval.has(err.code) && transient < 4 && Date.now() < deadline) {
+          transient += 1;
+          await sleep(retryMs * (transient + 1));
+          continue;
+        }
+        throw busy(root, 'guard-acquire', 'Cannot acquire guard', err);
+      }
       if (Date.now() >= deadline) throw busy(root, 'guard-acquire', 'Guard occupied; no automatic guard takeover');
       await sleep(retryMs);
     }

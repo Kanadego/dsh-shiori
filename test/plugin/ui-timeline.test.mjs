@@ -116,6 +116,10 @@ function findButtons(tree, label) {
     .filter((n) => n.type === "button" && collectText(n) === label);
 }
 
+function countTimelineItems(tree) {
+  return flattenVNode(tree).filter((n) => n.props && n.props.className === "dshi_item").length;
+}
+
 // ---------------------------------------------------------------------------
 // fixtures（wire 形状见 src/plugin/protocol.mjs timelineItem）
 // ---------------------------------------------------------------------------
@@ -194,27 +198,60 @@ test("F4 分页：hasMore=false 时「下一页」禁用；首页「上一页」
   assert.ok(prev && prev.props.disabled === true, "首页 → 上一页禁用");
 });
 
-test("F4 分页：hasMore=true 时「下一页」可点，点击后以 offset=20 请求下一页（0.3 每页 100 → 20）", async () => {
+test("F4 分页：界面每页 10 条（0.4）——首页整批请求 limit=20 只显示前 10 条；批内「下一页」纯本地不发请求；跨批才以 offset=20 请求下一批", async () => {
   const { host, renderTab, runTabEffects } = await mountTimelineTab();
   const calls = [];
+  // 整批 20 条（一批 = 两个显示页）；第二批 hasMore=false 供末页禁用断言。
+  const items = Array.from({ length: 20 }, (_, i) =>
+    timelineItem({ target: { type: "spark", id: "abcd1234abcd1234abcd", title: "批内条目-" + String(i).padStart(2, "0") } }));
   const dsh = {
     call: async (method, session, payload) => {
       calls.push(payload);
-      return pageDto({ items: [timelineItem()], hasMore: false });
+      return pageDto({ items, hasMore: payload.offset === 0 });
     },
   };
-  const firstPage = pageDto({ items: [timelineItem()], hasMore: true });
-  let tree = renderTab(dsh, firstPage);
-  const next = findButtons(tree, "下一页")[0];
-  assert.ok(next && next.props.disabled !== true, "hasMore=true → 下一页可用");
-  host.effects.length = 0; // 首轮渲染的 load(offset=0) 不重放，只看翻页那一次请求
-  next.props.onClick();
-  tree = renderTab(dsh, pageDto({ items: [timelineItem()], hasMore: false }));
+  let tree = renderTab(dsh); // page=null → effect load(offset=0)
   await runTabEffects(); // effect 手动驱动 load(offset)
   await flush();
-  assert.deepEqual(calls, [{ offset: 20, limit: 20 }], "下一页以 offset=20（每页 20 条）请求");
+  assert.deepEqual(calls, [{ offset: 0, limit: 20 }], "首页仍整批请求 limit=20（wire 协议不变）");
+  tree = renderTab(dsh, host.states[PANEL_STATES]);
+  assert.equal(countTimelineItems(tree), 10, "界面每页只显示 10 条（0.4 显示层分页）");
+  let text = collectText(tree);
+  assert.ok(text.includes("批内条目-00"), "首页显示第 1 条");
+  assert.ok(!text.includes("批内条目-10"), "首页不显示第 11 条");
+  assert.ok(text.includes("界面每页显示 10 条"), "页脚文案跟随界面每页 10 条");
+  host.effects.length = 0; // 渲染收集到的 load effect 不重放；批内翻页不应发请求
+
+  // 批内翻页：本地切片，不发请求
+  const next = findButtons(tree, "下一页")[0];
+  assert.ok(next && next.props.disabled !== true, "有本地下一页 → 下一页可用");
+  next.props.onClick();
+  tree = renderTab(dsh, host.states[PANEL_STATES]);
+  host.effects.length = 0;
+  assert.deepEqual(calls, [{ offset: 0, limit: 20 }], "批内「下一页」纯本地切片，不发 RPC");
+  assert.equal(countTimelineItems(tree), 10, "第二显示页仍每页 10 条");
+  text = collectText(tree);
+  assert.ok(text.includes("批内条目-10"), "第二显示页展示第 11 条");
+  assert.ok(!text.includes("批内条目-00"), "第二显示页不再展示第 1 条");
+
+  // 跨批：再点一次「下一页」才以 offset=20 请求下一批（第二批 hasMore=false）
   const next2 = findButtons(tree, "下一页")[0];
-  assert.ok(next2 && next2.props.disabled === true, "末页禁用下一页");
+  assert.ok(next2 && next2.props.disabled !== true, "批内页耗尽 → 下一页仍可用");
+  next2.props.onClick();
+  tree = renderTab(dsh, host.states[PANEL_STATES]);
+  await runTabEffects(); // effect 手动驱动 load(offset)
+  await flush();
+  assert.deepEqual(calls, [{ offset: 0, limit: 20 }, { offset: 20, limit: 20 }], "跨批翻页以 offset=20（整批 20 条）请求");
+  // 末页语义不回归：末批两条本地显示页耗尽且 hasMore=false → 下一页禁用
+  host.effects.length = 0;
+  tree = renderTab(dsh, host.states[PANEL_STATES]);
+  const nextLocal = findButtons(tree, "下一页")[0];
+  assert.ok(nextLocal && nextLocal.props.disabled !== true, "末批仍有本地下一页");
+  nextLocal.props.onClick();
+  tree = renderTab(dsh, host.states[PANEL_STATES]);
+  host.effects.length = 0;
+  const nextEnd = findButtons(tree, "下一页")[0];
+  assert.ok(nextEnd && nextEnd.props.disabled === true, "末批末页（无本地下一页 + hasMore=false）→ 下一页禁用");
 });
 
 // ---------------------------------------------------------------------------
@@ -284,4 +321,152 @@ test("F4 跳转：core 条目不提供「定位」（核心记忆无对应 tab�
   assert.equal(findButtons(tree, "定位").length, 0, "core 条目无定位按钮");
   assert.ok(collectText(tree).includes("记忆内容"), "提示核心记忆去「记忆内容」页查看");
   assert.equal(jumps.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// f) 空批回退（0.4-REVIEW §2.4 问题 1 / P1#6；评审 attempt-2 阻塞 1/2、需给证 3）
+//    编号 ①-⑤ 按本节用例在文件中的顺序：①=逐批回退、②=hasMore 空批不回退、
+//    ③=offset=0 空态、④=回退在飞 busy、⑤=批缓存不写。退化实验留痕（改坏 → 变
+//    红，均实测）：
+//    A. 回退条件加 && false → ①④⑤ 三条红（④=在飞 busy、⑤=缓存给证）；
+//    B. 回退改回递归 return load()（阻塞 1 原 bug）→ ①④⑤ 三条红（④=busy 在飞被提前复位）；
+//    C. 去掉缓存守卫 !fellBack → ⑤ 红（batchCache 被写入 offset=40 的陈旧批）。
+//    （②③ 在三种变异下都仍绿，作回归对照。）
+// ---------------------------------------------------------------------------
+
+test("F4 空批回退：offset>0 拉回空批 → 逐批回退（40→20→0），非空批即停", async () => {
+  const { host, renderTab, runTabEffects } = await mountTimelineTab();
+  const calls = [];
+  const batches = {
+    0: pageDto({ items: [timelineItem()], hasMore: false }),
+    20: pageDto(),
+    40: pageDto(),
+  };
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push(payload);
+      return batches[payload.offset];
+    },
+  };
+  host.states[PANEL_STATES + 1] = 40; // 预置 offset=40（用户已翻到第 5 显示页）
+  let tree = renderTab(dsh);
+  await runTabEffects();
+  await flush();
+  assert.deepEqual(calls, [
+    { offset: 40, limit: 20 },
+    { offset: 20, limit: 20 },
+    { offset: 0, limit: 20 },
+  ], "空批逐批回退：40→20→0，恰 3 次请求（空批不等于结束）");
+  tree = renderTab(dsh, host.states[PANEL_STATES]);
+  assert.equal(countTimelineItems(tree), 1, "回退到非空批即停，渲染批0 内容");
+  assert.equal(host.states[PANEL_STATES + 1], 0, "offset 状态同步为落地批");
+});
+
+test("F4 空批回退：hasMore===true 的空批不回退（不与服务端「还有更多」打架）", async () => {
+  const { host, renderTab, runTabEffects } = await mountTimelineTab();
+  const calls = [];
+  const batches = {
+    0: pageDto({ items: [timelineItem()], hasMore: false }),
+    20: pageDto({ hasMore: true }), // 空批但服务端声明还有更多：防御异常 DTO，不回退
+  };
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push(payload);
+      return batches[payload.offset];
+    },
+  };
+  host.states[PANEL_STATES + 1] = 20;
+  let tree = renderTab(dsh);
+  await runTabEffects();
+  await flush();
+  assert.deepEqual(calls, [{ offset: 20, limit: 20 }], "hasMore===true 空批恰 1 次请求，不回退");
+  tree = renderTab(dsh, host.states[PANEL_STATES]);
+  assert.equal(countTimelineItems(tree), 0, "hasMore 空批照旧落地渲染（0 条）");
+});
+
+test("F4 空批回退：offset=0 空批照旧渲染空态引导文案（不回退、不发多余请求）", async () => {
+  const { host, renderTab, runTabEffects } = await mountTimelineTab();
+  const calls = [];
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push(payload);
+      return pageDto();
+    },
+  };
+  let tree = renderTab(dsh);
+  await runTabEffects();
+  await flush();
+  assert.deepEqual(calls, [{ offset: 0, limit: 20 }], "首页空批恰 1 次请求（不回退到负 offset）");
+  tree = renderTab(dsh, host.states[PANEL_STATES]);
+  assert.ok(collectText(tree).includes("还没有任何变更记录"), "空态引导文案照旧");
+  assert.equal(findButtons(tree, "下一页").length, 0, "空态不渲染分页条");
+});
+
+test("F4 空批回退：回退在飞期间 busy 仍为 true、「刷新」仍禁点（评审 attempt-2 阻塞 1 能红证据）", async () => {
+  const { host, renderTab } = await mountTimelineTab();
+  const calls = [];
+  let resolveFallback;
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push(payload);
+      if (payload.offset === 40) return pageDto(); // 空批 → 立即触发回退
+      if (payload.offset === 20) {
+        return new Promise((resolve) => { resolveFallback = resolve; }); // 回退批挂起（在飞）
+      }
+      return pageDto({ items: [timelineItem()], hasMore: false });
+    },
+  };
+  host.states[PANEL_STATES + 1] = 40;
+  renderTab(dsh);
+  const effectPromise = (async () => { for (const fn of host.effects.splice(0)) await fn(); })();
+  await flush(); // 第一轮（空批）落地，第二轮（offset=20）在飞
+  assert.deepEqual(calls, [{ offset: 40, limit: 20 }, { offset: 20, limit: 20 }], "前置：空批已触发回退且回退请求在飞");
+  let tree = renderTab(dsh, host.states[PANEL_STATES]);
+  const refreshing = findButtons(tree, "刷新中…")[0];
+  assert.ok(refreshing, "回退在飞：按钮处于「刷新中…」（busy 仍为 true，未被提前复位）");
+  assert.equal(refreshing.props.disabled, true, "回退在飞：刷新禁点（不能并发第二次 load）");
+  resolveFallback(pageDto({ items: [timelineItem()], hasMore: false })); // 落地：busy 才复位
+  await effectPromise;
+  await flush();
+  tree = renderTab(dsh, host.states[PANEL_STATES]);
+  assert.equal(countTimelineItems(tree), 1, "回退落地显示非空批");
+  const refresh = findButtons(tree, "刷新")[0];
+  assert.ok(refresh && refresh.props.disabled !== true, "落地后刷新恢复可点");
+});
+
+test("F4 空批回退：回退链不把空批/已判空批次写入批缓存（评审 attempt-2 需给证 3）", async () => {
+  const { host, renderTab, runTabEffects } = await mountTimelineTab();
+  const calls = [];
+  const stage = { phase: "initial" };
+  const batch40Full = pageDto({ items: [timelineItem(), timelineItem()], hasMore: false });
+  const batch40Empty = pageDto(); // 数据收缩后批40 已空
+  const batch20 = pageDto({ items: [timelineItem()], hasMore: false });
+  const dsh = {
+    call: async (method, session, payload) => {
+      calls.push(payload);
+      if (stage.phase === "refresh") return payload.offset === 40 ? batch40Empty : batch20;
+      return batch40Full;
+    },
+  };
+  host.states[PANEL_STATES + 1] = 40;
+  let tree = renderTab(dsh);
+  await runTabEffects();
+  await flush();
+  assert.deepEqual(calls, [{ offset: 40, limit: 20 }], "前置：批40 非空落地，lastLoadedOffset=40");
+  assert.equal(host.states[PANEL_STATES + 6], null, "前置：无换批 → 批缓存仍为 null");
+  // 评审给证链：在 offset=40 点「刷新」→ 拉回空批 → 回退 20
+  stage.phase = "refresh";
+  tree = renderTab(dsh, host.states[PANEL_STATES]);
+  findButtons(tree, "刷新")[0].props.onClick();
+  await flush();
+  assert.deepEqual(calls, [
+    { offset: 40, limit: 20 },
+    { offset: 40, limit: 20 },
+    { offset: 20, limit: 20 },
+  ], "刷新拉批40（空批）→ 回退拉批20");
+  // 关键断言：回退链上批缓存必须仍是 null（空批与已判空批次的陈旧内容都不得入缓存）
+  assert.equal(host.states[PANEL_STATES + 6], null, "回退链不写批缓存（cache 仍为 null）");
+  tree = renderTab(dsh, host.states[PANEL_STATES]);
+  assert.equal(countTimelineItems(tree), 1, "回退落地批20 非空");
+  assert.equal(host.states[PANEL_STATES + 1], 20, "offset 同步为落地批 20");
 });

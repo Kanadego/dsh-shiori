@@ -9,9 +9,11 @@
 // - 相同 key 可在不同 scope 并存，但同一 scope 内重复 key 是数据错误，拒绝；
 // - 输出按 key 的 UTF-16 码元序稳定排序，绝不依赖系统 locale。
 //
-// Topic 形状：{key,title,summary,scopeId,revision,updated,body?}。
+// Topic 形状：{key,title,summary,scopeId,revision,updated,body?,archivedAt?,
+//              group?,pinned?}。
 // body 之外的字段全部必填；summary ≤60 UTF-16 且不得含换行（会破坏索引行结构）；
-// 允许未知字段以保持数据前向兼容（Topic 是数据记录，不是控制接口）。
+// group/pinned 为 0.4 S3 新增可选分组元数据（缺省读取补 [] / false，不回写磁盘，
+// 老文件行为不变）；允许未知字段以保持数据前向兼容（Topic 是数据记录，不是控制接口）。
 
 import { fail, describe, requireObject, requireExactKeys } from "./errors.mjs";
 import { validateKey } from "./keys.mjs";
@@ -21,7 +23,20 @@ import { validateKey } from "./keys.mjs";
 export const GLOBAL_SCOPE_ID = "global";
 
 export const SUMMARY_MAX_CHARS = 60;
+
+// 0.4 S3（DESIGN §S3.1）：group 软上限——首个是主组（计数/摘要），其余为兼属。
+// 超出不拒绝（软约束，只提示），调用方用 groupSoftLimitWarning 取提示文案。
+export const GROUP_SOFT_LIMIT = 3;
+
 const MAX_SCOPE_ID_CHARS = 128;
+
+/** group 超软上限时的提示文案；未超上限或无 group 字段返回 null。 */
+export function groupSoftLimitWarning(topic) {
+  if (Array.isArray(topic?.group) && topic.group.length > GROUP_SOFT_LIMIT) {
+    return `topic "${topic.key}" 挂载 ${topic.group.length} 个组，超过软上限 ${GROUP_SOFT_LIMIT}（主组为 "${topic.group[0]}"）`;
+  }
+  return null;
+}
 
 export function validateScopeId(value, name) {
   if (typeof value !== "string" || value.length === 0) {
@@ -103,6 +118,35 @@ export function validateTopic(topic, where) {
     if (topic.archivedAt.includes("\n") || topic.archivedAt.includes("\r")) {
       fail("INVALID_INPUT", `${where}: archivedAt must not contain line breaks`);
     }
+  }
+  // 分组元数据（0.4 S3，可选）：group 是组 key 数组（首个是主组，软上限
+  // GROUP_SOFT_LIMIT，超出不在此拒绝）；pinned 是布尔钉住标记。老文件没有
+  // 这两个字段 = 未分组、不钉住，行为不变；读取侧补默认值（[] / false），
+  // 不回写磁盘。组 key 是否存在于 groups.json 由组清单层（groups.mjs）
+  // 校验——本模块只做形状与 key 字符规范校验（与 topic key 同一规则）。
+  if (topic.group !== undefined) {
+    if (!Array.isArray(topic.group)) {
+      fail("INVALID_INPUT", `${where}: group must be an array of group keys when present`);
+    }
+    const seenGroups = new Set();
+    for (let i = 0; i < topic.group.length; i++) {
+      const groupKey = topic.group[i];
+      if (typeof groupKey !== "string" || groupKey.length === 0) {
+        fail("INVALID_INPUT", `${where}: group[${i}] must be a non-empty string`);
+      }
+      try {
+        validateKey(groupKey);
+      } catch (error) {
+        fail("INVALID_INPUT", `${where}: group[${i}]: ${error.message}`);
+      }
+      if (seenGroups.has(groupKey)) {
+        fail("INVALID_INPUT", `${where}: group contains duplicate key "${groupKey}"`);
+      }
+      seenGroups.add(groupKey);
+    }
+  }
+  if (topic.pinned !== undefined && typeof topic.pinned !== "boolean") {
+    fail("INVALID_INPUT", `${where}: pinned must be a boolean when present`);
   }
   return topic;
 }

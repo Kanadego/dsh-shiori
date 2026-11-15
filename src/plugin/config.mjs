@@ -5,7 +5,9 @@
 //     它只证明「可序列化结构 + 默认值」，不证明路径安全，不替代 normalize；
 //   - normalizePluginConfig：权威规范化。未知键拒绝；缺省 mode=shadow / allowActive=false /
 //     defaultPersona=null / 两个 persona 映射=[] / l2、organize、forgetting.enabled=false /
-//     ownerId='local' / dataRoot=stateRoot=null；预算经 core/validateConfig 全关系校验
+//     ownerId='local'；0.4-S1 起 dataRoot/stateRoot 为 null 时解析为 DSH_HOME 默认根
+//     （<DSH_HOME>/shiori-data / shiori-state，各根独立解析、显式配置优先，normalize
+//     保持纯函数不触盘）；预算经 core/validateConfig 全关系校验
 //     （0.2 U2 起水位 softChars/hardChars 为权威：老配置只有 ratio 时按
 //     hardCapChars × ratio 四舍五入换算，输出里 ratio 一律由水位回推保持同源），
 //     semantic 段为 F1 方案 C 的接口预留（F1b 起 local 接真实本地 embedding：
@@ -15,17 +17,21 @@
 //     互不嵌套），静态 schema dump 不能替代本步。
 //
 // 安全规则：
-//   - 仅 dataRoot 与 stateRoot 皆 null 且 mode=shadow 允许 inert 挂载（needs-configuration）；
-//   - active 或配置了任一 root ⇒ 两个绝对 root 必须显式提供；
-//   - active 必须 allowActive===true；
+//   - 0.4-S1 起 normalizePluginConfig 对 null 根自动解析默认根 <DSH_HOME>/shiori-data
+//     与 <DSH_HOME>/shiori-state（DSH_HOME 取 process.env.DSH_HOME，缺省 ~/.dsh）；
+//     apply 阶段 verifyPluginRoots 校验通过后 mkdir -p——inert 不再因 root 缺失触发
+//     （needs-configuration 退役）；
+//   - mode 默认仍为 shadow（安全取向不变），只有 mode=active 且 allowActive===true 才进 active；
+//   - verifyPluginRoots 保留双根皆 null → 默认根的兜底解析（直构 settings 时生效）；
 //   - profileRoot 只在宿主 bootstrap 能证明可信时由调用方显式传入（本批 DSH 0.2.1-rc.2
 //     无已核实的 ctx.profileRoot，入口一律不传；ctx.baseUrl 不是 profileRoot，
 //     禁止用 cwd/HOME/包目录猜测）。
 //
 // 本模块除 schemastery 与既有生产模块外零依赖；抛出的错误均带可序列化 .code（INVALID_INPUT）。
 
-import { realpathSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
+import { homedir } from "node:os";
 import z from "@deepseek-ai/schemastery";
 import { DEFAULT_CONFIG, validateConfig } from "../core/config.mjs";
 import { normalizeForgetPolicy } from "../forgetting/decay.mjs";
@@ -170,8 +176,8 @@ export function coreBudgetsOf(budgets) {
 export const Config = z.object({
   mode: z.union([z.const("shadow"), z.const("active")]).default("shadow").description("shadow 只读影子（默认，不写业务数据）；active 显式启用完整工具与写入"),
   allowActive: z.boolean().default(false).description("显式允许 active；mode=active 时必须为 true"),
-  dataRoot: nullableString().default(null).description("业务数据根目录（绝对路径）；默认 null（inert 挂载，需配置诊断）"),
-  stateRoot: nullableString().default(null).description("运行状态根目录（绝对路径），与 dataRoot 互不嵌套；默认 null"),
+  dataRoot: nullableString().default(null).description("业务数据根目录（绝对路径）；缺省（null）时插件加载阶段自动解析为 <DSH_HOME>/shiori-data 并自动创建目录（DSH_HOME 取环境变量 DSH_HOME，未设置时为 ~/.dsh）"),
+  stateRoot: nullableString().default(null).description("运行状态根目录（绝对路径），与 dataRoot 互不嵌套；缺省（null）时自动解析为 <DSH_HOME>/shiori-state 并自动创建目录（DSH_HOME 取环境变量 DSH_HOME，未设置时为 ~/.dsh）"),
   ownerId: z.string().default("local").description("可信部署配置的单用户 owner 标识；模型不可传"),
   defaultPersona: personaChoice().description("默认人设卡名；null=global memory / 无默认卡"),
   sessionPersonas: z.array(z.object({
@@ -195,7 +201,7 @@ export const Config = z.object({
       dims: z.natural().default(512).description("向量维度"),
       dtype: z.union([z.const("fp32"), z.const("fp16"), z.const("q8")]).default("fp32")
         .description("ONNX 推理精度：fp32=精度基线（91MB）；fp16=折中；q8=最小最快（23MB，短文本 p95 约 4ms）"),
-      cacheDir: z.string().default("").description("模型缓存目录；空字符串表示用 <stateRoot>/semantic/models"),
+      cacheDir: z.string().default("").description("模型缓存目录；空字符串表示用 <dataRoot>/models（0.4-S5 起模型跟业务数据走，升级插件、重装包都不用重下）"),
       mirror: z.string().default("https://hf-mirror.com/").description("HuggingFace 镜像地址（国内直连 huggingface.co 一般不可达）"),
     }).default({ model: "Xenova/bge-small-zh-v1.5", dims: 512, dtype: "fp32", cacheDir: "", mirror: "https://hf-mirror.com/" }),
     minSimilarity: z.number().default(0.55)
@@ -407,7 +413,19 @@ export function normalizeSemantic(value) {
       ? DEFAULT_SEMANTIC.local.cacheDir
       : value.local.cacheDir;
     if (typeof cacheDir !== "string") {
-      fail(`semantic.local.cacheDir must be a string (empty string = use <stateRoot>/semantic/models), got ${String(cacheDir)}`);
+      fail(`semantic.local.cacheDir must be a string (empty string = use <dataRoot>/models), got ${String(cacheDir)}`);
+    }
+    // P0#3（0.4 审查报告）：手动目录校验——非空必须是绝对路径，且含 .. 片段一律
+    // 拒绝（不做折叠收缩：手动填的目录必须写规范形式，堵「../ 逃逸出缓存根」的
+    // 写法）。空串保持既有契约不变（= 使用 <dataRoot>/models）。错误沿用本模块
+    // fail 的 INVALID_INPUT 口径；防御二道闸在 semantic/local.mjs localModelDir。
+    if (cacheDir !== "") {
+      if (!isAbsolute(cacheDir)) {
+        fail(`semantic.local.cacheDir must be an absolute path (empty string = use <dataRoot>/models), got "${cacheDir}"`);
+      }
+      if (cacheDir.split(/[\\/]+/).includes("..")) {
+        fail(`semantic.local.cacheDir must not contain ".." path segments, got "${cacheDir}"`);
+      }
     }
     const mirror = value.local.mirror === undefined
       ? DEFAULT_SEMANTIC.local.mirror
@@ -491,6 +509,29 @@ function normalizeRoot(value, name) {
 }
 
 // ---------------------------------------------------------------------------
+// 默认根解析（0.4-S1 装完即用）
+// ---------------------------------------------------------------------------
+
+/**
+ * DSH 主目录：process.env.DSH_HOME 优先（非空字符串才采信），缺省 ~/.dsh。
+ * 写法照官方惯例（defaultOwnerStateFile：process.env.DSH_HOME || ~/.dsh）。
+ * Windows 上即用户主目录下的 .dsh（即 ~/.dsh），与现有部署路径一致，存量数据零迁移。
+ */
+export function defaultDshHome() {
+  const fromEnv = process.env.DSH_HOME;
+  return typeof fromEnv === "string" && fromEnv.length > 0 ? fromEnv : join(homedir(), ".dsh");
+}
+
+/** 两个根的默认落点：<DSH_HOME>/shiori-data 与 <DSH_HOME>/shiori-state（互不嵌套）。 */
+export function defaultPluginRoots() {
+  const home = defaultDshHome();
+  return {
+    dataRoot: join(home, "shiori-data"),
+    stateRoot: join(home, "shiori-state"),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // normalizePluginConfig
 // ---------------------------------------------------------------------------
 
@@ -517,6 +558,14 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
   let stateRoot = normalizeRoot(raw.stateRoot, "stateRoot");
   const rootsProvided = dataRoot !== null || stateRoot !== null;
 
+  // 0.4-S1 来源标记（reviewer P1）：必须在改写 null 之前算好——normalize 把 null
+  // 换成默认路径后「缺省 vs 显式」的信息就丢了。profileRoot 派生的根也属 default
+  // （宿主 bootstrap 缺省，不是用户显式配置）。
+  const rootsSource = Object.freeze({
+    dataRoot: dataRoot !== null ? "explicit" : "default",
+    stateRoot: stateRoot !== null ? "explicit" : "default",
+  });
+
   if (profileRoot !== undefined) {
     if (typeof profileRoot !== "string" || !isAbsolute(profileRoot)) {
       fail(`options.profileRoot, when provided, must be an absolute path`);
@@ -528,20 +577,23 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
     }
   }
 
-  if (rootsProvided || profileRoot !== undefined) {
-    if (dataRoot === null || stateRoot === null) {
-      fail(`dataRoot and stateRoot must both be provided explicitly once either is configured`);
-    }
-    const relation = textualRootRelation(dataRoot, stateRoot);
-    if (relation !== "disjoint") {
-      fail(`dataRoot and stateRoot must be absolute, disjoint and non-nested (${relation}: "${dataRoot}" / "${stateRoot}")`);
-    }
+  // 0.4-S1（reviewer 拍板）：null 根一律解析为 DSH_HOME 默认落点——各根独立解析
+  // 互不牵连（只显式给一个根时另一个取默认），显式配置优先，profileRoot 缺省优先于
+  // DSH_HOME 缺省。normalize 保持纯函数不触盘；目录创建（mkdir -p）在 verifyPluginRoots。
+  if (dataRoot === null || stateRoot === null) {
+    const defaults = defaultPluginRoots();
+    if (dataRoot === null) dataRoot = normalizeRoot(defaults.dataRoot, "dataRoot");
+    if (stateRoot === null) stateRoot = normalizeRoot(defaults.stateRoot, "stateRoot");
+  }
+
+  const relation = textualRootRelation(dataRoot, stateRoot);
+  if (relation !== "disjoint") {
+    fail(`dataRoot and stateRoot must be absolute, disjoint and non-nested (${relation}: "${dataRoot}" / "${stateRoot}")`);
   }
   if (mode === "active") {
+    // 0.4-S1：根已全部解析（缺失走默认），「active 需显式双根」的拒绝分支不可达，
+    // 删除（reviewer 拍板）。启用按钮只写 mode:active + allowActive:true 即可工作。
     if (!allowActive) fail(`mode "active" requires allowActive === true`);
-    if (dataRoot === null || stateRoot === null) {
-      fail(`mode "active" requires both dataRoot and stateRoot to be configured`);
-    }
   }
 
   const ownerId = raw.ownerId === undefined ? "local" : requireNonEmptyString(raw.ownerId, "ownerId");
@@ -564,6 +616,7 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
     allowActive,
     dataRoot,
     stateRoot,
+    rootsSource,
     ownerId,
     defaultPersona,
     sessionPersonas: Object.freeze(sessionPersonas.map(Object.freeze)),
@@ -632,17 +685,27 @@ function textualRootRelation(a, b) {
 
 /**
  * apply 阶段统一真实路径校验：真实 link（junction/symlink）解析后仍要求绝对、
- * 互不嵌套。inert（两根皆 null）直接通过并标记。失败抛带 .code 的 Error。
+ * 互不嵌套；校验通过后对两个根 mkdir -p（0.4-S1：装完即用，目录在默认位置就绪）。
+ * 0.4-S1 起双根皆 null 不再返回 inert——解析为 <DSH_HOME>/shiori-data 与
+ * <DSH_HOME>/shiori-state 默认根（DSH_HOME 取 env，缺省 ~/.dsh），inert 不再因
+ * root 缺失触发。失败抛带 .code 的 Error（含可读的根目录创建诊断）。
  *
  * @param {object} settings normalizePluginConfig 的返回值。
- * @returns {{inert: boolean, dataRoot: string|null, stateRoot: string|null}}
+ * @returns {{inert: boolean, dataRoot: string, stateRoot: string}}
  */
 export function verifyPluginRoots(settings) {
-  const { dataRoot, stateRoot } = settings;
+  let { dataRoot, stateRoot } = settings;
   if (dataRoot === null && stateRoot === null) {
-    return { inert: true, dataRoot: null, stateRoot: null };
+    // 0.4-S1：root 缺失 → 默认根（不再 inert）。默认落点 shiori-data / shiori-state
+    // 天然互不嵌套，但仍走同一条 link 解析 + 嵌套校验 + mkdir 路径，不设捷径。
+    // DSH_HOME 非绝对路径（手滑写相对值）在这里得到可读报错，而不是静默落 cwd。
+    const defaults = defaultPluginRoots();
+    dataRoot = normalizeRoot(defaults.dataRoot, "dataRoot");
+    stateRoot = normalizeRoot(defaults.stateRoot, "stateRoot");
   }
   if (dataRoot === null || stateRoot === null) {
+    // 防御（reviewer P3）：仅直构可达——normalize 与上方的双 null 兜底之后，正常
+    // 路径不可能出现半 null 根；直构 settings 未过 normalize 时在此拦截。
     fail(`verifyPluginRoots requires both roots to be configured`);
   }
   const resolvedData = resolveWithLinks(dataRoot);
@@ -650,6 +713,21 @@ export function verifyPluginRoots(settings) {
   const relation = textualRootRelation(resolvedData, resolvedState);
   if (relation !== "disjoint") {
     fail(`dataRoot and stateRoot overlap after resolving real links (${relation}: "${resolvedData}" / "${resolvedState}")`);
+  }
+  // 嵌套校验通过后才创建目录（盘根/嵌套等非法关系不会触发任何写盘）。
+  // 无条件 mkdir 是有意行为（0.4 装完即用，reviewer P3 确认口径）：shadow 态同样
+  // 在 apply 时把默认（或显式）目录创建就绪——空目录创建幂等、无副作用，用户打开
+  // 面板即可见具体路径，不必先点「启用」；mkdir -p 对已存在目录是 no-op。
+  try {
+    mkdirSync(resolvedData, { recursive: true });
+    mkdirSync(resolvedState, { recursive: true });
+  } catch (error) {
+    const wrapped = new Error(
+      `cannot create shiori root directories (dataRoot="${resolvedData}", stateRoot="${resolvedState}"): `
+      + `${error instanceof Error ? error.message : String(error)}。请检查磁盘与权限，或在配置中显式指定 dataRoot / stateRoot`,
+    );
+    wrapped.code = "INVALID_INPUT";
+    throw wrapped;
   }
   return { inert: false, dataRoot: resolvedData, stateRoot: resolvedState };
 }

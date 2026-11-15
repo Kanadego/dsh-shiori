@@ -1,6 +1,6 @@
 {
   "name": "dsh-shiori",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "DeepSeek Harness 的分层记忆插件：L0 人设卡常驻、L1 记忆核心+派生索引每轮注入、L2 Spark 卡片按触发词浮回、L3 专题按需展开，配套整理/遗忘与原生 web 面板。",
   "repository": {
     "type": "git",
@@ -26,6 +26,9 @@
   "type": "module",
   "icon": "./icon.png",
   "main": "index.mjs",
+  "bin": {
+    "dsh-shiori-admin": "./bin/admin.mjs"
+  },
   "exports": {
     ".": "./index.mjs",
     "./client": "./client/index.js",
@@ -55,6 +58,7 @@
   "files": [
     "index.mjs",
     "icon.png",
+    "bin",
     "src",
     "client",
     "cordis.patch.yml",
@@ -64,13 +68,14 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/core/*.test.mjs test/host/*.test.mjs test/storage/*.test.mjs test/service/*.test.mjs test/integration/*.test.mjs test/runtime/*.test.mjs test/completion/*.test.mjs test/acceptance/*.test.mjs test/sparks/*.test.mjs test/organize/*.test.mjs test/forgetting/*.test.mjs test/plugin/*.test.mjs test/semantic/*.test.mjs",
+    "test": "node scripts/run-tests.mjs dev -- test/core/*.test.mjs test/host/*.test.mjs test/storage/*.test.mjs test/service/*.test.mjs test/integration/*.test.mjs test/runtime/*.test.mjs test/completion/*.test.mjs test/acceptance/*.test.mjs test/sparks/*.test.mjs test/organize/*.test.mjs test/forgetting/*.test.mjs test/plugin/*.test.mjs test/semantic/*.test.mjs",
+    "test:release": "node scripts/run-tests.mjs release",
     "test:p5": "node --test test/plugin/*.test.mjs",
     "verify:package": "node scripts/verify-package.mjs",
     "test:integration": "node --test test/service/*.test.mjs test/integration/*.test.mjs",
     "test:p1": "node --test test/runtime/*.test.mjs test/completion/*.test.mjs test/acceptance/*.test.mjs",
     "test:p3": "node --test test/organize/*.test.mjs",
-    "test:p4": "node --test test/forgetting/*.test.mjs"
+    "test:p4": "node scripts/run-tests.mjs dev -- test/forgetting/*.test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-system-prompt": ">=0.2.1-rc.2 <0.3.0",
