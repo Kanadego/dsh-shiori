@@ -14,25 +14,27 @@
 //     实际使用的 submission id 写入测试名并经 P_SUBMISSION_ID 暴露给 REPORT/RESULT。
 //   - boot 终止语义（owner review R5：不依赖外部 timeout 命令——GNU timeout 在 Windows
 //     PowerShell 下解析为 timeout.exe，语义完全不同）：Node 进程内轮询 marker / 存活窗口，
-//     由本测试显式终止子进程并核对 stderr。
+//     由本测试显式终止子进程并核对 stderr。限时 boot 三件套（boot / dsh / stderr 核查）
+//     抽至 test/fixtures/stage.mjs 共享脚手架，与发版层共用。
 //   - 不触真实 profile / 记忆 / 凭据；不联网装依赖；不发模型请求；3080 不受影响。
 //
 // 本测试耗时较长（多次真实 pnpm add/remove + 限时 boot），属于发布闸门级用例。
+// 0.4 分层收口二期：combined 的「boot 存活窗口」用例（timeout 90s，dev 层最大
+// 耗时项）已拆至 test/release/dsh-boot-soak.test.mjs（发版门禁层，断言原样搬移）。
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync, spawn } from "node:child_process";
+import {
+  resolveDshBin, findLatestPSubmission, treeHasRealPController, createDshStageRoot,
+  seedBuildApprovals, stagePackageCopy, dshExec, bootDsh, assertCleanBootStderr,
+  removeDshStageRoot,
+} from "../fixtures/stage.mjs";
 
 const WORKQ = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const NPM_GLOBAL = process.env.DSH_NPM_GLOBAL
-  ?? join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "npm", "node_modules");
-const DSH_BIN = process.env.DSH_BIN ?? join(NPM_GLOBAL, "@deepseek-ai", "dsh", "lib", "bin.js");
-const BOOT_SOAK_MS = 30_000;
-const BOOT_MARKER_POLL_MS = 250;
+const DSH_BIN = resolveDshBin();
 
 if (!existsSync(DSH_BIN)) {
   test("dsh-smoke：本机无 DSH 0.2.1-rc.2 安装，按契约如实 not-run", () => {
@@ -40,200 +42,36 @@ if (!existsSync(DSH_BIN)) {
   });
 }
 
-// owner 归档的 immutable P 提交（board submissions 目录）；绝不读 P 工作副本。
-// R6 追加：取「最新」提交（attempt 降序 → createdAt 降序），不再硬编码 a1-；
-// SHIORI_P_SUBMISSION 环境变量可显式指定提交 id（owner 审计用）。清单校验
-// controller.mjs + protocol.mjs 必须同时在提交内。找不到时返回 null，combined 路径如实 not-run。
-function findLatestPSubmission() {
-  const submissionsDir = join(WORKQ, "..", "..", "submissions", "P");
-  const explicit = process.env.SHIORI_P_SUBMISSION;
-  if (explicit) {
-    const files = join(submissionsDir, explicit, "files");
-    if (!existsSync(join(files, "src", "plugin", "controller.mjs")) || !existsSync(join(files, "src", "plugin", "protocol.mjs"))) {
-      return null;
-    }
-    return { id: explicit, files };
-  }
-  if (!existsSync(submissionsDir)) return null;
-  const candidates = [];
-  for (const entry of readdirSync(submissionsDir)) {
-    const files = join(submissionsDir, entry, "files");
-    if (!existsSync(join(files, "src", "plugin", "controller.mjs"))) continue;
-    if (!existsSync(join(files, "src", "plugin", "protocol.mjs"))) continue;
-    let attempt = 0;
-    let createdAt = "";
-    try {
-      const manifest = JSON.parse(readFileSync(join(submissionsDir, entry, "manifest.json"), "utf8"));
-      attempt = Number(manifest.attempt) || 0;
-      createdAt = String(manifest.createdAt ?? "");
-    } catch { /* 清单不可解析按最旧处理 */ }
-    candidates.push({ id: entry, files, attempt, createdAt });
-  }
-  candidates.sort((a, b) => (b.attempt - a.attempt) || b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
-  return candidates[0] ?? null;
-}
-
-function sleep(ms) {
-  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
-}
-
 function runSuite() {
-  const pSubmission = findLatestPSubmission();
+  const pSubmission = findLatestPSubmission(WORKQ);
   const pFiles = pSubmission ? pSubmission.files : null;
   // R6 追加第 4 条：树形态判定与 package.test 一致——owner 合并树里 P 的真实
   // controller/protocol 已在 WORKQ（无 stub 标记），combined 路径直接用树本体
   // 打包（不写 stub、不依赖 submissions 目录可达）；单槽提交树则仍要求
   // immutable P 提交可解析，否则 combined 如实 not-run。
-  const workqControllerPath = join(WORKQ, "src", "plugin", "controller.mjs");
-  const treeHasRealP = existsSync(workqControllerPath)
-    && existsSync(join(WORKQ, "src", "plugin", "protocol.mjs"))
-    && !readFileSync(workqControllerPath, "utf8").includes("SYNTHETIC TEST STUB");
+  const treeHasRealP = treeHasRealPController(WORKQ);
   // 实际使用的 P 来源（写进 combined 测试名；RESULT.json 引用）
   globalThis.P_SUBMISSION_ID = pSubmission ? pSubmission.id : (treeHasRealP ? "worktree(merged tree)" : null);
   let smoke = null;
   let combined = null;
 
-  const hostEnv = (root) => ({
-    ...process.env,
-    DSH_HOME: root.home,
-    DSH_AGENTS_HOME: root.home,
-    SystemRoot: process.env.SystemRoot ?? "C:\\Windows",
-  });
-
-  const dsh = (root, profile, args, { expectCode = 0 } = {}) => {
-    let stdout = "";
-    let stderr = "";
-    let code = 0;
-    try {
-      stdout = execFileSync(process.execPath, [DSH_BIN, ...args], {
-        cwd: root.cwd,
-        encoding: "utf8",
-        maxBuffer: 64 * 1024 * 1024,
-        timeout: 240_000,
-        env: hostEnv(root),
-      });
-    } catch (error) {
-      code = error.status ?? 1;
-      stdout = String(error.stdout ?? "");
-      stderr = String(error.stderr ?? "");
-    }
-    if (expectCode !== null) assert.equal(code, expectCode, `dsh ${args.join(" ")} exit=${code}\nstderr: ${stderr.slice(0, 2000)}`);
-    return { code, stdout, stderr };
-  };
-
-  // Node 进程内限时 boot（显式终止语义，owner review R5）：
-  //   reached-marker：marker 文件出现 → 立即终止子进程 → 成功（single 路径用）
-  //   soaked：        存活窗口内进程未退出且 stderr 干净 → 终止 → 成功（combined 路径用，
-  //                   P 真实 controller 不产生 marker，以「无激活失败/无崩溃签名」为准）
-  //   exited-early：  进程自行退出 → 失败（附 exit code 与 stderr）
-  //   timeout：       marker 未出现且进程仍存活超过窗口 → 失败
-  const boot = async (root, profile, { markerPath = null } = {}) => {
-    const child = spawn(process.execPath, [DSH_BIN, "--profile", profile, "--", "--help"], {
-      cwd: root.cwd,
-      env: hostEnv(root),
-      stdio: ["ignore", "ignore", "pipe"],
-      windowsHide: true,
-    });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-    const deadline = Date.now() + BOOT_SOAK_MS;
-    let outcome = null;
-    while (Date.now() < deadline) {
-      if (markerPath && existsSync(markerPath)) { outcome = "reached-marker"; break; }
-      if (child.exitCode !== null || child.signalCode !== null) { outcome = "exited-early"; break; }
-      await sleep(BOOT_MARKER_POLL_MS);
-    }
-    if (outcome === null) outcome = markerPath ? "timeout" : "soaked";
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill();
-    }
-    await new Promise((resolveExit) => {
-      if (child.exitCode !== null || child.signalCode !== null) resolveExit();
-      else {
-        child.once("exit", resolveExit);
-        setTimeout(resolveExit, 5000);
-      }
-    });
-    return { outcome, stderr, exitCode: child.exitCode, signal: child.signalCode };
-  };
-
-  const assertCleanBootStderr = (result, context) => {
-    assert.ok(!/did not activate/i.test(result.stderr), `${context}: activation failure on stderr:\n${result.stderr.slice(0, 2000)}`);
-    assert.ok(!/Unhandled|TypeError|ReferenceError|SyntaxError/.test(result.stderr),
-      `${context}: crash signature on stderr:\n${result.stderr.slice(0, 2000)}`);
-  };
-
-  const packTgz = (pkgDir) => {
-    execFileSync("npm pack --silent", { cwd: pkgDir, encoding: "utf8", shell: true, windowsHide: true });
-    // 版本号从 package.json 读，别把文件名钉死（v0.2.0 发版时钉死过一次，smoke 全红）
-    const { version } = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
-    return join(pkgDir, `dsh-shiori-${version}.tgz`);
-  };
-
-  const stagePackageCopy = (targetPkg, { overlayP = false, writeStubs = false } = {}) => {
-    // 工作副本 → temp 包副本（不含 REPORT/RESULT/test/collab；stub 只写入副本）
-    for (const entry of ["package.json", "index.mjs", "cordis.patch.yml", "README.md", "src", "client", "docs"]) {
-      cpSync(join(WORKQ, entry), join(targetPkg, entry), { recursive: true });
-    }
-    if (overlayP && pFiles) {
-      // combined：叠加 owner 归档的 immutable P 提交生产文件；绝不写 stub
-      cpSync(pFiles, targetPkg, { recursive: true });
-    }
-    if (writeStubs) {
-      writeFileSync(join(targetPkg, "src", "plugin", "controller.mjs"), STUB_CONTROLLER);
-      writeFileSync(join(targetPkg, "src", "plugin", "protocol.mjs"), STUB_PROTOCOL);
-    }
-    return packTgz(targetPkg);
-  };
-
+  // 薄包装：保持原有调用点形状；实现统一在 test/fixtures/stage.mjs（与发版层共用）
+  const dsh = (root, profile, args, { expectCode = 0 } = {}) => dshExec({ dshBin: DSH_BIN, root, args, expectCode });
+  const boot = (root, profile, { markerPath = null } = {}) => bootDsh({ dshBin: DSH_BIN, root, profile, markerPath });
   const profileManifest = (root) => JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-
-  // F1b：@huggingface/transformers 硬依赖 onnxruntime-node / protobufjs / sharp，三个包都带
-  // 安装脚本。pnpm 在非交互运行里一律拒跑未审批的脚本并整体失败（ERR_PNPM_IGNORED_BUILDS），
-  // 交互式 GUI 则是弹「允许运行安装脚本：{names}」再重试（dsh-plugin-manager 的
-  // build-approval 把结果写进 profile 的 pnpm-workspace.yaml allowBuilds）。
-  // 本测试走 CLI，所以把那次审批预先落盘，等价于用户在 GUI 里点了「允许」。
-  const BUILD_APPROVALS = ["onnxruntime-node", "protobufjs", "sharp"];
-  const seedBuildApprovals = (profileDir) => {
-    mkdirSync(profileDir, { recursive: true });
-    const file = join(profileDir, "pnpm-workspace.yaml");
-    const lines = [
-      "packages:",
-      "  - .",
-      "nodeLinker: hoisted",
-      "autoInstallPeers: false",
-      "allowBuilds:",
-      ...BUILD_APPROVALS.map((name) => `  ${name}: true`),
-      "",
-    ];
-    writeFileSync(file, lines.join("\n"), "utf8");
-    return file;
-  };
+  const stagePkgCopy = (targetPkg, opts = {}) =>
+    stagePackageCopy({ workQ: WORKQ, targetPkg, pFiles, ...opts });
 
   before(() => {
-    smoke = { root: mkdtempSync(join(tmpdir(), "shiori-q-dsh-smoke-")) };
-    smoke.home = join(smoke.root, "home");
-    smoke.agents = join(smoke.root, "agents");
-    smoke.cwd = join(smoke.root, "cwd");
-    smoke.pkg = join(smoke.root, "pkg");
-    smoke.data = join(smoke.root, "data");
-    smoke.state = join(smoke.root, "state");
+    smoke = createDshStageRoot("shiori-q-dsh-smoke-");
     smoke.profile = join(smoke.home, "profiles", "shiori-smoke");
-    for (const dir of [smoke.home, smoke.agents, smoke.cwd, smoke.pkg, smoke.data, smoke.state]) mkdirSync(dir, { recursive: true });
-    smoke.tgz = stagePackageCopy(smoke.pkg, { writeStubs: true });
+    smoke.tgz = stagePkgCopy(smoke.pkg, { writeStubs: true, stubs: { controller: STUB_CONTROLLER, protocol: STUB_PROTOCOL } });
     seedBuildApprovals(smoke.profile);
 
     if (pFiles || treeHasRealP) {
-      combined = { root: mkdtempSync(join(tmpdir(), "shiori-q-dsh-combined-")) };
-      combined.home = join(combined.root, "home");
-      combined.agents = join(combined.root, "agents");
-      combined.cwd = join(combined.root, "cwd");
-      combined.pkg = join(combined.root, "pkg");
-      combined.data = join(combined.root, "data");
-      combined.state = join(combined.root, "state");
+      combined = createDshStageRoot("shiori-q-dsh-combined-");
       combined.profile = join(combined.home, "profiles", "shiori-smoke-p");
-      for (const dir of [combined.home, combined.agents, combined.cwd, combined.pkg, combined.data, combined.state]) mkdirSync(dir, { recursive: true });
-      combined.tgz = stagePackageCopy(combined.pkg, { overlayP: Boolean(pFiles) });
+      combined.tgz = stagePkgCopy(combined.pkg, { overlayP: Boolean(pFiles) });
       seedBuildApprovals(combined.profile);
       // R6 追加第 4 条：combined 必须真的加载 P 的 controller，不许「声明 combined 却跑 stub」。
       const combinedController = readFileSync(join(combined.pkg, "src", "plugin", "controller.mjs"), "utf8");
@@ -247,9 +85,7 @@ function runSuite() {
   });
 
   after(() => {
-    for (const stage of [smoke, combined]) {
-      if (stage?.root) rmSync(stage.root, { recursive: true, force: true });
-    }
+    for (const stage of [smoke, combined]) removeDshStageRoot(stage);
   });
 
   // ---------------------------------------------------------------------------
@@ -308,6 +144,9 @@ function runSuite() {
 
   // ---------------------------------------------------------------------------
   // combined 路径（owner 归档 immutable P 提交，无 stub 替换；不可用时如实 not-run）
+  //
+  // 「boot 存活窗口」用例（timeout 90s，dev 层最大耗时项）已拆至
+  // test/release/dsh-boot-soak.test.mjs（发版门禁层，断言原样搬移）。
   // ---------------------------------------------------------------------------
 
   const combinedAvailable = Boolean(pFiles || treeHasRealP);
@@ -326,14 +165,6 @@ function runSuite() {
     const dump = dsh(combined, "shiori-smoke-p", ["--profile", "shiori-smoke-p", "--dump-config"]);
     assert.ok(dump.stdout.includes("id: shiori") && dump.stdout.includes("name: dsh-shiori"),
       "combined composed tree contains the shiori entry (real P controller + Q shell)");
-  });
-
-  test(`${combinedLabel}：boot 存活窗口（inert shadow，无激活失败/无崩溃签名，由本测试显式终止）`, { timeout: 90_000 }, async () => {
-    if (!combinedAvailable) return;
-    const result = await boot(combined, "shiori-smoke-p");
-    assert.ok(result.outcome === "soaked" || result.outcome === "reached-marker",
-      `combined boot outcome=${result.outcome} exit=${result.exitCode} signal=${result.signal}\nstderr: ${result.stderr.slice(0, 2000)}`);
-    assertCleanBootStderr(result, "combined boot");
   });
 }
 

@@ -251,7 +251,7 @@ dsh-shiori-admin destroy --data <path> [--yes]
 | `topic_append` | 追加到指定专题 | topic、section、content | 专题不存在会报错，先用 topic_create |
 | `memory_list_topics` | 列专题（含 revision token） | — | 合并 / 编辑前拿权威 token |
 | `topic_create` | 新建专题 | topic、title | 已存在返回 alreadyExists |
-| `group_manage` | 管理专题分组：列出（计数只认主组）/ 建组 / 改名 / 删除 / 迁移成员 | action | 删除非空组需 `migrateTo`：成员先整体改挂、组条目后删（两次提交，见工具描述的并发边界） |
+| `group_manage` | 管理专题分组：列出（计数只认主组，并返回悬空引用 `dangling`）/ 建组 / 改名 / 删除 / 迁移成员 / 修复悬空（repair） | action | 删除非空组需 `migrateTo`：成员先整体改挂、组条目后删（两次提交，见工具描述的并发边界）；`repair` 单次 CAS 提交清掉 `dangling` 里的悬空挂载，返回 cleaned/remaining；组清单为空且仍有挂载时以 INVALID_STATE 拒绝（先 `group_manage action=create` 初始化组清单） |
 | `spark_save` | 存 Spark 卡 | content、title、triggers | triggers 必填（空数组 = 不唤醒） |
 | `spark_read` | 读卡 | id | 可读归档卡 |
 | `spark_update` | 改卡（含 links） | id + 变更字段 | links 的 target 必须在库内 |

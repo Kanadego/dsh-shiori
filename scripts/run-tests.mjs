@@ -1,14 +1,18 @@
 // 测试分层运行器：dev 层（npm test）/ release 门禁层（npm run test:release）。
 //
-// 分层机制（0.4-REVIEW 附录 C）：不靠文件名约定猜，用「目录清单 + 显式排除清单」
-// 在这一个脚本里集中决策，并带全覆盖守卫——凡 test/ 下发现的 *.test.mjs，
-// 必须恰好归入某一层，否则直接报错退出（新增文件/新目录漏注册都会被拦下，
-// 不会静默漏跑）。
+// 分层机制（0.4-REVIEW 附录 C）：不靠文件名约定猜，用目录清单在这一个脚本里
+// 集中决策，并带全覆盖守卫——凡 test/ 下发现的 *.test.mjs，必须恰好归入某一层，
+// 否则直接报错退出（新增文件/新目录漏注册都会被拦下，不会静默漏跑）。
 //
-//   dev     = LAYER_DIRS 内全部测试文件，剔除 EXCLUDE_FROM_DEV（发版层专属文件）
+//   dev     = LAYER_DIRS 内全部测试文件
 //   release = dev ∪ RELEASE_DIRS 内全部测试文件（即「开发层 + 发版层」全量）
 //
-// 用法：node scripts/run-tests.mjs <dev|release> [选择器...]
+// 慢测试 / 发版闸门用例直接放进 test/release/ 目录归层（0.4 分层收口二期起
+// 不再维护手写的 dev 排除清单——挪文件即是归层，不会忘改常量）。
+//
+// 用法：node scripts/run-tests.mjs <dev|release> [--collect-only] [选择器...]
+// --collect-only：只跑全覆盖守卫并打印收集到的测试文件清单（不运行任何测试），
+//                 供 verify:package 的「包内可收集」tarball 校验复用。
 // 选择器两种写法（可混用，都是收窄文件集，不影响守卫）：
 //   test/<dir>/*.test.mjs  —— 旧式域 glob（npm test 脚本里原样保留，映射到目录）
 //   <子串>                 —— 对 test/ 下相对路径做子串过滤（如 forgetting）
@@ -30,10 +34,9 @@ const LAYER_DIRS = [
 /** 发版门禁层专属目录：仅 test:release 收集。 */
 const RELEASE_DIRS = ["release"];
 
-/** 开发层显式排除清单（精确路径，整文件进发版层）。 */
-const EXCLUDE_FROM_DEV = ["forgetting/stage-regression.test.mjs"];
-
 const mode = process.argv[2];
+const rawArgs = process.argv.slice(3);
+const collectOnly = rawArgs.includes("--collect-only");
 
 /** 解析选择器：test/<dir>/... 形式 → 目录收窄；其余 → 子串过滤。 */
 function parseSelectors(args) {
@@ -91,13 +94,6 @@ function inDirs(rel, dirs) {
 // ---------------------------------------------------------------------------
 
 const all = discoverAll();
-const excluded = [];
-for (const ex of EXCLUDE_FROM_DEV) {
-  if (!all.includes(ex)) {
-    fail(`EXCLUDE_FROM_DEV 里的 "${ex}" 在 test/ 下不存在——排除清单写错或文件被改名，拒绝猜测，请修正清单。`);
-  }
-  excluded.push(ex);
-}
 
 const devCandidates = all.filter((rel) => inDirs(rel, LAYER_DIRS));
 const releaseOnly = all.filter((rel) => !inDirs(rel, LAYER_DIRS) && inDirs(rel, RELEASE_DIRS));
@@ -107,13 +103,13 @@ if (unlayered.length > 0) {
   fail(`发现未分层的测试文件（不在 LAYER_DIRS 也不在 RELEASE_DIRS），为防漏跑拒绝运行：\n  ${unlayered.join("\n  ")}\n请把它们登记进 scripts/run-tests.mjs 的对应目录清单。`);
 }
 
-const dev = devCandidates.filter((rel) => !excluded.includes(rel));
+const dev = devCandidates;
 
 // ---------------------------------------------------------------------------
 // 按模式选层（release = dev 全量 + 发版层专属目录）
 // ---------------------------------------------------------------------------
 
-const { dirs: selDirs, substrings: selSubs } = parseSelectors(process.argv.slice(3));
+const { dirs: selDirs, substrings: selSubs } = parseSelectors(rawArgs.filter((arg) => arg !== "--collect-only"));
 
 let files;
 if (mode === "dev") {
@@ -122,11 +118,10 @@ if (mode === "dev") {
   if (releaseOnly.length === 0) {
     fail("发版门禁层（test/release/）没有收集到任何测试文件——门禁空转，拒绝运行。");
   }
-  // release 层 = 开发层候选全量（含 EXCLUDE_FROM_DEV——那只是 dev 层的排除）
-  //             + 发版层专属目录。守卫已确保 all 里没有未分层文件。
+  // release 层 = 开发层全量 + 发版层专属目录。守卫已确保 all 里没有未分层文件。
   files = [...devCandidates, ...releaseOnly];
 } else {
-  fail(`用法：node scripts/run-tests.mjs <dev|release> [选择器...]，收到 mode="${mode ?? ""}"`);
+  fail(`用法：node scripts/run-tests.mjs <dev|release> [--collect-only] [选择器...]，收到 mode="${mode ?? ""}"`);
 }
 
 if (selDirs.length > 0 || selSubs.length > 0) {
@@ -141,8 +136,17 @@ if (selDirs.length > 0 || selSubs.length > 0) {
   }
 }
 
-const layerTag = mode === "release" ? `release（开发层 ${devCandidates.length} + 发版层专属 ${releaseOnly.length}）` : `dev（发版层专属 ${excluded.length} 个文件 + test/release/ 整目录已排除）`;
+const layerTag = mode === "release" ? `release（开发层 ${devCandidates.length} + 发版层专属 ${releaseOnly.length}）` : `dev（test/release/ 整目录已排除）`;
 console.error(`[run-tests] ${mode} 层：${files.length} 个测试文件（${layerTag}）`);
+
+if (collectOnly) {
+  // --collect-only：守卫已跑完（走到这里说明全覆盖断言通过），打印清单即收，
+  // 不运行任何测试。verify:package 的 tarball 校验靠这一步证明「包内测试可收集」。
+  console.log(`[run-tests] collect-only：${mode} 层收集到 ${files.length} 个测试文件（守卫通过，未运行）：`);
+  for (const rel of files) console.log(`  ${rel}`);
+  console.log(`[run-tests] collect-only OK`);
+  process.exit(0);
+}
 
 const res = spawnSync(process.execPath, ["--test", ...files.map((rel) => join(TEST_ROOT, rel))], {
   stdio: "inherit",

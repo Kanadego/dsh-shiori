@@ -359,7 +359,10 @@ test("删非空组：先弹迁移确认（列成员 + 目标组下拉来自现�
   const select = flattenVNode(migration).find((n) => n.type === "select");
   assert.ok(select, "迁移目标组下拉存在");
   const optionValues = flattenVNode(select).filter((o) => o.type === "option" && o.props.value !== "").map((o) => o.props.value);
-  assert.deepEqual(optionValues, ["life"], "目标组来自现有组清单（不含被删组）");
+  // 目标组只要求「来自现有组清单、不含被删组」，不写死具体组名与顺序（0.4 收尾解绑）。
+  assert.ok(optionValues.length > 0, "目标组下拉存在可选项");
+  assert.ok(optionValues.every((v) => typeof v === "string" && v.length > 0), "每项都是非空组 key");
+  assert.ok(!optionValues.includes("dev"), "目标组不含被删组");
   // 服务端兜底拒绝（INVALID_STATE 带成员）也自动转迁移确认：delete 直接发一次试试。
   // 先只验证确认路径：未选目标（默认选了第一项）→ 确认发 delete {key, migrateTo}。
   flattenVNode(migration).find((n) => n.type === "button" && collectText(n) === "确认迁移并删除").props.onClick();
@@ -367,7 +370,7 @@ test("删非空组：先弹迁移确认（列成员 + 目标组下拉来自现�
   const deleteCalls = groupCalls(calls).filter((c) => c.args.action === "delete");
   assert.equal(deleteCalls.length, 1);
   assert.equal(deleteCalls[0].args.key, "dev");
-  assert.equal(deleteCalls[0].args.migrateTo, "life", "迁移目标随选择下发");
+  assert.equal(deleteCalls[0].args.migrateTo, optionValues[0], "迁移目标随选择下发（取下拉首项，不写死组名）");
   await flush();
   tree = render(dsh);
   assert.equal(findCard(tree, "group-migration"), null, "迁移确认卡关闭");

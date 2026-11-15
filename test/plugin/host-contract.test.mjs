@@ -162,6 +162,8 @@ test("真实 defineTool：17 工具 output schema 编译（子集非法即抛）
     // S3：group_manage 真实建组 + 列举（groups.json 走真实 CAS 写）。
     ["group_manage", { action: "create", key: "dev", title: "开发与配置", summary: "DSH / 插件 / 发版", order: 10 }],
     ["group_manage", { action: "list" }],
+    // 0.4 收尾：repair 成功回执（cleaned/remaining）同样过真实输出 schema。
+    ["group_manage", { action: "repair" }],
     ["spark_read", null],
     ["spark_update", null],
     ["spark_graph", {}],
@@ -175,6 +177,14 @@ test("真实 defineTool：17 工具 output schema 编译（子集非法即抛）
     const violations = validateJsonSchemaValue(compiled.get(name).output.schema, value, "value");
     assert.deepEqual(violations, [], `${name} output must pass the real runner schema: ${JSON.stringify(violations)}`);
   }
+
+  // 0.4 收尾：successCases 的 schema 校验对可选字段没有判别力——repair 回执
+  // 必须真实带上 cleaned/remaining（空修复为 0），再单独重放一次核对字段在场。
+  const repaired = await compiled.get("group_manage").execute(
+    { action: "repair" }, { agent: { session: { id: "s-real" } } },
+  );
+  assert.equal(repaired.cleaned, 0);
+  assert.equal(repaired.remaining, 0);
 
   // spark_forget / spark_feedback / spark_forget(supersede) 需要两张卡。
   const second = await compiled.get("spark_save").execute(

@@ -1,8 +1,9 @@
 // dsh-shiori 包清单静态核查（只读，不修改、不联网、不发布）。
 // 可独立运行：npm run verify:package；亦被 test/plugin/package.test.mjs 复用。
 
-import { existsSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -50,7 +51,12 @@ export function checkPackageJson(pkg) {
   expect(pkg.scripts?.["test:p1"] && pkg.scripts?.["test:p3"] && pkg.scripts?.["test:p4"],
     "old domain scripts (p1/p3/p4) must be preserved");
 
-  for (const forbidden of [/phase\d/i, /collab/i, /\/test\//, /_backup/i, /REPORT/i, /RESULT/i]) {
+  // 0.4 分层收口二期：包内可测——scripts/（run-tests 运行器）与 test/（测试本体）
+  // 必须随包发布，装包后 npm test 才有运行器可找。
+  expect(pkg.files.includes("scripts"), 'files must include "scripts" (in-package test runner)');
+  expect(pkg.files.includes("test"), 'files must include "test" (in-package tests)');
+  // 仍禁止的命名残留（phase/collab/备份/结果文件）；test 已转为有意纳入，不再排除
+  for (const forbidden of [/phase\d/i, /collab/i, /_backup/i, /REPORT/i, /RESULT/i]) {
     expect(!pkg.files.some((entry) => forbidden.test(entry)), `files must not include ${forbidden}`);
   }
 
@@ -195,7 +201,14 @@ export function checkImports(root = ROOT, { mode = "single", pRoot = null } = {}
 
 export function checkTarball(root = ROOT) {
   const problems = [];
-  const required = ["package.json", "index.mjs", "client/index.js", "cordis.patch.yml", "src/plugin/config.mjs", "src/plugin/client-rpc.mjs", "src/core/config.mjs"];
+  const required = [
+    "package.json", "index.mjs", "client/index.js", "cordis.patch.yml",
+    "src/plugin/config.mjs", "src/plugin/client-rpc.mjs", "src/core/config.mjs",
+    // 包内可测（0.4 分层收口二期）：运行器 + 共享脚手架 + dev/release 两层样本
+    "scripts/run-tests.mjs", "scripts/verify-package.mjs",
+    "test/fixtures/stage.mjs", "test/forgetting/store.test.mjs",
+    "test/release/stage-regression.test.mjs",
+  ];
   let files = null;
   try {
     const stdout = execFileSync("npm pack --dry-run --json", { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024, shell: true, windowsHide: true });
@@ -208,13 +221,109 @@ export function checkTarball(root = ROOT) {
   for (const file of required) {
     if (!names.has(file)) problems.push(`tarball missing required file: ${file}`);
   }
+  // scripts/ 与 test/ 现在是有意纳入的（包内可测）；仍禁止 phase/collab/备份/
+  // node_modules 混入，docs 只带 plugin 子目录。
   for (const name of names) {
-    if (/^(phase\d|collab|test|_backup|node_modules|docs\/(?!plugin))/i.test(name)) {
+    if (/^(phase\d|collab|_backup|node_modules|docs\/(?!plugin))/i.test(name)) {
       problems.push(`tarball must not include: ${name}`);
     }
     if (/REPORT\.md|RESULT\.json|\.tgz$|\.log$/i.test(name)) problems.push(`tarball must not include: ${name}`);
   }
   return { name: "tarball", ok: problems.length === 0, detail: problems, files: [...names].sort() };
+}
+
+// ---------------------------------------------------------------------------
+// 5b. tarball 解包后包内测试可被运行器收集（不真跑全量）
+//
+// 真实 npm pack → tar 解包到临时目录 → 在解包目录里执行
+// `node scripts/run-tests.mjs dev --collect-only`：该模式只跑 run-tests 的
+// 全覆盖守卫并打印收集清单即退出（不运行任何测试），证明装包的人手里那份
+// test/scripts 能被包自带的运行器完整收集（dev 层文件数须高于地板值）。
+// ---------------------------------------------------------------------------
+
+// dev 层测试文件数地板：实测 91，留一成余量——拦得住「测试文件成批消失」，
+// 也不会因为删一两个文件就误报。
+export const COLLECT_FLOOR = 80;
+
+// 与 scripts/run-tests.mjs 的 LAYER_DIRS 保持一致（run-tests 是直接执行的脚本，
+// 不能 import 复用；此处为验收显式断言用的目录清单副本）。
+const LAYER_DIRS = [
+  "core", "host", "storage", "service", "integration", "runtime", "completion",
+  "acceptance", "sparks", "organize", "forgetting", "plugin", "semantic",
+];
+
+// 解包后必须存在的「包内可测」硬证据（owner review 口径 q-43e1a0ca62aa1859 第 3 条）：
+// 运行器 + 核查脚本 + 共享脚手架 + 测试引用的冻结夹具。
+const COLLECT_MUST_EXIST = [
+  "scripts/run-tests.mjs",
+  "scripts/verify-package.mjs",
+  "test/fixtures/stage.mjs",
+  "test/fixtures/frozen/G/a2-226d3f0e-77ea-4a4c-b097-ad6483ebc806/files/src/sparks/store.mjs",
+];
+
+export function checkTarballCollect(root = ROOT) {
+  const problems = [];
+  let collected = 0;
+  const work = mkdtempSync(join(tmpdir(), "shiori-verify-collect-"));
+  try {
+    let tgzName = null;
+    try {
+      const stdout = execFileSync(`npm pack --json --pack-destination "${work}"`, { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024, shell: true, windowsHide: true });
+      const parsed = JSON.parse(stdout);
+      tgzName = (Array.isArray(parsed) ? parsed[0]?.filename : parsed.filename) ?? null;
+    } catch (error) {
+      // npm 的实际报错在 stderr 里；message 只有 "Command failed: ..." 一行，优先取 stderr 尾部。
+      const stderr = error?.stderr == null ? "" : String(error.stderr).trim();
+      const reason = stderr ? stderr.slice(-500) : String(error.message).split("\n")[0];
+      return { name: "tarball collect", ok: false, detail: [`npm pack failed: ${reason}`], collected };
+    }
+    if (!tgzName) return { name: "tarball collect", ok: false, detail: ["npm pack --json returned no filename"], collected };
+    const pkgDir = join(work, "package");
+    // tar 参数一律用相对路径（cwd=work）：绝对路径里的盘符冒号会被 GNU tar
+    // 当成「远程主机」而拒解（"Cannot connect to C:"）。npm tarball 自带顶层
+    // package/ 目录，直接解到 work 根即可，不要再套一层。
+    try {
+      execFileSync("tar", ["-xzf", tgzName], { cwd: work, windowsHide: true });
+    } catch (error) {
+      // 解包失败也要走「返回 problems」的约定，不能把异常抛给调用方。
+      return { name: "tarball collect", ok: false, detail: [`tar extract failed: ${String(error.message).split("\n")[0]}`], collected };
+    }
+    // 验收硬证据：运行器在包里且语法可加载、13 个层目录齐全、被引用夹具在位
+    for (const rel of COLLECT_MUST_EXIST) {
+      if (!existsSync(join(pkgDir, rel))) problems.push(`unpacked tarball missing: ${rel}`);
+    }
+    for (const dir of LAYER_DIRS) {
+      if (!existsSync(join(pkgDir, "test", dir))) problems.push(`unpacked tarball missing test layer dir: test/${dir}/`);
+    }
+    const syntax = spawnSync(process.execPath, ["--check", "scripts/run-tests.mjs"], { cwd: pkgDir, encoding: "utf8", windowsHide: true });
+    if (syntax.status !== 0) {
+      problems.push(`node --check scripts/run-tests.mjs failed in unpacked package:\n${String(syntax.stderr ?? "").slice(-800)}`);
+    }
+    const res = spawnSync(process.execPath, ["scripts/run-tests.mjs", "dev", "--collect-only"], {
+      cwd: pkgDir, encoding: "utf8", windowsHide: true, timeout: 120_000,
+    });
+    const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+    if (res.status !== 0) {
+      // status 为 null 时是被信号杀掉的（含 spawnSync 超时），别只写 "signal" 看不出原因。
+      const why = res.status === null && res.signal
+        ? `collect 超时或被信号终止（signal=${res.signal}, timeout=120000ms）`
+        : `exit=${res.status}`;
+      problems.push(`in-package collect failed (${why}):\n${output.slice(-1500)}`);
+    } else {
+      const match = output.match(/collect-only：dev 层收集到 (\d+) 个测试文件/);
+      if (!match) {
+        problems.push(`collect output missing summary line:\n${output.slice(-800)}`);
+      } else {
+        collected = Number(match[1]);
+        if (collected < COLLECT_FLOOR) {
+          problems.push(`in-package dev collect found ${collected} test files — below floor ${COLLECT_FLOOR}`);
+        }
+      }
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+  return { name: "tarball collect", ok: problems.length === 0, detail: problems, collected };
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +354,10 @@ export function runChecks({ withTarball = true, mode = "single", pRoot = null, r
     checkImports(root, { mode, pRoot }),
     checkNoMachinePaths(root),
   ];
-  if (withTarball) checks.push(checkTarball(root));
+  if (withTarball) {
+    checks.push(checkTarball(root));
+    checks.push(checkTarballCollect(root));
+  }
   return checks;
 }
 

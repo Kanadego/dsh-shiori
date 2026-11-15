@@ -540,7 +540,8 @@ export function defaultPluginRoots() {
  *
  * @param {object} raw 宿主传入的原始配置（允许部分缺省）。
  * @param {{profileRoot?: string}} [options] 仅当宿主 bootstrap 证明可信时传入的
- *   profile 根；两者皆 null 时允许计算并列 shiori-data / shiori-state。默认不传。
+ *   profile 根；每个缺省的根单独用它派生 shiori-data / shiori-state（缺省优先于
+ *   DSH_HOME），显式配置的根不受影响。默认不传。
  * @returns {Readonly<object>} 冻结的完整设置对象（CONTRACTS §2 settings 形状）。
  */
 export function normalizePluginConfig(raw, { profileRoot } = {}) {
@@ -556,11 +557,14 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
 
   let dataRoot = normalizeRoot(raw.dataRoot, "dataRoot");
   let stateRoot = normalizeRoot(raw.stateRoot, "stateRoot");
-  const rootsProvided = dataRoot !== null || stateRoot !== null;
 
   // 0.4-S1 来源标记（reviewer P1）：必须在改写 null 之前算好——normalize 把 null
   // 换成默认路径后「缺省 vs 显式」的信息就丢了。profileRoot 派生的根也属 default
-  // （宿主 bootstrap 缺省，不是用户显式配置）。
+  // （宿主 bootstrap 缺省，不是用户显式配置）。边界（0.4 P4 返工，reviewer nit 7）：
+  // scope.mjs 的 default 自洽校验要求值等于 DSH_HOME 默认根——profileRoot 入口当前
+  // 不可达（config.mjs 顶部边界注释、index.mjs apply 都不传 options），一旦未来接入
+  // profileRoot，scope 的 default 值校验必须同步放宽（或给 rootsSource 引入第三来源），
+  // 否则 profileRoot 派生根会被 scope 误拒。
   const rootsSource = Object.freeze({
     dataRoot: dataRoot !== null ? "explicit" : "default",
     stateRoot: stateRoot !== null ? "explicit" : "default",
@@ -570,11 +574,10 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
     if (typeof profileRoot !== "string" || !isAbsolute(profileRoot)) {
       fail(`options.profileRoot, when provided, must be an absolute path`);
     }
-    if (!rootsProvided) {
-      // 仅可信 profile bootstrap 才允许并列默认根；一旦计算即不再是 inert。
-      dataRoot = join(profileRoot, "shiori-data");
-      stateRoot = join(profileRoot, "shiori-state");
-    }
+    // 每个缺省的根单独用 profileRoot 派生（0.4 P4：实现与下方注释口径一致），
+    // 显式配置的根不受影响；一旦派生即不再是 inert。
+    if (dataRoot === null) dataRoot = join(profileRoot, "shiori-data");
+    if (stateRoot === null) stateRoot = join(profileRoot, "shiori-state");
   }
 
   // 0.4-S1（reviewer 拍板）：null 根一律解析为 DSH_HOME 默认落点——各根独立解析
@@ -661,7 +664,9 @@ const CASE_INSENSITIVE_FS = process.platform === "win32";
 // 尾部分隔符（盘根折叠为裸盘符，POSIX 根 "/" 折叠为 ""），win32 再统一小写。
 // 此后「相等 / 嵌套 / 不相交」的判定只在这一种 canonical 形状上进行，盘根、
 // 混排分隔符、尾随分隔符不再有特例。
-function comparableRoot(value) {
+// 0.4 P4 返工（reviewer）：scope.mjs 的 rootsSource 自洽校验按同一口径比较默认根，
+// 两处必须同源——导出复用，不许在 scope 里再写一份相似实现。
+export function comparableRoot(value) {
   let normalized = normalize(value);
   if (CASE_INSENSITIVE_FS) normalized = normalized.toLowerCase();
   while (normalized.endsWith(sep)) {

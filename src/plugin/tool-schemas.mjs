@@ -101,6 +101,17 @@ const groupMigrationEntry = {
   },
 };
 
+// 0.4 收尾：list 的悬空引用条目（topic.group 指向不存在组的 (topicKey, group) 对，
+// 按对去重；repair 清理后正常归零）。
+const groupDanglingEntry = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    topicKey: { type: "string", required: true },
+    group: { type: "string", required: true },
+  },
+};
+
 const sparkReceiptProperties = {
   ok: { type: "boolean", required: true },
   tool: { type: "string", required: true },
@@ -174,7 +185,9 @@ export const TOOL_OUTPUT_SCHEMAS = Object.freeze({
     properties: {
       scope: { type: "string", required: true },
       action: { type: "string", required: true },
-      // groups.json 的 revision（list/delete 为操作后清单哈希；清单缺失时 null）。
+      // groups.json 的 revision（list/delete 为操作后清单哈希；清单缺失时 null；
+      // repair 为提交后重读清单的 revision，与 remaining 同源；提交后重读失败时
+      // 回退为提交所用快照 revision，并附 warning）。
       revision: { ...hexRev, required: true },
       groups: { type: "array", items: groupEntry },
       key: { type: "string" },
@@ -182,6 +195,15 @@ export const TOOL_OUTPUT_SCHEMAS = Object.freeze({
       updated: { type: "boolean" },
       deleted: { type: "boolean" },
       migrated: { type: "array", items: groupMigrationEntry },
+      // 0.4 收尾：list 返回的悬空引用清单（可选——仅 list 分组返回）。
+      dangling: { type: "array", items: groupDanglingEntry },
+      // 0.4 收尾：repair 返回的清理条数与清理后剩余悬空条数（可选——仅 repair 分支
+      // 返回）。cleaned 只数本次实际摘除的 (topicKey, group) 对（写时已不存在的
+      // 挂载不计）；remaining 按提交后重读的清单计算，重读失败时缺省并附 warning。
+      cleaned: { type: "integer" },
+      remaining: { type: "integer" },
+      // repair 提交后重读失败时的提示（已提交的 cleaned 仍然有效，remaining 不给）。
+      warning: { type: "string" },
     },
   },
 

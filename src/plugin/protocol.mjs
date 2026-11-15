@@ -192,11 +192,17 @@ const getGraphNodeItem = {
     summary: { oneOf: [{ type: "string" }, { type: "null" }] },
     vitality: { oneOf: [{ type: "string" }, { type: "null" }] },
     revision: { oneOf: [{ type: "integer" }, { type: "null" }] },
+    // 0.4 收尾（reviewer attempt-1 必修 1）：补 entities 契约。nodeOut 三条路径
+    // （全量 / level=2）恒输出该字段（projectGraph 的 normalizeEntities 已规范化：
+    // trim 非空、去重保序、上限 MAX_NODE_ENTITIES=4，脏数据退化为 []），此前
+    // additionalProperties:false 下它属于「实现返回契约外字段」的矛盾，谁加一道
+    // 输出校验就会炸。客户端 entityKeyOf 按 raw.entities[0] 做实体聚类着色。
+    entities: { type: "array", items: nonEmptyString, maxItems: 4 },
     hitCount: { type: "integer", minimum: 0 },
     lastHitAt: { oneOf: [{ type: "string" }, { type: "null" }] },
     createdAt: { oneOf: [{ type: "string" }, { type: "null" }] },
   },
-  required: ["id", "vitality"],
+  required: ["id", "vitality", "entities"],
 };
 const getGraphEdgeItem = {
   type: "object",

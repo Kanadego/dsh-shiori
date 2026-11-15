@@ -2,7 +2,7 @@
 //
 // 集成测试：复制当前项目生产 src/test/package 到临时 stage，不覆盖 store。
 // 只复制历史 G a2 loader 对照夹具，保留全部定向断言；内嵌 P0-P3 回归已拆至
-// test/forgetting/stage-regression.test.mjs（发版门禁层，用例未删）。
+// test/release/stage-regression.test.mjs（发版门禁层，用例未删）。
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createProjectStage, removeStage } from '../fixtures/stage.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORK = path.resolve(HERE, '../..'); // 当前项目根（test/forgetting → 上两级）
@@ -149,29 +150,22 @@ function assertArchivedSnapshot(before, after, executedAt) {
 }
 
 // 「真实旧回归」三条用例及其 stage 子进程三件套（runNodeTest / stageTestFiles /
-// tapCounts）已整体拆至 test/forgetting/stage-regression.test.mjs（发版门禁层，
+// tapCounts）已整体拆至 test/release/stage-regression.test.mjs（发版门禁层，
 // npm run test:release 执行）；本文件保留壳自身的 forgetting 集成测试常规跑。
+// stage 搭台（复制 src/test/package.json + 冻结夹具、拆台清理）抽至
+// test/fixtures/stage.mjs 共享脚手架，与发版层 stage-regression 共用一份。
 
 // ---------------------------------------------------------------------------
 
 describe('P4-N 已集成窄存储（temp stage 生产位置）', () => {
   before(async () => {
-    stage = await fsp.mkdtemp(path.join(os.tmpdir(), 'shiori-p4n-stage-'));
-    for (const name of ['src', 'test']) {
-      await fsp.cp(path.join(WORK, name), path.join(stage, name), { recursive: true });
-    }
-    await fsp.copyFile(path.join(WORK, 'package.json'), path.join(stage, 'package.json'));
-    const fixture = 'test/fixtures/frozen/G/a2-226d3f0e-77ea-4a4c-b097-ad6483ebc806/files/src/sparks/store.mjs';
-    await fsp.mkdir(path.dirname(path.join(stage, fixture)), { recursive: true });
-    await fsp.copyFile(path.join(WORK, fixture), path.join(stage, fixture));
+    stage = await createProjectStage({ prefix: 'shiori-p4n-stage-' });
     ({ openSparkStore } = await import(pathToFileURL(path.join(stage, 'src', 'sparks', 'store.mjs')).href));
   });
 
   after(async () => {
-    if (stage) {
-      await fsp.rm(stage, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {});
-      stage = null;
-    }
+    await removeStage(stage);
+    stage = null;
   });
 
   // ------------------------------------------------------------------
@@ -1211,5 +1205,5 @@ describe('P4-N 已集成窄存储（temp stage 生产位置）', () => {
   });
 
   // 「真实旧回归（stage 生产位置运行 P0-P3 测试）」describe 块已拆至
-  // test/forgetting/stage-regression.test.mjs（发版门禁层，用例逐字原样搬移）。
+  // test/release/stage-regression.test.mjs（发版门禁层，用例逐字原样搬移）。
 });

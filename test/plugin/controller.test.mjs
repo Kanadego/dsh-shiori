@@ -11,6 +11,8 @@ import { createShioriPluginController } from "../../src/plugin/controller.mjs";
 import { TOOL_NAMES, TOOL_OUTPUT_SCHEMAS } from "../../src/plugin/tool-schemas.mjs";
 import { openCompletionState } from "../../src/completion/index.mjs";
 import { defaultPluginRoots } from "../../src/plugin/config.mjs";
+import { openSemanticVectorStore } from "../../src/semantic/store.mjs";
+import { pinScope } from "../../src/plugin/scope.mjs";
 
 // 0.4-S1（reviewer P3）：测试入口统一注入 DSH_HOME=临时目录——0.4 起缺省根会真实
 // mkdir（scope.mjs 直构缺根补默认同样落默认路径），不注入会写到真实 ~/.dsh。
@@ -1424,12 +1426,12 @@ test("S5 P0#3：迟到 done（stop/restart 后任务态已复位）不触发自�
 });
 
 test("S5 P0#3：banned 窗口内迟到 done 不触发自动 rebuild（autoRebuildAttempts 保持 0）", async (t) => {
-  // 真实可达窗口：stop() 的 sync prefix（banned=true）与 cleanupGeneration 真正
-  // +1 代次之间隔一个微任务。构造：downloader 在 gate 放行后返回 thenable，
-  // then 里先 res(done)（排队 runSemanticDownload 的续体）再同步调 stop()——
-  // stop 的 gen+1 微任务排在续体之后，续体运行时 stale() 尚看不出代次已换。
-  // 没有 trigger 开头的 banned/started 闸，此用例变红：attempts=1 且 rebuild
-  // 真的被拉起（夹具已落盘模型文件，文件门禁放行 → phase 不再是 idle）。
+  // 历史窗口：本次改动前，stop() 的 sync prefix（banned=true）与 cleanupGeneration
+  // 真正 +1 代次之间隔一个微任务——构造：downloader 在 gate 放行后返回 thenable，
+  // then 里先 res(done)（排队 runSemanticDownload 的续体）再同步调 stop()，续体
+  // 运行时 stale() 尚看不出代次已换。0.4 收尾把代次失效挪进 stop 同步段后窗口已
+  // 关闭，本用例保留为回归钉：迟到 done 一律不拉起 rebuild。若把同步段的代次失效
+  // 回退，这里仍由 trigger 的 banned 闸兜住（断言不变，行为事实不变）。
   const roots = await tempRoots();
   t.after(roots.cleanup);
   let release = null;
@@ -1469,6 +1471,130 @@ test("S5 P0#3：banned 窗口内迟到 done 不触发自动 rebuild（autoRebuil
   }, 2000), "rebuild 若被拉起须先收尾（上限 2000ms）");
   const s = await controller.management.getStatus(trustedContext, {});
   assert.equal(s.diagnostics.semantic.rebuild.phase, "idle", "rebuild 保持 idle（未被拉起）");
+});
+
+test("0.4 收尾：stop() 的同步段即完成代次失效（不 +2）并复位下载态", async (t) => {
+  // 判别力（两道）：
+  // ① 同步段——把 invalidateDownloadGeneration() 挪回 cleanupGenerationInner（回退
+  //    本次改动）时，stop() 之后、await 之前读到的代次仍是旧值，第一条断言变红；
+  // ② 不 +2——若 stop 同步段 +1 之后 cleanupGenerationInner 又补一次，最后那条
+  //    「仍等于 genBefore+1」的断言变红。
+  // 下载 snapshot 的形状被 deepEqual 钉死（不能加字段），故代次走 controller.diagnostics()。
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  let release = null;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const fakeDownloader = {
+    download: async ({ onProgress }) => {
+      onProgress({ percent: 40, loadedBytes: 40, totalBytes: 100, filesDone: 1, filesTotal: 2 });
+      await gate;
+      return { ok: "done", source: "x", attempts: [] };
+    },
+  };
+  const controller = await createShioriPluginController(fakeCtx(), localSemanticSettings(roots), {
+    bindings: fakeBindingsFactory(),
+    createDownloader: () => fakeDownloader,
+  });
+  await controller.start();
+  const trustedContext = rpcContext();
+  await controller.management.executeTool(trustedContext, { name: "semantic_download", args: {} });
+  const before = await controller.management.getStatus(trustedContext, {});
+  assert.equal(before.diagnostics.semantic.download.running, true, "下载中 running=true");
+  const genBefore = controller.diagnostics().downloadGeneration;
+
+  const stopping = controller.stop(); // 不 await：只跑同步段就检查
+  assert.equal(controller.diagnostics().banned, true, "同步段已置 banned");
+  assert.equal(controller.diagnostics().downloadGeneration, genBefore + 1,
+    "stop() 首个 await 之前代次已 +1（banned/代次窗口关闭）");
+
+  release(); // 旧代次任务此刻才收尾：stale() 立即可见，done 不许写回
+  await stopping;
+  await settle(); await settle();
+  assert.equal(controller.diagnostics().downloadGeneration, genBefore + 1,
+    "同一代清理不再 +2（每次清理恰 +1）");
+  const after = await controller.management.getStatus(trustedContext, {});
+  assert.equal(after.diagnostics.semantic.download.running, false, "stop 返回后不残留 running=true");
+  assert.equal(after.diagnostics.semantic.download.phase, "idle", "迟到 done 不覆写复位后的状态");
+  assert.equal(after.diagnostics.semantic.ready, false, "迟到 done 不冒充新代次就绪");
+});
+
+test("0.4 收尾：下载后自动 rebuild 走 force 全量路径——注入计数桩 provider，与可选依赖解耦", async (t) => {
+  // 造一张 active 卡 + 预置一份 revision 与之匹配的旧向量（旧模型存量），然后
+  // 触发下载完成。force/增量两条分支的可观测分叉用注入的计数桩 provider 度量
+  // （reviewer attempt-1 必修 2：不再依赖「可选依赖未安装 → embed 快速失败」
+  // 这一环境事实，标准 npm install 装上 @huggingface/transformers 也不受影响）：
+  //   force（下载后自动重建）：先 store.clear() → revision 未变也必须重算 →
+  //     embed 桩被调用 ≥1 次；
+  //   增量（面板手动重建，对照组）：revision 未变 → 直接沿用现有向量 →
+  //     embed 桩零调用。
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  const settings = localSemanticSettings(roots);
+  const dims = settings.semantic.local.dims;
+  let embedCalls = 0;
+  const stubProvider = {
+    kind: "local",
+    dims,
+    embed: async () => {
+      embedCalls += 1;
+      return new Float32Array(dims); // 零向量即可（本用例不关心相似度）
+    },
+  };
+  const fakeDownloader = {
+    download: async ({ onProgress }) => {
+      onProgress({ percent: 100, loadedBytes: 100, totalBytes: 100, filesDone: 3, filesTotal: 3 });
+      await installFakeModelFiles(roots.dataRoot); // done = 文件齐全（真下载收尾契约）
+      return { ok: "done", source: "x", attempts: [] };
+    },
+  };
+  const controller = await createShioriPluginController(fakeCtx(), settings, {
+    bindings: fakeBindingsFactory(),
+    createDownloader: () => fakeDownloader,
+    createEmbeddingProvider: () => stubProvider, // 0.4 收尾新增 seam
+  });
+  await controller.start();
+  const trustedContext = rpcContext();
+  const saved = await controller.management.executeTool(trustedContext, {
+    name: "spark_save", args: { title: "卡一", content: "正文内容", triggers: [], vitality: "evergreen" },
+  });
+  assert.equal(saved.ok, true, "卡片落库");
+  assert.ok(typeof saved.id === "string" && saved.id.length > 0, "拿到卡片 id");
+  assert.ok(Number.isInteger(saved.revision) && saved.revision >= 0, "拿到卡片 revision");
+  // 预置旧向量：与卡片同 id 同 revision（增量分支会据此跳过 embed 的那份存量）。
+  // 落点与控制器同契约：<stateRoot>/semantic/<scopeId>.json；scopeId 用与
+  // scopeFromTrustedContext 同一入口 pinScope 按 (settings, sessionId) 推导。
+  const scopeId = pinScope({
+    settings: { ...settings, sessionPersonas: [], workspacePersonas: [] },
+    sessionId: "s-panel", workspace: null, generation: 1, source: "panel-rpc",
+  }).scopeId;
+  const seed = await openSemanticVectorStore({
+    stateRoot: roots.stateRoot, scopeId,
+    model: settings.semantic.local.model, dims,
+  });
+  seed.upsert(saved.id, saved.revision, new Array(dims).fill(0));
+  await seed.save();
+  seed.close();
+  assert.equal(embedCalls, 0, "预置阶段不动桩");
+  // ── 主张：下载完成 → 自动 rebuild 走 force 全量 ──
+  await controller.management.executeTool(trustedContext, { name: "semantic_download", args: {} });
+  assert.ok(await waitFor(async () => {
+    const st = await controller.management.getStatus(trustedContext, {});
+    const r = st.diagnostics.semantic.rebuild;
+    return r.running === false && r.phase === "done";
+  }, 2000), "自动 rebuild 以 done 收尾（桩 embed 必成功，上限 2000ms）");
+  assert.ok(embedCalls >= 1, `force 全量：revision 未变的卡也被清掉重算（embed 桩被调用，实际 ${embedCalls} 次）`);
+  assert.equal(controller.diagnostics().counters.autoRebuildAttempts, 1, "恰好触发一次");
+  // ── 对照组：面板手动重建走增量，revision 未变 → embed 零调用 ──
+  const before = embedCalls;
+  const manual = await controller.management.executeTool(trustedContext, { name: "semantic_rebuild", args: {} });
+  assert.equal(manual.started, true, "手动重建能发起（单飞锁已释放）");
+  assert.ok(await waitFor(async () => {
+    const st = await controller.management.getStatus(trustedContext, {});
+    const r = st.diagnostics.semantic.rebuild;
+    return r.running === false && r.phase === "done";
+  }, 2000), "手动 rebuild 以 done 收尾（上限 2000ms）");
+  assert.equal(embedCalls, before, "手动重建走增量：revision 未变直接沿用现有向量，embed 桩零调用");
+  await controller.stop();
 });
 
 test("S5 P0#3：自动 rebuild 失败落面板可见错误（不静默）——门禁拒绝时 lastError 带触发前缀", async (t) => {

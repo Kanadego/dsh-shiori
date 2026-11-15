@@ -16,6 +16,8 @@ import { digestPlan as organizeDigestPlan } from "../../src/organize/executor.mj
 import {
   MANAGEMENT_METHODS, MANAGEMENT_METHOD_NAMES, validateManagementPayload, MANAGEMENT_ERROR_CODES,
 } from "../../src/plugin/protocol.mjs";
+import { createGroupManageTool } from "../../src/host/tools.mjs";
+import { ensureGroupsFile, readGroups, writeGroups } from "../../src/core/groups.mjs";
 
 function fakeBindingsFactory() {
   const registered = { preStep: null, sessionEvents: null, waterfall: null, sections: [], tools: [] };
@@ -1431,9 +1433,6 @@ test("P2-B3：旧形状兼容（store kind organize + plan.kind archive-topic）
 // 一个 topic 可挂多组，但组行计数只认主组 t.group[0]——退化成遍历整个 group
 // 数组时，多组 topic 会在每个挂载组重复 +1，组计数总和虚高。
 
-import { createGroupManageTool } from "../../src/host/tools.mjs";
-import { ensureGroupsFile } from "../../src/core/groups.mjs";
-
 test("group_manage list 主组口径：多组 topic 只计入主组 t.group[0]，非主组不重复计数", async (t) => {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-groupcount-"));
   t.after(() => rm(base, { recursive: true, force: true }));
@@ -1487,6 +1486,416 @@ test("group_manage list 边界口径：group 空数组 / 缺失 / 非数组一�
   assert.equal(life.topics, 0, "life 只被 t-multi 副组挂着，计数为 0");
   const total = out.groups.reduce((sum, g) => sum + g.topics, 0);
   assert.equal(total, 2, "组计数总和 = 有主组的 topic 数（t-ok + t-multi；守恒：副组与畸形挂载不虚增）");
+});
+
+// ── 0.4 收尾：主组判据收紧 + CAS 自愈重试 + dangling 检测与 repair ────────────
+// ① 稀疏数组的空洞让 group[0] 取出 undefined，旧判据 primary !== null 放行
+//   undefined，计数表混进 undefined 键；② 删除组「迁移成员 + CAS 删组」两步
+//   之间 groups.json 被并发改动时，旧实现只改错误文案让人手动重试，没有自愈；
+//   ③ 悬空引用（卡片指向已不存在的组）旧实现既不暴露也不修复。
+
+// 需求 1（主组判据 typeof primary === "string"）属内部卫生：旧判据放行的
+// undefined 只落在内部 counts 表，而输出只按 groups 行取值——undefined 键不
+// 会出现在任何观测面上。因此本用例无法判别旧实现（旧实现下三条断言同样全绿），
+// 这里诚实降级为计数契约：空洞主组不把任何组行计数撑起来、尾部空洞不影响合法
+// 主组、组行计数总和 = 有合法字符串主组的 topic 数。
+test("group_manage list 稀疏数组：空洞主组不污染任何组行计数（契约断言，不能判别旧实现）", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-groupsparse-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  const holed = new Array(2);       // [ <1 empty>, "dev" ]：group[0] 是空洞
+  holed[1] = "dev";
+  const tailSparse = ["life"];      // ["life", <1 empty>]：主组合法、尾部空洞
+  tailSparse.length = 2;
+  const service = {
+    async listTopics() {
+      return [
+        { key: "t-ok", group: ["dev"] },      // 对照组：证明计数仍在工作
+        { key: "t-holed", group: holed },     // 稀疏：group[0] 空洞 → 无合法主组
+        { key: "t-tail", group: tailSparse }, // 稀疏：主组 life 合法，尾部空洞不参与
+      ];
+    },
+    async mutate() { throw new Error("list 计数用例不触写路径"); },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  const out = await tool.execute({ action: "list" });
+  const dev = out.groups.find((g) => g.key === "dev");
+  const life = out.groups.find((g) => g.key === "life");
+  // 契约：空洞主组没有合法字符串主组，不得把任何组行计数撑起来；旧实现把
+  // undefined 计数放进内部表但不进输出，所以以下断言对旧实现同样成立（见上方注释）。
+  assert.equal(dev.topics, 1, "dev 只计 t-ok（t-holed 的 group[0] 是空洞，不得计入任何键）");
+  assert.equal(life.topics, 1, "life 计 t-tail（主组合法；尾部空洞不影响）");
+  const total = out.groups.reduce((sum, g) => sum + g.topics, 0);
+  assert.equal(total, 2, "计数守恒：组行总和 = 有合法字符串主组的 topic 数（空洞主组不虚增）");
+});
+
+test("group_manage delete：CAS 冲突自动重读 revision 补删组条目，迁移绝不二次执行", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-groupcas-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  // 铺两行组：gone（待删）与 dest（迁移目标）。并发写者在迁移提交期间往清单追加
+  // intruder 组，让 deleteGroup 的 CAS（expectedRevision=action 开头的快照）必失败。
+  const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
+  await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
+    { key: "gone", title: "待删组", summary: "", order: 1 },
+    { key: "dest", title: "目标组", summary: "", order: 2 },
+  ] });
+  const topics = new Map([
+    ["t-1", { key: "t-1", title: "卡1", summary: "s", body: "正文1", revision: 1, group: ["gone"] }],
+    ["t-2", { key: "t-2", title: "卡2", summary: "s", body: "正文2", revision: 5, group: ["dest"] }],
+  ]);
+  let mutateCalls = 0;
+  const service = {
+    async listTopics() {
+      return [...topics.values()].map((t) => ({ key: t.key, group: [...t.group] }));
+    },
+    async readTopic(key) {
+      const t = topics.get(key);
+      if (!t) {
+        const e = new Error(`topic 不存在: ${key}`); e.code = "NOT_FOUND"; throw e;
+      }
+      return { ...t, group: [...t.group] };
+    },
+    async mutate({ changes }) {
+      mutateCalls += 1;
+      for (const c of changes) {
+        const t = topics.get(c.key);
+        t.revision += 1;
+        t.group = [...c.topic.group];
+        t.body = c.text;
+      }
+      // 模拟并发窗口：迁移提交生效的同时，别处改了 groups.json（CAS 基线失效）。
+      const cur = await readGroups({ dataRoot: base, scopeId: "amber" });
+      await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: cur.revision, groups: [
+        ...cur.data.groups, { key: "intruder", title: "并发新组", summary: "", order: 99 },
+      ] });
+      return { revision: "after-mutate" };
+    },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  const out = await tool.execute({
+    action: "delete", key: "gone", migrateTo: "dest", operationId: "cas-retry-1",
+  });
+  assert.equal(out.deleted, true, "第一次 CAS 失败必须由实现自愈（重读 revision 补删），不得上抛");
+  assert.equal(mutateCalls, 1, "重试只补删组条目，绝不二次迁移（service.mutate 只调一次）");
+  const after = await readGroups({ dataRoot: base, scopeId: "amber" });
+  assert.deepEqual(after.data.groups.map((g) => g.key), ["dest", "intruder"],
+    "gone 已删；并发写入的 intruder 必须保留（重试用的是重读后的清单，不是覆盖）");
+  assert.deepEqual(topics.get("t-1").group, ["dest"], "成员迁移生效且只执行一次");
+});
+
+test("group_manage list：dangling 字段列出 topic.group 指向不存在组的条目（去重），既有键不丢", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-groupdangling-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
+  await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
+    { key: "dev", title: "开发", summary: "", order: 1 },
+    { key: "life", title: "生活", summary: "", order: 2 },
+  ] });
+  const service = {
+    async listTopics() {
+      return [
+        { key: "t-a", group: ["dev", "ghost"] },      // 副组悬空
+        { key: "t-b", group: ["missing"] },           // 主组悬空
+        { key: "t-c", group: ["dev"] },               // 全部有效（对照组）
+        { key: "t-d", group: ["life", "ghost"] },     // 与 t-a 悬到同一个 ghost，仍是独立条目
+        { key: "t-e", group: ["ghost", "ghost"] },    // 同一悬空组重复挂载 → 去重为一条
+      ];
+    },
+    async mutate() { throw new Error("dangling 检测用例不触写路径"); },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  const out = await tool.execute({ action: "list" });
+  assert.deepEqual(out.dangling, [
+    { topicKey: "t-a", group: "ghost" },
+    { topicKey: "t-b", group: "missing" },
+    { topicKey: "t-d", group: "ghost" },
+    { topicKey: "t-e", group: "ghost" },
+  ], "悬空条目形如 {topicKey, group}，按 (topicKey, group) 去重，顺序随 topic 遍历序");
+  // 既有返回结构只加字段、不改原有键：scope/action/revision/groups 全部仍在。
+  for (const k of ["scope", "action", "revision", "groups"]) {
+    assert.ok(Object.hasOwn(out, k), `既有键 ${k} 必须保留`);
+  }
+  assert.equal(out.groups.find((g) => g.key === "dev").topics, 2, "有效组计数不受悬空检测影响（dev 主组计 t-a + t-c）");
+});
+
+test("group_manage repair：清掉悬空引用（CAS+operationId 单提交），有效组与卡片正文不动，repair 后 list 干净", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouprepair-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
+  await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
+    { key: "dev", title: "开发", summary: "", order: 1 },
+  ] });
+  const topics = new Map([
+    ["t-a", { key: "t-a", title: "卡A", summary: "sa", body: "正文A", revision: 11, group: ["dev", "ghost"] }],
+    ["t-b", { key: "t-b", title: "卡B", summary: "sb", body: "正文B", revision: 22, group: ["ghost"] }],
+    ["t-c", { key: "t-c", title: "卡C", summary: "sc", body: "正文C", revision: 33, group: ["dev"] }],
+  ]);
+  const mutateCalls = [];
+  const service = {
+    async listTopics() {
+      return [...topics.values()].map((t) => ({ key: t.key, group: [...t.group] }));
+    },
+    async readTopic(key) {
+      const t = topics.get(key);
+      if (!t) {
+        const e = new Error(`topic 不存在: ${key}`); e.code = "NOT_FOUND"; throw e;
+      }
+      return { ...t, group: [...t.group] };
+    },
+    async mutate(args) {
+      mutateCalls.push(args);
+      for (const c of args.changes) {
+        const t = topics.get(c.key);
+        assert.equal(c.expectedRevision, t.revision, "repair 变更必须带 CAS（expectedRevision=读时 revision）");
+        t.revision += 1;
+        t.group = [...c.topic.group];
+        t.body = c.text;
+      }
+      // review a3 项 1（remaining 判别力）：提交期间不改 groups.json。本次变更已把
+      // ghost 挂载摘掉，提交后重读 topics 时真实剩余悬空为 0；若 remaining 退回
+      // 「提交前快照」口径，会数到 2（t-a/ghost + t-b/ghost），下面 remaining === 0
+      // 断言必变红。
+      return { revision: "after-repair" };
+    },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  const out = await tool.execute({ action: "repair", operationId: "repair-1" });
+  assert.equal(out.cleaned, 2, "清理条数 = 实际摘除的 (topicKey, group) 对数（t-a 的 ghost + t-b 的 ghost）");
+  assert.equal(
+    out.remaining, 0,
+    "remaining 用提交后重读的 topics：ghost 挂载已摘掉、known 仍是 {dev} → 0；"
+    + "退回提交前快照口径会数到 2（t-a/ghost + t-b/ghost），本条必变红",
+  );
+  assert.equal(mutateCalls.length, 1, "全部清理收进单次 service.mutate 提交");
+  assert.equal(mutateCalls[0].operationId, "repair-1", "operationId 必须透传（幂等键）");
+  assert.deepEqual(topics.get("t-a").group, ["dev"], "t-a 只摘 ghost，有效主组 dev 保留");
+  assert.deepEqual(topics.get("t-b").group, [], "t-b 只剩悬空挂载 → 清成空数组");
+  assert.equal(topics.get("t-b").body, "正文B", "卡片正文原样保留");
+  assert.deepEqual(topics.get("t-c").group, ["dev"], "全有效卡片 t-c 不进变更（不碰有效组和卡片正文）");
+  // repair 之后 list 必须干净
+  const listed = await tool.execute({ action: "list" });
+  assert.deepEqual(listed.dangling, [], "repair 后 list.dangling 为空");
+  // 重放幂等：无悬空时不再触写路径
+  const again = await tool.execute({ action: "repair", operationId: "repair-2" });
+  assert.equal(again.cleaned, 0, "重复 repair 空清理");
+  assert.equal(again.remaining, 0, "重复 repair 剩余悬空条数同样为 0");
+  assert.equal(mutateCalls.length, 1, "无悬空引用时 repair 不触写路径（幂等）");
+});
+
+// review a3 项 2：提交前复核用的是较早的 snapshot，快照里判成悬空的挂载可能已被
+// 别处摘掉——buildChanges 重读后实际摘除 0 条时，repair 必须跳过 mutate（否则白涨
+// groups.json revision），返回 cleaned 0 与当前 revision。
+test("group_manage repair：重读 topics 时悬空挂载已被别处摘掉 → 跳过 mutate，cleaned 0", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouprepairnoop-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
+  await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
+    { key: "dev", title: "开发", summary: "", order: 1 },
+  ] });
+  const before = await readGroups({ dataRoot: base, scopeId: "amber" });
+  let mutateCalls = 0;
+  const service = {
+    // 快照里 t-a 仍挂 ghost（悬空）。
+    async listTopics() { return [{ key: "t-a", group: ["dev", "ghost"] }]; },
+    // 但读改写时 ghost 已被别处摘掉：实际无可摘条目。
+    async readTopic(key) {
+      return { key, title: "卡A", summary: "sa", body: "正文A", revision: 5, group: ["dev"] };
+    },
+    async mutate() { mutateCalls += 1; return { revision: "should-not-happen" }; },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  const out = await tool.execute({ action: "repair", operationId: "repair-noop" });
+  assert.equal(out.cleaned, 0, "实际摘除 0 条：如实返回 0，不谎报快照里的悬空数");
+  assert.equal(out.remaining, 0, "既然没有实际变更，剩余悬空按空修复返回 0");
+  assert.equal(out.revision, before.revision, "不触写：返回的仍是当前清单 revision");
+  assert.equal(mutateCalls, 0, "removed 为 0 时绝不调用 service.mutate（避免空提交涨 revision）");
+});
+
+// review a3 项 1 另一方向：提交窗口内别处删掉 dev 组 → remaining 用提交后重读的
+// known 精确为 2（t-a/dev + t-c/dev）。退回「提交前 known」口径会算成 0，本条必红。
+test("group_manage repair：提交窗口内 dev 组被删 → remaining 精确为 2（提交后 known）", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouprepairknown-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
+  await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
+    { key: "dev", title: "开发", summary: "", order: 1 },
+  ] });
+  const topics = new Map([
+    ["t-a", { key: "t-a", title: "卡A", summary: "sa", body: "正文A", revision: 1, group: ["dev", "ghost"] }],
+    ["t-c", { key: "t-c", title: "卡C", summary: "sc", body: "正文C", revision: 2, group: ["dev"] }],
+  ]);
+  let mutateCalls = 0;
+  const service = {
+    async listTopics() { return [...topics.values()].map((x) => ({ key: x.key, group: [...x.group] })); },
+    async readTopic(key) { const x = topics.get(key); return { ...x, group: [...x.group] }; },
+    async mutate({ changes }) {
+      mutateCalls += 1;
+      for (const c of changes) {
+        const x = topics.get(c.key);
+        x.revision += 1;
+        x.group = [...c.topic.group];
+        x.body = c.text;
+      }
+      // 提交期间别处删掉 dev：提交后 t-a/t-c 的 dev 挂载都成残余悬空。
+      const cur = await readGroups({ dataRoot: base, scopeId: "amber" });
+      await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: cur.revision, groups: [] });
+      return { revision: "after-repair" };
+    },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  const out = await tool.execute({ action: "repair", operationId: "repair-known-fresh" });
+  assert.equal(out.cleaned, 1, "只摘 t-a/ghost");
+  assert.equal(out.remaining, 2,
+    "提交后 known 为空：t-a/t-c 的 dev 挂载都成残余悬空（2）；"
+    + "退回提交前 known 口径会算成 0，本条必变红");
+  assert.equal(mutateCalls, 1);
+});
+
+// 必修 1 回归：list/repair 的先 topics 后 groups 读序。组可见性保证挂载发生在
+// 建组之后——若组在这两次读之间被建出，后读的 groups 必须看得到它。这里让
+// listTopics 在返回前顺手把新组写进 groups.json（模拟并发建组）：旧读序
+//（先 groups 定格 known、后读 topics）会把这条件挂载误判成悬空并静默摘掉。
+test("group_manage list/repair 读序：读 topics 期间建出的组不被误判为悬空（必修 1 回归）", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouporder-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
+  await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
+    { key: "dev", title: "开发", summary: "", order: 1 },
+  ] });
+  let groupCreated = false;
+  const service = {
+    async listTopics() {
+      if (!groupCreated) {
+        groupCreated = true;
+        // 并发建组：本快照之后、工具读 groups 之前，新组 hot 落盘。
+        const cur = await readGroups({ dataRoot: base, scopeId: "amber" });
+        await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: cur.revision, groups: [
+          ...cur.data.groups, { key: "hot", title: "热组", summary: "", order: 2 },
+        ] });
+      }
+      return [{ key: "t-hot", group: ["hot"] }];
+    },
+    async readTopic() { throw new Error("有效挂载不得被 repair 读改写"); },
+    async mutate() { throw new Error("有效挂载不得被 repair 写入"); },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  const listed = await tool.execute({ action: "list" });
+  assert.deepEqual(listed.dangling, [], "组先于挂载可见，后读 groups 必看到 hot，不得判悬空");
+  assert.equal(listed.groups.find((g) => g.key === "hot").topics, 1, "hot 组正常计数");
+  const repaired = await tool.execute({ action: "repair" });
+  assert.equal(repaired.cleaned, 0, "repair 用同一读序，读到最新清单后不清理任何有效挂载");
+  assert.equal(repaired.remaining, 0, "剩余悬空为 0");
+});
+
+// 必修 2 回归：groups.json 缺失/为空时 known 是空集——若不拒绝，repair 会把
+// 每条挂载都当悬空、一次 mutate 全摘（清空用户数据，不是修复）。
+test("group_manage repair：groups.json 缺失且有挂载 → INVALID_STATE 拒绝，不摘任何挂载", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouprepairnogroups-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  // 刻意不调 ensureGroupsFile：groups.json 缺失，readGroupsOrEmpty 兜底为空清单。
+  let mutateCalls = 0;
+  const service = {
+    async listTopics() {
+      return [{ key: "t-a", group: ["dev"] }, { key: "t-b", group: ["ghost"] }];
+    },
+    async readTopic(key) { return { key, title: "卡", summary: "", body: "正文", revision: 1, group: [] }; },
+    async mutate() { mutateCalls += 1; return { revision: "should-not-happen" }; },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  await assert.rejects(
+    () => tool.execute({ action: "repair", operationId: "repair-no-groups" }),
+    (e) => {
+      assert.equal(e.code, "INVALID_STATE");
+      assert.match(e.message, /group_manage action=create/, "文案要指到 agent 真能调到的 group_manage create");
+      assert.match(e.message, /初始化/);
+      assert.deepEqual(e.details.mountedTopics, ["t-a", "t-b"]);
+      return true;
+    },
+  );
+  assert.equal(mutateCalls, 0, "拒绝发生在构造变更之前，绝不写盘");
+  // list 只读，仍如实暴露悬空（暴露 ≠ 清空）。
+  const listed = await tool.execute({ action: "list" });
+  assert.equal(listed.revision, null, "清单缺失时 revision 为 null");
+  assert.deepEqual(listed.dangling.map((d) => d.topicKey), ["t-a", "t-b"]);
+  // 空清单 + 无挂载：repair 正常空修复，不误拒。
+  service.listTopics = async () => [];
+  const emptyRepair = await tool.execute({ action: "repair" });
+  assert.equal(emptyRepair.cleaned, 0);
+  assert.equal(emptyRepair.remaining, 0);
+  assert.equal(mutateCalls, 0);
+});
+
+// 必修 4b：repair 的写失败必须透出——mutate 的 CAS 冲突不能被吞成「已修复」。
+test("group_manage repair：service.mutate 抛 CAS 冲突如实透出，不吞不重试", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouprepairfail-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
+  await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
+    { key: "dev", title: "开发", summary: "", order: 1 },
+  ] });
+  let mutateCalls = 0;
+  const service = {
+    async listTopics() { return [{ key: "t-a", group: ["dev", "ghost"] }]; },
+    async readTopic(key) {
+      return { key, title: "卡A", summary: "sa", body: "正文A", revision: 7, group: ["dev", "ghost"] };
+    },
+    async mutate() {
+      mutateCalls += 1;
+      const error = new Error("simulated repair CAS conflict");
+      error.code = "REVISION_CONFLICT";
+      throw error;
+    },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  await assert.rejects(
+    () => tool.execute({ action: "repair", operationId: "repair-cas-fail" }),
+    (e) => e.code === "REVISION_CONFLICT" && /simulated repair CAS conflict/.test(e.message),
+  );
+  assert.equal(mutateCalls, 1, "只提交一次，失败不重试、不谎报 cleaned");
+});
+
+// 必修 2：读清单到 mutate 之间若有人建组修好了悬空，repair 必须复核 revision——
+// 否则本次 mutate 会把刚修好的挂载再摘一次（数据丢失风险）。
+test("group_manage repair：readTopic 与 mutate 之间组被建出（悬空已自愈）→ 提交前复核，不触写", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p4-grouprecheck-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await ensureGroupsFile({ dataRoot: base, scopeId: "amber" });
+  const empty = await readGroups({ dataRoot: base, scopeId: "amber" });
+  await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: empty.revision, groups: [
+    { key: "dev", title: "开发", summary: "", order: 1 },
+  ] });
+  let groupCreated = false;
+  let mutateCalls = 0;
+  const service = {
+    async listTopics() { return [{ key: "t-a", group: ["dev", "hot"] }]; },
+    async readTopic(key) {
+      if (!groupCreated) {
+        groupCreated = true;
+        // 并发建组：本次 readTopic 之后、mutate 之前，hot 落盘——t-a 的挂载不再悬空。
+        const cur = await readGroups({ dataRoot: base, scopeId: "amber" });
+        await writeGroups({ dataRoot: base, scopeId: "amber", expectedRevision: cur.revision, groups: [
+          ...cur.data.groups, { key: "hot", title: "热组", summary: "", order: 2 },
+        ] });
+      }
+      return { key, title: "卡A", summary: "sa", body: "正文A", revision: 3, group: ["dev", "hot"] };
+    },
+    async mutate() { mutateCalls += 1; return { revision: "should-not-happen" }; },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  const out = await tool.execute({ action: "repair", operationId: "repair-recheck" });
+  assert.equal(out.cleaned, 0, "复核发现挂载已不再悬空：清理 0 条");
+  assert.equal(out.remaining, 0, "剩余悬空 0 条");
+  assert.equal(mutateCalls, 0, "提交前复核拦下 mutate，不得把刚修好的挂载再摘一次");
+  assert.ok(typeof out.revision === "string", "返回复核后的清单 revision");
+  const after = await readGroups({ dataRoot: base, scopeId: "amber" });
+  assert.ok(after.data.groups.some((g) => g.key === "hot"), "并发建出的 hot 组保留");
 });
 
 // ── 0.4 S6 卸载与焚毁（destroyData，第 11 个管理方法）────────────────────────

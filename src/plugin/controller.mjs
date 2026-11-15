@@ -135,6 +135,10 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     createDownloader = createLocalModelDownloader,
     // S5 复审：座位守卫工厂（默认真实实现；测试注入只读/可写桩，不占真实座位）。
     createSeatGuardFactory = createSeatGuard,
+    // 0.4 收尾（reviewer attempt-1 必修 2）：embedding provider 工厂 seam，与
+    // createDownloader 同款——缺省真实实现（生产行为零变化）；测试注入计数桩，
+    // 使 force/增量分叉的断言与可选依赖（@huggingface/transformers）装没装彻底解耦。
+    createEmbeddingProvider: createEmbeddingProviderImpl = createEmbeddingProvider,
   } = dependencies;
 
   // inert 判定（0.4-S1 起，reviewer P2① 口径）：仅由 mode 与根校验共同决定——
@@ -168,7 +172,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     return { ...semantic, local: { ...semantic.local, cacheDir: modelDir } };
   }
   const semanticProvider = settings.semantic.provider === "local"
-    ? createEmbeddingProvider(semanticProviderConfig())
+    ? createEmbeddingProviderImpl(semanticProviderConfig())
     : null;
 
   // 路径校验：active 或配置了任一 root 时必须显式提供两个绝对 root、disjoint、
@@ -508,7 +512,15 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     if (store === null) {
       fail("INVALID_STATE", "向量索引不可用（语义召回未启用或 stateRoot 未配置）", {});
     }
-    if (force === true) store.clear(); // 全量：丢弃现有索引从头算
+    // force 全量：丢弃现有索引从头算。副作用取舍（0.4 收尾 reviewer 记录项，不改
+    // 行为）：store.clear() 只清内存态（src/semantic/store.mjs clear 契约），磁盘
+    // 上仍是旧向量，直到首批 embed 成功后才按批覆盖落盘（每批收尾的 store.save）。因此——
+    // ① 首个 embed 失败或批间中止时，磁盘保持旧索引不回滚，但进程内索引已空，
+    //   重建期间语义召回静默退化为字面匹配（召回质量下降，不报错，重建完即恢复）；
+    // ② 中途 abort 也会按批把部分新索引覆盖旧盘（断点续传契约的一部分，非 bug），
+    //   「换模型维度变了」的场景下这些部分新向量本就该替换旧向量，方向正确。
+    // 彻底消除要做成「影子索引 + 原子切换」，属结构性改动，0.5 再议。
+    if (force === true) store.clear();
     for (let i = 0; i < records.length; i += SEMANTIC_REBUILD_BATCH) {
       if (ctrl.banned || !ctrl.started) {
         rebuild.phase = "aborted";
@@ -738,15 +750,21 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
    * 点一次「重建向量」，不必再手动操作。防重不靠这里——runSemanticDownload
    * 的 done 分支结构上只走一次（stale/running 检查在前，running 先翻 false），
    * semanticRebuild 自身单飞（已有 rebuild 在跑 → started:false 快照）；本函数
-   * 只做两道纵深防御：
-   * ① banned/started 闸——真实可达：stop() 的 sync prefix（banned=true）与
-   *    cleanupGeneration 真正 +1 代次之间隔着一个微任务，done 续体若排在该窗口
-   *    （见 test「banned 窗口内迟到 done」用例的 thenable 构造），stale() 尚看不
-   *    出代次已换，必须在此拦下，不许 stop 之后拉起 resourcesFor/vectorStoreFor；
+   * 只做两道纵深防御（主防线在 stop 的同步段：0.4 收尾已把代次 +1 与下载态复位
+   * 挪到 banned 置位的同一个同步段，原来那个微任务窗口不复存在）：
+   * ① banned/started 闸——纵深防御：防 stop 之后仍被拉起的调用形态，不许拉起
+   *    resourcesFor/vectorStoreFor（历史窗口由 test「banned 窗口内迟到 done」的
+   *    thenable 构造钉住，现在先被同步段的代次失效拦下）；
    * ② 代次闸——兜底，防未来的重放/重复投递形态（当前结构不可达，不写成主防线）。
    * 计数器 autoRebuildAttempts 经 diagnostics().counters 可观测（恰好一次可断言）。
    * 失败不静默：运行期错误本就落 rebuild.error + lastError；触发期同步抛错
    * （只读态 / 门禁 / 目录无法解析等）在 catch 里落 lastError，面板可见。
+   *
+   * 0.4 收尾：强制全量（force: true）。换模型通常意味着维度变了，旧模型留下的
+   * 向量继续留在库里参与检索会串味——增量分支只算新增/变化（revision 未变直接
+   * 沿用旧向量），清不掉换模型前的存量。下载完成的场景必然是新模型首次就位，
+   * 走 runSemanticRebuild 的 force 分支（先 store.clear() 再从头算）才干净。
+   * 面板手动「重建向量」仍走增量，不受此影响。
    */
   let autoRebuildTriggeredGen = -1;
   function triggerAutoRebuildAfterDownload(scope, gen) {
@@ -754,7 +772,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     if (gen === autoRebuildTriggeredGen) return; // 纵深防御：同代次重复投递兜底
     autoRebuildTriggeredGen = gen;
     ctrl.diag.autoRebuildAttempts += 1;
-    semanticRebuild(scope, {})
+    semanticRebuild(scope, { force: true })
       .catch((error) => {
         ctrl.semantic.lastError =
           `下载后自动重建向量失败：${error instanceof Error ? error.message : String(error)}`;
@@ -786,7 +804,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     // 代次不匹配（已被 stop/restart 复位，或新任务已接管）：直接退场不写回。
     if (stale() || dl.running !== true) return;
     // running 先翻 false：done 分支只走一次——触发天然在「恰一次」的窗口里
-    // （banned/gen+1 窗口内的迟到 done 由 triggerAutoRebuildAfterDownload 拦下）。
+    // （stop 的同步段已换代次，迟到 done 在这里就 stale 退场；trigger 内的闸是纵深防御）。
     dl.running = false;
     if (result.ok === "done") {
       dl.phase = "done";
@@ -796,8 +814,9 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       ctrl.semantic.ready = true;
       ctrl.semantic.lastError = null;
       // P0#3：done = 文件齐全 + 维度校验通过（真实推理），自动串一次 rebuild。
-      // 与面板按钮同参（增量 rebuild，args:{}）；文件门禁正常放行，真实下载的
-      // 收尾校验已保证文件齐备。
+      // 0.4 收尾：这里走 force 全量——换模型后旧向量的维度已变，增量分支会沿用
+      // 存量旧向量；面板手动按钮仍走增量（args:{}）。文件门禁正常放行，真实下载
+      // 的收尾校验已保证文件齐备。
       triggerAutoRebuildAfterDownload(scope, gen);
     } else if (result.ok === "cancelled") {
       dl.phase = "cancelled";
@@ -1879,19 +1898,41 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   /** 逆序清理：撤注册 / 订阅 → 排空在途 → flush → close → 关 store → 清缓存。
    *  B4：串行化——start 失败路径与 stop 可能并发到达，二次清理必须幂等。 */
   let cleanupChain = Promise.resolve();
-  function cleanupGeneration(phase) {
-    const run = cleanupChain.then(() => cleanupGenerationInner(phase), () => cleanupGenerationInner(phase));
+  /** 契约：传 downloadsInvalidated: true 的调用方**必须**已在自己的同步段调过
+   *  invalidateDownloadGeneration()，否则这一代会静默漏一次代次失效。目前只有
+   *  stop()（:2014 调、:2018 传参）一个调用点用这个标志。 */
+  function cleanupGeneration(phase, { downloadsInvalidated = false } = {}) {
+    const run = cleanupChain.then(
+      () => cleanupGenerationInner(phase, downloadsInvalidated),
+      () => cleanupGenerationInner(phase, downloadsInvalidated),
+    );
     cleanupChain = run.then(() => {}, () => {});
     return run;
   }
 
-  async function cleanupGenerationInner(phase) {
+  /**
+   * 代次失效 + 下载态复位（0.4 收尾：从 cleanupGenerationInner 抽出，stop 的同步段
+   * 也调一次）。为什么可以挪：读 ctrl.downloadGeneration 的只有 detached 下载任务
+   * 自己的 stale()（runSemanticDownload 及其进度/源/phase 写回）与下载完成后的
+   * triggerAutoRebuildAfterDownload——两者都只读这个计数、不依赖清理链时序。stop()
+   * 在首个 await 之前调本函数，banned 置位与代次失效落在同一个同步段，窗口关闭；
+   * triggerAutoRebuildAfterDownload 里的 banned/started 闸随之降级为纵深防御。
+   * 代次只 +1 一次：stop 路径在自己的同步段 +1，并以 downloadsInvalidated=true
+   * 让 cleanupGeneration 跳过；start 失败等非 stop 路径仍由 inner 补做。
+   */
+  function invalidateDownloadGeneration() {
+    ctrl.downloadGeneration += 1;
+    resetDownloadIdle();
+  }
+
+  async function cleanupGenerationInner(phase, downloadsInvalidated = false) {
     const errors = [];
     // S5 复审 P1：清理路径（stop / start 失败）同步复位下载任务态并 +1 代次——
     // 下载任务是 detached，不进排空；靠代次失效收尾写 + 状态复位保证
     // stop 之后 diagnostics.semantic.download 不残留 running=true。
-    ctrl.downloadGeneration += 1;
-    resetDownloadIdle();
+    // 0.4 收尾：stop 已在同步段调过 invalidateDownloadGeneration()（关掉 banned 与
+    // 代次之间的微任务窗口），这里按标志跳过，同一代清理不会 +2 次。
+    if (!downloadsInvalidated) invalidateDownloadGeneration();
     // 1) 撤销注册与订阅（bindings 逆序 dispose）。
     try {
       const disposed = bindings.disposeAll();
@@ -1967,10 +2008,18 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     ctrl.banned = true;
     ctrl.stopRequested = true;
     ctrl.stopCount += 1;
+    // 0.4 收尾：代次失效与下载态复位放进同步段（第一个 await 之前）。读代次的是
+    // detached 下载任务的 stale() / 迟到进度写回，以及下载完成后的
+    // triggerAutoRebuildAfterDownload；原先它们排在 cleanupGeneration →
+    // cleanupChain.then(...) 的微任务里，banned 置位与代次 +1 之间留了一个窗口
+    // （见 test「banned 窗口内迟到 done」的 thenable 构造），只能靠 banned 闸兜底。
+    // 挪到这里后窗口关闭；cleanupGeneration 收到 downloadsInvalidated 标记，
+    // 同一代清理不再 +1 第二次。
+    invalidateDownloadGeneration();
     if (ctrl.startingPromise !== null) {
       await ctrl.startingPromise.catch(() => {});
     }
-    const errors = await cleanupGeneration("stop");
+    const errors = await cleanupGeneration("stop", { downloadsInvalidated: true });
     ctrl.started = false;
     ctrl.starting = false;
     ctrl.startingPromise = null;
@@ -2001,6 +2050,9 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       startCount: ctrl.startCount,
       stopCount: ctrl.stopCount,
       generation: ctrl.generation,
+      /** S5 下载任务代次：stop 的同步段即 +1（失效在途 detached 下载的收尾写），
+       *  与 generation 分开记——下载任务跨 start/stop 的失效口径只认这一条。 */
+      downloadGeneration: ctrl.downloadGeneration,
       ownerId: settings.ownerId,
       budgets: settings.budgets,
       modules: { l2: settings.l2.enabled, organize: settings.organize.enabled, forgetting: settings.forgetting.enabled },

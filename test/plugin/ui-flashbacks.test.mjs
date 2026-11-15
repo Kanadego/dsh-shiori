@@ -322,6 +322,114 @@ test("F2 服务端：getGraph 返回 nodes 命中字段、deliveries（含 trigg
 });
 
 // ---------------------------------------------------------------------------
+// c2) 0.4 收尾：nodeOut 补 entities——服务端节点带出规范化实体，客户端着色接上
+// ---------------------------------------------------------------------------
+
+/** getGraph 单测的极简 management 装配（L2 关闭：不查账本；卡片来自内存 fixture）。 */
+async function buildGraphManagement(cards) {
+  const { createManagement } = await import(pathToFileURL(join(WORKQ, "src", "plugin", "management.mjs")).href);
+  return createManagement({
+    settings: {
+      mode: "active", ownerId: "local", defaultPersona: null, sessionPersonas: [], workspacePersonas: [],
+      organize: { enabled: true }, forgetting: { enabled: true }, l2: { enabled: false },
+      dataRoot: join(WORKQ, "tmp-nonexistent-data"), stateRoot: join(WORKQ, "tmp-nonexistent-state"),
+      budgets: {},
+    },
+    dataRoot: join(WORKQ, "tmp-nonexistent-data"),
+    state: { l2Store: { diagnostics: async () => ({}) } },
+    resourcesFor: async () => ({ sparkStore: { listActive: async () => cards } }),
+    isStarted: () => true,
+    generation: () => 1,
+    registerGrant: () => ({}),
+    executeToolForScope: async () => ({}),
+  }).management;
+}
+
+test("0.4 收尾：getGraph nodeOut 输出 entities（trim/去重/上限 4，缺失退化为 []）", async () => {
+  const cards = [
+    // 脏数据齐活：带空格重复、非字符串、空串、超出上限的尾随实体——
+    // 期望按 normalizeEntities 口径规范化（trim 后去重保序、上限 4 截断）。
+    { id: "s1", scopeId: "global", state: "active", title: "卡一", summary: "s", vitality: "evergreen", revision: 1, triggers: [], entities: ["项目甲", " 项目甲 ", 42, "", "项目乙", "项目丙", "项目丁", "项目戊"], links: [], content: "c", hitCount: 0, lastHitAt: null, createdAt: null },
+    { id: "s2", scopeId: "global", state: "active", title: "卡二", summary: null, vitality: "ephemeral", revision: 1, triggers: [], entities: ["项目甲"], links: [], content: "c", hitCount: 0, lastHitAt: null, createdAt: null },
+    { id: "s3", scopeId: "global", state: "active", title: "卡三", summary: null, vitality: "ephemeral", revision: 1, triggers: [], links: [], content: "c", hitCount: 0, lastHitAt: null, createdAt: null },
+  ];
+  const mgmt = await buildGraphManagement(cards);
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
+
+  const out = await mgmt.getGraph(trusted, {});
+  const nodeById = Object.fromEntries(out.nodes.map((n) => [n.id, n]));
+  assert.deepEqual(nodeById.s1.entities, ["项目甲", "项目乙", "项目丙", "项目丁"],
+    "脏 entities 规范化：trim 后去重保序、非字符串/空串丢弃、上限 4 截断");
+  assert.deepEqual(nodeById.s2.entities, ["项目甲"], "干净 entities 原样带出");
+  assert.deepEqual(nodeById.s3.entities, [], "无 entities 的卡缺省 []（不再丢字段，客户端据此走中性色）");
+  // 契约断言（reviewer attempt-1 必修 1）：wire 的每个节点键都必须在
+  // getGraphNodeItem 的 outputSchema 声明（写法照 test/plugin/timeline.test.mjs
+  // 的 getTimeline 同款断言）——additionalProperties:false 下新增字段漏声明
+  // 即属契约矛盾，这里钉死防止再犯。
+  const { MANAGEMENT_METHODS } = await import(pathToFileURL(join(WORKQ, "src", "plugin", "protocol.mjs")).href);
+  const nodeItems = MANAGEMENT_METHODS.getGraph.outputSchema.oneOf[0].properties.nodes.items;
+  assert.equal(nodeItems.additionalProperties, false, "节点 schema 保持 additionalProperties:false（契约口径不变）");
+  assert.equal(nodeItems.properties.entities.type, "array");
+  assert.equal(nodeItems.properties.entities.maxItems, 4, "entities 上限与 graph.mjs MAX_NODE_ENTITIES 一致");
+  assert.deepEqual(nodeItems.properties.entities.items, { type: "string", minLength: 1 }, "entities 元素为非空字符串");
+  assert.ok(nodeItems.required.includes("entities"), "entities 进 required（nodeOut 三条路径恒输出该字段）");
+  for (const node of out.nodes) {
+    for (const key of Object.keys(node)) {
+      assert.ok(Object.hasOwn(nodeItems.properties, key), `wire key "${key}" 未在 getGraphNodeItem 声明`);
+    }
+  }
+  // level=2 分支的节点 schema 与全量分支是同一对象（形状一致的契约由引用相等钉住）。
+  assert.equal(MANAGEMENT_METHODS.getGraph.outputSchema.oneOf[2].properties.nodes.items, nodeItems,
+    "level=2 与全量共用同一 getGraphNodeItem");
+  // 其余既有字段不受影响（nodeOut 扩展不挤掉旧字段）。
+  assert.equal(nodeById.s1.title, "卡一");
+  assert.equal(nodeById.s1.hitCount, 0);
+  assert.equal(nodeById.s1.createdAt, null);
+});
+
+test("0.4 收尾：getGraph entities 经 nodeOut 出线后客户端接上着色（有实体聚类色 / 无实体中性色）", async () => {
+  // 端到端接线：management.getGraph（真实 projectGraph + 补字段后的 nodeOut）
+  // 的返回原样喂给客户端 GraphTab，验证图例「填充=实体聚类」从此是真的——
+  // 此前 nodeOut 丢 entities，所有节点永远落中性色。
+  const cards = [
+    { id: "s1", scopeId: "global", state: "active", title: "卡一", summary: "s", vitality: "evergreen", revision: 1, triggers: [], entities: ["项目甲"], links: [], content: "c", hitCount: 0, lastHitAt: null, createdAt: null },
+    { id: "s2", scopeId: "global", state: "active", title: "卡二", summary: null, vitality: "ephemeral", revision: 1, triggers: [], entities: ["项目甲"], links: [], content: "c", hitCount: 0, lastHitAt: null, createdAt: null },
+    { id: "s3", scopeId: "global", state: "active", title: "卡三", summary: null, vitality: "ephemeral", revision: 1, triggers: [], links: [], content: "c", hitCount: 0, lastHitAt: null, createdAt: null },
+  ];
+  const mgmt = await buildGraphManagement(cards);
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
+  const graph = await mgmt.getGraph(trusted, {});
+
+  // 客户端 GraphTab：经真实插槽挂到 graph tab 找到组件本体，再直接渲染
+  // （react stub 不自动调用嵌套组件；与 ui-flashbacks 既有 FlashbacksTab 用例同款）。
+  // 首渲染 state 全走初值 → 手动跑 load effect（拉 getGraph）→ 二次渲染读最新 state。
+  const host = makeStatefulReact();
+  const mod = loadModule(host);
+  const dsh = { call: async (method) => (method === "getGraph" ? graph : {}) };
+  const firstTree = await mountSection(host, ["graph", "session-A", "", null, { mode: "active" }]);
+  const tab = findComponent(firstTree, "GraphTab");
+  assert.ok(tab, "graph tab 挂载 GraphTab");
+  host.states.length = 0;
+  host.cursor.v = 0;
+  host.effects.length = 0;
+  tab.type({ dsh, sessionId: "session-A" }); // 首渲染：state 全初值，load effect 入列
+  for (const effect of host.effects.splice(0)) effect();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  host.cursor.v = 0;
+  const tree = tab.type({ dsh, sessionId: "session-A" }); // 二次渲染：graph state 已填充
+
+  const circleByKey = {};
+  for (const g of flattenVNode(tree).filter((n) => n.type === "g" && ["s1", "s2", "s3"].includes(String(n.props.key)))) {
+    circleByKey[g.props.key] = flattenVNode(g).find((n) => n.type === "circle");
+  }
+  assert.ok(circleByKey["s1"] && circleByKey["s2"] && circleByKey["s3"], "三个节点都渲染出 circle");
+  const NEUTRAL = "var(--dsw-alias-label-secondary";
+  assert.ok(!String(circleByKey["s1"].props.style.fill).includes(NEUTRAL), "有实体的节点着聚类色（不再是中性色）");
+  assert.equal(circleByKey["s1"].props.style.fill, circleByKey["s2"].props.style.fill, "同一实体（项目甲）同色");
+  assert.ok(String(circleByKey["s3"].props.style.fill).includes(NEUTRAL), "无实体的节点落中性色");
+});
+
+// ---------------------------------------------------------------------------
 // e/f) 消息底部按钮：插槽注册、降级关联、冻结 ctx、插槽缺席静默跳过
 // ---------------------------------------------------------------------------
 

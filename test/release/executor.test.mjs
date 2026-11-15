@@ -1,6 +1,10 @@
 // P3 根集成测试：直接检验根 src/organize 与 src/sparks/store.mjs。
 // 冻结 P2 loader 对照仅复制已接收 G a2 的不可变 store 到临时目录。
 // 生产测试不导入 proposal；J/K 组合必须执行，导入或构造失败直接失败。
+//
+// 0.4 分层收口二期自 test/organize/executor.test.mjs 整体迁入 test/release/
+// （本文件全部 describe 组均为 P3-L 前缀，整文件归发版门禁层；
+// 相对路径深度不变：test/<dir>/ → 上两级仍是项目根，断言零改动）。
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';

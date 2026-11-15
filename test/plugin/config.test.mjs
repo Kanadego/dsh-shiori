@@ -318,6 +318,28 @@ test("forgetting policy 部分覆盖 + 默认补全；非法值拒绝", () => {
 // verifyPluginRoots：真实路径（含 link 解析）
 // ---------------------------------------------------------------------------
 
+test("profileRoot 缺省优先于 DSH_HOME：每个缺省的根单独派生，显式根不受影响（0.4 P4）", () => {
+  // 只显式给 dataRoot：stateRoot 用 profileRoot 派生（不再牵连去 DSH_HOME）
+  const onlyData = normalizePluginConfig(
+    { dataRoot: join(TMP_ROOT, "d") },
+    { profileRoot: join(TMP_ROOT, "profile") },
+  );
+  assert.equal(onlyData.dataRoot, join(TMP_ROOT, "d"));
+  assert.equal(onlyData.stateRoot, join(TMP_ROOT, "profile", "shiori-state"));
+  assert.equal(onlyData.rootsSource.dataRoot, "explicit");
+  assert.equal(onlyData.rootsSource.stateRoot, "default");
+
+  // 对称方向：只显式给 stateRoot，dataRoot 用 profileRoot 派生
+  const onlyState = normalizePluginConfig(
+    { stateRoot: join(TMP_ROOT, "s") },
+    { profileRoot: join(TMP_ROOT, "profile") },
+  );
+  assert.equal(onlyState.dataRoot, join(TMP_ROOT, "profile", "shiori-data"));
+  assert.equal(onlyState.stateRoot, join(TMP_ROOT, "s"));
+  assert.equal(onlyState.rootsSource.dataRoot, "default");
+  assert.equal(onlyState.rootsSource.stateRoot, "explicit");
+});
+
 test("verifyPluginRoots：双根 null 解析默认根并 mkdir（inert 退役）；真实目录解析后不嵌套", () => {
   // 0.4-S1：双根 null 不再 inert——解析默认根（本文件顶部已把 DSH_HOME 指到临时目录）
   // 并真实创建目录

@@ -12,8 +12,9 @@
 // - 单用户本地 profile 是本批安全边界：多用户身份不可信时拒绝，不默认共享。
 
 import path from "node:path";
+import { realpathSync } from "node:fs";
 import { DEFAULT_CONFIG, validateConfig } from "../core/index.mjs";
-import { normalizeSemantic, defaultPluginRoots } from "./config.mjs";
+import { normalizeSemantic, defaultPluginRoots, comparableRoot } from "./config.mjs";
 import { normalizeForgetPolicy } from "../forgetting/decay.mjs";
 import { GLOBAL_SCOPE_ID } from "../core/topics.mjs";
 
@@ -25,6 +26,37 @@ function fail(code, message, details) {
   error.code = code;
   if (details !== undefined) error.details = details;
   throw error;
+}
+
+/**
+ * 默认根比较口径（0.4 P4 返工，reviewer 打回项 1）：解析后等价，逐字节 === 会在
+ * junction/symlink 环境打死插件——index.mjs apply 把 verifyPluginRoots 解析出的
+ * 真实路径回填 settings 而 rootsSource 保持 default，词形与 realpath 不相等。
+ * 存在则 realpath，解析失败或不存在退回字面；再按 config.mjs 的 comparableRoot
+ * 同口径折叠（导出复用，两处不许各写一份）。
+ */
+function comparableResolvedRoot(value) {
+  let resolved = value;
+  try {
+    resolved = realpathSync(value);
+  } catch {
+    // 不存在 / 不可解析：退回字面比较
+  }
+  return comparableRoot(resolved);
+}
+
+/**
+ * 默认根（DSH_HOME / profileRoot 派生，非调用方显式提供）的绝对路径校验：
+ * 复用 requireAbsoluteRoot 的文案会误说 "when provided"（reviewer nit 6），
+ * 这里给准确文案。
+ */
+function requireDerivedAbsoluteRoot(value, field) {
+  if (typeof value !== "string" || value.length === 0 || !path.isAbsolute(value)) {
+    fail("INVALID_INPUT", `settings.${field} default root derived from DSH_HOME must be an absolute path, got ${JSON.stringify(value)}`, {
+      field, received: typeof value,
+    });
+  }
+  return value;
 }
 
 const isPlainRecord = (v) =>
@@ -134,15 +166,50 @@ export function validateControllerSettings(raw) {
   }
 
   // 0.4-S1（reviewer P2②）：各根独立解析——只显式给一个根时，另一个补 DSH_HOME
-  // 默认（与 normalizePluginConfig 同语义），不再要求「必须齐给或全缺」；双根皆 null
-  // 仍允许（inert 兼容路径，仅供直构/嵌入方，apply 路径不可达）。rootsSource 由
-  // normalize 传入；直构缺省时按「显式给值=explicit、缺省/补默认=default」现推。
+  // 默认（与 normalizePluginConfig 同语义），不再要求「必须齐给或全缺」。rootsSource
+  // 由 normalize 传入；直构缺省时按「显式给值=explicit、缺省/补默认=default」现推。
+  // 显式传入 rootsSource 时做自洽校验（0.4 P4）：explicit 必须对应已给值；default
+  // 必须对应未给值或「解析后等价于 DSH_HOME 默认根」的值——normalize/verify 注入
+  // 产物就是「真实路径（junction/symlink 已解析）+ default 标记」，controller.mjs
+  // 会对此再校验，不能拒。「source=explicit 但值是 null」「default 配自定路径」
+  // 这类自相矛盾的配置直接拒绝，不给排障留坑。
+  // 边界（nit 7）：default 值校验只认 DSH_HOME 默认根；profileRoot 入口当前不可达
+  // （config.mjs 顶部边界注释、index.mjs apply 均不传 options），若未来接入
+  // profileRoot，这里必须同步放宽或给 rootsSource 引入第三来源。
   let rootsSource = raw.rootsSource;
   if (rootsSource !== undefined) {
     if (!isPlainRecord(rootsSource)
       || (rootsSource.dataRoot !== "explicit" && rootsSource.dataRoot !== "default")
       || (rootsSource.stateRoot !== "explicit" && rootsSource.stateRoot !== "default")) {
       fail("INVALID_INPUT", 'settings.rootsSource must be { dataRoot: "explicit" | "default", stateRoot: "explicit" | "default" }', {});
+    }
+    let defaults = null; // 惰性（nit 5）：双 explicit 不触碰 defaultPluginRoots
+    for (const field of ["dataRoot", "stateRoot"]) {
+      const given = raw[field] ?? null;
+      // 类型先行（attempt 4 返工）：comparables 会走 realpathSync/normalize，
+      // 非字符串（如 raw.dataRoot = 5）在那里抛 TypeError，绕过统一 fail。
+      // 与 explicit 分支同口径：非法类型一律 INVALID_INPUT。
+      if (given !== null && typeof given !== "string") {
+        fail("INVALID_INPUT", `settings.${field} must be a string when provided, got ${typeof given}`, {
+          field, received: typeof given,
+        });
+      }
+      if (rootsSource[field] === "explicit") {
+        if (given === null) {
+          fail("INVALID_INPUT", `settings.rootsSource.${field} is "explicit" but settings.${field} is not given`, { field });
+        }
+      } else if (given !== null) {
+        defaults ??= defaultPluginRoots();
+        // 接受条件（attempt 5 收口，单条判据）：解析后等价。comparableResolvedRoot
+        // 先 realpath、解析失败时退回 comparableRoot 字面折叠（实现见下方 comparableResolvedRoot），
+        // 「两侧 realpath 都失败」的场景已由该兜底覆盖，不需要第二个字面判据。
+        // 边界：DSH_HOME 指向坏链接时词形与目标不一致，解析侧与词形侧都不相等，
+        // 照旧拒绝——本卡不覆盖该场景（生产不可达）。
+        const sameResolved = comparableResolvedRoot(given) === comparableResolvedRoot(defaults[field]);
+        if (!sameResolved) {
+          fail("INVALID_INPUT", `settings.rootsSource.${field} is "default" but settings.${field} is not the DSH_HOME default root after path resolution`, { field });
+        }
+      }
     }
   }
   let dataRoot = raw.dataRoot ?? null;
@@ -156,12 +223,21 @@ export function validateControllerSettings(raw) {
   if (dataRoot !== null) requireAbsoluteRoot(dataRoot, "dataRoot");
   if (stateRoot !== null) requireAbsoluteRoot(stateRoot, "stateRoot");
   if (dataRoot === null && stateRoot !== null) {
-    dataRoot = requireAbsoluteRoot(defaultPluginRoots().dataRoot, "dataRoot");
+    dataRoot = requireDerivedAbsoluteRoot(defaultPluginRoots().dataRoot, "dataRoot");
     rootsSource = { ...rootsSource, dataRoot: "default" };
   }
   if (stateRoot === null && dataRoot !== null) {
-    stateRoot = requireAbsoluteRoot(defaultPluginRoots().stateRoot, "stateRoot");
+    stateRoot = requireDerivedAbsoluteRoot(defaultPluginRoots().stateRoot, "stateRoot");
     rootsSource = { ...rootsSource, stateRoot: "default" };
+  }
+  // active 直构双空兜底（0.4 P4）：与 apply 路径（normalizePluginConfig）同语义——
+  // active 不允许带着一对 null 根去 openState，双根皆缺省时补 DSH_HOME 默认并标记
+  // default；shadow 保持 null（影子挂载 inert，不能给它补根）。
+  if (mode === "active" && dataRoot === null && stateRoot === null) {
+    const defaults = defaultPluginRoots();
+    dataRoot = requireDerivedAbsoluteRoot(defaults.dataRoot, "dataRoot");
+    stateRoot = requireDerivedAbsoluteRoot(defaults.stateRoot, "stateRoot");
+    rootsSource = { ...rootsSource, dataRoot: "default", stateRoot: "default" };
   }
   if (dataRoot !== null && mode !== "active") {
     // shadow 配置了 root：允许只读预览挂载（诊断可见），但必须显式知道这是 shadow。

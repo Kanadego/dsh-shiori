@@ -359,6 +359,14 @@ export function createManagement(deps) {
         });
       }
       // 节点出线口径：全量与 level=2 共用（level=1 无节点；簇内节点必须仍带命中字段）。
+      // 0.4 收尾补 entities：projectGraph 的节点已按 normalizeEntities 规范化
+      // （trim 非空、去重保序、上限 4 条，脏数据退化为 []）；客户端 entityKeyOf
+      // 按 raw.entities 取首实体做聚类着色（图例「填充=实体聚类」），此前 nodeOut
+      // 丢字段导致所有节点落中性色。缺省 []，调用方（客户端）按空数组走中性色。
+      // 前提（0.4 收尾 reviewer 记录项）：这里只做 Array.isArray 兜底、不重复
+      // 规范化，规范化单一来源在 graph.mjs 的 normalizeEntities——若投影路径
+      // 变更（换掉 projectGraph / 改节点产出），规范化必须跟着走，否则脏数据
+      // 会从这里漏到 wire（契约 maxItems 4 / items 非空字符串会被打破）。
       const nodeOut = (n) => {
         const meta = hitMeta.get(n.id) ?? { hitCount: 0, lastHitAt: null, createdAt: null };
         return {
@@ -367,6 +375,7 @@ export function createManagement(deps) {
           summary: n.summary ?? null,
           vitality: n.vitality ?? null,
           revision: n.revision ?? null,
+          entities: Array.isArray(n.entities) ? n.entities : [],
           hitCount: meta.hitCount,
           lastHitAt: meta.lastHitAt,
           createdAt: meta.createdAt,

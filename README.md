@@ -57,6 +57,24 @@ dsh plugin --profile web add dsh-shiori
 | 面板 RPC 通道、授权边界与宿主降级行为 | **[docs/plugin/client.md](docs/plugin/client.md)** |
 | 历史版本发布说明与变更记录 | **[docs/releases/README.md](docs/releases/README.md)** |
 
+## 在已安装的包里跑测试
+
+npm 包自带 `scripts/`（测试运行器）与 `test/`（两层测试），装包后可以在包目录里直接跑包内测试（v0.4.0 起）：
+
+| 命令 | 跑什么 |
+| --- | --- |
+| `npm test` | 开发层（dev）全套测试 |
+| `npm run test:release` | 开发层 + 发版门禁层全量（含真实 DSH CLI 冒烟、stage 旧回归、boot 存活窗口等慢用例） |
+| `npm run verify:package` | 包清单 / tarball / 包内可收集性核查 |
+
+前置条件：
+
+- **Node.js >= 24**（`engines.node` 要求，测试运行器同样依赖 node:test）；
+- **peer 依赖可解析**：通过 `dsh plugin --profile <n> add <tgz>` 安装时自动就位；若把包手动放进某个目录直接跑测试，需先自行安装 `peerDependencies`（react、zod、@deepseek-ai/dsh-* 等）；
+- **环境类用例如实标注**：本机未装 DSH CLI 时，真实冒烟 / boot 存活窗口用例按契约 not-run（不会假绿）；`npm run test:release` 的完整覆盖需要装好 DSH 0.2.1-rc.2。
+
+`npm run verify:package` 里有一项「tarball collect」：真实 `npm pack` → 解包到临时目录 → 在解包目录执行 `node scripts/run-tests.mjs dev --collect-only`（只跑分层守卫并打印收集清单，不运行测试），证明装包人手里那份 `test/` + `scripts/` 能被包自带运行器完整收集。
+
 ## 版本更新
 
 <details open>
@@ -66,12 +84,13 @@ dsh plugin --profile web add dsh-shiori
 
 - **首次安装可用**：数据与状态根目录默认落到 `~/.dsh/shiori-data`、`~/.dsh/shiori-state` 并自动创建；面板给「启用记忆」按钮与初始化卡片，不再只有一行 needs-configuration。
 - **侧边栏独立入口**：侧边栏出现「记忆」图标，点开直达全屏面板。
-- **专题分组**：专题可挂多个分组（首个为主组），新增分组管理 UI 与 `group_manage` 工具；L1 索引仍平铺。
+- **专题分组**：专题可挂多个分组（首个为主组），新增分组管理 UI 与 `group_manage` 工具；L1 索引仍平铺。`group_manage` 增 `repair` 动作与 `list.dangling`，删组时并发留下的悬空引用可一次清掉。
 - **面板分页与人设卡**：最近变更、专题、闪回命中统一每页 10 条；会话顶部可切人设卡，切卡即换整套记忆。
 - **模型下载**：状态页可一键下载语义模型到数据目录，带进度，失败可手动指定目录。
 - **卸载与焚毁**：新增 `dsh-shiori-admin` 命令与面板危险按钮，二次确认后删除整个数据目录。
 - **图谱两级视图**：首屏只画簇圆，点开进簇内画连线，带面包屑。
-- **修复**：进簇过渡期不再闪假空态；时间线回退下界钳到 0；清簇不再清空地图；迁移断言不再写死组名。
+- **修复**：进簇过渡期不再闪假空态；时间线回退下界钳到 0；清簇不再清空地图；迁移断言不再写死组名；换模型后自动重建改为强制全量（旧维度向量不再残留）；图谱节点带实体标签，图例名副其实；数据根落在 junction / symlink 上不再启动即失败。
+- **可测与分层**：包内携带 `scripts/` 与 `test/`，装包后可原地 `npm test`；开发层约 35 秒、发版层约 75 秒，分层靠文件位置而非排除清单。
 
 </details>
 

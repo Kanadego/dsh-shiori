@@ -29,7 +29,9 @@ import {
   checkPatchYml,
   checkClientBundle,
   checkTarball,
+  checkTarballCollect,
   checkImports,
+  COLLECT_FLOOR,
   EXPECTED_FROM_P,
 } from "../../scripts/verify-package.mjs";
 
@@ -189,6 +191,9 @@ test("combined 模式（temp 双形态树）：缺 P 失败、叠真实 P 提交
   }
 });
 
+// 0.4 分层收口二期：files 白名单新增 scripts/ 与 test/（包内可测——装包后
+// npm test 才有运行器可找）。排除清单同步收窄：test 不再排除（review 口径
+// q-43e1a0ca62aa1859：改的是「test 不再排除」，不是把整条断言删掉或放宽）。
 test("tarball：真实 npm pack --dry-run 白名单", () => {
   const result = checkTarball();
   assert.deepEqual(result.detail, [], result.detail.join("; "));
@@ -197,10 +202,26 @@ test("tarball：真实 npm pack --dry-run 白名单", () => {
   assert.ok(result.files.includes("cordis.patch.yml"));
   assert.ok(result.files.includes("src/plugin/config.mjs"));
   assert.ok(result.files.includes("icon.png"), "tarball carries the package icon");
+  // 包内可测三件套：运行器 / 核查脚本 / 共享 stage 脚手架必须随包发布
+  assert.ok(result.files.includes("scripts/run-tests.mjs"), "tarball ships the in-package test runner");
+  assert.ok(result.files.includes("scripts/verify-package.mjs"), "tarball ships the package verifier");
+  assert.ok(result.files.includes("test/fixtures/stage.mjs"), "tarball ships the shared stage scaffold");
   for (const file of result.files) {
-    assert.ok(!/^(phase\d|collab|test|_backup|node_modules)/i.test(file), `tarball excludes ${file}`);
+    assert.ok(!/^(phase\d|collab|_backup|node_modules)/i.test(file), `tarball excludes ${file}`);
     assert.ok(!/REPORT\.md|RESULT\.json|\.tgz$|\.log$/i.test(file), `tarball excludes ${file}`);
   }
+});
+
+// 0.4 收尾（rework attempt 2）：checkTarballCollect 是「先验证再交付」的闸门，
+// 必须有自己的自动化覆盖。真实 npm pack → tar 解包到临时目录 → 在包内跑
+// `node scripts/run-tests.mjs dev --collect-only`（纯本地操作，无网也能跑；
+// 实测约 2-3s，允许耗时，不用 skip/timeout 绕开）。
+test("tarball collect：真实 npm pack 解包后包内测试可被自带运行器收集", () => {
+  const result = checkTarballCollect();
+  assert.deepEqual(result.detail, [], `tarball collect problems: ${result.detail.join("; ")}`);
+  assert.equal(result.ok, true, `tarball collect must pass: ${result.detail.join("; ")}`);
+  assert.ok(result.collected >= COLLECT_FLOOR,
+    `in-package dev collect ${result.collected} test files must be >= floor ${COLLECT_FLOOR}`);
 });
 
 

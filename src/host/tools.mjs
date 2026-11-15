@@ -630,7 +630,23 @@ export function createTopicCreateTool({ service, getSessionInfo, now, readonlyGu
 };
 
 /**
- * S3 group_manage 工具（第 17 个宿主工具，agent 可调；action=list/create/update/delete）。
+ * 迁移已提交、随后删组失败时的错误注解（0.4 收尾，必修 3）。
+ * 只要本次 action 真的迁移过 topic，不论首试还是重试失败、也不论 error.code，
+ * 调用方都必须知道「迁移已生效」——否则看到「组清单不存在 / migrateTo 不存在」
+ * 会误以为整体失败。文案不承诺重跑幂等（目标组没了会卡在 migrateTo 预检）。
+ */
+function noteMigrationTookEffect(error, { key, migrateTo, retried }) {
+  error.message += `（迁移已生效：组内 topic 已迁至 "${migrateTo}"，组条目 "${key}" 可能已不存在或尚未删除；`
+    + (retried
+      ? `自动重试一次仍失败（${error.code ?? "未知错误"}），重跑本 action 不一定幂等`
+        + `（"${migrateTo}" 若已不存在会卡在 migrateTo 预检），请先核对组清单再收尾）`
+      : `本次未自动重试（${error.code ?? "未知错误"}），请先核对组清单再收尾）`);
+  return error;
+}
+
+/**
+ * S3 group_manage 工具（第 17 个宿主工具，agent 可调；action=list/create/update/delete，
+ * 0.4 收尾新增 action=repair：清理 list 里 dangling 字段报出的悬空组引用）。
  * 组清单数据层复用 S3-a 的 src/core/groups.mjs（groups.json 读写 / CAS / 迁移计划），
  * topic 文件的组迁移改写走 service.mutate（store 提交协议：journal/CAS/预算），
  * 绝不绕过存储层直写。
@@ -642,6 +658,9 @@ export function createTopicCreateTool({ service, getSessionInfo, now, readonlyGu
  * 提交把新 topic 挂入被删组时不在保护范围——该成员的迁移计划（deleteGroup 返回
  * 的 migration）会被丢弃而组条目仍被删除，留下悬空 key；commit 侧组存在性校验与
  * deleteGroup 的 CAS 只能把窗口压到最小，完全闭合需要跨文件单事务，超出本单范围。
+ * 0.4 收尾补了两道自愈：① 第一步迁移已生效而第二步 CAS 失败时，重读 revision 自动
+ * 补删组条目一次（不二次迁移），第二次仍失败才上抛；② 悬空 key 由 list 的 dangling
+ * 字段显式暴露，action=repair 走 service.mutate（CAS + operationId）只清悬空引用。
  *
  * @param {object} deps
  * @param {object} deps.service 见 docs/host/README.md 的 service 契约（mutate/readTopic/listTopics）
@@ -669,12 +688,29 @@ export function createGroupManageTool({ service, dataRoot, scopeId, now, readonl
     }));
   }
 
+  /**
+   * 悬空引用清单（0.4 收尾）：挂载里指向不存在组的条目，形如 [{topicKey, group}]，
+   * 按 (topicKey, group) 对去重，顺序随 topic 遍历序。list 与 repair 共用一套口径。
+   */
+  function danglingPairsOf(snapshot, known) {
+    const dangling = [];
+    for (const t of snapshot) {
+      const seen = new Set();
+      for (const g of t.group) {
+        if (typeof g !== "string" || g.length === 0 || known.has(g) || seen.has(g)) continue;
+        seen.add(g);
+        dangling.push({ topicKey: t.key, group: g });
+      }
+    }
+    return dangling;
+  }
+
   async function readGroupsOrEmpty() {
     try {
       return await readGroups({ dataRoot, scopeId });
     } catch (error) {
       if (error?.code === "NOT_FOUND") {
-        // 组清单缺失：等价「无任何组」（ensureGroupsFile 由宿主激活路径负责，
+        // 组清单缺失：等价「无任何组」（默认模板由宿主激活路径负责初始化，
         // 这里不静默初始化——读路径绝不写盘）。
         return { revision: null, data: { version: 1, groups: [] } };
       }
@@ -684,9 +720,9 @@ export function createGroupManageTool({ service, dataRoot, scopeId, now, readonl
 
   return {
     name: "group_manage",
-    description: "Manage topic groups for the current scope: list groups (with per-group topic counts), create/update group metadata (key/title/summary/order), or delete a group. Deleting a non-empty group requires migrateTo: the group's topics are re-grouped in one commit first, and the group entry is removed afterwards as a second, separate step. A topic newly attached to the group between the two commits is NOT protected and may be left with a dangling key (concurrency edge; see the known-limitation note in createGroupManageTool). Groups are per-scope and referenced from topic front-matter; a topic's first group is its primary group (soft limit: 3 groups per topic, more only yields a warning).",
+    description: "Manage topic groups for the current scope: list groups (with per-group topic counts and the dangling field reporting topic.group entries that point at groups no longer in the list), create/update group metadata (key/title/summary/order), delete a group, or repair dangling references. Deleting a non-empty group requires migrateTo: the group's topics are re-grouped in one commit first, and the group entry is removed afterwards as a second, separate step; if that second step hits a revision conflict after the migration already committed, the revision is re-read and the entry deletion is retried once automatically (never a second migration); if that retry also fails, the error is rethrown annotated with the fact that the migration already took effect (rerunning is not guaranteed to be idempotent). A topic newly attached to the group between the two commits is NOT protected and may be left with a dangling key — action=repair removes exactly those dangling references and reports cleaned/remaining (one CAS'd mutate commit with operationId; cleaned counts only pairs actually removed at write time; valid groups and card bodies untouched; refused with INVALID_STATE when the group list is empty but topics carry mounts, to avoid wiping every mount). repair re-reads the group list right before committing, but that recheck is NOT atomic with the mutate: a group created in the window right after the recheck can still make a fresh mount removable — this residual window is reported as-is, not closed. If the post-commit re-read fails, the result still reports cleaned plus a warning and omits remaining rather than inventing a value. Groups are per-scope and referenced from topic front-matter; a topic's first group is its primary group (soft limit: 3 groups per topic, more only yields a warning).",
     inputSchema: {
-      action: { type: "string", required: true, description: "One of: list, create, update, delete." },
+      action: { type: "string", required: true, description: "One of: list, create, update, delete, repair." },
       key: { type: "string", description: "Group key (create/update/delete)." },
       title: { type: "string", description: "Group title (required for create; optional for update)." },
       summary: { type: "string", description: "Group summary (required for create; optional for update)." },
@@ -701,20 +737,36 @@ export function createGroupManageTool({ service, dataRoot, scopeId, now, readonl
       rejectScope(a);
       const action = requireString(a, "action");
       if (action === "list") {
+        // 读序约束（0.4 收尾，交叉审查必修 1）：必须先读 topic 快照、后读组清单。
+        // 组可见性本身保证了挂载发生在建组之后——若某个组在这两次读之间被建出、
+        // topic 随即挂上它，后读的 groups 必然看得到该组；反序（先 groups 定格
+        // known、后读 topics）会把这条件正当挂载误判成悬空引用。
+        const snapshot = topicSnapshotOf(await service.listTopics());
         const { revision, data } = await readGroupsOrEmpty();
         // 主组口径（0.4 审查 P0#2，用户 2026-11-14 拍板）：一个 topic 可以挂多组，
         // 但计数只认主组 t.group[0]，多组 topic 不在非主组重复计数——否则组行计数
         // 总和会虚高，且与面板成员列表（row.group[0] === key）口径不一致。
+        // 主组判据收紧（0.4 收尾）：稀疏数组空洞让 group[0] 取出 undefined，
+        // 旧判据 primary !== null 放行 undefined，计数表混进 undefined 键——
+        // 改为「非空字符串」才算合法主组。
         const counts = new Map();
-        for (const t of await service.listTopics()) {
-          const primary = Array.isArray(t?.group) && t.group.length > 0 ? t.group[0] : null;
-          if (primary !== null) counts.set(primary, (counts.get(primary) ?? 0) + 1);
+        // 悬空引用检测（0.4 收尾）：挂载指向不存在组的条目。删除组的「迁移成员 +
+        // CAS 删组」是两步提交，并发窗口会留下「卡片指向已不存在的组」——list
+        // 把它们显式暴露出来（按 topicKey+group 去重），repair 负责清理。
+        const known = new Set(data.groups.map((g) => g.key));
+        for (const t of snapshot) {
+          const primary = t.group.length > 0 ? t.group[0] : null;
+          if (typeof primary === "string" && primary.length > 0) {
+            counts.set(primary, (counts.get(primary) ?? 0) + 1);
+          }
         }
+        const dangling = danglingPairsOf(snapshot, known);
         return {
           scope: scopeId,
           action,
           revision,
           groups: data.groups.map((g) => ({ ...g, topics: counts.get(g.key) ?? 0 })),
+          dangling,
         };
       }
       // 以下三个 action 都是写：只读态直接拒绝（与既有写工具同一守卫）。
@@ -811,27 +863,167 @@ export function createGroupManageTool({ service, dataRoot, scopeId, now, readonl
           migrated = plan;
         }
         // 组条目删除（CAS：revision 取本 action 开头的清单读取；topic 迁移不改
-        // groups.json，CAS 仍成立）。
-        const postSnapshot = topicSnapshotOf(await service.listTopics());
+        // groups.json，CAS 仍成立）。postSnapshot 的读取也放进 try：迁移已提交后
+        // 若这里 listTopics 读失败，同样属于「迁移已生效但收尾失败」，必须走下面的
+        // 注解分支，不能让裸错误无说明上抛（review a3 项 2）。
+        let postSnapshot;
         let deleted;
         try {
+          postSnapshot = topicSnapshotOf(await service.listTopics());
           deleted = await deleteGroup({
             dataRoot, scopeId, key, migrateTo, topics: postSnapshot, expectedRevision: revision,
           });
         } catch (error) {
           // 迁移提交与组条目删除之间存在并发窗口：topic 改挂已经生效、只是
-          // groups.json 被并发改动导致 CAS 失败。此时不能让调用方误判成整体
-          // 失败——错误文案写明「迁移已生效，重试幂等」（重跑本 action 时组内
-          // topic 已不在组内，只会补删组条目，不会二次迁移）。
+          // groups.json 被并发改动导致 CAS 失败。此时自愈（0.4 收尾）：重读清单
+          // revision 补删组条目一次——重试只走 deleteGroup、不带迁移语义，绝不
+          // 二次迁移。不变量：重试只做一次、绝不循环。
+          // 只要迁移过 topic，任何最终错误（首试的非 CAS 错误、重试的任何错误）都要
+          // 交代迁移后果：目标组恰在窗口内被删时，内部预检抛的是 INVALID_INPUT
+          //（"migrateTo 不存在"）；groups.json 被整个删掉时首试抛 NOT_FOUND——调用方
+          // 都看不出迁移已经生效。文案不承诺重跑幂等。
           if (error?.code === "REVISION_CONFLICT" && migrated.length > 0) {
-            error.message += `（迁移已生效，重试幂等：组内 topic 已迁至 "${migrateTo}"，重试只需补删组条目）`;
+            try {
+              const fresh = await readGroupsOrEmpty();
+              deleted = await deleteGroup({
+                dataRoot, scopeId, key, migrateTo, topics: postSnapshot, expectedRevision: fresh.revision,
+              });
+            } catch (retryError) {
+              throw noteMigrationTookEffect(retryError, { key, migrateTo, retried: true });
+            }
+          } else {
+            if (migrated.length > 0) {
+              noteMigrationTookEffect(error, { key, migrateTo, retried: false });
+            }
+            throw error;
           }
-          throw error;
         }
         return { scope: scopeId, action, key, deleted: true, migrated, revision: deleted.revision };
       }
+      if (action === "repair") {
+        // 悬空引用自愈（0.4 收尾，命名口径经评审 amber-review-04 拍板）：只清
+        // topic.group 里指向不存在组的条目，有效挂载与卡片正文原样保留；走
+        // service.mutate 单提交（CAS + operationId，与迁移同一提交协议）。
+        // 返回 cleaned（清理条数，按 topicKey+group 对计数）与 remaining
+        // （清理后重读快照再算的剩余悬空条数，正常路径为 0）。
+        // 读序约束（同必修 1）：先 topics 后 groups——组可见即说明挂载发生在建组
+        // 之后，后读的 known 必然包含它；反序会把两次读之间新建组的合法挂载当成
+        // 悬空引用静默摘掉。
+        const snapshot = topicSnapshotOf(await service.listTopics());
+        const { revision, data } = await readGroupsOrEmpty();
+        const known = new Set(data.groups.map((g) => g.key));
+        // 清单缺失/为空（readGroupsOrEmpty 的兜底）时，known 为空会把每条挂载都
+        // 判成悬空、一次 mutate 全摘——这不是修复，是把用户数据清空。拒绝并要求
+        // 先用 group_manage action=create 初始化组清单（宿主激活路径也会写默认模板）。提交前复核
+        // 读到空清单时同样适用。
+        const assertNotWipingAll = (knownSet) => {
+          if (knownSet.size === 0 && snapshot.some((t) => t.group.length > 0)) {
+            throw INVALID_STATE(
+              "group_manage: 组清单为空或缺失（groups.json 尚未初始化），拒绝 repair——"
+              + "会把全部 topic 挂载当作悬空引用清空；请先用 group_manage action=create 初始化组清单",
+              { scope: scopeId, mountedTopics: snapshot.filter((t) => t.group.length > 0).map((t) => t.key) },
+            );
+          }
+        };
+        assertNotWipingAll(known);
+        const dangling = danglingPairsOf(snapshot, known);
+        if (dangling.length === 0) {
+          // 无悬空引用：空修复不触写路径（重放幂等）。
+          return { scope: scopeId, action, cleaned: 0, remaining: 0, revision };
+        }
+        const ghostsOf = (pairs) => {
+          const map = new Map();
+          for (const { topicKey, group } of pairs) {
+            if (!map.has(topicKey)) map.set(topicKey, new Set());
+            map.get(topicKey).add(group);
+          }
+          return map;
+        };
+        const buildChanges = async (ghostsByTopic) => {
+          const changes = [];
+          let removed = 0;
+          for (const [topicKey, ghosts] of ghostsByTopic) {
+            const current = await service.readTopic(topicKey);
+            const currentGroup = Array.isArray(current.group) ? current.group : [];
+            // cleaned 按实际摘除的 (topicKey, group) 对数累加（review a3 项 5）：
+            // 悬空判定基于较早快照，读改写时该挂载可能已被别处摘掉——只数本次
+            // 真正移除的条目，避免高报。
+            const present = new Set(currentGroup.filter((g) => typeof g === "string" && ghosts.has(g)));
+            removed += present.size;
+            changes.push({
+              kind: "topic",
+              key: topicKey,
+              expectedRevision: current.revision,
+              text: current.body ?? "",
+              topic: {
+                title: current.title,
+                summary: current.summary,
+                // 只摘除悬空引用：字符串挂载里指向不存在组的条目，其余原样保留。
+                group: currentGroup.filter((g) => !(typeof g === "string" && ghosts.has(g))),
+              },
+            });
+          }
+          return { changes, removed };
+        };
+        let { changes, removed } = await buildChanges(ghostsOf(dangling));
+        let cleaned = removed;
+        let commitRevision = revision;
+        // 空提交拦截（review a3 项 2）：buildChanges 会按最新 revision 重读 topic，
+        // 快照里判成悬空的挂载可能已被别处摘掉——removed 为 0 说明本次 changes 不会
+        // 真正改动任何 topic.group，mutate 只是白涨 groups.json 的 revision。既然已
+        // 无实际变更，直接按空修复返回（与顶部「无悬空」分支同构），不触写。
+        if (removed === 0) {
+          return { scope: scopeId, action, cleaned: 0, remaining: 0, revision };
+        }
+        // 提交前复核（0.4 收尾必修 2）：从读清单到 mutate 之间若有人建组修好了
+        // 这些悬空，本次 mutate 会把刚修好的挂载再摘一次。revision 变了就按新
+        // 清单重算悬空：已不再悬空则不触写、按空修复返回。
+        // 边界（review a3 项 6）：复核与 mutate 无法原子化——复核后到提交前若又
+        // 有人新建组，仍可能摘掉一条刚变合法的挂载；该残余窗口如实告知，不在此处
+        // 再叠一轮读写（跨文件单事务超出本单范围）。
+        const approval = await readGroupsOrEmpty();
+        if (approval.revision !== revision) {
+          const freshKnown = new Set(approval.data.groups.map((g) => g.key));
+          assertNotWipingAll(freshKnown);
+          const freshDangling = danglingPairsOf(snapshot, freshKnown);
+          if (freshDangling.length === 0) {
+            // 窗口内悬空已被别处修好：不触写，空修复返回（cleaned 0）。
+            return { scope: scopeId, action, cleaned: 0, remaining: 0, revision: approval.revision };
+          }
+          const rebuilt = await buildChanges(ghostsOf(freshDangling));
+          changes = rebuilt.changes;
+          cleaned = rebuilt.removed;
+          commitRevision = approval.revision;
+          // 同「空提交拦截」：复核后重读的 topic 已没有可摘条目时，不触写。
+          if (rebuilt.removed === 0) {
+            return { scope: scopeId, action, cleaned: 0, remaining: 0, revision: approval.revision };
+          }
+        }
+        await service.mutate({ operationId, changes });
+        // remaining 如实重算（必修 3）：提交后先重读 topics、再读 groups（读序约束），
+        // 用提交后的最新清单算剩余悬空——提交期间某组被删时不会少算残余。
+        // revision 与 remaining 同源（review a3 项 4）：都取提交后重读的清单快照。
+        // 重读失败时已提交的 cleaned 不能吞掉（review a3 项 3）：返回 cleaned 与
+        // warning，remaining 无从计算就不给（绝不臆造数值）。
+        try {
+          const afterSnapshot = topicSnapshotOf(await service.listTopics());
+          const afterGroups = await readGroupsOrEmpty();
+          const afterKnown = new Set(afterGroups.data.groups.map((g) => g.key));
+          const remaining = danglingPairsOf(afterSnapshot, afterKnown).length;
+          return { scope: scopeId, action, cleaned, remaining, revision: afterGroups.revision };
+        } catch (error) {
+          return {
+            scope: scopeId,
+            action,
+            cleaned,
+            revision: commitRevision,
+            warning: `repair 已提交（cleaned=${cleaned}），但提交后重读快照失败（${error?.code ?? "未知错误"}）：`
+              + "remaining 无法计算，请重新执行 group_manage list 核对剩余悬空引用",
+          };
+        }
+      }
       throw INVALID_INPUT(
-        `group_manage: action 必须是 list / create / update / delete，收到 "${action}"`,
+        `group_manage: action 必须是 list / create / update / delete / repair，收到 "${action}"`,
         { action },
       );
     },

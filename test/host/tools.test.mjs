@@ -342,6 +342,8 @@ import os from "node:os";
 import path from "node:path";
 import { createGroupManageTool, createTopicCreateTool } from "../../src/host/tools.mjs";
 import { ensureGroupsFile, groupsFilePath } from "../../src/core/groups.mjs";
+import { withLock } from "../../src/storage/lockfile.mjs";
+import { atomicReplace } from "../../src/storage/fsutil.mjs";
 
 async function makeGroupFixture(t, initial = {}) {
   const base = await fsp.mkdtemp(path.join(os.tmpdir(), "shiori-s3-groupmanage-"));
@@ -555,17 +557,21 @@ test("S3 group_manage delete：空组直接删；migrateTo 指向不存在组报
 
 // 0.4 补丁（账本 #4846d2 / review a1 打回项 1）：迁移提交与组条目删除之间存在
 // 并发窗口——topic 改挂已在 service.mutate 里生效、groups.json 却被并发改动导致
-// deleteGroup 的 CAS 失败。此时错误文案必须写明「迁移已生效，重试幂等」，不能
-// 让调用方误判成整体失败；非 CAS 错误（如清单被并发删除）则原样上抛、不被改写。
+// deleteGroup 的 CAS 失败。旧契约是首次 CAS 失败即上抛、文案标注「迁移已生效，
+// 重试幂等」让人手动重试；0.4 收尾（本单）换成自愈：重读 revision 补删组条目一次
+// （绝不二次迁移），第二次仍失败才上抛。只要迁移过 topic，任何最终错误（首试非 CAS
+// 错误、重试的任何错误 code）都必须带「迁移已生效」说明，但不承诺重跑幂等。
 
-test("S3 group_manage delete + migrateTo：迁移提交后 groups.json 被并发改动 → REVISION_CONFLICT 文案标注「迁移已生效，重试幂等」", async (t) => {
+test("S3 group_manage delete + migrateTo：迁移提交后 groups.json 被并发改动 → 自愈重读 revision 补删组条目（0.4 收尾）", async (t) => {
   const { tool, service, base } = await makeGroupFixture(t);
   const file = groupsFilePath(base, "amber");
   // 并发写手：迁移 mutate 提交成功后立刻手改磁盘 groups.json（模拟另一宿主在
   // 同一窗口期写入），使 action 开头读到的 revision 与磁盘真值错开，deleteGroup
   // 的 CAS 必失败——走的是真实 deleteGroup 代码路径，不桩库函数。
+  let mutateCount = 0;
   const innerMutate = service.mutate.bind(service);
   service.mutate = async (request) => {
+    mutateCount += 1;
     const receipt = await innerMutate(request);
     const raw = JSON.parse(await fsp.readFile(file, "utf8"));
     const victim = raw.groups.find((g) => g.key === "life");
@@ -573,25 +579,30 @@ test("S3 group_manage delete + migrateTo：迁移提交后 groups.json 被并发
     await fsp.writeFile(file, JSON.stringify(raw), "utf8");
     return receipt;
   };
-  await assert.rejects(
-    () => tool.execute({ action: "delete", key: "dev", migrateTo: "project" }),
-    (e) => {
-      if (!isCodedError(e)) return false;
-      assert.equal(e.code, "REVISION_CONFLICT");
-      assert.match(e.message, /迁移已生效，重试幂等/, "CAS 失败且已有迁移时必须标注重试幂等");
-      assert.match(e.message, /"project"/, "文案指明迁移目标组");
-      return true;
-    },
-  );
-  // 迁移已生效：组内 topic 的改挂在 topic 账里已提交（重试幂等的语义前提）。
+  const out = await tool.execute({ action: "delete", key: "dev", migrateTo: "project" });
+  assert.equal(out.deleted, true, "第一次 CAS 失败必须由实现自愈（重读 revision 补删），不上抛");
+  // 并发写手对 life.title 的改动原样保留——若重试仍用旧 revision 会二次
+  // REVISION_CONFLICT 上抛，这条等价于钉住「重试读的是并发改动后的最新盘」。
+  const raw = JSON.parse(await fsp.readFile(file, "utf8"));
+  assert.ok(!raw.groups.some((g) => g.key === "dev"), "dev 组已从清单删除");
+  assert.match(raw.groups.find((g) => g.key === "life").title, /（并发改动）$/,
+    "并发改动未被覆盖（重试基于并发后的真值 revision）");
+  // 迁移恰好一次：mutate 计数钉死二次迁移禁令——重试只走 deleteGroup 补删组
+  // 条目（组条目删除在本架构里不经 service.mutate）。
+  assert.equal(mutateCount, 1, "service.mutate 只调 1 次（迁移），重试绝不二次迁移");
+  // 组内 topic 的改挂已生效：挂载到 migrateTo，全库无任何 topic 还挂着 dev。
   assert.deepEqual((await service.readTopic("proj-x")).group, ["project"]);
+  for (const topic of await service.listTopics()) {
+    assert.ok(!topic.group.includes("dev"), `topic ${topic.key} 不得再挂已删除的组`);
+  }
 });
 
-test("S3 group_manage delete + migrateTo：非 CAS 错误（清单被并发删除 → NOT_FOUND）原样上抛，文案不被改写", async (t) => {
+test("S3 group_manage delete + migrateTo：首试非 CAS 错误（清单被并发删除 → NOT_FOUND）code 保留，同样附迁移已生效说明", async (t) => {
   const { tool, service, base } = await makeGroupFixture(t);
   const file = groupsFilePath(base, "amber");
-  // 并发删手：迁移提交后删掉 groups.json——deleteGroup 读不到清单抛 NOT_FOUND，
-  // code 不是 REVISION_CONFLICT，即使 migrated 非空也不得附加幂等文案。
+  // 并发删手：迁移提交后删掉 groups.json——首试 deleteGroup 读不到清单抛 NOT_FOUND，
+  // 不是 REVISION_CONFLICT、不进重试；但迁移已经生效，错误必须照样交代后果
+  //（否则调用方只看到「组清单不存在」，不知道 topic 已改挂 migrateTo）。
   const innerMutate = service.mutate.bind(service);
   service.mutate = async (request) => {
     const receipt = await innerMutate(request);
@@ -603,10 +614,86 @@ test("S3 group_manage delete + migrateTo：非 CAS 错误（清单被并发删�
     (e) => {
       // NOT_FOUND 是 storage 层补充码（host/errors.mjs 的 CODES 五元组之外），
       // 这里直接断言 code，不经过 isCodedError。
-      assert.equal(e.code, "NOT_FOUND");
-      assert.doesNotMatch(e.message, /迁移已生效，重试幂等/, "非 CAS 错误不被改写");
+      assert.equal(e.code, "NOT_FOUND", "code 原样保留");
+      assert.match(e.message, /迁移已生效/, "首试非 CAS 错误同样交代迁移后果");
+      assert.match(e.message, /"project"/, "文案点名迁移目标组");
+      assert.match(e.message, /本次未自动重试/, "首试失败没有重试，文案不得谎称重试过");
       return true;
     },
   );
-  assert.deepEqual((await service.readTopic("proj-x")).group, ["project"]);
+  assert.deepEqual((await service.readTopic("proj-x")).group, ["project"], "迁移确实已生效");
+});
+
+test("S3 group_manage delete + migrateTo：重试仍 CAS 冲突 → 上抛 REVISION_CONFLICT + 迁移已生效说明，迁移只做一次（必修 3）", async (t) => {
+  const { tool, service, base } = await makeGroupFixture(t);
+  const file = groupsFilePath(base, "amber");
+  const rootReal = await fsp.realpath(base);
+  const baseGroups = JSON.parse(await fsp.readFile(file, "utf8")).groups;
+  // 并发写手：持续以「语义不变、字节改变」（_seq 自增）的方式改写 groups.json，
+  // 且每次改写都在存储锁内——锁队列 FIFO 保证「重试补删」在重读 revision 之后
+  // 必然被再次改盘，二次 CAS 必失败（不桩任何内部函数，只注入并发写盘）。
+  let stop = false;
+  let seq = 0;
+  const writer = (async () => {
+    while (!stop) {
+      try {
+        await withLock(rootReal, { retryMs: 5 }, async () => {
+          seq += 1;
+          const body = JSON.stringify({ version: 1, groups: baseGroups, _seq: seq });
+          await atomicReplace(file, Buffer.from(body, "utf8"));
+        });
+      } catch {
+        // 并发 rename 抖动（EPERM 等）忽略，下一轮继续写。
+      }
+    }
+  })();
+  let error;
+  try {
+    await assert.rejects(
+      () => tool.execute({ action: "delete", key: "dev", migrateTo: "project" }),
+      (e) => { error = e; return true; },
+    );
+  } finally {
+    stop = true;
+    await writer;
+  }
+  assert.equal(error?.code, "REVISION_CONFLICT", "二次失败仍是 CAS 冲突，code 原样保留");
+  assert.match(error.message, /迁移已生效/);
+  assert.match(error.message, /"project"/, "文案点名迁移目标组");
+  assert.match(error.message, /不一定幂等/, "不承诺重跑幂等");
+  assert.equal(service.mutateLog.length, 1, "迁移只发生一次：重试只补删组条目，绝不二次迁移");
+  assert.deepEqual((await service.readTopic("proj-x")).group, ["project"], "迁移已生效且只执行一次");
+  // 组条目未删（整体失败），并发写手写入的字节保留。
+  const raw = JSON.parse(await fsp.readFile(file, "utf8"));
+  assert.ok(raw.groups.some((g) => g.key === "dev"), "dev 条目仍在（CAS 两次失败，删除未提交）");
+});
+
+test("S3 group_manage delete + migrateTo：窗口内目标组被删（重试预检 INVALID_INPUT）→ 任何二次错误都附加迁移已生效说明（必修 3）", async (t) => {
+  const { tool, service, base } = await makeGroupFixture(t);
+  const file = groupsFilePath(base, "amber");
+  // 并发删手：迁移提交后把目标组 project 从清单删掉——首试因字节改动 CAS 失败，
+  // 重试重读后 CAS 通过、却卡在 migrateTo 预检（INVALID_INPUT）。旧实现只在二次
+  // 失败也是 CAS 冲突时才加说明，调用方看不出迁移已生效。
+  const innerMutate = service.mutate.bind(service);
+  service.mutate = async (request) => {
+    const receipt = await innerMutate(request);
+    const raw = JSON.parse(await fsp.readFile(file, "utf8"));
+    const next = { ...raw, groups: raw.groups.filter((g) => g.key !== "project") };
+    await fsp.writeFile(file, JSON.stringify(next), "utf8");
+    return receipt;
+  };
+  await assert.rejects(
+    () => tool.execute({ action: "delete", key: "dev", migrateTo: "project" }),
+    (e) => {
+      assert.equal(e.code, "INVALID_INPUT", "重试在 migrateTo 预检失败，code 原样保留");
+      assert.match(e.message, /迁移已生效/, "二次失败（任何 code）都必须交代迁移后果");
+      assert.match(e.message, /"project"/, "文案点名迁移目标组");
+      assert.match(e.message, /不一定幂等/, "不承诺重跑幂等（目标组没了）");
+      return true;
+    },
+  );
+  assert.equal(service.mutateLog.length, 1, "迁移只发生一次，重试不二次迁移");
+  assert.deepEqual((await service.readTopic("proj-x")).group, ["project"], "迁移已生效");
+  const raw = JSON.parse(await fsp.readFile(file, "utf8"));
+  assert.ok(raw.groups.some((g) => g.key === "dev"), "dev 条目未删（整体失败）");
 });

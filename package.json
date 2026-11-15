@@ -61,6 +61,8 @@
     "bin",
     "src",
     "client",
+    "scripts",
+    "test",
     "cordis.patch.yml",
     "docs/plugin/INSTALL.md",
     "docs/plugin/client.md",
