@@ -2119,6 +2119,17 @@ test("S7 getGraph：level=1 分簇概览（clusters/total 出线、无 nodes/edg
   assert.deepEqual(Object.keys(full).sort(),
     ["deliveries", "deliveryStats", "edges", "nodes", "scope"], "缺省响应不含 level/clusters/cluster 键");
   assert.equal(full.nodes.find((n) => n.id === "g1").hitCount, 3, "全量路径命中统计照常");
+  // degree 出线（#224c65）：全量路径每个节点 degree 必须是非负整数——
+  // projectGraph 已按边累加（graph.mjs:260-261），nodeOut 此前丢字段导致全为 undefined。
+  for (const node of full.nodes) {
+    assert.ok(Number.isInteger(node.degree) && node.degree >= 0,
+      `全量路径节点 ${node.id} 的 degree 必须是非负整数（实得 ${JSON.stringify(node.degree)}）`);
+  }
+  // g1↔g2 互逆两条有向边折叠为一条无向边：两端各计 1；g3/g4 无边计 0。
+  assert.equal(full.nodes.find((n) => n.id === "g1").degree, 1, "g1 度=1（g1↔g2 折叠边）");
+  assert.equal(full.nodes.find((n) => n.id === "g2").degree, 1, "g2 度=1（g1↔g2 折叠边）");
+  assert.equal(full.nodes.find((n) => n.id === "g3").degree, 0, "g3 孤立节点度=0");
+  assert.equal(full.nodes.find((n) => n.id === "g4").degree, 0, "g4 孤立节点度=0");
 
   // ② level=1：clusters/total 出线，nodes/edges 不出线；投递账与吞吐统计不丢。
   const l1 = await build().getGraph(trusted, { level: 1 });
@@ -2150,6 +2161,14 @@ test("S7 getGraph：level=1 分簇概览（clusters/total 出线、无 nodes/edg
   assert.equal(typeof g1.lastHitAt, "string");
   assert.equal(typeof g1.createdAt, "string");
   assert.deepEqual(l2.edges, [{ source: "g1", target: "g2", rel: "related" }], "跨簇边不进 level=2（互逆折叠 rel 取字典序较小者）");
+  // degree 出线（#224c65）：level=2 簇内节点同样带整数 degree——
+  // clusterProjection 只按簇内边重算（graph.mjs:383-390），g1/g2 各 1。
+  for (const node of l2.nodes) {
+    assert.ok(Number.isInteger(node.degree) && node.degree >= 0,
+      `level=2 节点 ${node.id} 的 degree 必须是非负整数（实得 ${JSON.stringify(node.degree)}）`);
+  }
+  assert.equal(g1.degree, 1, "level=2 簇内 g1 度=1（簇内折叠边 g1-g2）");
+  assert.equal(l2.nodes.find((n) => n.id === "g2").degree, 1, "level=2 簇内 g2 度=1");
 
   // ④ level=2 未知簇：不抛错，空 nodes/edges + count 0。
   const miss = await build().getGraph(trusted, { level: 2, cluster: "不存在" });
@@ -2170,6 +2189,35 @@ test("S7 getGraph：level=1 分簇概览（clusters/total 出线、无 nodes/edg
     "clusters 必须齐全（旧实现读 projection.clusters 得 undefined，本断言必红）");
   assert.equal(l1WithCluster.total, 4, "total 必须齐全");
   assert.equal(Object.hasOwn(l1WithCluster, "nodes"), false, "level=1 不出 nodes");
+
+  // ⑦ degree 出线（#224c65）：同一节点连两条边 → degree===2；孤立节点 → 0。
+  // 独立夹具（不改上面 ①②③ 的既有断言口径）：h1 同时连 h2/h3，h4 无边。
+  const degreeCards = [
+    { id: "h1", scopeId: "global", state: "active", title: "枢纽", summary: null, vitality: "evergreen", revision: 1, triggers: [], entities: [], links: [{ target: "h2" }, { target: "h3" }], content: "c", hitCount: 0, lastHitAt: null, createdAt: null },
+    { id: "h2", scopeId: "global", state: "active", title: "叶二", summary: null, vitality: "ephemeral", revision: 1, triggers: [], entities: [], links: [], content: "c", hitCount: 0, lastHitAt: null, createdAt: null },
+    { id: "h3", scopeId: "global", state: "active", title: "叶三", summary: null, vitality: "ephemeral", revision: 1, triggers: [], entities: [], links: [], content: "c", hitCount: 0, lastHitAt: null, createdAt: null },
+    { id: "h4", scopeId: "global", state: "active", title: "孤立", summary: null, vitality: "ephemeral", revision: 1, triggers: [], entities: [], links: [], content: "c", hitCount: 0, lastHitAt: null, createdAt: null },
+  ];
+  const buildDegree = () => createManagement({
+    settings: {
+      mode: "active", ownerId: "local", defaultPersona: null, sessionPersonas: [], workspacePersonas: [],
+      organize: { enabled: true }, forgetting: { enabled: true }, l2: { enabled: false },
+      dataRoot: path.join(tmpdir(), "shiori-s7-nonexistent-data"),
+      stateRoot: path.join(tmpdir(), "shiori-s7-nonexistent-state"),
+      budgets: {},
+    },
+    dataRoot: path.join(tmpdir(), "shiori-s7-nonexistent-data"),
+    state: { l2Store: { diagnostics: async () => ledger } },
+    resourcesFor: async () => ({ sparkStore: { listActive: async () => degreeCards } }),
+    isStarted: () => true,
+    generation: () => 1,
+    registerGrant: () => ({}),
+    executeToolForScope: async () => ({}),
+  }).management;
+  const deg = await buildDegree().getGraph(trusted, {});
+  assert.equal(deg.nodes.find((n) => n.id === "h1").degree, 2, "连两条边的节点 degree 必须为 2（出线丢字段时必红）");
+  assert.equal(deg.nodes.find((n) => n.id === "h4").degree, 0, "孤立节点 degree 必须为 0");
+  assert.equal(deg.edges.length, 2, "h1 的两条边都要出线");
 });
 
 test("S7 protocol：getGraph 输入新增可选 level/cluster；非法 level 被拒（wire 11 方法：S6 的 destroyData 已并入）", () => {
@@ -2193,4 +2241,21 @@ test("S7 protocol：getGraph 输入新增可选 level/cluster；非法 level 被
     "analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView",
     "getStatus", "getTimeline", "listCandidates", "previewPlan", "reviewCandidate",
   ].sort());
+
+  // degree 出线（#224c65）：输出契约必须先声明——getGraphNodeItem 是
+  // additionalProperties:false，未声明的字段一上线就是「契约外字段」。
+  // 注：validateManagementPayload 校验的是 inputSchema，仓库无 outputSchema
+  // 运行时校验器；此处按 timeline.test.mjs:287-292 的既有口径断言声明本身，
+  // 值域由 minimum:0 表达（-1 不在合法值域），运行时「输出的 degree 全是
+  // 非负整数」由 S7 getGraph 用例的真实输出断言覆盖。
+  const graphOut = MANAGEMENT_METHODS.getGraph.outputSchema;
+  const nodeBranches = graphOut.oneOf.filter((branch) => Object.hasOwn(branch.properties ?? {}, "nodes"));
+  assert.equal(nodeBranches.length, 2, "带节点的一支是全量、一支是 level=2");
+  for (const branch of nodeBranches) {
+    const nodeItem = branch.properties.nodes.items;
+    assert.deepEqual(nodeItem.properties.degree, { type: "integer", minimum: 0 },
+      "degree 必须声明为 integer 且 minimum 0（degree:-1 不在合法值域）");
+    assert.equal(nodeItem.additionalProperties, false);
+    assert.ok(nodeItem.required.includes("degree"), "nodeOut 两条路径恒输出 degree，故进 required");
+  }
 });

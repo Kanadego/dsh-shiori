@@ -10,10 +10,10 @@
 
 ## A · Core 层（注释编号 §A）
 
-被引用处：`src/core/render.mjs:4`、`src/core/topics.mjs:5`、`src/core/budget.mjs:8`、`src/core/index.mjs:1`（引作 `collab/CONTRACTS.md §A`）、`test/storage/helpers.mjs:2`。
+被引用处：`src/core/render.mjs:4`、`src/core/topics.mjs:5`、`src/core/budget.mjs:8`、`test/storage/helpers.mjs:2`。
 
 - **公共入口仅导出六个成员**：`DEFAULT_CONFIG` / `validateConfig` / `renderL1` / `evaluateMutation` 等（完整清单见模块头注释）。出处：`src/core/index.mjs:2-10`。
-- **L1 渲染索引格式固定**：磁盘 `core.md` 只存人工正文，`renderL1` 在读取时派生索引、禁止回写。索引标题行 `## 主题记忆索引`（/ `Topic memory index`），条目行 `- key [scopeId] — summary`，归档钩子行仅在存在冷专题时出现；`chars` 按 UTF-16 码元计、`bytes` 为 UTF-8 字节数（仅诊断），标题/换行/来源标记全部计入 chars。出处：`src/core/render.mjs:4-10`。
+- **L1 渲染索引格式固定**：磁盘 `core.md` 只存人工正文，`renderL1` 在读取时派生索引、禁止回写。索引标题行 `## 主题记忆索引`（/ `Topic memory index`），条目行 `- key [scopeId] — summary`，归档钩子行仅在存在冷专题时出现；`chars` 按 UTF-16 码元计、`bytes` 为 UTF-8 字节数（仅诊断），标题/换行/来源标记全部计入 chars。出处：`src/core/render.mjs:3-10`。
 - **Topic 可见性规则**：`scopeId === activeScopeId` 或 `"global"` 可见；同 key 时 active 覆盖 global；其他 scope 一律不可见；同 scope 内重复 key 是数据错误；输出按 key 的 UTF-16 码元序稳定排序，不依赖 locale。出处：`src/core/topics.mjs:5-12`。
 - **预算闸门规则（双水位 + 绝对硬顶）**：唯一水位基数 `config.core.hardCapChars`（默认 10000），`softAt=floor(cap×softRatio)`、`hardAt=floor(cap×hardRatio)`；占用按完整渲染文本的 UTF-16 码元数计。规则：当前 < hardAt 时候选可首次跨入 ≥hardAt 但候选 ≤ cap；hardAt ≤ 当前 ≤ cap 时禁止净增长；当前 > cap 时只允许净减少修复；当前正常时候选 > cap 则写盘前拒绝。出处：`src/core/budget.mjs:3-13`。
 - `test/storage/helpers.mjs:2,29` 声明其 stub 语义按 §A/§B 文字实现（A 模块合并后已由真实 `evaluateMutation` 替换 stub，注释为历史留痕）。
@@ -45,7 +45,7 @@
 
 被引用处：`test/runtime/_helpers.mjs:4`、`src/acceptance/index.mjs:18`。
 
-- `openCompletionState({root, scopeId})` 的返回句柄带 `sink`（作为 D 的 probeSink 注入）；runtime/acceptance 的工厂注入形状以此为准。出处：`src/acceptance/index.mjs:16-19`、`src/runtime/index.mjs:15`。
+- `openCompletionState({root, scopeId})` 的返回句柄带 `sink`（作为 D 的 probeSink 注入）；runtime/acceptance 的工厂注入形状以此为准。出处：`src/acceptance/index.mjs:16-19`、`src/runtime/index.mjs:16`。
 - 错误码至少区分 `INVALID_INPUT / INVALID_STATE / UNSUPPORTED / REVISION_CONFLICT / LOCK_BUSY`（completion 需要独立错误工厂，因 `src/host/errors.mjs` 的 CODES 集不含 LOCK_BUSY）。出处：`src/completion/errors.mjs:4-12`。
 
 ## F · 出站证据与验收矩阵（注释编号 §F「出站证据与矩阵接口」）
@@ -64,7 +64,7 @@
 - host 桥错误（`src/host/errors.mjs`）要求带 code 的 Error，至少区分 `INVALID_INPUT / REVISION_CONFLICT / BUDGET_REJECTED / INVALID_STATE / UNSUPPORTED`，不静默截断。出处：`src/host/errors.mjs:4-6`。
 - 可信 store 入口 `openSparkStore({root, scopeId, ...})`：`src/sparks/store.mjs:1155`。
 - public record 字段集：`id, scopeId, revision, title, summary, triggers, entities, links, content, vitality, state`（图谱投影的消费形状依据）。出处：`src/sparks/graph.mjs:15-16`。
-- 工具门面是纯 host-agnostic 门面，接收可信 scopeId 与 store 实例；payload 中出现 `scope` / `scopeId` / `root` 键一律 INVALID_INPUT。出处：`src/sparks/tools.mjs:4-10`；store 缺必需方法时报 INVALID_INPUT（`src/sparks/tools.mjs:216`）。
+- 工具门面是纯 host-agnostic 门面，接收可信 scopeId 与 store 实例；payload 中出现 `scope` / `scopeId` / `root` 键一律 INVALID_INPUT。出处：`src/sparks/tools.mjs:3-10`；store 缺必需方法时报 INVALID_INPUT（`src/sparks/tools.mjs:216`）。
 
 ## H · L2 检索与投递纯函数边界（注释编号 §H）
 
@@ -84,11 +84,11 @@
 
 ## J/K/L 槽 · 记忆整理（注释编号 §1/§2/§4/§5-J）
 
-被引用处：`src/organize/analyze.mjs:3,21,361,364-368`、`src/organize/executor.mjs:3`、`src/organize/queue.mjs:1`、`test/organize/analyze.test.mjs:2`。
+被引用处：`src/organize/analyze.mjs:3,21,361,364-368`、`src/organize/executor.mjs:3`、`test/organize/analyze.test.mjs:2`。
 
 - **§2（analyze 职责）**：从调用方传入的完整 active 卡快照（`store.listActive`）同步生成 isolated / link / cluster 三类候选，全程零写入零副作用；不 import node:fs/node:path、不改传入 records；候选只是建议，不含批准或执行语义；evidence 为确定性协议 JSON（无时间戳、无随机值、无 LLM 建议）。出处：`src/organize/analyze.mjs:3-19`。
 - **§1（确定性公式）**：所有匹配按 trim+toLowerCase 归一化，去重并按 UTF16 码点二进制序排序；digest = SHA256(UTF8 stable({kind, scopeId, sources, evidence}))，stable 按「递归对普通对象键排序序列化」的字面公式实现，数组顺序保持；相同输入（含任意排列/键序差异）产出完全相同的候选集。出处：`src/organize/analyze.mjs:21-24,361,364-368`。
-- **§4（executor 职责）**：只执行调用方每轮显式提交的单个已批准 plan（link / merge-topic / archive-topic），复用既有 service/store/spark store 的锁、CAS、journal、operation 幂等，不重写底层文件、不新增通用跨 DB 协调 journal；`authorize(...)` 必须严格 `=== true` 才继续。出处：`src/organize/executor.mjs:3-8`。
+- **§4（executor 职责）**：只执行调用方每轮显式提交的单个已批准 plan（link / merge-topic / archive-topic），复用既有 service/store/spark store 的锁、CAS、journal、operation 幂等，不重写底层文件、不新增通用跨 DB 协调 journal；`authorize(...)` 必须严格 `=== true` 才继续。出处：`src/organize/executor.mjs:3-9`。
 - **§5-J（测试覆盖口径）**：排列稳定、跨 scope/重复/非法输入、入边孤立等覆盖项。出处：`test/organize/analyze.test.mjs:2`。
 - queue（K 槽）：`reviewed` 是「已审阅」不是「已批准/已执行」，队列不产生任何业务写入。出处：`src/organize/queue.mjs:3-6`。
 
@@ -106,17 +106,17 @@
 
 被引用处：`index.mjs:3`、`src/plugin/{bindings,controller,config,scope,persona,state,tool-schemas,client-rpc,management}.mjs` 头注释、`client/index.js:11`、`docs/plugin/client.md:9`、`test/plugin/client.test.mjs:218`。
 
-- **§2（Q/P 装配边界）**：插件入口 `apply` 固定顺序 `normalizePluginConfig → verifyPluginRoots → createShioriPluginController → controller.start → mountShioriRpc`，返回 async cleanup（RPC stop → controller.stop），部分启动失败逆序清理（`index.mjs:3-9`）；controller 生命周期冻结契约——构造不自动 start、start/stop 幂等、失败逆序清理、部分 start 不残留工具/section/锁（`src/plugin/controller.mjs:5-14`）；config 职责边界——Config 只证明可序列化结构 + 默认值，权威规范化在 `normalizePluginConfig`（未知键拒绝；0.4-S1 起 dataRoot/stateRoot 为 null 时解析为 DSH_HOME 默认根），路径安全由 `verifyPluginRoots` 真实校验（`src/plugin/config.mjs:3-10`；`verifyPluginRoots` 实现见 `:16-17`）；生产 bindings 来自 ctx（`src/plugin/bindings.mjs:1-3`）；scope 只能从可信证据解析，payload 中的 ownerId/scopeId/persona/authorize/root 一律拒绝（`src/plugin/scope.mjs:3-6`）；management 为面板管理 API 生产实现（`src/plugin/management.mjs:1`）。
+- **§2（Q/P 装配边界）**：插件入口 `apply` 固定顺序 `normalizePluginConfig → verifyPluginRoots → createShioriPluginController → controller.start → mountShioriRpc`，返回 async cleanup（RPC stop → controller.stop），部分启动失败逆序清理（`index.mjs:3-9`）；controller 生命周期冻结契约——构造不自动 start、start/stop 幂等、失败逆序清理、部分 start 不残留工具/section/锁（`src/plugin/controller.mjs:5-14`）；config 职责边界——Config 只证明可序列化结构 + 默认值，权威规范化在 `normalizePluginConfig`（未知键拒绝；0.4-S1 起 dataRoot/stateRoot 为 null 时解析为 DSH_HOME 默认根），路径安全由 `verifyPluginRoots` 真实校验（`src/plugin/config.mjs:3-10`；`verifyPluginRoots` 实现见 `:16-17`）；生产 bindings 来自 ctx（`src/plugin/bindings.mjs:1-3`）；scope 只能从可信证据解析，payload 中的 ownerId/scopeId/persona/authorize/root 一律拒绝（`src/plugin/scope.mjs:3-7`）；management 为面板管理 API 生产实现（`src/plugin/management.mjs:1`）。
 - **§3（persona adapter）**：L0 persona 持久化到 `dataRoot/persona`；read/commit 与 service 契约一致（文件锁、CAS、原子写、持久 operationId 重放先于 liveCAS）；上限 12000 UTF-16；外改坏格式/超限不覆盖原文件。出处：`src/plugin/persona.mjs:3-8`。
-- **§4（工具输出 schema）**：所有宿主工具提供 `output:{schema,render}`；输出 schema 覆盖所有读分支 / nullable / changes / 写回执；严禁空对象闭合 schema；实际 9 兼容工具 + topic_create + group_manage + 6 Spark 工具共 **17 个**（`TOOL_NAMES` / `TOOL_OUTPUT_SCHEMAS` 为唯一权威）。出处：`src/plugin/tool-schemas.mjs:3-5,115,282`。
-- **§4/§5/§6（stateRoot 账本）**：工具 operationId 重放账（重放先于新 liveCAS）、L2 投递账（pending/accepted/committed 三阶段 + journal 可恢复提交）、L1 投影快照等；`src/plugin/state.mjs:3-9`（其中「§5」的历史原文未定义，此处按模块实际职责记录）。
+- **§4（工具输出 schema）**：所有宿主工具提供 `output:{schema,render}`；输出 schema 覆盖所有读分支 / nullable / changes / 写回执；严禁空对象闭合 schema；实际 9 兼容工具 + topic_create + group_manage + 6 Spark 工具共 **17 个**（`TOOL_NAMES` / `TOOL_OUTPUT_SCHEMAS` 为唯一权威）。出处：`src/plugin/tool-schemas.mjs:3-5,127,304`。
+- **§4/§5/§6（stateRoot 账本）**：工具 operationId 重放账（重放先于新 liveCAS）、L2 投递账（pending/accepted/committed 三阶段 + journal 可恢复提交）、L1 投影快照等；`src/plugin/state.mjs:3-9,187-225`（其中「§5」的历史原文未定义，此处按模块实际职责记录）。
 - **§6（wire 冻结）**：面板 RPC wire 为 namespace `shiori` 的 management 方法 `(sessionId, payload)`；方法清单冻结为 **11 个**：`getStatus / getMemoryView / getGraph / executeTool / listCandidates / analyze / reviewCandidate / previewPlan / executePlan / getTimeline / destroyData`，由 `MANAGEMENT_METHODS`（`src/plugin/protocol.mjs`）唯一权威定义并 `validateManagementPayload` 校验；Q 侧挂载时若与冻结清单不一致立刻失败（`src/plugin/client-rpc.mjs:43-49`）；client 按同一冻结 wire 消费（`client/index.js:11-13`，测试镜像 `test/plugin/client.test.mjs:218`）。
 - **§6.1（destroyData，0.4 S6 新增，wire 唯一一次增项）**：焚毁整个 dataRoot（目录本身一并移除）。输入闭合 `{ confirm: string }`（required，additionalProperties:false），语义是 `confirm` 必须等于当前 `settings.dataRoot` 原文（逐字符相等，不等抛 `INVALID_INPUT`）；输出闭合 `{ deleted: boolean, files: integer, bytes: integer, dataRoot: string }`（additionalProperties:false），目录不存在返回 `deleted:false` 而不是抛错。实现走共享模块 `src/storage/purge.mjs`（`purgeDataRoot(root, { expectedRoot, stateRoot })`）——与命令行 `bin/admin.mjs destroy` 同一份校验与删除代码，行为一致。安全边界（fail-closed，任一不满足抛 `PurgeSafetyError`，`details.rule` 记规则名）：目标必须绝对路径、不含 `..` 段、真实 link 解析后与 stateRoot 互不相交（相等/互相嵌套都拒绝）、非盘符根 / POSIX 根、非用户主目录（或其祖先；目标位于主目录之内允许——默认根 `<~/.dsh>/shiori-data` 本就在主目录内）、非仓库根（或其祖先；仓库根之内允许）、目标存在时必须是普通目录（symlink/junction 一律拒绝）；删除实现逐项 lstat——symlink/junction 只删链接本身，绝不递归删软链目标；IO 失败原样上抛，绝不忽略错误后继续。门面守门顺序：schema 校验 → inert（NOT_CONFIGURED）→ shadow/未 start（UNSUPPORTED / INVALID_STATE）→ 只读宿主（HOST_LOCKED）→ owner principal 二次核验（UNAUTHORIZED）→ confirm 比对（INVALID_INPUT）→ purge 安全校验 → 删除。出处：`src/plugin/protocol.mjs`（destroyData schema）、`src/plugin/management.mjs`（destroyData 实现）、`src/storage/purge.mjs`、`bin/admin.mjs`。
 - **§7（RPC 授权）**：授权只认服务端绑定身份 `ctx.invocation.peer.principal`（本批仅 `principal.kind === "owner"`）；payload / wire 永不携带 trustedContext；存在 sessionId 不等于获授权。出处：`src/plugin/client-rpc.mjs:5-13`。
 
 ## host 桥工具最小集合（`src/host/tools.mjs:4-5` 引用）
 
-- `createCompatTools` 覆盖契约要求的最小集合：`soul_read` / `soul_update` / `memory_read` / `memory_search` / `memory_append` / `memory_rewrite` / `core_write` / `topic_append` / `memory_list_topics`（9 个）；`topic_create`（独立工厂，`src/host/tools.mjs:542`）、`group_manage`（`src/host/tools.mjs:653`）与 6 个 Spark 工具（`src/sparks/tools.mjs`）由 controller 一并注册成 17 工具全集（`src/plugin/controller.mjs:82`）。
+- `createCompatTools` 覆盖契约要求的最小集合：`soul_read` / `soul_update` / `memory_read` / `memory_search` / `memory_append` / `memory_rewrite` / `core_write` / `topic_append` / `memory_list_topics`（9 个）；`topic_create`（独立工厂，`src/host/tools.mjs:542`）、`group_manage`（`src/host/tools.mjs:672`）与 6 个 Spark 工具（`src/sparks/tools.mjs`）由 controller 一并注册成 17 工具全集（`src/plugin/controller.mjs:82`）。
 
 ## §8 · 真实宿主证据（注释编号 §8）
 

@@ -37,13 +37,14 @@
 // details.rule 记具体规则）；路径形状非法同样走 PurgeSafetyError——对调用方
 // 而言「这个路径不许删」只有一种结果：拒绝。
 
-import { promises as fsp, realpathSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, normalize, sep } from "node:path";
+import { promises as fsp, statSync } from "node:fs";
+import { dirname, isAbsolute, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+import { comparableRoot, resolveWithLinks } from "./path-canon.mjs";
 
 // ---------------------------------------------------------------------------
-// 错误与路径比较辅助
+// 错误类型
 // ---------------------------------------------------------------------------
 
 export class PurgeSafetyError extends Error {
@@ -52,42 +53,6 @@ export class PurgeSafetyError extends Error {
     this.name = "PurgeSafetyError";
     this.code = "INVALID_INPUT";
     this.details = { rule, ...(details ?? {}) };
-  }
-}
-
-// 与 config.mjs comparableRoot 同口径：normalize（统一分隔符、折叠重复、收缩
-// ..）后去掉全部尾部分隔符（盘根折叠为裸盘符，POSIX 根折叠为 ""），win32 再
-// 统一小写。此后「相等 / 嵌套」判定只在这一种 canonical 形状上进行。
-const CASE_INSENSITIVE_FS = process.platform === "win32";
-
-function comparableRoot(value) {
-  let normalized = normalize(value);
-  if (CASE_INSENSITIVE_FS) normalized = normalized.toLowerCase();
-  while (normalized.endsWith(sep)) {
-    normalized = normalized.slice(0, -1);
-  }
-  return normalized;
-}
-
-// 沿已存在的最近祖先做 realpath，再拼回不存在尾部：得到「按当前文件系统解析」
-// 的绝对路径（config.mjs resolveWithLinks 同款算法与行为；该函数未导出，
-// 这里按同一语义实现）。解析失败（非 ENOENT）抛 PurgeSafetyError。
-function resolveWithLinks(target) {
-  let current = target;
-  const tail = [];
-  for (;;) {
-    try {
-      const resolved = realpathSync(current);
-      return tail.length === 0 ? resolved : join(resolved, ...tail);
-    } catch (error) {
-      if (error && error.code !== "ENOENT") {
-        throw new PurgeSafetyError(`cannot resolve "${target}": ${String(error.message || error)}`, "resolve");
-      }
-      const parent = dirname(current);
-      if (parent === current) return target; // 到盘根仍不存在：按字面路径返回
-      tail.unshift(basename(current));
-      current = parent;
-    }
   }
 }
 
@@ -151,7 +116,7 @@ export async function assertPurgeTargetSafe(target, options = {}) {
   }
 
   const normalized = normalize(target);
-  const resolved = resolveWithLinks(normalized);
+  const resolved = resolveWithLinks(normalized, (m) => new PurgeSafetyError(m, "resolve"));
 
   // 3) 目标自身存在时必须是普通目录；symlink/junction 一律拒绝（fail-closed，
   //    不解析、不跟随——哪怕链接指向的目录看起来无害）
@@ -189,7 +154,7 @@ export async function assertPurgeTargetSafe(target, options = {}) {
   }
   let resolvedState;
   try {
-    resolvedState = resolveWithLinks(normalize(stateRoot));
+    resolvedState = resolveWithLinks(normalize(stateRoot), (m) => new PurgeSafetyError(m, "resolve"));
   } catch (error) {
     throw new PurgeSafetyError(
       `cannot resolve stateRoot "${stateRoot}" for the purge safety check: ${String(error.message || error)}`,

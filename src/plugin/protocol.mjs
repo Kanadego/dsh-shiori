@@ -198,11 +198,16 @@ const getGraphNodeItem = {
     // additionalProperties:false 下它属于「实现返回契约外字段」的矛盾，谁加一道
     // 输出校验就会炸。客户端 entityKeyOf 按 raw.entities[0] 做实体聚类着色。
     entities: { type: "array", items: nonEmptyString, maxItems: 4 },
+    // 0.4 收尾补 degree：management.mjs 的 nodeOut 在全量与 level=2 两条路径恒输出
+    // （graph.mjs 的 projectGraph / clusterProjection 已把度算好，nodeOut 兜底 0）。
+    // 客户端 nodeRadiusOf 按 raw.degree 放大节点半径。additionalProperties:false
+    // 下不声明即「实现返回契约外字段」。两条带节点的路径（全量 / level=2）恒输出，故进 required。
+    degree: { type: "integer", minimum: 0 },
     hitCount: { type: "integer", minimum: 0 },
     lastHitAt: { oneOf: [{ type: "string" }, { type: "null" }] },
     createdAt: { oneOf: [{ type: "string" }, { type: "null" }] },
   },
-  required: ["id", "vitality", "entities"],
+  required: ["id", "vitality", "entities", "degree"],
 };
 const getGraphEdgeItem = {
   type: "object",

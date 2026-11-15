@@ -13,9 +13,11 @@ import {
   verifyPluginRoots,
   defaultDshHome,
   defaultPluginRoots,
+  comparableRoot,
   BUDGET_CEILINGS,
   SETTINGS_NAMESPACE,
 } from "../../src/plugin/config.mjs";
+import { comparableRoot as comparableRootFromCanon } from "../../src/storage/path-canon.mjs";
 import { DEFAULT_CONFIG } from "../../src/core/config.mjs";
 
 const TMP_ROOT = mkdtempSync(join(tmpdir(), "shiori-q-config-"));
@@ -724,4 +726,13 @@ test("P0#3 semantic.local.cacheDir：相对路径拒绝、含 .. 片段拒绝；
   const abs = join(tmpdir(), "hf-cache");
   const ok = normalizeSemantic(localWith(abs));
   assert.equal(ok.local.cacheDir, abs);
+});
+
+// 0.4-S2（#e8a569）：路径规范化收口到 src/storage/path-canon.mjs 单一来源。
+// config.mjs 只 re-export（同一函数对象），scope.mjs 的 import 路径不变。
+test("0.4-S2：config.mjs 的 comparableRoot 直接 re-export 自 path-canon（单一来源）", () => {
+  assert.equal(comparableRoot, comparableRootFromCanon, "必须是同一个函数对象，而非各自实现");
+  for (const value of ["/", join(tmpdir(), "shiori-canon-root")]) {
+    assert.equal(comparableRoot(value), comparableRootFromCanon(value), `折叠结果必须同源：${value}`);
+  }
 });

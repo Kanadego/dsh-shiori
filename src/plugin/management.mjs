@@ -367,6 +367,11 @@ export function createManagement(deps) {
       // 规范化，规范化单一来源在 graph.mjs 的 normalizeEntities——若投影路径
       // 变更（换掉 projectGraph / 改节点产出），规范化必须跟着走，否则脏数据
       // 会从这里漏到 wire（契约 maxItems 4 / items 非空字符串会被打破）。
+      // 0.4 收尾补 degree：projectGraph（graph.mjs:190/260-261）与 clusterProjection
+      // （graph.mjs:383-390）都算好了节点度，此前 nodeOut 白名单未放行，字段在这一
+      // 步被静默丢掉。客户端 nodeRadiusOf 依赖该字段（读 node.raw.degree）据此放大
+      // 节点半径，缺失即退化为 0 → 半径恒为基准值、重要度看不出来。脏数据兜底 0
+      // 与 hitCount 同口径（非负整数才放行）。
       const nodeOut = (n) => {
         const meta = hitMeta.get(n.id) ?? { hitCount: 0, lastHitAt: null, createdAt: null };
         return {
@@ -375,6 +380,7 @@ export function createManagement(deps) {
           summary: n.summary ?? null,
           vitality: n.vitality ?? null,
           revision: n.revision ?? null,
+          degree: Number.isInteger(n.degree) && n.degree >= 0 ? n.degree : 0,
           entities: Array.isArray(n.entities) ? n.entities : [],
           hitCount: meta.hitCount,
           lastHitAt: meta.lastHitAt,
