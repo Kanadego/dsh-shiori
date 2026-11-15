@@ -1842,13 +1842,16 @@ window.__ModuleLoader__.load({
               h("span", { className: "dshi_cardTitle" }, "语义召回"),
               h("span", { className: "dshi_badge" + (semantic.enabled ? "" : " dshi_badgeDim") },
                 semantic.enabled ? "已开启" : "未开启"),
-              semantic.enabled ? h("div", { className: "dshi_row" },
-                // S5：未安装模型时「下载模型」高亮（主按钮）——干净机器的第一入口。
+              // S5 后续：按钮常显，未开启语义召回时禁用并给原因——早前按
+              // semantic.enabled 整体不渲染，用户开了面板找不到「下载模型」入口，
+              // 以为按钮丢了（实机反馈）。
+              h("div", { className: "dshi_row" },
                 h("button", {
-                  className: semantic.modelInstalled === false && !dlRunning
+                  className: semantic.modelInstalled === false && !dlRunning && semantic.enabled
                     ? "dshi_btn dshi_btnPrimary" : "dshi_btn",
                   onClick: startDownload,
-                  disabled: dlRunning
+                  disabled: dlRunning || !semantic.enabled,
+                  title: semantic.enabled ? undefined : "先在插件设置里把语义召回（semantic.provider）改成 local 并重启 DSH"
                 }, dlRunning ? "下载中…" : "下载模型"),
                 dlRunning ? h("button", {
                   className: "dshi_btn dshi_btnDanger",
@@ -1857,9 +1860,10 @@ window.__ModuleLoader__.load({
                 h("button", {
                   className: "dshi_btn",
                   onClick: startRebuild,
-                  disabled: rebuildRunning
-                }, rebuildRunning ? "重建中…" : "重建向量"))
-                : null),
+                  disabled: rebuildRunning || !semantic.enabled,
+                  title: semantic.enabled ? undefined : "先在插件设置里把语义召回（semantic.provider）改成 local 并重启 DSH"
+                }, rebuildRunning ? "重建中…" : "重建向量"),
+                semantic.enabled ? null : h("span", { className: "dshi_hint" }, "语义召回未开启（provider=none），开启后才能下载模型"))),
             h("div", { className: "dshi_items" },
               statusRow("模型目录", semantic.modelDir ? String(semantic.modelDir) : "—",
                 "模型跟数据根走（<dataRoot>/models）：升级插件、重装包都不用重下"),
@@ -1966,7 +1970,10 @@ window.__ModuleLoader__.load({
               destroyError.message + "（code: " + String(destroyError.code) + "）") : null,
             destroyStage === "confirm" ? h("div", { className: "dshi_confirm", "data-role": "destroy-confirm" },
               h("div", null, "危险操作：将永久删除整个 dataRoot 的全部内容（目录本身一并移除）。只删 dataRoot，stateRoot 与 DSH 配置不受影响。"),
-              h("div", { className: "dshi_hint" }, "请输入 dataRoot 原文以确认（逐字符一致才能执行）："),
+              // 文案直说「照抄下面这串路径」并把路径整条摆出来：早前写「请输入 dataRoot
+              // 原文」，用户照字面打了 dataRoot 五个字符，按钮永远是灰的（实机反馈）。
+              h("div", { className: "dshi_hint" }, "请照抄下面这串完整路径以确认（逐字符一致才能执行，区分大小写、首尾空白忽略）："),
+              h("code", { className: "dshi_code", "data-role": "destroy-root-echo" }, destroyRoot || "（服务端未回显 dataRoot，无法清除）"),
               h("input", {
                 className: "dshi_input",
                 "data-role": "destroy-confirm-input",
@@ -1978,7 +1985,7 @@ window.__ModuleLoader__.load({
               }),
               destroyDraftText !== "" && !destroyMatches
                 ? h("div", { className: "dshi_hint", "data-role": "destroy-mismatch" },
-                    "输入与 dataRoot 不一致（区分大小写，首尾空白忽略）：需要逐字符一致才能执行。")
+                    "输入与上面那串路径不一致：需要逐字符一致才能执行。")
                 : null,
               h("div", { className: "dshi_row" },
                 h("button", {
@@ -6296,8 +6303,10 @@ window.__ModuleLoader__.load({
         ? workspacePersonaConfig.defaultPersona : "";
       // S2-2：下拉选项来自 getStatus.personas（缺失/非数组 → 空数组 → 手填回退）。
       var workspacePersonaOptions = personaOptionsFrom(modeStatus);
-      var defaultPersonaDraft = typeof personaUi.defaultDraft === "string" ? personaUi.defaultDraft : "";
-      var workspacePersonaValue = defaultPersonaDraft !== "" ? defaultPersonaDraft : configuredDefaultPersona;
+      // 三态：undefined=用户还没动过（跟配置值）；string=用户正在编辑（含空串）。
+      // 早前把空串当成「没编辑过」回落到配置值，导致一清空输入框就被填回 amber。
+      var defaultPersonaDraft = typeof personaUi.defaultDraft === "string" ? personaUi.defaultDraft : null;
+      var workspacePersonaValue = defaultPersonaDraft !== null ? defaultPersonaDraft : configuredDefaultPersona;
       var workspacePersonaOptionList = personaSelectValues(workspacePersonaOptions, workspacePersonaValue);
       var defaultPersonaBusy = personaUi.defaultBusy === true;
       var defaultPersonaError = personaUi.defaultError || null;
@@ -6575,24 +6584,26 @@ window.__ModuleLoader__.load({
               "data-role": "default-persona",
               title: "没有会话专属卡、工作区路径也没匹配到时注入这张卡（defaultPersona，单键写入）"
             }, "工作区默认卡（defaultPersona）",
+              // 用 input + datalist 而不是 select：下拉只列出 persona/*.md 里已有的卡，
+              // 但用户经常要先把 defaultPersona 写成一张还没建的卡名（或临时改回别
+              // 的卡），select 会把手输锁死——实机反馈「删掉 amber 又弹回 amber、
+              // ctrl+a 输 momo 立刻被替换」就是这个（选项里只有 amber，选中值被
+              // 受控回弹）。datalist 既能点选也能自由输入，且不新增 useState。
+              h("input", {
+                className: "dshi_input",
+                "data-role": "default-persona-input",
+                value: workspacePersonaValue,
+                placeholder: "卡名（可下拉选，也可手输）",
+                list: workspacePersonaOptions.length > 0 ? "dshi-persona-options" : undefined,
+                autoComplete: "off",
+                onChange: function (event) { setPersonaUi({ defaultDraft: event.target.value }); }
+              }),
               workspacePersonaOptions.length > 0
-                ? h("select", {
-                    className: "dshi_select",
-                    "data-role": "default-persona-select",
-                    value: workspacePersonaValue,
-                    onChange: function (event) { setPersonaUi({ defaultDraft: event.target.value }); }
-                  },
-                    workspacePersonaValue === "" ? h("option", { key: "__unset", value: "" }, "请选择默认卡") : null,
+                ? h("datalist", { id: "dshi-persona-options" },
                     workspacePersonaOptionList.map(function (name) {
-                      return h("option", { key: name, value: name }, name);
+                      return h("option", { key: name, value: name });
                     }))
-                : h("input", {
-                    className: "dshi_input",
-                    "data-role": "default-persona-input",
-                    value: workspacePersonaValue,
-                    placeholder: "例如 amber",
-                    onChange: function (event) { setPersonaUi({ defaultDraft: event.target.value }); }
-                  })),
+                : null),
             h("button", {
               className: "dshi_btn",
               "data-role": "default-persona-save",

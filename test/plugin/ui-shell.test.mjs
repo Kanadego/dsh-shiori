@@ -996,13 +996,19 @@ test("S2-3 工作区默认卡：personas 非空 → 下拉列出卡名，回显�
     let tree = render();
     const control = defaultPersonaControl(tree);
     assert.ok(control, "选择器行渲染工作区默认卡控件");
-    const select = flattenVNode(control).find((n) => n.type === "select" && n.props["data-role"] === "default-persona-select");
-    assert.ok(select, "有卡列表时渲染下拉");
-    assert.equal(select.props.value, "amber", "回显当前 defaultPersona");
-    const options = flattenVNode(select).filter((n) => n.type === "option").map((n) => collectText(n));
-    assert.deepEqual(options, ["amber", "beta", "gamma"], "选项来自 getStatus.personas");
+    // 实机反馈：下拉把「手输一张还没建的卡名」锁死了（选项里只有 amber，
+    // ctrl+a 输 momo 立刻被受控值回弹）。改成 input + datalist：既能点选
+    // 候选，也能自由输入。
+    const input = flattenVNode(control).find((n) => n.type === "input" && n.props["data-role"] === "default-persona-input");
+    assert.ok(input, "有卡列表时仍渲染可输入控件");
+    assert.equal(input.props.list, "dshi-persona-options", "input 通过 list 关联 datalist");
+    assert.equal(input.props.value, "amber", "回显当前 defaultPersona");
+    const list = flattenVNode(control).find((n) => n.type === "datalist");
+    assert.ok(list, "有卡列表时渲染 datalist 候选");
+    const options = flattenVNode(list).filter((n) => n.type === "option").map((n) => n.props.value);
+    assert.deepEqual(options, ["amber", "beta", "gamma"], "候选项来自 getStatus.personas");
     // 保存默认卡：单键 set，其余配置键不动。
-    select.props.onChange({ target: { value: "beta" } });
+    input.props.onChange({ target: { value: "beta" } });
     tree = render();
     findButton(tree, "保存默认卡").props.onClick();
     await flush(20);
