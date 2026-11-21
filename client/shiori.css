@@ -193,3 +193,7 @@
    client bundle 拿不到自身资源 URL，不引包内 icon.png，png 留给市场与配置页），
    尺寸由宿主下发（props.size），display:block 防基线空隙撑破侧边栏布局。 */
 .dshi_sideIcon{display:block}
+/* 0.5 批次 4 · B 线：「记忆整理」12 项热度参数（设置页）——两列自适应网格，
+   窄屏退化为单列；预览区与审计列表沿用既有 dshi_bgroup / dshi_item 形态。 */
+.dshi_tempGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:var(--dshi-space-sm)}
+.dshi_tempPreview{display:flex;flex-direction:column;gap:var(--dshi-space-xs);border:1px solid var(--dsw-alias-border-l2,#dce2eb);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}

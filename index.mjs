@@ -80,10 +80,13 @@ export async function apply(ctx, config) {
   // 选卡三字段（defaultPersona / sessionPersonas / workspacePersonas）在宿主侧是
   // volatile 引用（cordis-plugin-loader 热提交后引用值就地更新、不重载插件）。引用原样
   // 带到 controller，pinScope 每次实时解包，切卡才会在会话进行中立即生效。
+  // 0.5 批次 4 · B 线：temperature 同样是 volatile 引用——面板保存后服务端要能
+  // 热读到新值（预览 base / 审计「live==params」确认），一并透传（评审授权扩展）。
   const liveRefs = Object.freeze({
     defaultPersona: config?.defaultPersona ?? null,
     sessionPersonas: config?.sessionPersonas ?? null,
     workspacePersonas: config?.workspacePersonas ?? null,
+    temperature: config?.temperature ?? null,
   });
   const settings = Object.freeze({ ...normalized, dataRoot: verified.dataRoot, stateRoot: verified.stateRoot, liveRefs });
 

@@ -220,7 +220,11 @@ window.__ModuleLoader__.load({
     // S2-4：壳条不再吸顶（见 .dshi_sticky 注释），原先让出框架顶部的 top 覆盖规则删除；
     // 上下留白统一由 .dshi_rootMain 的 padding 承担（底部补 max(28px, bottom-clearance)，
     // 修侧边栏入口打开时首尾被宿主框架裁切）。
-".dshi_sideIcon{display:block}";
+".dshi_sideIcon{display:block}" +
+    // 0.5 批次 4 · B 线：「记忆整理」12 项热度参数（设置页）——两列自适应网格，
+    // 窄屏退化为单列；预览区与审计列表沿用既有 dshi_bgroup / dshi_item 形态。
+".dshi_tempGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:var(--dshi-space-sm)}" +
+".dshi_tempPreview{display:flex;flex-direction:column;gap:var(--dshi-space-xs);border:1px solid var(--dsw-alias-border-l2,#dce2eb);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}";
     function ensureStyle() {
       try {
         if (document.getElementById("dsh-shiori-style")) return;
@@ -237,8 +241,8 @@ window.__ModuleLoader__.load({
     // （顶部强提示，手动关闭）。宿主面板滚动容器之外挂 body，不受 .dshi_root 影响。
     // 非 DOM 环境（测试/SSR）整体静默 no-op，绝不抛错。卸载时 disposeToastUi()
     // 统一清理全部定时器并摘除节点（不许泄漏），由 apply(ctx) 的 disposer 调用。
-    var TOAST_TTL = { success: 3000, error: 6000, restart: 6000 };
-    var TOAST_KIND_CLASS = { success: "dshi_toastSuccess", error: "dshi_toastError", restart: "dshi_toastRestart" };
+    var TOAST_TTL = { success: 3000, error: 6000, restart: 6000, warn: 6000 };
+    var TOAST_KIND_CLASS = { success: "dshi_toastSuccess", error: "dshi_toastError", restart: "dshi_toastRestart", warn: "dshi_toastRestart" };
     var RESTART_HINT = "保存成功；新预算将在下次插件重载或宿主重启后生效。";
     var toastUi = null; // { host, banner, bannerText, entries: [{ el, timer }] }
 
@@ -478,7 +482,8 @@ window.__ModuleLoader__.load({
     // ── 冻结 wire 定义（namespace shiori；参数 session→wire sessionId + payload） ──
     // 0.5 批次 4 · C 线：契约扩展 11 → 14（整理向导 onboardingPreview/Apply/Mark；
     // 输出权威在服务端 P protocol，客户端按原样 JSON 透传渲染）。
-    var RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"];
+    // 0.5 批次 4 · B 线：契约扩展 14 → 17（热度参数三方法，追加在 onboardingMark 之后）。
+    var RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"];
     function sessionCodec() {
       return {
         mode: "strict",
@@ -1829,6 +1834,34 @@ window.__ModuleLoader__.load({
       var destroyDoneState = useState(null);
       var destroyDone = destroyDoneState[0];
       var setDestroyDone = destroyDoneState[1];
+      // ── 0.5 批次 4 · B 线：状态页「冷热分布」卡片（新 state 追加在既有 state
+      // 之后，老测试 states 下标不变）。数据：getTemperatureSettings（参数视图）
+      // + simulateTemperature({params: 当前值}) 的 base.tiers；任一失败整卡静默
+      // 隐藏（shadow / 未启动属预期，不是错误）。
+      var tempStatusState = useState(null); // null | {error, settings, sim}
+      var tempStatus = tempStatusState[0];
+      var setTempStatus = tempStatusState[1];
+      useEffect(function () {
+        var cancelled = false;
+        (async function () {
+          try {
+            var settingsDto = await props.dsh.call("getTemperatureSettings", props.sessionId, {});
+            if (cancelled) return;
+            var params = settingsDto && settingsDto.current && typeof settingsDto.current === "object" ? settingsDto.current : null;
+            if (params === null) { setTempStatus({ error: "no-current", settings: null, sim: null }); return; }
+            var sim = null;
+            try {
+              sim = await props.dsh.call("simulateTemperature", props.sessionId, { params: params });
+            } catch (e) {
+              sim = null; // shadow / 未启动：不展示回放，但参数视图仍可展示
+            }
+            if (!cancelled) setTempStatus({ error: null, settings: settingsDto, sim: sim });
+          } catch (e) {
+            if (!cancelled) setTempStatus({ error: (e && e.message) || String(e), settings: null, sim: null });
+          }
+        })();
+        return function () { cancelled = true; };
+      }, [props.sessionId]);
       // 显示口径：本地快照优先（点击后的即时反馈），否则回落服务端诊断——
       // 关闭面板再打开，任务仍在跑（服务端单飞不随面板走）。
       var serverDownload = semantic && typeof semantic.download === "object" && semantic.download !== null
@@ -2363,6 +2396,35 @@ window.__ModuleLoader__.load({
                     : null)
               : null)
             : null,
+          // 0.5 批次 4 · B 线：冷热分布（simulateTemperature base.tiers）+ 上次评估
+          // / 下次触发条件。上次评估在批次 5 之前不存在真实数据——如实写「尚未
+          // 评估」，不编假时间；下次触发按 evaluateEveryHours 从当前时间推算。
+          tempStatus && tempStatus.error === null && tempStatus.settings ? (function () {
+            var settingsDto = tempStatus.settings;
+            var tempParams = settingsDto.current && typeof settingsDto.current === "object" ? settingsDto.current : {};
+            var tiers = tempStatus.sim && tempStatus.sim.base && tempStatus.sim.base.tiers
+              && typeof tempStatus.sim.base.tiers === "object" ? tempStatus.sim.base.tiers : null;
+            var everyHours = typeof tempParams.evaluateEveryHours === "number" ? tempParams.evaluateEveryHours : null;
+            var nextAt = everyHours !== null
+              ? new Date(Date.now() + everyHours * 3600000).toISOString().replace("T", " ").slice(0, 19)
+              : null;
+            return h("div", { className: "dshi_card", "data-role": "temperature-status-card" },
+              h("div", { className: "dshi_row" },
+                h("span", { className: "dshi_cardTitle" }, "冷热分布")),
+              tiers
+                ? h("div", { className: "dshi_item" },
+                    "active " + String(tiers.active) + " · cool " + String(tiers.cool)
+                    + " · cold " + String(tiers.cold) + " · frozen " + String(tiers.frozen))
+                : null,
+              h("div", { className: "dshi_hint" },
+                tiers
+                  ? "按当前参数回放账本得到的分级分布（只读，不代表已归档）。"
+                  : "当前模式（shadow / 未启动）不支持回放模拟；切到 active 后可见。"),
+              statusRow("上次评估", "尚未评估（0.5 批次 5 上线后开始记录）"),
+              statusRow("下次触发条件", everyHours !== null
+                ? "距上次成功评估满 " + String(everyHours) + " 小时（按当前时间推算约 " + nextAt + "）"
+                : "未知（未取到热度参数）"));
+          })() : null,
           // 0.4 S6「卸载并清除数据」危险按钮：与命令行 destroy 走同一 purge
           // 模块；二次确认必须输入 dataRoot 原文（不是点两下确认），失败如实
           // 显示错误码。dataRoot 未知（diagnostics 缺席）时整卡不渲染。
@@ -5705,6 +5767,23 @@ window.__ModuleLoader__.load({
       var occupancyState = useState(null);
       var occupancy = occupancyState[0];
       var setOccupancy = occupancyState[1];
+      // ── 0.5 批次 4 · B 线：「记忆整理」热度参数（新 state 一律追加在既有 state
+      // 之后，老测试预置的 states 下标不变）──
+      // tempInfo = getTemperatureSettings 回包 {error,data}；tempEdits = 用户改动的
+      // 部分 12 项；tempPreview = simulateTemperature 回包 {loading,error,data}；
+      // tempSave = 保存/审计的忙态与一次性反馈。
+      var tempInfoState = useState(null);
+      var tempInfo = tempInfoState[0];
+      var setTempInfo = tempInfoState[1];
+      var tempEditsState = useState(null);
+      var tempEdits = tempEditsState[0];
+      var setTempEdits = tempEditsState[1];
+      var tempPreviewState = useState(null);
+      var tempPreview = tempPreviewState[0];
+      var setTempPreview = tempPreviewState[1];
+      var tempSaveState = useState(null);
+      var tempSave = tempSaveState[0];
+      var setTempSave = tempSaveState[1];
       // S2-3：「工作区默认卡」编辑已移到壳条顶部选择器区（与「选工作区」「选会话」
       // 同一水平行），本页不再持有 persona 相关 state。老测试预置的 states[0..4]
       // 下标不变。
@@ -5729,6 +5808,16 @@ window.__ModuleLoader__.load({
         });
         return function () { cancelled = true; };
       }, [props.sessionId]);
+      // 0.5 批次 4 · B 线：热度参数只读视图（当前值/默认值/规格/交叉校验/审计）。
+      useEffect(function () {
+        var cancelled = false;
+        props.dsh.call("getTemperatureSettings", props.sessionId, {}).then(function (dto) {
+          if (!cancelled) setTempInfo({ error: null, data: dto });
+        }, function (e) {
+          if (!cancelled) setTempInfo({ error: e || { message: "读取热度参数失败" }, data: null });
+        });
+        return function () { cancelled = true; };
+      }, [props.sessionId]);
       if (!scope) {
         return h("div", { className: "dshi_error" }, "[shiori/ui-unsupported] configForms 服务不可用：无法提供原生预算配置界面（工具模式仍可用）。");
       }
@@ -5750,6 +5839,162 @@ window.__ModuleLoader__.load({
         var parts = path.split(".");
         var factoryDefault = BUDGET_FACTORY_DEFAULTS[parts[0]] ? BUDGET_FACTORY_DEFAULTS[parts[0]][parts[1]] : undefined;
         change(path, factoryDefault);
+      };
+      // ── 0.5 批次 4 · B 线：「记忆整理」热度参数（12 项表单 + 预览 + 审计）─────
+      // 当前值优先取宿主配置快照（scope.getSnapshot().value.temperature，与保存
+      // 确认同源）；getTemperatureSettings 的 current 由服务端 liveRefs.temperature
+      // 热读（已生效值），冻结的装配期 settings 只是热读失败时的兜底。
+      var tempData = tempInfo && tempInfo.data ? tempInfo.data : null;
+      var tempSpecs = tempData && tempData.specs && typeof tempData.specs === "object" ? tempData.specs : null;
+      var tempDefaults = tempData && tempData.defaults && typeof tempData.defaults === "object" ? tempData.defaults : null;
+      var tempAudit = tempData && Array.isArray(tempData.audit) ? tempData.audit : [];
+      var configTemperature = value && value.temperature && typeof value.temperature === "object" ? value.temperature : null;
+      var tempCurrent = configTemperature || (tempData && tempData.current) || null;
+      var tempKeys = tempSpecs ? Object.keys(tempSpecs) : (tempCurrent ? Object.keys(tempCurrent) : []);
+      var tempDraft = {};
+      for (var tki = 0; tki < tempKeys.length; tki += 1) {
+        var tk = tempKeys[tki];
+        if (tempEdits && Object.prototype.hasOwnProperty.call(tempEdits, tk)) tempDraft[tk] = tempEdits[tk];
+        else if (tempCurrent && Object.prototype.hasOwnProperty.call(tempCurrent, tk)) tempDraft[tk] = tempCurrent[tk];
+        else if (tempDefaults) tempDraft[tk] = tempDefaults[tk];
+      }
+      var tempDirty = false;
+      for (var tdj = 0; tdj < tempKeys.length; tdj += 1) {
+        if (!tempCurrent || !Object.is(tempDraft[tempKeys[tdj]], tempCurrent[tempKeys[tdj]])) { tempDirty = true; break; }
+      }
+      var tempInvalid = tempPreview && tempPreview.error ? tempPreview.error : null;
+      var tempNumberText = function (n) {
+        return typeof n === "number" && isFinite(n) ? String(n) : "—";
+      };
+      var cacheTempPreview = function (params) {
+        setTempPreview({ loading: true, error: null, data: null });
+        return props.dsh.call("simulateTemperature", props.sessionId, { params: params }).then(function (dto) {
+          setTempPreview({ loading: false, error: null, data: dto });
+        }, function (e) {
+          setTempPreview({ loading: false, error: e || { message: "预览失败（服务端未返回原因）" }, data: null });
+        });
+      };
+      var changeTemp = function (tk, fieldValue) {
+        var merged = assign({}, tempEdits || {});
+        merged[tk] = fieldValue;
+        setTempEdits(merged);
+        setTempSave(null);
+        var next = assign({}, tempDraft);
+        next[tk] = fieldValue;
+        cacheTempPreview(next);
+      };
+      var resetTempDefaults = function () {
+        if (!tempDefaults) return;
+        setTempEdits(assign({}, tempDefaults));
+        setTempSave(null);
+        cacheTempPreview(assign({}, tempDefaults));
+      };
+      // 保存顺序（任务书固定）：scope.mutate 写 ["temperature"] → 新快照确认已生效
+      // → recordTemperatureChange（INVALID_STATE 最多重试 3 次、间隔 300ms）→ toast。
+      // 任一步失败都如实提示，绝不「写入未确认却提示成功」。
+      var saveTemperature = async function () {
+        if (!scope || typeof scope.mutate !== "function") {
+          setTempSave({ busy: false, error: { code: "ui/unsupported", message: "设置命名空间不可用（configForms 缺席），无法保存热度参数。" } });
+          return;
+        }
+        if (!tempDirty || tempInvalid || (tempPreview && tempPreview.loading)) return;
+        var temperatureObject = assign({}, tempDraft);
+        setTempSave({ busy: true, error: null, ok: null });
+        try {
+          var run = scope.mutate([{ op: "set", path: ["temperature"], value: temperatureObject }], scope.getSnapshot().revision);
+          await run;
+          var nextSnapshot = scope.getSnapshot();
+          setSnapshot(nextSnapshot);
+          var appliedValue = nextSnapshot && nextSnapshot.status === "ready" && nextSnapshot.value
+            && nextSnapshot.value.temperature && typeof nextSnapshot.value.temperature === "object"
+            ? nextSnapshot.value.temperature : null;
+          var applied = appliedValue !== null;
+          if (applied) {
+            for (var ak = 0; ak < tempKeys.length; ak += 1) {
+              if (!Object.is(appliedValue[tempKeys[ak]], temperatureObject[tempKeys[ak]])) { applied = false; break; }
+            }
+          }
+          if (!applied) {
+            setTempSave({ busy: false, error: { code: "ui/scope", message: "写入未确认生效——请重新打开本页核对当前值。" }, ok: null });
+            return;
+          }
+          var operationId = "temp-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+          var sleepMs = function (ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); };
+          // 只有「参数尚未生效」这一类 INVALID_STATE 值得等宿主热提交后重试；
+          // 优先读服务端机器可读标记 details.reason，旧版 message 子串仅作兼容兜底。
+          // 审计账本 I/O 失败等同为 INVALID_STATE，但重试无用，须原样展示原因。
+          var notEffectiveYet = function (e) {
+            if (!e || String(e.code || "") !== "INVALID_STATE") return false;
+            if (e.details && String(e.details.reason || "") === "parameters-not-effective") return true;
+            return String(e.message || "").indexOf("尚未生效") >= 0;
+          };
+          var lastError = null;
+          for (var attempt = 0; attempt < 3; attempt += 1) {
+            var receipt;
+            try {
+              receipt = await props.dsh.call("recordTemperatureChange", props.sessionId, { params: temperatureObject, operationId: operationId });
+            } catch (e) {
+              lastError = e;
+              if (!notEffectiveYet(e) || attempt === 2) break;
+              await sleepMs(300);
+              continue;
+            }
+            // 审计已落账：先按回执给出如实结论；刷新展示失败不得反报成审计失败。
+            setTempEdits(null);
+            setTempPreview(null);
+            var changedCount = receipt && Array.isArray(receipt.changes) ? receipt.changes.length : 0;
+            var okMessage;
+            if (receipt && receipt.recorded === true) {
+              okMessage = "已保存并记录审计（" + changedCount + " 项变更）。";
+            } else if (receipt && receipt.replay === true) {
+              okMessage = "参数已保存；本次重放既有审计，未新增审计记录。";
+            } else {
+              okMessage = "参数已保存；与上一条审计相比无变更，未新增审计记录。";
+            }
+            var refreshFailed = false;
+            try {
+              var refreshed = await props.dsh.call("getTemperatureSettings", props.sessionId, {});
+              setTempInfo({ error: null, data: refreshed });
+            } catch (e) {
+              refreshFailed = true;
+            }
+            if (refreshFailed) {
+              setTempSave({ busy: false, error: { code: "ui/refresh", message: "参数与审计已保存；读取最新状态失败，请重新打开本页。" }, ok: null });
+              shioriToast("warn", "参数与审计已保存，但读取最新状态失败");
+            } else {
+              setTempSave({ busy: false, error: null, ok: okMessage });
+              shioriToast("ok", "记忆整理参数已保存");
+            }
+            return;
+          }
+          var shouldRetryHint = notEffectiveYet(lastError)
+            ? "服务端尚未把新参数交给插件（INVALID_STATE）。设置本身已写入宿主配置；请等宿主热提交/重载插件后，重新打开本页再保存一次以补记审计。"
+            : "保存已写入，但审计失败：" + ((lastError && lastError.message) || String(lastError));
+          setTempSave({ busy: false, error: { code: (lastError && lastError.code) || "ui/audit", message: shouldRetryHint }, ok: null });
+          shioriToast("error", "参数已写入，但审计未落账：" + shouldRetryHint);
+        } catch (e) {
+          setTempSave({ busy: false, error: e || { message: "保存失败" }, ok: null });
+          shioriToast("error", "热度参数保存失败：" + ((e && e.message) || String(e)));
+        }
+      };
+      var tempCooling = [];
+      var tempRestoring = [];
+      if (tempPreview && tempPreview.data && Array.isArray(tempPreview.data.transitions)) {
+        for (var tti = 0; tti < tempPreview.data.transitions.length; tti += 1) {
+          var transition = tempPreview.data.transitions[tti];
+          if (!transition || typeof transition !== "object") continue;
+          if (Number(transition.T_to) < Number(transition.T_from)) tempCooling.push(transition);
+          else if (Number(transition.T_to) > Number(transition.T_from)) tempRestoring.push(transition);
+        }
+      }
+      var tempTransitionLine = function (transition) {
+        return h("div", { key: String(transition.key) + ":" + String(transition.scopeId || ""), className: "dshi_item", "data-role": "temperature-transition" },
+          h("span", null, String(transition.key)),
+          h("span", { className: "dshi_badge" }, String(transition.from) + " → " + String(transition.to)),
+          h("span", { className: "dshi_hint" },
+            "T " + tempNumberText(transition.T_from) + " → " + tempNumberText(transition.T_to)
+            + " · 字符 " + (typeof transition.chars === "number" ? String(transition.chars) : "0")
+            + " · 理由：" + String(transition.reason || "")));
       };
       // 字段行：界面名主位（技术名进 title tooltip）+ 后果描述 + 已修改徽章 +
       // 单字段恢复默认 + 就地中文错误。
@@ -5909,7 +6154,115 @@ window.__ModuleLoader__.load({
           shioriToast("error", "预算保存失败：" + ((e && e.code) ? e.code + " " : "") + ((e && e.message) || String(e)));
         }
       };
-      return h("form", {
+      var temperatureCard = h("div", { className: "dshi_card", "data-role": "temperature-settings" },
+        h("div", { className: "dshi_row" },
+          h("span", { className: "dshi_cardTitle" }, "记忆整理"),
+          h("span", { className: "dshi_titleSub" }, "12 项热度参数；先预览后保存，保存当刻不触发任何自动整理")),
+        h("div", { className: "dshi_hint" },
+          "改动任一参数会立即用服务端回放模拟「会冷却 / 会恢复」的影响（不写盘）；确认后才写入设置并记录一条审计。"
+          + (tempData && Number.isInteger(tempData.hysteresis) ? "恢复线须比冷却线高至少 " + tempData.hysteresis + "。" : "")),
+        tempInfo && tempInfo.error
+          ? h("div", { className: "dshi_error", "data-role": "temperature-load-error" },
+              "读取热度参数失败：" + ((tempInfo.error && tempInfo.error.message) || String(tempInfo.error)))
+          : null,
+        !tempData
+          ? h("div", { className: "dshi_loading" }, "加载中…")
+          : h("div", { className: "dshi_items" },
+              h("div", { className: "dshi_tempGrid" }, tempKeys.map(function (key) {
+                var spec = tempSpecs && tempSpecs[key] && typeof tempSpecs[key] === "object" ? tempSpecs[key] : {};
+                var changed = tempCurrent ? !Object.is(tempDraft[key], tempCurrent[key]) : false;
+                var min = spec.min !== undefined ? String(spec.min) : undefined;
+                var max = spec.max !== undefined ? String(spec.max) : undefined;
+                var range = (min !== undefined ? min : "—") + " ~ " + (max !== undefined ? max : "—");
+                return h("div", { className: "dshi_fieldRow", key: key, "data-temp-key": key },
+                  h("label", { className: "dshi_label", title: spec.description || key },
+                    String(key) + (spec.unit ? "（" + spec.unit + "）" : ""),
+                    changed ? h("span", { className: "dshi_modBadge" }, "已修改") : null),
+                  h("div", { className: "dshi_hint" },
+                    "当前 " + tempNumberText(tempCurrent ? tempCurrent[key] : undefined)
+                    + " · 默认 " + tempNumberText(tempDefaults ? tempDefaults[key] : undefined)
+                    + " · 范围 " + range),
+                  h("div", { className: "dshi_controlRow" },
+                    h("input", {
+                      className: "dshi_input", type: "number",
+                      min: min, max: max, step: spec.integer === true ? "1" : "any",
+                      "data-path": "temperature." + key,
+                      "data-temp-input": key,
+                      value: tempDraft[key] === undefined ? "" : String(tempDraft[key]),
+                      onChange: function (event) {
+                        var text = String(event.target.value == null ? "" : event.target.value).trim();
+                        var parsed = text === "" ? NaN : Number(text);
+                        changeTemp(key, text !== "" && Number.isFinite(parsed) ? parsed : text);
+                      }
+                    }),
+                    h("button", {
+                      className: "dshi_btn", type: "button", title: "恢复该项默认值",
+                      "data-role": "temperature-reset-field", "data-key": key,
+                      disabled: !tempDefaults,
+                      onClick: function () { changeTemp(key, tempDefaults ? tempDefaults[key] : undefined); }
+                    }, "默认")),
+                  spec.description ? h("div", { className: "dshi_hint" }, String(spec.description)) : null);
+              })),
+              h("div", { className: "dshi_row" },
+                h("button", { className: "dshi_btn", type: "button", "data-role": "temperature-reset-all", onClick: resetTempDefaults, disabled: !tempDefaults }, "恢复全部默认"),
+                tempDirty ? h("button", {
+                  className: "dshi_btn dshi_btnPrimary", type: "button",
+                  "data-role": "temperature-save",
+                  disabled: !!(tempSave && tempSave.busy) || !!tempInvalid || !!(tempPreview && tempPreview.loading),
+                  onClick: saveTemperature
+                }, tempSave && tempSave.busy ? "保存中…" : "保存热度参数") : null),
+              tempPreview && tempPreview.loading ? h("div", { className: "dshi_loading" }, "预览计算中…") : null,
+              tempInvalid
+                ? h("div", { className: "dshi_error", "data-role": "temperature-invalid" },
+                    "参数不合法：" + ((tempInvalid.message) || String(tempInvalid)))
+                : null,
+              tempPreview && tempPreview.data && tempDirty
+                ? h("div", { className: "dshi_tempPreview", "data-role": "temperature-preview" },
+                    h("div", { className: "dshi_cardTitle" }, "预览（不写盘）"),
+                    h("div", { className: "dshi_hint" },
+                      "分级分布（候选）：active " + String(tempPreview.data.candidate && tempPreview.data.candidate.tiers ? tempPreview.data.candidate.tiers.active : 0)
+                      + " · cool " + String(tempPreview.data.candidate && tempPreview.data.candidate.tiers ? tempPreview.data.candidate.tiers.cool : 0)
+                      + " · cold " + String(tempPreview.data.candidate && tempPreview.data.candidate.tiers ? tempPreview.data.candidate.tiers.cold : 0)
+                      + " · frozen " + String(tempPreview.data.candidate && tempPreview.data.candidate.tiers ? tempPreview.data.candidate.tiers.frozen : 0)),
+                    h("div", { className: "dshi_bgroup", "data-role": "temperature-cooling" },
+                      h("div", { className: "dshi_cardTitle" }, "会冷却（" + tempCooling.length + "）"),
+                      tempCooling.length > 0
+                        ? h("div", { className: "dshi_items" }, tempCooling.map(tempTransitionLine))
+                        : h("div", { className: "dshi_empty" }, "没有专题会因此降温。")),
+                    h("div", { className: "dshi_bgroup", "data-role": "temperature-restoring" },
+                      h("div", { className: "dshi_cardTitle" }, "会恢复（" + tempRestoring.length + "）"),
+                      tempRestoring.length > 0
+                        ? h("div", { className: "dshi_items" }, tempRestoring.map(tempTransitionLine))
+                        : h("div", { className: "dshi_empty" }, "没有专题会因此回升。")),
+                    h("div", { className: "dshi_hint", "data-role": "temperature-l1-delta" },
+                      "L1 字符净变化（预估）：" + (typeof tempPreview.data.l1DeltaChars === "number"
+                        ? (tempPreview.data.l1DeltaChars > 0 ? "+" : "") + String(tempPreview.data.l1DeltaChars)
+                        : "0") + "（正=预计移回 L1，负=预计移出 L1；仅为估算）"))
+                : null,
+              tempSave && tempSave.ok ? h("div", { className: "dshi_ok", "data-role": "temperature-saved" }, tempSave.ok) : null,
+              tempSave && tempSave.error
+                ? h("div", { className: "dshi_error", "data-role": "temperature-save-error" },
+                    "保存失败：" + ((tempSave.error.message) || String(tempSave.error)))
+                : null,
+              h("div", { className: "dshi_bgroup", "data-role": "temperature-audit" },
+                h("div", { className: "dshi_cardTitle" }, "审计（最近 " + tempAudit.length + " 条）"),
+                tempData.auditError
+                  ? h("div", { className: "dshi_hint", "data-role": "temperature-audit-error" },
+                      "审计暂不可读：" + String(tempData.auditError))
+                  : null,
+                tempAudit.length === 0
+                  ? h("div", { className: "dshi_empty" }, "尚无参数变更审计（保存一次参数后出现）。")
+                  : h("div", { className: "dshi_items" }, tempAudit.map(function (entry, index) {
+                      var changes = entry && Array.isArray(entry.changes) ? entry.changes : [];
+                      return h("div", { className: "dshi_item", key: (entry && entry.operationId) || String(index), "data-role": "temperature-audit-entry" },
+                        h("div", { className: "dshi_itemHead" },
+                          h("span", null, entry && entry.at ? String(entry.at).replace("T", " ").slice(0, 19) : "—")),
+                        h("div", { className: "dshi_hint" }, changes.map(function (change) {
+                          return String(change.key) + "：" + tempNumberText(change.from) + " → " + tempNumberText(change.to);
+                        }).join("；")));
+                    })))));
+      return h(fragment, null,
+        h("form", {
         className: "dshi_card",
         onSubmit: function (event) { event.preventDefault(); save(); }
       },
@@ -5951,7 +6304,8 @@ window.__ModuleLoader__.load({
             "旧版占比字段（core.softRatio / core.hardRatio）已在界面隐藏，保存时自动清除、按水位生效；记忆目标长度（core.targetChars）不在界面出现，保存时自动收敛到「软水位 ~ 硬水位-1」之间并写回。",
             snapshot ? " rev " + String(snapshot.revision) : null,
             "。"),
-          value ? h("pre", { className: "dshi_pre" }, stableStringify(value.budgets)) : null));
+          value ? h("pre", { className: "dshi_pre" }, stableStringify(value.budgets)) : null)),
+        temperatureCard);
     }
 
     // ── F2 闪回命中（面板统计页）──────────────────────────────────────────

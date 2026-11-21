@@ -44,11 +44,13 @@ export const RPC_SERVICE_KEY = "shiori.panel";
 // 挂载时立刻失败并指出差异——契约问题上报 owner，不静默兼容。
 // 0.5 批次 4 · C 线契约扩展：11 → 14（整理向导三方法，评审拍板独立方法、
 // previewPlan/executePlan 不动；顺序与 protocol.MANAGEMENT_METHODS 同序同字）。
+// 0.5 批次 4 · B 线契约扩展：14 → 17（热度参数三方法，追加在 onboardingMark 之后）。
 export const CONTRACT_METHODS = Object.freeze([
   "getStatus", "getMemoryView", "getGraph", "executeTool",
   "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan",
   "getTimeline", "destroyData",
   "onboardingPreview", "onboardingApply", "onboardingMark",
+  "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange",
 ]);
 
 /** 方法名集合差异摘要（missing/unexpected；controller 的 DRAINED 断言复用）。 */
@@ -276,6 +278,20 @@ class ShioriPanelService extends TypertRemoteService {
     return dispatchShioriCall(this, "onboardingMark", session, payload, signal);
   }
 
+  // 0.5 批次 4 · B 线：热度参数三方法（wire 15/16/17；追加在 onboardingMark 之后，
+  // 顺序与 protocol.MANAGEMENT_METHODS 逐字一致）。
+  getTemperatureSettings(session, payload, signal) {
+    return dispatchShioriCall(this, "getTemperatureSettings", session, payload, signal);
+  }
+
+  simulateTemperature(session, payload, signal) {
+    return dispatchShioriCall(this, "simulateTemperature", session, payload, signal);
+  }
+
+  recordTemperatureChange(session, payload, signal) {
+    return dispatchShioriCall(this, "recordTemperatureChange", session, payload, signal);
+  }
+
   async stop() {
     return stopShioriPanelService(this);
   }
@@ -285,8 +301,9 @@ class ShioriPanelService extends TypertRemoteService {
   }
 }
 
-// 模块加载即打 Remote 标记：Gateway 由此发现全部端点（14 个：原 10 + destroyData
-// + 0.5 批次 4 C 线整理向导三方法 onboardingPreview/Apply/Mark）。
+// 模块加载即打 Remote 标记：Gateway 由此发现全部端点（17 个：原 10 + destroyData
+// + 0.5 批次 4 C 线整理向导三方法 onboardingPreview/Apply/Mark + 0.5 批次 4 B 线
+// 热度参数三方法 getTemperatureSettings/simulateTemperature/recordTemperatureChange）。
 for (const method of CONTRACT_METHODS) applyRemoteMarker(ShioriPanelService, method);
 
 /**

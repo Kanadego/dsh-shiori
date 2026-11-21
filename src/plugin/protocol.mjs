@@ -946,6 +946,104 @@ export const MANAGEMENT_METHODS = Object.freeze({
       required: ["action", "flag", "warning"],
     },
   },
+
+  // 0.5 批次 4 · B 线（wire 15/16/17）：热度参数面板、回放预览与变更审计。
+  // 三方法的数值字段（12 项参数、温度 T、字符净变化）在本 JSON Schema 子集里
+  // 没有 number 节点可表达，统一以 additionalProperties:true 块承接；字段存在性
+  // 与业务校验由 params.mjs（唯一源头）/ replay.mjs 在服务端权威把关，非法即
+  // INVALID_INPUT（message 带键名与允许区间）。
+  getTemperatureSettings: {
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        // 当前生效的 12 项参数（服务端 liveRefs.temperature 热读后 normalize；
+        // 冻结的装配期 settings 仅在热读缺失/失败时兜底）。
+        current: { type: "object", additionalProperties: true },
+        // 出厂默认 12 项（DEFAULT_TEMPERATURE_PARAMS）。
+        defaults: { type: "object", additionalProperties: true },
+        // 12 项规格（PARAM_SPECS：min/max/unit/integer?/description），表单渲染依据。
+        specs: { type: "object", additionalProperties: true },
+        // 三条交叉校验规则（code/left/right/rule），面板逐条展示。
+        crossChecks: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              code: nonEmptyString,
+              left: nonEmptyString,
+              right: nonEmptyString,
+              rule: { type: "string" },
+            },
+            required: ["code", "left", "right", "rule"],
+          },
+        },
+        // 恢复线回差（RESTORE_HYSTERESIS）。
+        hysteresis: { type: "integer", minimum: 0 },
+        // 最近 settings_change 审计（新 → 旧，上限 20 条；只读回放，面板不自己拼）。
+        audit: {
+          type: "array",
+          items: { type: "object", additionalProperties: true },
+        },
+        // 账本损坏/读失败时的有界摘要：此时 audit 为 []，面板显示「审计暂不可读」，
+        // 不让整个 getTemperatureSettings 失败（可选字段，无异常不出键）。
+        auditError: { type: "string" },
+      },
+      required: ["current", "defaults", "specs", "crossChecks", "hysteresis", "audit"],
+    },
+  },
+
+  simulateTemperature: {
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        params: { type: "object", additionalProperties: true },
+      },
+      required: ["params"],
+    },
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        // base / candidate 都是 { tiers: {active,cool,cold,frozen} } 分级分布。
+        base: { type: "object", additionalProperties: true },
+        candidate: { type: "object", additionalProperties: true },
+        // 迁级清单（只列 from !== to）：key/scopeId/from/to/T_from/T_to/reason/chars。
+        transitions: { type: "array", items: { type: "object", additionalProperties: true } },
+        // L1 字符净变化（预估：迁入 cold/frozen − 迁出 cold/frozen）。
+        l1DeltaChars: { type: "integer" },
+        alarms: { type: "array", items: { type: "object", additionalProperties: true } },
+      },
+      required: ["base", "candidate", "transitions", "l1DeltaChars", "alarms"],
+    },
+  },
+
+  recordTemperatureChange: {
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        params: { type: "object", additionalProperties: true },
+        operationId,
+      },
+      required: ["params", "operationId"],
+    },
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        recorded: { type: "boolean" },
+        // 同 operationId 重复调用：不重复落账，回放首次结果。
+        replay: { type: "boolean" },
+        // 键级旧/新值（[{key,from,to}]；从服务端 live settings 取新值）。
+        changes: { type: "array", items: { type: "object", additionalProperties: true } },
+      },
+      required: ["recorded", "replay", "changes"],
+    },
+  },
 });
 
 /** 管理 API 方法名集合。 */

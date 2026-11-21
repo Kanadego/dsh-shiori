@@ -490,6 +490,30 @@ export function createUiHarness(options = {}) {
       return true;
     }
 
+    // 0.5 批次 4 B 线：表单交互钩子（不改渲染链，只在已渲染树上定位/拨动元素）。
+    // 只处理单属性选择器（与 matchesSelector 能力一致），多属性请分步 find。
+    function find(selector) {
+      return dom ? findFirst(dom, (el) => matchesSelector(el, selector)) : null;
+    }
+
+    function findAll(selector) {
+      const out = [];
+      if (dom) walk(dom, (el) => { if (matchesSelector(el, selector)) out.push(el); });
+      return out;
+    }
+
+    function change(selector, value) {
+      const el = find(selector);
+      if (!el || typeof el.onchange !== "function") return false;
+      el.onchange({ target: { value } });
+      return true;
+    }
+
+    function textOf(selector) {
+      const el = find(selector);
+      return el ? collectDomText(el) : "";
+    }
+
     async function flush(rounds = 20) {
       // 跑收集到的 effect 函数并捕获 cleanup（供下次 deps 变化时清理）。
       // 注意：effects 下标与 effectCleanups 下标一致（effectCursor 顺序），
@@ -515,7 +539,7 @@ export function createUiHarness(options = {}) {
       dom = null;
     }
 
-    return { render, rerender, unmount, text, html, click, flush, host };
+    return { render, rerender, unmount, text, html, click, flush, host, find, findAll, change, textOf };
   }
 
   return {

@@ -412,12 +412,15 @@ export function personaForSession(settings, { sessionId, workspace } = {}) {
 export function readLiveRefs(raw) {
   const pick = (value) => (value !== null && typeof value === "object" && typeof value.get === "function" ? value : null);
   if (raw === null || typeof raw !== "object") {
-    return Object.freeze({ defaultPersona: null, sessionPersonas: null, workspacePersonas: null });
+    return Object.freeze({ defaultPersona: null, sessionPersonas: null, workspacePersonas: null, temperature: null });
   }
   return Object.freeze({
     defaultPersona: pick(raw.defaultPersona),
     sessionPersonas: pick(raw.sessionPersonas),
     workspacePersonas: pick(raw.workspacePersonas),
+    // 0.5 批次 4 · B 线：12 项热度参数的 volatile 引用（面板保存后服务端热读；
+    // 消费方是 controller.liveTemperature，不参与选卡）。
+    temperature: pick(raw.temperature),
   });
 }
 

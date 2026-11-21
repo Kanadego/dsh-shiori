@@ -298,8 +298,10 @@ test('读取侧 IO 失败（非 ENOENT）包装 IO_ERROR 上抛，绝不静默�
   await assert.rejects(() => topicActivityStats({ stateRoot: 42 }), (e) => e.code === 'INVALID_INPUT');
 });
 
-test('TOPIC_ACTIVITY_KINDS 恒为四类（冻结）；显式 at 合法值原样入账', async (t) => {
-  assert.deepEqual([...TOPIC_ACTIVITY_KINDS], ['read', 'updated', 'search_hit', 'group_list']);
+test('TOPIC_ACTIVITY_KINDS 恒为五类（0.5 批次 4 B 线追加 settings_change，冻结）；显式 at 合法值原样入账', async (t) => {
+  // 本次唯一被授权的冻结集合扩展：热度参数审计事件 settings_change 正式纳入
+  // 合法 kind（复用唯一 writer；温度引擎按未知 kind 忽略，不参与加热）。
+  assert.deepEqual([...TOPIC_ACTIVITY_KINDS], ['read', 'updated', 'search_hit', 'group_list', 'settings_change']);
   assert.ok(Object.isFrozen(TOPIC_ACTIVITY_KINDS));
   const root = await makeTmpRoot(t, 'shiori-topic-activity-');
   const ledger = makeLedger(root);

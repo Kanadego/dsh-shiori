@@ -176,13 +176,15 @@ test("② tab 栏含「投递体检」label（插在闪回命中与记忆预算�
       .filter((n) => n.type === "button" && String((n.props && n.props.className) || "").includes("dshi_tab"))
       .map((n) => harness.collectText(n));
     assert.deepEqual(tabButtons, ["状态", "最近变更", "记忆内容", "闪回图谱", "遗忘", "专题", "闪回命中", "投递体检", "记忆预算"]);
-    // 合并口径（0.5-4D × 0.5-4C）：C 线首屏会主动探测一次 onboardingPreview，
-    // 因此这里只钉「除 getStatus 与 onboardingPreview 外零调用」——投递体检页签自身
-    // 不得触发任何数据方法（onboardingPreview 的次数上限由 client.test.mjs 守卫）。
+    // 合并口径（0.5-4D × 0.5-4C × 0.5-4B）：C 线首屏会主动探测一次 onboardingPreview，
+    // B 线状态页要画冷热分布会读 getTemperatureSettings，因此这里只钉「除 getStatus /
+    // onboardingPreview / getTemperatureSettings 外零调用」——三者都是只读首屏探测
+    // （探活 / 探向导 / 画冷热分布），投递体检页签自身仍不得触发任何数据方法
+    // （onboardingPreview 的次数上限由 client.test.mjs 守卫）。
     assert.deepEqual(
-      calls.filter((c) => c.method !== "getStatus" && c.method !== "onboardingPreview"),
+      calls.filter((c) => c.method !== "getStatus" && c.method !== "onboardingPreview" && c.method !== "getTemperatureSettings"),
       [],
-      "除 getStatus 与 onboardingPreview 外零 RPC 调用",
+      "除 getStatus / onboardingPreview / getTemperatureSettings 外零 RPC 调用",
     );
   } finally {
     harness.restore();

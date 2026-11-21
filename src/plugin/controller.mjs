@@ -45,6 +45,8 @@ import { ensureGroupsFile } from "../storage/groups.mjs";
 // 0.5-2B：topic-activity 事件账本（非阻塞入账；事件按 targetScopeId 归属，
 // 落 <stateRoot>/topic-activity.jsonl，供 0.5 阶段 B 温度引擎回放）。
 import { createTopicActivityLedger } from "../storage/topic-activity.mjs";
+// 0.5 批次 4 · B 线：热度参数热读（liveRefs.temperature → normalize；失败回落冻结快照）。
+import { normalizeTemperatureParams, validateTemperatureParams } from "../forgetting/params.mjs";
 import { createSeatGuard } from "../host/seat.mjs";
 import { createSparkTools } from "../sparks/tools.mjs";
 import { createCompressProbe } from "../host/compress-probe.mjs";
@@ -190,6 +192,27 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   // 覆盖，不是死代码。inert 下不启 runtime、不触盘，仅 management.getStatus 可用。
   const isInert = settings.mode === "shadow" && settings.dataRoot === null && settings.stateRoot === null;
   const nowIso = () => now().toISOString();
+
+  // 0.5 批次 4 · B 线（评审授权）：12 项热度参数的热读入口。temperature 是宿主
+  // volatile 引用（index.mjs 透传进 liveRefs），面板 scope.mutate 保存后引用值
+  // 就地更新、不重载插件。与 liveSettingsForScope 同款兜底口径：引用缺失 / get()
+  // 抛错 / 值非法一律回落装配期冻结快照，绝不因热读失败拒绝请求。
+  function liveTemperature() {
+    const ref = settings.liveRefs && settings.liveRefs.temperature;
+    if (ref !== null && ref !== undefined && typeof ref === "object" && typeof ref.get === "function") {
+      try {
+        const raw = ref.get();
+        if (raw !== undefined) {
+          const normalized = normalizeTemperatureParams(raw);
+          validateTemperatureParams(normalized);
+          return normalized;
+        }
+      } catch {
+        /* 回落冻结快照 */
+      }
+    }
+    return normalizeTemperatureParams(settings.temperature);
+  }
 
   // 0.5-2B：topic-activity 事件账本（每实例一个；事件自带 targetScopeId 归属，
   // 全 scope 共享同一 <stateRoot>/topic-activity.jsonl）。构造零 IO（尾部探测与
@@ -1856,6 +1879,13 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     // R4②：人设卡目录读取注入点（仅测试注入 EACCES 桩验证 personasError 与
     // diagnostics.roots 并存；生产不传，门面缺省用 node:fs readdir）。
     readdir: personasReaddir,
+    // 0.5 批次 4 · B 线：热度参数三方法的数据源。liveTemperature 热读 volatile
+    // 引用（见上方定义）；审计事件复用本插件唯一 topic-activity 账本实例 append
+    // （评审拍板：不在 state.mjs 另开第二个 writer 写同一文件）。
+    liveTemperature,
+    appendTemperatureAudit: (event) => (topicActivity !== null
+      ? topicActivity.append(event)
+      : Promise.resolve({ ok: false, code: "NOT_CONFIGURED", error: "topic-activity ledger unavailable" })),
     // P-C 诚实度：getStatus.diagnostics 暴露 typertRpc（wire 契约的
     // diagnostics 块为 additionalProperties:true，纯增量），真实入口 boot
     // 与面板都能观察到严格 codec 的实际状态。
@@ -1879,11 +1909,14 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   // 注释同步：本路径并非全程纯内存，如实口径见 deliveryCheckupFor）。
   // 0.5 批次 4 · C 线：契约扩展 11 → 14（+ 整理向导 onboardingPreview/Apply/Mark；
   // 评审拍板独立三方法，previewPlan/executePlan 不动）。
+  // 0.5 批次 4 · B 线：契约扩展 14 → 17（+ 热度参数三方法 getTemperatureSettings /
+  // simulateTemperature / recordTemperatureChange，追加在 onboardingMark 之后）。
   const DRAINED_MANAGEMENT_METHODS = [
-    "getMemoryView", "getGraph", "listCandidates", "analyze",
-    "reviewCandidate", "previewPlan", "executePlan", "executeTool", "getTimeline",
+    "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze",
+    "reviewCandidate", "previewPlan", "executePlan", "getTimeline",
     "destroyData",
     "onboardingPreview", "onboardingApply", "onboardingMark",
+    "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange",
   ];
   // 三处清单逐字一致断言（评审要求，错位即启动失败）：CONTRACT_METHODS（Q 挂载
   // 闸已断言它与 protocol.MANAGEMENT_METHODS 集合一致）去掉纯内存 getStatus 后

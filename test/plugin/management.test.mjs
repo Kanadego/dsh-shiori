@@ -12,6 +12,7 @@ import { openSparkStore } from "../../src/sparks/store.mjs";
 import { createManagement } from "../../src/plugin/management.mjs";
 import { createStateStore } from "../../src/plugin/state.mjs";
 import { analyzeForgetting, normalizeForgetPolicy } from "../../src/forgetting/decay.mjs";
+import { DEFAULT_TEMPERATURE_PARAMS } from "../../src/forgetting/params.mjs";
 import { digestPlan as organizeDigestPlan } from "../../src/organize/executor.mjs";
 import {
   MANAGEMENT_METHODS, MANAGEMENT_METHOD_NAMES, validateManagementPayload, MANAGEMENT_ERROR_CODES,
@@ -67,11 +68,12 @@ async function setup(t) {
 
 // ── protocol（纯 JSON 层）────────────────────────────────────
 
-test("protocol：14 个方法全覆盖（11 + 0.5 批次 4 C 线整理向导扩展：onboardingPreview/Apply/Mark）；闭包拒绝未知键；queueRevision/planDigest/operationId 规则", () => {
+test("protocol：17 个方法全覆盖（11 + 整理向导三方法 + 热度参数三方法）；闭包拒绝未知键；queueRevision/planDigest/operationId 规则", () => {
   assert.deepEqual([...MANAGEMENT_METHOD_NAMES].sort(), [
     "analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView",
-    "getStatus", "getTimeline", "listCandidates", "onboardingApply", "onboardingMark",
-    "onboardingPreview", "previewPlan", "reviewCandidate",
+    "getStatus", "getTemperatureSettings", "getTimeline", "listCandidates", "onboardingApply",
+    "onboardingMark", "onboardingPreview", "previewPlan", "recordTemperatureChange",
+    "reviewCandidate", "simulateTemperature",
   ].sort());
   for (const name of MANAGEMENT_METHOD_NAMES) {
     assert.ok(MANAGEMENT_METHODS[name].inputSchema);
@@ -2248,12 +2250,13 @@ test("S7 protocol：getGraph 输入新增可选 level/cluster；非法 level 被
       `应拒绝：${JSON.stringify(bad)}`,
     );
   }
-  // wire 方法清单：S6 并入后为 11（destroyData 第 11 位）；0.5 批次 4 C 线整理向导扩展 14
-  //（onboardingPreview/Apply/Mark 追加在 destroyData 之后）。
+  // wire 方法清单：S6 并入后为 11（destroyData 第 11 位）；整理向导扩展 14；
+  // 0.5 批次 4 B 线热度参数三方法追加在 onboardingMark 之后（17）。
   assert.deepEqual([...MANAGEMENT_METHOD_NAMES].sort(), [
     "analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView",
-    "getStatus", "getTimeline", "listCandidates", "onboardingApply", "onboardingMark",
-    "onboardingPreview", "previewPlan", "reviewCandidate",
+    "getStatus", "getTemperatureSettings", "getTimeline", "listCandidates", "onboardingApply",
+    "onboardingMark", "onboardingPreview", "previewPlan", "recordTemperatureChange",
+    "reviewCandidate", "simulateTemperature",
   ].sort());
 
   // degree 出线（#224c65）：输出契约必须先声明——getGraphNodeItem 是
@@ -2471,4 +2474,253 @@ test("R1：getRootDegradation 非空 → executeTool 先报 UNSUPPORTED + detail
       (e) => e.code === "INVALID_STATE",
     );
   }
+});
+
+// ── 0.5 批次 4 · B 线：热度参数三方法（getTemperatureSettings / simulateTemperature
+// / recordTemperatureChange）。验收口径：只读预览零写入、settings 未生效
+// INVALID_STATE + 账本零新增、成功路径审计与服务端 live 值一致、同 operationId
+// 不重复落账、保存当刻 executePlan/listCandidates 零调用、dataRoot 零变化。
+
+const TEMP_NOW = "2026-11-22T00:00:00.000Z";
+
+async function snapshotTree(root) {
+  const rows = [];
+  async function walk(dir) {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const rel = path.relative(root, full) || ".";
+      if (entry.isDirectory()) { rows.push(`d:${rel}`); await walk(full); continue; }
+      const st = await stat(full);
+      rows.push(`f:${rel}:${st.size}:${Math.round(st.mtimeMs)}`);
+    }
+  }
+  await walk(root);
+  return rows.sort();
+}
+
+async function ledgerLines(stateRoot) {
+  try {
+    const raw = await readFile(path.join(stateRoot, "topic-activity.jsonl"), "utf8");
+    return raw.split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line));
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+async function temperatureFixture(t, { temperature, liveGetter } = {}) {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-temp-rpc-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const dataRoot = path.join(base, "data");
+  const stateRoot = path.join(base, "state");
+  await mkdir(path.join(dataRoot, "scopes", "global", "topics"), { recursive: true });
+  await mkdir(stateRoot, { recursive: true });
+  // 两个专题：beta（约 52 天，默认 cool）+ alpha（约 325 天，默认 frozen）。
+  const { serializeTopicFile } = await import("../../src/storage/frontmatter.mjs");
+  await writeFile(path.join(dataRoot, "scopes", "global", "topics", "beta.md"),
+    serializeTopicFile({ key: "beta", title: "乙", summary: "s", updated: "2026-10-01T00:00:00.000Z", scopeId: "global", retention: "historical" }, "beta body 0123456789"), "utf8");
+  await writeFile(path.join(dataRoot, "scopes", "global", "topics", "alpha.md"),
+    serializeTopicFile({ key: "alpha", title: "甲", summary: "s", updated: "2026-01-01T00:00:00.000Z", scopeId: "global", retention: "historical" }, "alpha body"), "utf8");
+  await writeFile(path.join(stateRoot, "topic-activity.jsonl"),
+    JSON.stringify({ at: "2026-10-02T00:00:00.000Z", scopeId: "global", kind: "read", topicKey: "beta" }) + "\n", "utf8");
+  const settings = {
+    mode: "active", allowActive: true,
+    dataRoot, stateRoot,
+    rootsSource: { dataRoot: "explicit", stateRoot: "explicit" },
+    ownerId: "local", defaultPersona: "amber",
+    sessionPersonas: [], workspacePersonas: [],
+    budgets: { persona: { maxChars: 12000 }, core: { targetChars: 2000, hardCapChars: 4000 } },
+    l2: { enabled: false }, organize: { enabled: true },
+    forgetting: { enabled: true, policy: normalizeForgetPolicy({}) },
+    temperature: temperature !== undefined ? temperature : { ...DEFAULT_TEMPERATURE_PARAMS },
+  };
+  const state = createStateStore({ stateRoot });
+  let resourcesCalls = 0;
+  const { management } = createManagement({
+    settings,
+    dataRoot,
+    state,
+    resourcesFor: async () => { resourcesCalls += 1; throw new Error("simulateTemperature must not open scope resources"); },
+    isStarted: () => true,
+    generation: () => 1,
+    registerGrant: () => ({}),
+    executeToolForScope: async () => ({}),
+    nowIso: () => TEMP_NOW,
+    ...(typeof liveGetter === "function" ? { liveTemperature: liveGetter } : {}),
+  });
+  return { base, dataRoot, stateRoot, settings, state, management, resourcesCalls: () => resourcesCalls };
+}
+
+const tempTrusted = { session: { id: "s-temp" }, source: "panel-rpc", principal: { kind: "owner" } };
+
+test("B线 getTemperatureSettings：形状齐全、纯读（零写入/零 scope 资源）、shadow 也可读", async (t) => {
+  const fx = await temperatureFixture(t);
+  const before = await snapshotTree(fx.base);
+  const dto = await fx.management.getTemperatureSettings(tempTrusted, {});
+  assert.equal(fx.resourcesCalls(), 0, "纯读不得打开 scope 资源");
+  assert.deepEqual(await snapshotTree(fx.base), before, "dataRoot/stateRoot 零变化");
+  assert.deepEqual(Object.keys(dto.current).sort(), Object.keys(DEFAULT_TEMPERATURE_PARAMS).sort());
+  assert.equal(dto.current.s0Days, DEFAULT_TEMPERATURE_PARAMS.s0Days);
+  assert.equal(dto.hysteresis, 10);
+  assert.equal(dto.crossChecks.length, 3);
+  assert.ok(dto.crossChecks.every((rule) => rule.code && rule.left && rule.right && typeof rule.rule === "string"));
+  assert.equal(dto.specs.s0Days.min, 7);
+  assert.deepEqual(dto.audit, [], "尚无 settings_change 审计");
+  // shadow（未启动）也允许纯读：不要求 started / active。
+  const shadowState = createStateStore({ stateRoot: fx.stateRoot });
+  const { management: shadow } = createManagement({
+    settings: { ...fx.settings, mode: "shadow", allowActive: false },
+    dataRoot: fx.dataRoot,
+    state: shadowState,
+    resourcesFor: async () => { throw new Error("not used"); },
+    isStarted: () => false,
+    generation: () => 0,
+    registerGrant: () => ({}),
+    executeToolForScope: async () => ({}),
+    nowIso: () => TEMP_NOW,
+  });
+  const shadowDto = await shadow.getTemperatureSettings(tempTrusted, {});
+  assert.equal(shadowDto.current.s0Days, DEFAULT_TEMPERATURE_PARAMS.s0Days);
+});
+
+test("B线 getTemperatureSettings：账本不可读 → audit:[] + auditError（不让整体失败）", async (t) => {
+  const fx = await temperatureFixture(t);
+  await rm(path.join(fx.stateRoot, "topic-activity.jsonl"));
+  await mkdir(path.join(fx.stateRoot, "topic-activity.jsonl")); // 目录占位 → 读取 IO 错误
+  const dto = await fx.management.getTemperatureSettings(tempTrusted, {});
+  assert.deepEqual(dto.audit, []);
+  assert.equal(typeof dto.auditError, "string");
+  assert.ok(dto.auditError.length > 0);
+});
+
+test("B线 simulateTemperature：只读预览（dataRoot/stateRoot 逐字节不变），T 与 evaluateTopics 一致", async (t) => {
+  const fx = await temperatureFixture(t);
+  const before = await snapshotTree(fx.base);
+  const coldLineUp = { ...DEFAULT_TEMPERATURE_PARAMS, coolThreshold: 40, restoreThreshold: 50 };
+  const sim = await fx.management.simulateTemperature(tempTrusted, { params: coldLineUp });
+  assert.equal(fx.resourcesCalls(), 0, "预览不得打开 scope 资源");
+  assert.deepEqual(await snapshotTree(fx.base), before, "预览必须零写入（mtime/size 实证）");
+  assert.equal(sim.base.tiers.cool + sim.base.tiers.cold + sim.base.tiers.frozen + sim.base.tiers.active, 2);
+  const beta = sim.transitions.find((entry) => entry.key === "beta");
+  assert.ok(beta, "beta 应从 cool 迁到 cold");
+  assert.equal(beta.from, "cool");
+  assert.equal(beta.to, "cold");
+  assert.equal(sim.l1DeltaChars, 20, "beta 正文 20 字符迁入 cold");
+  // 与直接 evaluateTopics 逐条一致（同事件序列/参数）。
+  const { evaluateTopics } = await import("../../src/forgetting/topic-temperature.mjs");
+  const { toFormulaParams } = await import("../../src/forgetting/params.mjs");
+  const direct = evaluateTopics({
+    topics: [
+      { key: "alpha", scopeId: "global", updated: "2026-01-01T00:00:00.000Z", retention: "historical" },
+      { key: "beta", scopeId: "global", updated: "2026-10-01T00:00:00.000Z", retention: "historical" },
+    ],
+    groups: [],
+    events: [{ at: "2026-10-02T00:00:00.000Z", scopeId: "global", kind: "read", topicKey: "beta" }],
+    now: TEMP_NOW,
+    params: toFormulaParams(coldLineUp),
+  });
+  const byKey = new Map(direct.topics.map((entry) => [entry.key, entry]));
+  for (const projected of sim.candidate.topics) {
+    assert.equal(projected.T, byKey.get(projected.key).T, projected.key + " 的 T 与 evaluateTopics 逐条相等");
+    assert.equal(projected.tier, byKey.get(projected.key).tier);
+  }
+});
+
+test("B线 simulateTemperature：非法参数 INVALID_INPUT（带键名/区间）且 settings 不变、账本零新增", async (t) => {
+  const fx = await temperatureFixture(t);
+  const before = await snapshotTree(fx.base);
+  await assert.rejects(
+    () => fx.management.simulateTemperature(tempTrusted, { params: { ...DEFAULT_TEMPERATURE_PARAMS, restoreThreshold: 30 } }),
+    (error) => error.code === "INVALID_INPUT" && /restoreThreshold/.test(error.message),
+  );
+  await assert.rejects(
+    () => fx.management.simulateTemperature(tempTrusted, { params: { ...DEFAULT_TEMPERATURE_PARAMS, s0Days: "三十" } }),
+    (error) => error.code === "INVALID_INPUT" && /s0Days/.test(error.message),
+  );
+  assert.deepEqual(await snapshotTree(fx.base), before, "非法参数不得有任何写入");
+  assert.deepEqual(await ledgerLines(fx.stateRoot), [
+    { at: "2026-10-02T00:00:00.000Z", scopeId: "global", kind: "read", topicKey: "beta" },
+  ]);
+});
+
+test("B线 recordTemperatureChange：settings 未生效 → INVALID_STATE，账本零新增", async (t) => {
+  const fx = await temperatureFixture(t); // settings.temperature = 默认值
+  const target = { ...DEFAULT_TEMPERATURE_PARAMS, coolThreshold: 30, restoreThreshold: 50 };
+  const linesBefore = await ledgerLines(fx.stateRoot);
+  const dataBefore = await snapshotTree(fx.dataRoot);
+  let execCalls = 0;
+  let listCalls = 0;
+  const originalExec = fx.management.executePlan;
+  const originalList = fx.management.listCandidates;
+  fx.management.executePlan = (...args) => { execCalls += 1; return originalExec.apply(fx.management, args); };
+  fx.management.listCandidates = (...args) => { listCalls += 1; return originalList.apply(fx.management, args); };
+  await assert.rejects(
+    () => fx.management.recordTemperatureChange(tempTrusted, { params: target, operationId: "op-not-applied" }),
+    (error) => error.code === "INVALID_STATE" && /尚未生效/.test(error.message)
+      && error.details?.reason === "parameters-not-effective",
+  );
+  assert.deepEqual(await ledgerLines(fx.stateRoot), linesBefore, "settings 未生效时账本零新增");
+  assert.deepEqual(await snapshotTree(fx.dataRoot), dataBefore, "dataRoot 零变化");
+  assert.equal(execCalls, 0, "保存当刻 executePlan 零调用");
+  assert.equal(listCalls, 0, "保存当刻 listCandidates 零调用");
+});
+
+test("B线 recordTemperatureChange：成功落账（旧值取服务端审计账、新值取 live），同 operationId 重放不重复", async (t) => {
+  const target = { ...DEFAULT_TEMPERATURE_PARAMS, coolThreshold: 30, restoreThreshold: 55, readDedupHours: 12 };
+  const fx = await temperatureFixture(t, { temperature: target });
+  const dataBefore = await snapshotTree(fx.dataRoot);
+  const receipt = await fx.management.recordTemperatureChange(tempTrusted, { params: target, operationId: "op-temp-1" });
+  assert.equal(receipt.recorded, true);
+  assert.equal(receipt.replay, false);
+  assert.deepEqual(receipt.changes.map((change) => change.key).sort(), ["coolThreshold", "readDedupHours", "restoreThreshold"].sort());
+  const newValues = new Map(receipt.changes.map((change) => [change.key, change.to]));
+  assert.equal(newValues.get("coolThreshold"), 30, "审计新值从 live 取");
+  assert.equal(newValues.get("restoreThreshold"), 55);
+  assert.equal(newValues.get("readDedupHours"), 12);
+  const lines = (await ledgerLines(fx.stateRoot)).filter((line) => line.kind === "settings_change");
+  assert.equal(lines.length, 1, "只落一条 settings_change");
+  assert.equal(lines[0].operationId, "op-temp-1");
+  assert.deepEqual(lines[0].next, target, "审计行带完整 next 快照（下一次 diff 的服务端基准）");
+  assert.deepEqual(await snapshotTree(fx.dataRoot), dataBefore, "审计只落 stateRoot，dataRoot 零变化");
+  // 同 operationId 再次调用：返回首次结果，不重复落账。
+  const replay = await fx.management.recordTemperatureChange(tempTrusted, { params: target, operationId: "op-temp-1" });
+  assert.equal(replay.recorded, false);
+  assert.equal(replay.replay, true);
+  assert.deepEqual(replay.changes, receipt.changes);
+  assert.equal((await ledgerLines(fx.stateRoot)).filter((line) => line.kind === "settings_change").length, 1);
+  // 新 operationId + 同值：无变化 → 不构造空 changes 事件。
+  const noop = await fx.management.recordTemperatureChange(tempTrusted, { params: target, operationId: "op-temp-2" });
+  assert.equal(noop.recorded, false);
+  assert.equal(noop.replay, false);
+  assert.deepEqual(noop.changes, []);
+  assert.equal((await ledgerLines(fx.stateRoot)).filter((line) => line.kind === "settings_change").length, 1);
+  // 审计列表可见（新 → 旧，不含 next 快照）。
+  const dto = await fx.management.getTemperatureSettings(tempTrusted, {});
+  assert.equal(dto.audit.length, 1);
+  assert.equal(dto.audit[0].operationId, "op-temp-1");
+  assert.equal(dto.audit[0].next, undefined, "审计列表不携带 next 快照");
+});
+
+test("B线 recordTemperatureChange：热读 live 值（面板保存后宿主 volatile 引用更新即生效）", async (t) => {
+  const initial = { ...DEFAULT_TEMPERATURE_PARAMS };
+  const target = { ...DEFAULT_TEMPERATURE_PARAMS, coolThreshold: 32, restoreThreshold: 55 };
+  let current = initial;
+  const fx = await temperatureFixture(t, {
+    temperature: initial,
+    liveGetter: () => current,
+  });
+  // 面板保存：宿主引用更新 → 服务端热读到新值。
+  current = target;
+  const sim = await fx.management.simulateTemperature(tempTrusted, { params: target });
+  assert.ok(sim, "预览可用");
+  const receipt = await fx.management.recordTemperatureChange(tempTrusted, { params: target, operationId: "op-live" });
+  assert.equal(receipt.recorded, true);
+  const line = (await ledgerLines(fx.stateRoot)).find((entry) => entry.kind === "settings_change");
+  assert.equal(line.next.coolThreshold, 32, "审计新值来自热读 live 值");
+  assert.equal(line.next.restoreThreshold, 55);
 });

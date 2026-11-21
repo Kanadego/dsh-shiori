@@ -1,8 +1,10 @@
 // Shiori 0.5-2B · topic-activity 事件账本（0.5 方案 §5 阶段 A.4，温度引擎统计底座）。
 //
 // 落盘 <stateRoot>/topic-activity.jsonl：append-only JSONL，每行一个事件。
-// 事件形状（本模块只产出这四类 kind；读取侧对未知 kind 结构兼容，供后续版本扩展）：
+// 事件形状（写入侧白名单五类 kind：四类加热事件 + settings_change 审计；
+// 读取侧对未知 kind 结构兼容，供后续版本扩展）：
 //   { at, scopeId, kind: "read"|"updated"|"search_hit"|"group_list", topicKey?, groupKey? }
+//   { at, scopeId, kind: "settings_change", operationId, changes, next }
 //
 // 设计约束（任务书硬要求）：
 // - 非阻塞：append() 同步返回、内部排队落盘，绝不抛、绝不 reject；写失败只记
@@ -30,8 +32,11 @@ import path from 'node:path';
 import { invalidInput, wrapIoError } from './errors.mjs';
 import { isCanonicalIso } from './fsutil.mjs';
 
-/** 账本事件 kind 全集（写入侧白名单；读取侧对未知 kind 结构兼容）。 */
-export const TOPIC_ACTIVITY_KINDS = Object.freeze(['read', 'updated', 'search_hit', 'group_list']);
+/** 账本事件 kind 全集（写入侧白名单；读取侧对未知 kind 结构兼容）。
+ *  0.5 批次 4 · B 线追加 "settings_change"：热度参数变更审计事件（评审拍板：
+ *  正式纳入合法 kind，复用本账本唯一 writer 追加；不参与加热——温度引擎只认
+ *  read / updated 的加热语义，未知 kind 一律忽略）。 */
+export const TOPIC_ACTIVITY_KINDS = Object.freeze(['read', 'updated', 'search_hit', 'group_list', 'settings_change']);
 
 const ACTIVITY_FILE_NAME = 'topic-activity.jsonl';
 
@@ -49,10 +54,14 @@ function assertStateRoot(stateRoot) {
 /**
  * 写入侧事件校验（append 用）：非法返回人类可读原因，合法返回 null。
  * - kind 必须在 TOPIC_ACTIVITY_KINDS 内（未知 kind 拒写——温度引擎的加热判据
- *   只认这四类，混入未知 kind 会污染统计）；
+ *   只认 read/updated，混入未知 kind 会污染统计；settings_change 是审计事件，
+ *   引擎按未知 kind 忽略）；
  * - scopeId 必须是非空字符串（targetScopeId 归属边界）；
  * - at 缺省时由账本时钟补（规范 UTC ISO）；显式给出时必须是规范 UTC ISO；
- * - topicKey/groupKey 可选：给出时必须是非空字符串。
+ * - topicKey/groupKey 可选：给出时必须是非空字符串；
+ * - settings_change（0.5 批次 4 B 线）：额外要求 operationId 非空字符串、
+ *   changes 非空数组、next 完整 12 项参数对象（键级内容由 params.mjs 权威校验，
+ *   账本层只挡结构，保持与 validateActivityEvent 其他分支同粒度的 fail-closed）。
  */
 export function validateActivityEvent(event) {
   if (event === null || typeof event !== 'object' || Array.isArray(event)) {
@@ -71,6 +80,17 @@ export function validateActivityEvent(event) {
     const value = event[field];
     if (value !== undefined && (typeof value !== 'string' || value.length === 0)) {
       return `${field} 必须是非空字符串或缺省`;
+    }
+  }
+  if (event.kind === 'settings_change') {
+    if (typeof event.operationId !== 'string' || event.operationId.length === 0) {
+      return 'settings_change.operationId 必须是非空字符串';
+    }
+    if (!Array.isArray(event.changes) || event.changes.length === 0) {
+      return 'settings_change.changes 必须是非空数组';
+    }
+    if (event.next === null || typeof event.next !== 'object' || Array.isArray(event.next)) {
+      return 'settings_change.next 必须是完整 12 项参数对象';
     }
   }
   return null;
@@ -169,10 +189,16 @@ export function createTopicActivityLedger({ stateRoot, now = () => new Date(), f
       lastError = invalidReason;
       return Promise.resolve({ ok: false, code: 'INVALID_INPUT', error: invalidReason });
     }
-    // 事件行键序固定为形状约定顺序（at → scopeId → kind → topicKey → groupKey）。
+    // 事件行键序固定为形状约定顺序（at → scopeId → kind → topicKey → groupKey；
+    // settings_change 追加 operationId → changes → next）。
     const record = { at: event.at ?? now().toISOString(), scopeId: event.scopeId, kind: event.kind };
     if (event.topicKey !== undefined) record.topicKey = event.topicKey;
     if (event.groupKey !== undefined) record.groupKey = event.groupKey;
+    if (event.kind === 'settings_change') {
+      record.operationId = event.operationId;
+      record.changes = event.changes;
+      record.next = event.next;
+    }
     const pending = chain.then(() => writeOne(record));
     chain = pending.then(() => {}, () => {}); // 链体永不 reject（writeOne 已兜底，双保险）
     inflight.add(pending);
@@ -246,7 +272,8 @@ export async function readTopicActivity({ stateRoot, scopeId, fs = fsp } = {}) {
 }
 
 /**
- * 账本统计（温度引擎/测试用）：按 kind 计数（四类键恒齐，缺省 0）。
+ * 账本统计（温度引擎/测试用）：按 kind 计数。四类加热键恒齐（缺省 0）；
+ * settings_change 审计事件计入 total/skipped，但不进入 byKind（不参与加热统计）。
  * scopeId 过滤口径与 readTopicActivity 一致；skipped 透传（账本健康度观测）。
  *
  * @returns {Promise<{total: number, skipped: number, byKind: {read: number, updated: number, search_hit: number, group_list: number}}>}

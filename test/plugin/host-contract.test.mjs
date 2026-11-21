@@ -304,7 +304,7 @@ function fakeTypertCtx() {
   return { ctx, services };
 }
 
-test("P-C 严格描述符：真实 TypertRegistry 接受 14 端点注册（11 + 0.5 批次 4 整理向导三方法）→ local.get 全 strict；dispose→hasSeen→重注册；重复注册 adopt；无 typert 回退 SRC", async (t) => {
+test("P-C 严格描述符：真实 TypertRegistry 接受 17 端点注册（11 + 整理向导三方法 + B 线三方法）→ local.get 全 strict；dispose→hasSeen→重注册；重复注册 adopt；无 typert 回退 SRC", async (t) => {
   const registryMod = await loadTypertRegistry();
   if (!registryMod) {
     t.skip("real @deepseek-ai/dsh-typert-registry not resolvable on this machine (RESULT.json marks this check not-run)");
@@ -330,7 +330,7 @@ test("P-C 严格描述符：真实 TypertRegistry 接受 14 端点注册（11 + 
   assert.equal(typeof reg.disposer, "function");
 
   const methods = Object.keys(MANAGEMENT_METHODS);
-  assert.equal(methods.length, 14);
+  assert.equal(methods.length, 17);
   for (const method of methods) {
     const descriptor = typert.local.get(`shiori/${method}`);
     assert.ok(descriptor, `endpoint shiori/${method} must be registered`);

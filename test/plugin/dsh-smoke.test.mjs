@@ -182,8 +182,9 @@ import { join } from "node:path";
 export async function createShioriPluginController(ctx, settings) {
   const state = { started: 0, stopped: 0, mode: settings.mode, dataRoot: settings.dataRoot };
   // 桩的 management 方法清单同为 CONTRACT_METHODS 镜像（与下方 STUB_PROTOCOL 同步维护；
-  // 0.5 批次 4 C 线 wire 11→14：destroyData 之后依次追加 onboardingPreview/Apply/Mark）。
-  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"];
+  // 0.5 批次 4 C 线 wire 11→14：destroyData 之后依次追加 onboardingPreview/Apply/Mark；
+  // 0.5 批次 4 B 线 14→17：再追加热度参数三方法）。
+  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"];
   const management = Object.fromEntries(methods.map((method) => [
     method,
     async () => ({ mode: state.mode, method, synthetic: true, started: state.started, stopped: state.stopped }),
@@ -229,6 +230,9 @@ export const MANAGEMENT_METHODS = {
   onboardingPreview: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
   onboardingApply: { inputSchema: { type: "object", required: ["proposal", "hash", "operationId", "confirmed"] }, outputSchema: { type: "object" } },
   onboardingMark: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
+  getTemperatureSettings: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
+  simulateTemperature: { inputSchema: { type: "object", required: ["params"] }, outputSchema: { type: "object" } },
+  recordTemperatureChange: { inputSchema: { type: "object", required: ["params", "operationId"] }, outputSchema: { type: "object" } },
 };
 const ALLOWED = {
   getStatus: [], getMemoryView: [], getGraph: [], listCandidates: [],
@@ -242,6 +246,9 @@ const ALLOWED = {
   onboardingPreview: ["proposal"],
   onboardingApply: ["proposal", "hash", "operationId", "confirmed"],
   onboardingMark: ["dismiss", "restart", "hash"],
+  getTemperatureSettings: [],
+  simulateTemperature: ["params"],
+  recordTemperatureChange: ["params", "operationId"],
 };
 export function validateManagementPayload(name, payload) {
   const fail = (message) => { const e = new Error(message); e.code = "INVALID_INPUT"; throw e; };

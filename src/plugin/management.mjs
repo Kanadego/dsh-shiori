@@ -17,8 +17,8 @@
 //   映射/generation 仍相同；stop/断连撤销，重试与 merge 退休前重验；
 // - 候选队列持久快照跨重启恢复（queueStore）；plan 账不可变（planStore）。
 
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import * as fsp from "node:fs/promises";
+import path, { join } from "node:path";
 import { analyzeCandidates } from "../organize/analyze.mjs";
 import {
   createCandidateQueue, buildDraft as buildOrganizeDraft, buildArchiveTopicPlan,
@@ -40,6 +40,22 @@ import { coreBudgetsOf } from "./config.mjs";
 import { createTimelineReader } from "../timeline/index.mjs";
 import { purgeDataRoot, PurgeSafetyError } from "../storage/purge.mjs";
 import { readGroups } from "../storage/groups.mjs";
+import { parseTopicFile } from "../storage/frontmatter.mjs";
+import { isCanonicalIso, readFileOrNull } from "../storage/fsutil.mjs";
+import { parseGroupsFile } from "../core/groups.mjs";
+import { readTopicActivity, createTopicActivityLedger } from "../storage/topic-activity.mjs";
+// 0.5 批次 4 · B 线：回放模拟委托 forgetting/replay.mjs（它再委托 evaluateTopics）；
+// 参数唯一源头 params.mjs（校验 / diff / 审计事件纯构造）。
+import { simulateTemperature as simulateTemperaturePure } from "../forgetting/replay.mjs";
+import {
+  DEFAULT_TEMPERATURE_PARAMS,
+  PARAM_SPECS,
+  RESTORE_HYSTERESIS,
+  buildSettingsChangeEvent,
+  diffParams,
+  normalizeTemperatureParams,
+  validateTemperatureParams,
+} from "../forgetting/params.mjs";
 import { pinScope, sessionEvidenceFromRpc, rejectIdentityFields } from "./scope.mjs";
 
 const MAIN_SESSION_ACTOR = "main-session";
@@ -154,7 +170,65 @@ export function createManagement(deps) {
   }
 
   // R1：人设卡目录读取实现（缺省 = 生产 readdir；测试注入桩，controller 不传）。
-  const readdirForPersonas = typeof deps.readdir === "function" ? deps.readdir : readdir;
+  const readdirForPersonas = typeof deps.readdir === "function" ? deps.readdir : fsp.readdir;
+
+  // ── 0.5 批次 4 · B 线：热度参数热读与审计账本 writer ───────────────────────
+  // liveTemperature：controller 注入（liveRefs.temperature 热读 volatile 引用，
+  // 失败回落冻结快照）；直构（测试/嵌入方）缺省回落 settings.temperature。
+  const liveTemperature = typeof deps.liveTemperature === "function"
+    ? deps.liveTemperature
+    : () => normalizeTemperatureParams(settings.temperature);
+  function currentLiveTemperature() {
+    try {
+      return liveTemperature();
+    } catch {
+      return normalizeTemperatureParams(settings.temperature);
+    }
+  }
+  // appendTemperatureAudit：controller 注入其唯一 topic-activity 账本实例的
+  // append（评审拍板：不另开第二个 writer 写同一文件）。直构缺省惰性自建一个
+  // 账本（仅测试/嵌入方路径；生产永远走 controller 注入）。
+  let auditFallbackLedger = null;
+  const appendTemperatureAudit = typeof deps.appendTemperatureAudit === "function"
+    ? deps.appendTemperatureAudit
+    : (event) => {
+      if (settings.stateRoot === null) {
+        return Promise.resolve({ ok: false, code: "NOT_CONFIGURED", error: "stateRoot 未配置" });
+      }
+      if (auditFallbackLedger === null) {
+        auditFallbackLedger = createTopicActivityLedger({ stateRoot: settings.stateRoot, now: () => new Date(nowIso()) });
+      }
+      return auditFallbackLedger.append(event);
+    };
+  // settings_change 审计的读-查重-append 串行化：同进程唯一写者下，同 operationId
+  // 的并发调用不会各落一条（重复返回首次结果）。
+  let temperatureAuditQueue = Promise.resolve();
+  function serializeTemperatureAudit(task) {
+    const run = temperatureAuditQueue.then(task, task);
+    temperatureAuditQueue = run.then(() => {}, () => {});
+    return run;
+  }
+  /** 读 settings_change 审计（全局设置：不按 scope 过滤；只读、不加锁、不建目录）。 */
+  async function readTemperatureAudit() {
+    if (settings.stateRoot === null) return { entries: [], error: "stateRoot 未配置，审计账本不可读" };
+    try {
+      const { events } = await readTopicActivity({ stateRoot: settings.stateRoot });
+      return {
+        entries: events
+          .filter((entry) => entry.kind === "settings_change")
+          .map((entry) => ({
+            at: entry.at,
+            scopeId: entry.scopeId,
+            operationId: entry.operationId,
+            changes: entry.changes,
+            next: entry.next,
+          })),
+        error: null,
+      };
+    } catch (error) {
+      return { entries: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  }
 
   const isInert = settings.mode === "shadow" && settings.dataRoot === null && settings.stateRoot === null;
   const configured = !isInert;
@@ -291,6 +365,90 @@ export function createManagement(deps) {
       if (error?.code === "NOT_FOUND") return { revision: null, groups: [] };
       throw error;
     }
+  }
+
+  // ── 0.5 批次 4 · B 线：simulateTemperature 的只读数据源 ─────────────────────
+  //
+  // 硬约束：预览 RPC 必须零写入（不 appendRecord、不建目录、不碰 dataRoot）。
+  // 因此这里**不**经 resourcesFor / service / storage.groups 的锁内读——那些路径
+  // 会 mkdir 数据根目录并写 .shiori-lock/.shiori-lock.guard（dataRoot mtime/size
+  // 会变）。改为直接只读文件：topics 走 <dataRoot>/scopes/<scope>/topics/*.md
+  // （global 先、active 覆盖，与本仓 FileStore.effectiveView 同口径），组清单走
+  // <dataRoot>/scopes/<scope>/groups.json 的纯解析，事件走 readTopicActivity（裸
+  // readFile，无锁）。坏文件按「跳过并计数」降级（与 listTopics 的影子报告同精神），
+  // 不让一个手改坏文件拖垮整次预览。
+  async function readTopicsForReplay(scopeId) {
+    const root = settings.dataRoot;
+    if (typeof root !== "string" || root.length === 0) return { topics: [], skipped: 0 };
+    const scopes = scopeId === "global" ? ["global"] : ["global", scopeId];
+    const byKey = new Map();
+    let skipped = 0;
+    for (const sid of scopes) {
+      const dir = path.join(root, "scopes", sid, "topics");
+      let names;
+      try {
+        names = await fsp.readdir(dir);
+      } catch (error) {
+        if (error?.code === "ENOENT" || error?.code === "ENOTDIR") continue;
+        throw error;
+      }
+      const rows = [];
+      for (const name of names) {
+        if (!name.endsWith(".md")) continue;
+        const key = name.slice(0, -3);
+        let raw;
+        try {
+          raw = await fsp.readFile(path.join(dir, name));
+        } catch (error) {
+          if (error?.code === "ENOENT") { skipped += 1; continue; }
+          throw error;
+        }
+        let parsed;
+        try {
+          parsed = parseTopicFile(raw);
+        } catch {
+          skipped += 1;
+          continue;
+        }
+        if (!parsed.hasFrontMatter) { skipped += 1; continue; }
+        const { meta, body, group, pinned, retention, archiveOrigin } = parsed;
+        if (meta.key !== key || meta.scopeId !== sid) { skipped += 1; continue; }
+        rows.push({
+          key,
+          title: meta.title,
+          summary: meta.summary,
+          body,
+          scopeId: sid,
+          updated: meta.updated,
+          group,
+          pinned,
+          retention,
+          archiveOrigin,
+          ...(isCanonicalIso(meta.archivedAt) ? { archivedAt: meta.archivedAt } : {}),
+        });
+      }
+      for (const row of rows) byKey.set(row.key, row); // active 覆盖 global（同 key）
+    }
+    return { topics: [...byKey.values()], skipped };
+  }
+
+  /** 组清单只读解析（绕过锁/realpath/原子写；缺失或坏 JSON 按空清单降级）。 */
+  async function readGroupsForReplay(scopeId) {
+    if (typeof settings.dataRoot !== "string" || settings.dataRoot.length === 0) return [];
+    const raw = await readFileOrNull(path.join(settings.dataRoot, "scopes", scopeId, "groups.json"));
+    if (raw === null) return [];
+    try {
+      return parseGroupsFile(raw, `groups.json(${scopeId})`).groups;
+    } catch {
+      return [];
+    }
+  }
+
+  /** 全量账本事件回放源（readTopicActivity 是裸 readFile，无锁）。 */
+  async function readEventsForReplay() {
+    if (settings.stateRoot === null) return { events: [], skipped: 0 };
+    const { events, skipped } = await readTopicActivity({ stateRoot: settings.stateRoot });
+    return { events, skipped };
   }
 
   /** 向导作用人群：当前 scope 可见 topic 的未归档行（归档=冷内容，不进向导）。 */
@@ -1634,6 +1792,173 @@ export function createManagement(deps) {
           ? `dismissedAt 清除失败（向导保持隐藏态，可重试）：${restartResult.error}`
           : (restartResult.healed === true ? `检测到 onboarding.json 损坏，已备份为 ${restartResult.healedDetail} 并重建标记位` : null),
       };
+    },
+
+    /**
+     * 0.5 批次 4 · B 线（wire 15）：热度参数只读视图。返回当前值 / 默认值 / 12 项
+     * 规格 / 三条交叉校验规则 / 恢复回差，以及最近 20 条 settings_change 审计
+     * （topic-activity 账本只读回放，新 → 旧）。纯读：不 requireStarted、不开 scope
+     * 资源、不写任何文件；shadow 也可读（面板只展示不执行）。
+     */
+    async getTemperatureSettings(trustedContext, payload) {
+      validateManagementPayload("getTemperatureSettings", payload ?? {});
+      requireConfigured();
+      const current = currentLiveTemperature();
+      const auditRead = await readTemperatureAudit();
+      const auditEntries = auditRead.entries.slice(-20).reverse().map((entry) => ({
+        at: entry.at,
+        // scopeId / operationId 可给（溯源用）；next 快照不给（面板用不到，
+        // 12 个数字 × 20 条会把响应撑胖——评审口径）。
+        scopeId: entry.scopeId,
+        operationId: entry.operationId ?? null,
+        changes: Array.isArray(entry.changes) ? entry.changes : [],
+      }));
+      const out = {
+        current,
+        defaults: DEFAULT_TEMPERATURE_PARAMS,
+        specs: PARAM_SPECS,
+        crossChecks: [
+          {
+            code: "SMAX_GT_S0",
+            left: "sMaxDays",
+            right: "s0Days",
+            rule: "sMaxDays > s0Days",
+          },
+          {
+            code: "RESTORE_HYSTERESIS",
+            left: "restoreThreshold",
+            right: "coolThreshold",
+            rule: `restoreThreshold >= coolThreshold + ${RESTORE_HYSTERESIS}`,
+          },
+          {
+            code: "GRACE_LE_COOLDOWN",
+            left: "minRestoreGraceDays",
+            right: "minCooldownDays",
+            rule: "minRestoreGraceDays <= minCooldownDays",
+          },
+        ],
+        hysteresis: RESTORE_HYSTERESIS,
+        audit: auditEntries,
+      };
+      if (auditRead.error !== null) out.auditError = auditRead.error;
+      return out;
+    },
+
+    /**
+     * 0.5 批次 4 · B 线（wire 16）：回放预览。服务端取 topics（含 archived）/ 组
+     * 清单 / 全量 topic-activity 事件 / now，以 baseParams = 当前 settings.temperature
+     * 与候选 params 各回放一遍（T 的计算全部委托 evaluateTopics）。严格只读：
+     * 只读文件、不 appendRecord、不建目录、不加存储锁（见 readTopicsForReplay
+     * 头注释）；非法参数按 params.mjs 的 INVALID_INPUT 原样上抛（message 带键名
+     * 与允许区间）。
+     */
+    async simulateTemperature(trustedContext, payload) {
+      validateManagementPayload("simulateTemperature", payload);
+      requireActiveDataAccess("simulateTemperature");
+      const scope = await scopeFromTrustedContext(trustedContext);
+      const params = normalizeTemperatureParams(payload.params);
+      validateTemperatureParams(params);
+      const baseParams = currentLiveTemperature();
+      validateTemperatureParams(baseParams);
+      const { topics, skipped: skippedTopics } = await readTopicsForReplay(scope.scopeId);
+      const groups = await readGroupsForReplay(scope.scopeId);
+      const { events } = await readEventsForReplay();
+      const replayTopics = topics.map((row) => ({
+        key: row.key,
+        scopeId: row.scopeId,
+        updated: row.updated,
+        archivedAt: row.archivedAt,
+        pinned: row.pinned,
+        retention: row.retention,
+        archiveOrigin: row.archiveOrigin,
+        group: row.group,
+        // 字符数按正文长度注入（L1 净变化的预估口径，见 replay.mjs 头注释）。
+        chars: typeof row.body === "string" ? row.body.length : 0,
+      }));
+      void skippedTopics; // 坏文件已按 listTopics 同精神跳过；不把内部计数塞进冻结 DTO
+      return simulateTemperaturePure({
+        topics: replayTopics,
+        groups,
+        events,
+        now: nowIso(),
+        params,
+        baseParams,
+      });
+    },
+
+    /**
+     * 0.5 批次 4 · B 线（wire 17）：热度参数变更审计。
+     *
+     * 顺序契约（任务书）：面板先写 settings → 本方法只落审计。服务端口径：
+     * - live = 服务端当前 settings.temperature（自己手里的真值）；与 params 逐键
+     *   不相等 = 宿主尚未把新参数交给插件 → INVALID_STATE（面板重试，账本零新增）；
+     * - 相等后 changes = diff(服务端上一次审计记录的参数快照, live)；新值只取
+     *   live，旧值只取服务端自己的审计账（DEFAULT_TEMPERATURE_PARAMS 兜底），
+     *   绝不信任客户端上报的旧值；
+     * - 同 operationId 重复调用返回 { recorded:false, replay:true }，不重复落账；
+     * - 无变化（live 与上次审计快照一致）不构造审计事件（params.mjs 拒绝空
+     *   changes），如实返回 recorded:false。
+     */
+    async recordTemperatureChange(trustedContext, payload) {
+      validateManagementPayload("recordTemperatureChange", payload);
+      requireActiveDataAccess("recordTemperatureChange");
+      assertHostWritable("recordTemperatureChange");
+      const scope = await scopeFromTrustedContext(trustedContext);
+      const params = normalizeTemperatureParams(payload.params);
+      validateTemperatureParams(params);
+      const live = currentLiveTemperature();
+      validateTemperatureParams(live);
+      const mismatchedKeys = Object.keys(PARAM_SPECS).filter((key) => !Object.is(live[key], params[key]));
+      if (mismatchedKeys.length > 0) {
+        fail("INVALID_STATE", `设置尚未生效：服务端当前参数与提交值不一致（${mismatchedKeys.join(", ")}）；请等宿主热提交后按同一 operationId 重试`, {
+          reason: "parameters-not-effective",
+          mismatchedKeys,
+          current: { ...live },
+          target: { ...params },
+        });
+      }
+      return serializeTemperatureAudit(async () => {
+        const audit = await readTemperatureAudit();
+        if (audit.error !== null) {
+          fail("INVALID_STATE", `审计账本不可读，拒绝落账：${audit.error}`, {});
+        }
+        const replayed = audit.entries.find((entry) => entry.operationId === payload.operationId);
+        if (replayed !== undefined) {
+          return { recorded: false, replay: true, changes: Array.isArray(replayed.changes) ? replayed.changes : [] };
+        }
+        const last = audit.entries.length > 0 ? audit.entries[audit.entries.length - 1] : null;
+        let previous = normalizeTemperatureParams(DEFAULT_TEMPERATURE_PARAMS);
+        if (last !== null && last.next !== null && last.next !== undefined) {
+          try {
+            const candidate = normalizeTemperatureParams(last.next);
+            validateTemperatureParams(candidate);
+            previous = candidate;
+          } catch {
+            previous = normalizeTemperatureParams(DEFAULT_TEMPERATURE_PARAMS);
+          }
+        }
+        const changes = diffParams(previous, live);
+        if (changes.length === 0) {
+          return { recorded: false, replay: false, changes: [] };
+        }
+        const event = buildSettingsChangeEvent({
+          at: nowIso(),
+          targetScopeId: scope.scopeId,
+          changes,
+        });
+        const appendResult = await appendTemperatureAudit({
+          at: event.at,
+          scopeId: scope.scopeId,
+          kind: "settings_change",
+          operationId: payload.operationId,
+          changes: event.changes,
+          next: { ...live },
+        });
+        if (!appendResult || appendResult.ok !== true) {
+          fail("INVALID_STATE", `审计账本写入失败：${appendResult?.error ?? appendResult?.code ?? "unknown"}`, {});
+        }
+        return { recorded: true, replay: false, changes: event.changes };
+      });
     },
   };
 
