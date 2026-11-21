@@ -352,16 +352,41 @@ test("clusterProjection level=1：同 count 的簇按 key 字典序（ASCII 序�
     mk("a2", { entities: ["alpha"] }),
     mk("b2", { entities: ["beta"] }),
     mk("g2", { entities: ["gamma"] }),
-    mk("z", { entities: ["Zeta"] }), // 大写 Z (0x5A) 排在小写之前
+    // 规格连带：5C 实体归一（q-a80aab1b62b3b68f）——cluster key 输出 canonical 形
+    // （大小写折叠后的实体），"Zeta" 归一为 "zeta"；排序仍按 UTF-16 code-unit
+    // （a<b<g<z，zeta 只 1 张垫底），乱序输入输出不变的原断言口径保持。
+    mk("z", { entities: ["Zeta"] }),
   ];
   const p = clusterProjection({ scopeId: SCOPE, records });
-  // count 降序：alpha/beta/gamma 各 2 在前，Zeta 只 1 张垫底；count=2 组内按 key 字典序。
-  assert.deepEqual(p.clusters.map((c) => c.key), ["alpha", "beta", "gamma", "Zeta"]);
+  // count 降序：alpha/beta/gamma 各 2 在前，zeta 只 1 张垫底；count=2 组内按 key 字典序。
+  assert.deepEqual(p.clusters.map((c) => c.key), ["alpha", "beta", "gamma", "zeta"]);
   assert.equal(p.total, 7);
   // 输入乱序输出不变（纯函数可复现）
   const shuffled = [records[4], records[0], records[6], records[2], records[1], records[5], records[3]];
   assert.deepEqual(clusterProjection({ scopeId: SCOPE, records: shuffled }).clusters,
     p.clusters);
+});
+
+// 规格连带：5C 实体归一（q-a80aab1b62b3b68f 边界 3 的正向用例）——同一实体的
+// 大小写/全半角变体必须落到同一簇、同一个 canonical cluster key 上。
+test("clusterProjection level=1：同一实体的大小写与全半角变体归到同一簇（归一生效）", () => {
+  const records = [
+    mk("u1", { entities: ["GPU"] }),
+    mk("u2", { entities: ["gpu"] }),
+    mk("u3", { entities: ["ＧＰＵ"] }), // 全角字母 → NFKC 折叠为半角 gpu
+    mk("u4", { entities: [" Gpu "]}),  // 前后空白 + 混合大小写
+  ];
+  const p = clusterProjection({ scopeId: SCOPE, records });
+  assert.equal(p.total, 4);
+  assert.deepEqual(p.clusters, [{
+    key: "gpu", label: "gpu", count: 4,
+    samples: ["title-u1", "title-u2", "title-u3"],
+  }]);
+  // 节点 entities 同步输出 canonical 形（客户端着色与分簇同源）
+  const proj = projectGraph({ scopeId: SCOPE, records });
+  for (const node of proj.nodes) {
+    assert.deepEqual(node.entities, ["gpu"]);
+  }
 });
 
 test("clusterProjection level=1：samples 最多 3 个标题，非字符串/空串标题不进 samples", () => {
@@ -388,7 +413,12 @@ test("clusterProjection level=1：空输入返回空簇集，total=0", () => {
   assert.equal(filtered.total, 0);
 });
 
-test("clusterProjection level=2：节点形状与 projectGraph 一致，边只保留两端都在簇内的，degree 为簇内度数", () => {
+// 规格连带：5C level=2 跨簇边保留（q-2cf6750e005b6b66）——旧用例名与断言钉死
+// 「边只保留两端都在簇内」的旧行为，任务书模块 6 要求跨簇边照常出线（服务端不
+// 丢弃，渲染归客户端）。字段形状与簇内边完全一致（source/target/rel/reciprocal），
+// rel 缺失统一 null；degree 按「视图里看得见的边都算度」口径重算（簇内 + 跨簇），
+// projectGraph 的度数语义不动。
+test("clusterProjection level=2：节点形状与 projectGraph 一致，跨簇边照常出线，degree 按视图边集重算", () => {
   const records = [
     mk("a", { entities: ["甲"], links: [{ target: "b" }, { target: "c" }] }),
     mk("b", { entities: ["甲"], links: [{ target: "a", rel: "related" }, { target: "c" }] }),
@@ -406,13 +436,33 @@ test("clusterProjection level=2：节点形状与 projectGraph 一致，边只�
     assert.deepEqual(Object.keys(node).sort(), Object.keys(twin).sort());
   }
   assert.deepEqual(p.nodes.map((n) => n.id), ["a", "b"]);
-  // 跨簇边（a-c、b-c）不保留；a-b 互逆折叠保留
-  assert.deepEqual(p.edges, [{ source: "a", target: "b", rel: "related", reciprocal: true }]);
-  // degree 重算为簇内度数（全图里 a 是 2，簇内只有 1）
-  assert.equal(p.nodes.find((n) => n.id === "a").degree, 1);
-  assert.equal(p.nodes.find((n) => n.id === "b").degree, 1);
+  // 跨簇边（a-c、b-c）照常出线（指向簇外不丢弃）；a-b 互逆折叠保留；
+  // 字段形状与簇内边一致，rel 缺失统一 null。
+  assert.deepEqual(p.edges, [
+    { source: "a", target: "b", rel: "related", reciprocal: true },
+    { source: "a", target: "c", rel: null, reciprocal: false },
+    { source: "b", target: "c", rel: null, reciprocal: true },
+  ]);
+  // degree 按本视图出线边集重算：a 触及 a-b 与 a-c 共 2 条，b 触及 a-b 与 b-c 共 2 条
+  // （视图里看得见的边都算度；全图度数语义不变，见下方「全图投影不受影响」）。
+  assert.equal(p.nodes.find((n) => n.id === "a").degree, 2);
+  assert.equal(p.nodes.find((n) => n.id === "b").degree, 2);
   // 全图投影不受影响（projectGraph 原样不动）：a 的全图边是 a-b 与 a-c 共 2 条
   assert.equal(full.nodes.find((n) => n.id === "a").degree, 2);
+});
+
+// 规格连带：5C level=2 跨簇边保留（q-2cf6750e005b6b66 边界 4 的正向用例）——
+// 两端都在本簇外的边与本簇无关，本簇视图不出线。
+test("clusterProjection level=2：两端都在簇外的边不出线", () => {
+  const records = [
+    mk("in1", { entities: ["甲"], links: [] }),
+    mk("out1", { entities: ["乙"], links: [{ target: "out2", rel: "related" }] }),
+    mk("out2", { entities: ["丙"], links: [{ target: "out1", rel: "related" }] }),
+  ];
+  const p = clusterProjection({ scopeId: SCOPE, records, cluster: "甲" });
+  assert.deepEqual(p.nodes.map((n) => n.id), ["in1"]);
+  assert.deepEqual(p.edges, []); // out1-out2 两端都不在「甲」簇：不出线
+  assert.equal(p.nodes[0].degree, 0);
 });
 
 test("clusterProjection level=2：未知 cluster 不抛错，空 nodes/edges + count 0", () => {

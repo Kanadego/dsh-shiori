@@ -237,7 +237,7 @@ dsh-shiori-admin destroy --data <path> [--yes]
 
 `待执行 / 已执行 / 已作废`（open / executed / superseded）。已执行的计划不能重复预览或执行；想再整理请重新 analyze。
 
-## 4. 模型侧十七个工具
+## 4. 模型侧十九个工具
 
 | 工具 | 作用 | 必填 | 注意 |
 | --- | --- | --- | --- |
@@ -252,12 +252,14 @@ dsh-shiori-admin destroy --data <path> [--yes]
 | `memory_list_topics` | 列专题（含 revision token） | — | 合并 / 编辑前拿权威 token |
 | `topic_create` | 新建专题 | topic、title | 已存在返回 alreadyExists |
 | `group_manage` | 管理专题分组：列出（计数只认主组，并返回悬空引用 `dangling`）/ 建组 / 改名 / 删除 / 迁移成员 / 修复悬空（repair） | action | 删除非空组需 `migrateTo`：成员先整体改挂、组条目后删（两次提交，见工具描述的并发边界）；`repair` 单次 CAS 提交清掉 `dangling` 里的悬空挂载，返回 cleaned/remaining；组清单为空且仍有挂载时以 INVALID_STATE 拒绝（先 `group_manage action=create` 初始化组清单） |
-| `spark_save` | 存 Spark 卡 | content、title、triggers | triggers 必填（空数组 = 不唤醒） |
+| `spark_save` | 存 Spark 卡 | content、title、triggers | triggers 必填（空数组 = 不唤醒）；保存时服务端可给本卡自动挂 ≤3 条 `auto:similar` 相似边（只挂本卡，老卡不动） |
 | `spark_read` | 读卡 | id | 可读归档卡 |
-| `spark_update` | 改卡（含 links） | id + 变更字段 | links 的 target 必须在库内 |
+| `spark_update` | 改卡（含 links） | id + 变更字段 | links 的 target 必须在库内；改卡同样会按改后内容刷新本卡的 `auto:similar` 自动边（手动边不动） |
 | `spark_forget` | 归档 / 被替代 | id、mode | 物理不删卡 |
 | `spark_feedback` | 标记「用了」 | id、used | used=true 会抬半衰期 |
 | `spark_graph` | 读图谱 | — | 只读 |
+| `spark_link` | 单条新增人工连线 | id、target | 幂等：同 (target, rel) 重复执行零变化；`rel` 缺省 `related`；`auto:` 前缀是系统自动连线保留命名空间，人工使用会被拒 |
+| `spark_unlink` | 单条摘除人工连线 | id、target | 与 spark_link 互为逆操作（`rel` 缺省 `related`）；摘除不存在的边幂等成功；`auto:` 边由系统在保存/更新时重算维护，人工摘除被拒 |
 
 所有写工具都收 `operationId`（幂等键）：同 id 重试返回首次结果，不会重复写。
 

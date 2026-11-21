@@ -269,7 +269,13 @@ export const Config = z.object({
       keyRef: nullableString().default(null).description("密钥引用名（不存明文密钥）；null=未配置"),
     }).default({ endpoint: null, keyRef: null }),
   }).default(clone(DEFAULT_SEMANTIC)).volatile().description("语义召回接口预留（F1 方案 C）：本期只定契约，不实现召回；整块 volatile 让面板「保存模型目录」可热写"),
-  l2: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }).description("L2 闪回自动投递开关"),
+  l2: z.object({
+    enabled: z.boolean().default(false),
+    // 0.5-5C：闪回图谱分簇规则版本（§11.3）。分簇/归一规则升级时递增；消费方
+    // （面板缓存/派生数据）据此判断是否需要全量重算，服务端分簇是每次请求
+    // 现算的纯投影，本字段不改变任何服务端行为。
+    clustersVersion: z.natural().default(1),
+  }).default({ enabled: false, clustersVersion: 1 }).description("L2 闪回自动投递开关（含闪回图谱分簇规则版本）"),
   organize: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }).description("整理（候选/计划/执行）开关"),
   forgetting: z.object({
     enabled: z.boolean().default(false).description("遗忘（分析/计划/执行）开关；显式 includeArchived 冷搜不受此开关限制"),
@@ -542,6 +548,25 @@ function normalizeSwitch(value, name) {
   return { enabled: requireBoolean(value.enabled, `${name}.enabled`) };
 }
 
+// 0.5-5C：l2 段在 organize 同款 enabled 之上多一个 clustersVersion（闪回图谱
+// 分簇规则版本，自然数 ≥1，缺省 1）。独立校验器，不复用 normalizeSwitch——
+// 那样 clustersVersion 会先被当作未知键拒绝。
+function normalizeL2(value) {
+  if (value === undefined) return { enabled: false, clustersVersion: 1 };
+  if (!isPlainRecord(value)) fail(`l2 must be a plain object`);
+  for (const key of Object.keys(value)) {
+    if (key !== "enabled" && key !== "clustersVersion") fail(`l2 has unknown property "${key}"`);
+  }
+  if (!Object.hasOwn(value, "enabled")) fail(`l2 is missing "enabled"`);
+  const enabled = requireBoolean(value.enabled, "l2.enabled");
+  if (!Object.hasOwn(value, "clustersVersion")) return { enabled, clustersVersion: 1 };
+  const version = value.clustersVersion;
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
+    fail(`l2.clustersVersion must be a natural number >= 1, got ${String(version)}`);
+  }
+  return { enabled, clustersVersion: version };
+}
+
 function normalizeForgetting(value) {
   if (value === undefined) {
     return { enabled: false, policy: normalizeForgetPolicy({}) };
@@ -710,7 +735,7 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
     : requireMappingList(unwrapVolatile(raw.workspacePersonas), "workspacePersonas", workspaceMapping);
   // budgets 在宿主侧是 volatile 引用对象（见 unwrapVolatile）；解包后再做权威校验。
   const budgets = normalizeBudgets(unwrapVolatile(raw.budgets));
-  const l2 = normalizeSwitch(raw.l2, "l2");
+  const l2 = normalizeL2(raw.l2);
   const organize = normalizeSwitch(raw.organize, "organize");
   const forgetting = normalizeForgetting(raw.forgetting);
   // semantic 整块打了 volatile：宿主交过来的是 cosmokit 引用对象，先解包再校验。

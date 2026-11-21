@@ -229,6 +229,10 @@ const getGraphDeliveries = {
       deliveryId: nonEmptyString,
       at: nonEmptyString,
       sessionId: nonEmptyString,
+      // 0.5-5C：投递触发消息的稳定 id（controller.recordPending 落账的
+      // sourceMessageId；§11.5 turnRef 投影）。旧账本记录没有该字段时输出 null，
+      // 因此声明为 nullable 且恒输出（required）。
+      sourceMessageId: { oneOf: [nonEmptyString, { type: "null" }] },
       cards: {
         type: "array",
         items: {
@@ -245,7 +249,7 @@ const getGraphDeliveries = {
         },
       },
     },
-    required: ["deliveryId", "at", "sessionId", "cards"],
+    required: ["deliveryId", "at", "sessionId", "sourceMessageId", "cards"],
   },
 };
 const getGraphDeliveryStats = {

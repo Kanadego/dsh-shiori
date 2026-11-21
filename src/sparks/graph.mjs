@@ -13,7 +13,12 @@
 //
 // 本模块自包含：不 import G/H 或 P1 的任何文件，唯一依赖是传入的 public record
 // 形状（id, scopeId, revision, title, summary, triggers, entities, links, content,
-// vitality, state —— 见 CONTRACTS.md §G）。
+// vitality, state —— 见 CONTRACTS.md §G）。0.5-5C 起唯一例外：从同目录
+// aliases.mjs import 纯函数 resolveAlias（实体归一；零 IO，不破坏自包含性）。
+
+// 0.5-5C：实体归一（大小写/全半角/别名 → canonical）。纯函数，零 IO；
+// 别名表由调用方从 dataRoot/aliases.json 读入后传入（缺省只用内置兜底表）。
+import { resolveAlias } from "./aliases.mjs";
 
 const VITALITY_UNKNOWN = "unknown";
 /** 这些字段非空表示该卡已被合并/替代，即使 state 仍是 active 也不可投影。 */
@@ -50,18 +55,20 @@ function nonEmptyString(value) {
 const MAX_NODE_ENTITIES = 4;
 
 /**
- * 规范化一条记录的 entities（供节点聚类着色）：仅保留字符串且 trim 后非空的
- * 元素（保留 trim 后的值），按首次出现顺序去重，上限 MAX_NODE_ENTITIES 条截断。
- * 记录缺失 entities、非数组、元素非法一律不抛错，退化为 []。
+ * 规范化一条记录的 entities（供节点聚类着色与分簇）：0.5-5C 起每个元素经
+ * resolveAlias 归一（大小写/全半角/别名 → canonical；大小写不同的同一实体
+ * 归到同一 canonical，与分簇 key 同源），按首次出现顺序去重，上限
+ * MAX_NODE_ENTITIES 条截断。记录缺失 entities、非数组、元素非法（含归一后
+ * 为空）一律不抛错，退化为 []。aliases 为手写别名表（Map，可 null = 只用内置表）。
  */
-function normalizeEntities(record) {
+function normalizeEntities(record, aliases = null) {
   const raw = record.entities;
   if (!Array.isArray(raw)) return [];
   const seen = new Set();
   const out = [];
   for (const item of raw) {
     if (typeof item !== "string") continue;
-    const value = item.trim();
+    const value = resolveAlias(item, aliases);
     if (value.length === 0 || seen.has(value)) continue;
     seen.add(value);
     out.push(value);
@@ -134,6 +141,8 @@ function normalizeRel(rel) {
  * @param {object} input
  * @param {string} input.scopeId 可信 scope（工厂注入，不由数据决定）
  * @param {Array} input.records 待投影的 public record 数组（可含异 scope/archived 等脏数据）
+ * @param {Map<string, string>|null} [input.aliases] 手写别名表（aliases.mjs
+ *   loadAliasTable 产物；null = 只用内置兜底表）。影响节点 entities 的 canonical 形。
  * @returns {object} { scopeId, nodes, edges, stats }
  *   nodes: [{ id, title, summary, vitality, revision, degree, entities }]，按 id 稳定排序；
  *     entities 为规范化后的字符串数组（trim 非空、去重保序、上限 4 条，脏数据退化为 []），
@@ -141,7 +150,7 @@ function normalizeRel(rel) {
  *   edges: [{ source, target, rel, reciprocal }]，按 (source, target, rel) 稳定排序；
  *   stats: 节点/边规模、vitality 分布与各类丢弃计数。
  */
-export function projectGraph({ scopeId, records } = {}) {
+export function projectGraph({ scopeId, records, aliases = null } = {}) {
   if (!nonEmptyString(scopeId)) {
     return fail("INVALID_INPUT", "projectGraph requires a non-empty string scopeId from a trusted source", {
       scopeId: typeof scopeId,
@@ -188,7 +197,7 @@ export function projectGraph({ scopeId, records } = {}) {
       vitality: labelVitality(record),
       revision: record.revision ?? null,
       degree: 0,
-      entities: normalizeEntities(record),
+      entities: normalizeEntities(record, aliases),
     }))
     .sort((a, b) => compareStrings(a.id, b.id));
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
@@ -292,11 +301,24 @@ const UNCLUSTERED_LABEL = "未分类";
 /** 两级投影输出的 schema 版本（闭包契约：未知新增字段必须升版）。 */
 const CLUSTER_PROJECTION_SCHEMA_VERSION = 1;
 
-/** 主实体簇 key：与 projectGraph 节点的 entities[0] 同源（trim 非空字符串）。
- *  entities 缺失 / 非数组 / 元素全是脏值时，projectGraph 的投影已把它们归一成
- *  []，这里静默落到 UNCLUSTERED_KEY——不抛错、不猜测、不另立桶。 */
+/** 主实体簇 key：与 projectGraph 节点的 entities[0] 同源（0.5-5C 起为归一后的
+ *  canonical 形）。entities 缺失 / 非数组 / 元素全是脏值时，projectGraph 的投影
+ *  已把它们归一成 []，这里静默落到 UNCLUSTERED_KEY——不抛错、不猜测、不另立桶。 */
 function clusterKeyOfNode(node) {
   return node.entities.length > 0 ? node.entities[0] : UNCLUSTERED_KEY;
+}
+
+/**
+ * 0.5-5C：带人工覆盖的簇 key。clusterOverrides（Map cardId → 簇名，aliases.mjs
+ * loadClusterOverrides 产物）只覆盖被改过的卡；覆盖值非空字符串才生效，
+ * 派生结果（归一 entities[0]）照旧兜底。
+ */
+function clusterKeyOfNodeWithOverrides(node, clusterOverrides) {
+  if (clusterOverrides instanceof Map && clusterOverrides.size > 0) {
+    const overridden = clusterOverrides.get(node.id);
+    if (typeof overridden === "string" && overridden.length > 0) return overridden;
+  }
+  return clusterKeyOfNode(node);
 }
 
 function clusterLabelOf(key) {
@@ -310,16 +332,20 @@ function clusterLabelOf(key) {
  * @param {string} input.scopeId 可信 scope（工厂注入，不由数据决定）
  * @param {Array} input.records 待投影的 public record 数组（同 projectGraph 口径）
  * @param {string} [input.cluster] 缺省 = level 1（分簇概览）；给了字符串 = level 2（簇内视图）
+ * @param {Map<string, string>|null} [input.aliases] 手写别名表（同 projectGraph）。
+ * @param {Map<string, string>|null} [input.clusterOverrides] 人工分簇覆盖
+ *   （aliases.mjs loadClusterOverrides 产物，cardId → 簇名；null = 无覆盖）。
  * @returns {object}
  *   level 1：{ schemaVersion, level: 1, scopeId, clusters, total }。clusters 按数量降序、
  *   同数量按 key 字典序；每簇 { key, label, count, samples }，samples 最多 3 个标题
  *   （按 id 序取，只有非空字符串标题计入）。
  *   level 2：{ schemaVersion, level: 2, scopeId, cluster: { key, label, count }, nodes, edges }。
- *   nodes 形状与 projectGraph 的节点一致（复用其投影与过滤逻辑，degree 重算为簇内度数）；
- *   edges 只保留两端都在该簇内的（沿用 projectGraph 的排序与折叠结果）；
+ *   nodes 形状与 projectGraph 的节点一致（复用其投影与过滤逻辑，degree 按本视图
+ *   出线边集重算）；edges 保留至少一端在簇内的边——0.5-5C 起跨簇边（指向簇外）
+ *   照常出线，服务端不丢弃（渲染归客户端）；两端都在簇外的边仍不出线；
  *   未知 cluster 不抛错：返回空 nodes/edges + count 0。
  */
-export function clusterProjection({ scopeId, records, cluster } = {}) {
+export function clusterProjection({ scopeId, records, cluster, aliases = null, clusterOverrides = null } = {}) {
   if (!nonEmptyString(scopeId)) {
     return fail("INVALID_INPUT", "clusterProjection requires a non-empty string scopeId from a trusted source", {
       scopeId: typeof scopeId,
@@ -338,12 +364,14 @@ export function clusterProjection({ scopeId, records, cluster } = {}) {
   }
 
   // 单一事实来源：过滤 / 去重 / 边折叠全部复用 projectGraph，不复制一份字段。
-  const projection = projectGraph({ scopeId, records });
+  const projection = projectGraph({ scopeId, records, aliases });
+  // 每个节点的最终簇 key：人工覆盖优先，派生（归一 entities[0]）兜底。
+  const keyOf = (node) => clusterKeyOfNodeWithOverrides(node, clusterOverrides);
 
   if (cluster === undefined || cluster === null) {
     const byKey = new Map();
     for (const node of projection.nodes) {
-      const key = clusterKeyOfNode(node);
+      const key = keyOf(node);
       let bucket = byKey.get(key);
       if (bucket === undefined) {
         bucket = { key, label: clusterLabelOf(key), count: 0, samples: [] };
@@ -368,7 +396,7 @@ export function clusterProjection({ scopeId, records, cluster } = {}) {
   }
 
   // level 2：簇内视图。未知 cluster（数据里不存在该 key）不抛错，空返回。
-  const members = projection.nodes.filter((node) => clusterKeyOfNode(node) === cluster);
+  const members = projection.nodes.filter((node) => keyOf(node) === cluster);
   const clusterOut = { key: cluster, label: clusterLabelOf(cluster), count: members.length };
   if (members.length === 0) {
     return {
@@ -382,12 +410,18 @@ export function clusterProjection({ scopeId, records, cluster } = {}) {
   }
   const nodes = members.map((node) => ({ ...node, degree: 0 }));
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  // projectGraph 的 edges 已按 (source, target, rel) 排序；过滤保序，无需再排。
+  // 0.5-5C（任务书模块 6）：level 2 不再丢弃指向簇外的跨簇边——只要至少一端
+  // 在簇内就出线（服务端只保证输出；跨簇端点的渲染归客户端 5D）。两端都在簇
+  // 外的边与本簇无关，仍不出线。projectGraph 的 edges 已按 (source, target, rel)
+  // 排序；过滤保序，无需再排。degree 按本视图出线的边集重算（簇内 + 跨簇），
+  // 与「degree = 视图内触及该节点的边数」口径一致。
   const edges = projection.edges
-    .filter((edge) => nodeById.has(edge.source) && nodeById.has(edge.target));
+    .filter((edge) => nodeById.has(edge.source) || nodeById.has(edge.target));
   for (const edge of edges) {
-    nodeById.get(edge.source).degree += 1;
-    nodeById.get(edge.target).degree += 1;
+    const sourceNode = nodeById.get(edge.source);
+    const targetNode = nodeById.get(edge.target);
+    if (sourceNode !== undefined) sourceNode.degree += 1;
+    if (targetNode !== undefined) targetNode.degree += 1;
   }
   return {
     schemaVersion: CLUSTER_PROJECTION_SCHEMA_VERSION,

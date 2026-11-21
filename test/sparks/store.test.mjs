@@ -1046,3 +1046,208 @@ describe('organize plan 白名单（0.2.3 裁撤 thin-core 后的清理回归）
     assert.match(err.message, /link \/ merge-topic/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [0.5-5C] 自动连线（opts.autoLinks）/ spark_link / spark_unlink / forget 清理
+// ---------------------------------------------------------------------------
+
+describe('0.5-5C 自动连线（save/update 的 opts.autoLinks）', () => {
+  it('save 带合法候选：auto:similar 边与卡片同一次 mutate 落库，只挂当前卡自身，老卡 links 不变', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 'old1', title: '老卡一' });
+    const newCard = await store.save(cardInput({ title: '新卡' }), {
+      autoLinks: [
+        { target: 'old1', rel: 'auto:similar', score: 0.86 },
+        { target: 'spk-ghost', rel: 'auto:similar', score: 0.9 }, // 不存在 → 静默丢弃
+      ],
+    });
+    const autoOf = (card) => card.links.filter((l) => l.rel === 'auto:similar');
+    assert.deepEqual(autoOf(newCard), [{ target: 'old1', rel: 'auto:similar', score: 0.86 }]);
+    assert.equal(newCard.revision, 1, 'auto 边与 save 同一次 mutate：revision 即最终值');
+    const old1After = await store.read('old1');
+    assert.deepEqual(old1After.links, [], '绝不反向修改老卡（变异自测锚点）');
+  });
+
+  it('update 重算替换旧 auto 边、手动边不动；跳过（不传 autoLinks）保留旧 auto 边', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 'old1' });
+    await saveCard(store, { id: 'old2' });
+    const card = await store.save(cardInput({ title: '混合卡', links: [{ target: 'old1', rel: 'related' }] }), {
+      autoLinks: [{ target: 'old2', rel: 'auto:similar', score: 0.7 }],
+    });
+    assert.deepEqual(card.links, [
+      { target: 'old1', rel: 'related' },
+      { target: 'old2', rel: 'auto:similar', score: 0.7 },
+    ]);
+    // 重算：新候选替换旧 auto 边；手动边 related 原样保留
+    const recomputed = await store.update(card.id, { content: '新正文' }, {
+      autoLinks: [{ target: 'old1', rel: 'auto:similar', score: 0.83 }],
+    });
+    assert.deepEqual(recomputed.links, [
+      { target: 'old1', rel: 'related' },
+      { target: 'old1', rel: 'auto:similar', score: 0.83 },
+    ]);
+    // 跳过（provider 不可用 → 不传 autoLinks）：旧 auto 边保留，不被清空
+    const skipped = await store.update(card.id, { content: '再改' }, {});
+    assert.deepEqual(skipped.links.filter((l) => l.rel === 'auto:similar'), [
+      { target: 'old1', rel: 'auto:similar', score: 0.83 },
+    ]);
+  });
+
+  it('每卡自动边上限 3：候选超 3 在入口拒绝（INVALID_INPUT），失效候选在锁内静默丢弃', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 't1' });
+    await saveCard(store, { id: 't2' });
+    await saveCard(store, { id: 't3' });
+    await saveCard(store, { id: 't4' });
+    await assertRejects(
+      store.save(cardInput({ title: '超限' }), {
+        autoLinks: ['t1', 't2', 't3', 't4'].map((id) => ({ target: id, rel: 'auto:similar', score: 0.9 })),
+      }),
+      'INVALID_INPUT',
+      '最多 3',
+    );
+    const card = await store.save(cardInput({ title: '丢失效' }), {
+      autoLinks: [
+        { target: 't1', rel: 'auto:similar', score: 0.9 },
+        { target: 'spk-missing', rel: 'auto:similar', score: 0.89 },
+        { target: 't1', rel: 'auto:similar', score: 0.88 }, // 同 target 去重
+      ],
+    });
+    assert.deepEqual(card.links.filter((l) => l.rel === 'auto:similar'), [
+      { target: 't1', rel: 'auto:similar', score: 0.9 },
+    ]);
+  });
+
+  it('人工写面拒绝 auto: 前缀（保留命名空间）；autoLinks 通道的 score 必须 [0,1]；自环候选静默丢弃', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 'base' });
+    await assertRejects(
+      store.save(cardInput({ title: 'x', links: [{ target: 'base', rel: 'auto:similar' }] })),
+      'INVALID_INPUT',
+      '保留前缀',
+    );
+    await assertRejects(
+      store.update('base', { content: 'y', links: [{ target: 'base', rel: 'auto:anything' }] }),
+      'INVALID_INPUT',
+    );
+    await assertRejects(
+      store.save(cardInput({ title: 'x' }), { autoLinks: [{ target: 'base', rel: 'auto:similar', score: 1.5 }] }),
+      'INVALID_INPUT',
+    );
+    // 自环防御：auto 候选 target === 自身 → 锁内静默丢弃（save 时新卡 id 未定，用 update 验证）
+    const updated = await store.update('base', { content: 'z' }, {
+      autoLinks: [{ target: 'base', rel: 'auto:similar', score: 0.99 }],
+    });
+    assert.deepEqual(updated.links.filter((l) => l.rel === 'auto:similar'), []);
+  });
+});
+
+describe('0.5-5C spark_link / spark_unlink（人工边单条增删，幂等）', () => {
+  it('link：单条新增、缺省 related、revision +1；重复连接幂等零变化', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 'la' });
+    await saveCard(store, { id: 'lb' });
+    const first = await store.link('la', { target: 'lb', operationId: 'lnk-1' });
+    assert.equal(first.changed, true);
+    assert.equal(first.card.revision, 2);
+    assert.deepEqual(first.card.links, [{ target: 'lb', rel: 'related' }]);
+    const replay = await store.link('la', { target: 'lb', operationId: 'lnk-2' });
+    assert.equal(replay.changed, false);
+    assert.equal(replay.card.revision, 2, '幂等空转不动 revision');
+    // 显式 rel 是另一条边
+    const custom = await store.link('la', { target: 'lb', rel: 'explains', operationId: 'lnk-3' });
+    assert.equal(custom.changed, true);
+    assert.deepEqual((await store.read('la')).links, [
+      { target: 'lb', rel: 'related' },
+      { target: 'lb', rel: 'explains' },
+    ]);
+  });
+
+  it('unlink：单条摘除、缺省 related、幂等零变化；auto: 前缀拒绝（自动边由重算维护）', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 'ua' });
+    await saveCard(store, { id: 'ub' });
+    await store.link('ua', { target: 'ub', operationId: 'uln-0' });
+    const removed = await store.unlink('ua', { target: 'ub', operationId: 'uln-1' });
+    assert.equal(removed.changed, true);
+    assert.deepEqual((await store.read('ua')).links, []);
+    const missing = await store.unlink('ua', { target: 'ub', operationId: 'uln-2' });
+    assert.equal(missing.changed, false);
+    assert.equal(missing.card.revision, removed.card.revision, '幂等空转不动 revision');
+    // 重新连一条 auto: 边再试 unlink：auto 前缀被拒（分开管理）
+    await store.update('ua', { content: '带自动边' }, { autoLinks: [{ target: 'ub', rel: 'auto:similar', score: 0.8 }] });
+    await assertRejects(store.unlink('ua', { target: 'ub', rel: 'auto:similar' }), 'INVALID_INPUT', 'auto');
+    // CAS：expectedRevision 不符 → REVISION_CONFLICT
+    const card = await store.read('ua');
+    await assertRejects(store.unlink('ua', { target: 'ub', expectedRevision: card.revision + 5 }), 'REVISION_CONFLICT');
+  });
+
+  it('link/unlink 反例：目标不存在 / 自环 / 卡不存在 / 目标已归档 / 本卡已归档', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 'ra' });
+    await saveCard(store, { id: 'rb' });
+    await assertRejects(store.link('ra', { target: 'ghost' }), 'INVALID_INPUT');
+    await assertRejects(store.link('ra', { target: 'ra' }), 'INVALID_INPUT');
+    await assertRejects(store.link('ghost', { target: 'rb' }), 'NOT_FOUND');
+    await store.forget('rb', { mode: 'archive' });
+    await assertRejects(store.link('ra', { target: 'rb' }), 'INVALID_INPUT', 'active');
+    await store.forget('ra', { mode: 'archive' });
+    await assertRejects(store.link('ra', { target: 'rb' }), 'INVALID_STATE');
+    await assertRejects(store.unlink('ra', { target: 'rb' }), 'INVALID_STATE');
+  });
+});
+
+describe('0.5-5C forget 清理指向它的 auto: 前缀入边（q-f726d624ac36858f 选 A）', () => {
+  it('① auto:similar 边指向被归档卡：其他卡 links 里该条消失、filteredEdges 不出现', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 'retired' });
+    await saveCard(store, { id: 'holder', title: '持边卡' });
+    await store.update('holder', { content: '挂自动边' }, {
+      autoLinks: [{ target: 'retired', rel: 'auto:similar', score: 0.85 }],
+    });
+    assert.equal((await store.read('holder')).links.some((l) => l.target === 'retired'), true);
+    await store.forget('retired', { mode: 'archive' });
+    const after = await store.read('holder');
+    assert.equal(after.links.some((l) => l.target === 'retired'), false, 'auto 入边必须被清理（变异自测锚点）');
+    const g = await store.graph();
+    assert.equal(g.filteredEdges.length, 0, 'auto 边清理后不在 filteredEdges 复现');
+  });
+
+  it('② 人工边指向被归档卡：原样保留并在 filteredEdges 以 target-retired 出现（守住 G3）', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 'retired2' });
+    await saveCard(store, { id: 'holder2', title: '持手动边卡', links: [{ target: 'retired2', rel: '相关' }] });
+    await store.forget('retired2', { mode: 'archive' });
+    const after = await store.read('holder2');
+    assert.deepEqual(after.links, [{ target: 'retired2', rel: '相关' }], '人工边一律不删不改');
+    const g = await store.graph();
+    assert.deepEqual(g.filteredEdges, [
+      { source: 'holder2', target: 'retired2', rel: '相关', reason: 'target-retired' },
+    ]);
+  });
+
+  it('supersede 同样清理 auto 入边；被退休卡自身 outgoing links 不处理', async (t) => {
+    const root = await makeTmpRoot(t);
+    const store = await open(root, 'amber');
+    await saveCard(store, { id: 'old' });
+    await saveCard(store, { id: 'newer', title: '承接卡' });
+    await saveCard(store, { id: 'third', title: '旁观卡' });
+    await store.update('third', { content: '挂边' }, { autoLinks: [{ target: 'old', rel: 'auto:similar', score: 0.6 }] });
+    // old 自身有一条指向 newer 的 outgoing 边（人工）
+    await store.update('old', { links: [{ target: 'newer', rel: 'related' }] });
+    await store.forget('old', { mode: 'supersede', replacementId: 'newer' });
+    assert.equal((await store.read('third')).links.some((l) => l.target === 'old'), false, 'supersede 也清理 auto 入边');
+    const oldAfter = await store.read('old');
+    assert.deepEqual(oldAfter.links, [{ target: 'newer', rel: 'related' }], '被退休卡自身 outgoing links 不处理');
+  });
+});

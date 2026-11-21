@@ -23,7 +23,7 @@
 
 ---
 
-## 2. How to Use the 17 Agent Tools
+## 2. How to Use the 19 Agent Tools
 
 ### 2.1 L0 Persona Card (2 tools)
 - `soul_read()` → returns `{ exists, persona, content, revision, stale }`.
@@ -40,13 +40,15 @@
 - `memory_search({ query, limit?, includeArchived? })` → lexical keyword search across visible topics (archived topics return summary-only entries with `state: "archived"`).
 - `group_manage({ action, key?, title?, summary?, order?, migrateTo?, operationId? })` → manage topic groups in the current scope: `action: "list"` (per-group topic counts, primary-group `group[0]` only, plus a `dangling` list of `topic.group` entries pointing at groups no longer in the list), `"create"` / `"update"` metadata, `"delete"`, and `"repair"` (removes exactly those dangling references in one CAS'd `mutate` commit keyed by `operationId`, returning `cleaned`/`remaining`; refused with `INVALID_STATE` when the group list is empty or missing while topics carry mounts, so a repair can never wipe every mount — initialize it with `group_manage` `action: "create"` first). Deleting a non-empty group requires `migrateTo`: member topics are re-grouped in one commit, then the group entry is removed as a second step (a topic attached between the two commits may be left dangling — concurrency edge; the dangling list surfaces it and `repair` cleans it).
 
-### 2.3 L2 Spark Atomic Cards (6 tools)
-- `spark_save({ title, content, triggers, vitality, summary?, entities?, links?, operationId? })` → save an atomic memory card (`50–150` chars recommended). Give `3–5` distinct natural wake phrases in `triggers`; `vitality` is `"evergreen"` or `"ephemeral"`.
+### 2.3 L2 Spark Atomic Cards (8 tools)
+- `spark_save({ title, content, triggers, vitality, summary?, entities?, links?, operationId? })` → save an atomic memory card (`50–150` chars recommended). Give `3–5` distinct natural wake phrases in `triggers`; `vitality` is `"evergreen"` or `"ephemeral"`. On save, the server may attach up to 3 `auto:similar` links (rel `auto:similar` with an independent `score` field) to THIS card only — similar older cards are never rewritten.
 - `spark_read({ id })` → read full text and metadata of one spark card by ID.
-- `spark_update({ id, patch, expectedRevision?, operationId? })` → CAS patch of `title` / `summary` / `content` / `triggers` / `entities` / `links` / `vitality`.
+- `spark_update({ id, patch, expectedRevision?, operationId? })` → CAS patch of `title` / `summary` / `content` / `triggers` / `entities` / `links` / `vitality`. Like `spark_save`, this recomputes this card's own `auto:similar` links from the patched content (manual links are never touched).
 - `spark_forget({ id, mode: "archive" | "supersede", replacementId?, expectedRevision?, operationId? })` → retire a spark card from active trigger matching.
 - `spark_feedback({ id, used, sourceEventId?, operationId? })` → record explicit usefulness feedback for a delivered spark.
 - `spark_graph()` → returns active spark graph node/edge scale summary and panel handle.
+- `spark_link({ id, target, rel?, expectedRevision?, operationId? })` → add ONE manual link to another active card in the same scope (single-edge, idempotent: re-adding the same `(target, rel)` succeeds with no change). `rel` defaults to `"related"`; the `"auto:"` prefix is reserved for system-managed similarity edges and is rejected here.
+- `spark_unlink({ id, target, rel?, expectedRevision?, operationId? })` → remove ONE manual link (single-edge, idempotent: removing a missing edge succeeds with no change). `rel` defaults to `"related"`, matching `spark_link`'s default, so the two tools are exact inverses; `"auto:"` edges are system-managed (refreshed on the next save/update) and rejected here.
 
 ---
 
@@ -74,7 +76,7 @@ npm run verify:package   # Verify package exports, files whitelist, and tarball 
 - `src/sparks/` — L2 store (`store.mjs`), literal & entity spread matching (`match.mjs`), semantic recall (`semantic-recall.mjs`), turn attachment delivery (`delivery.mjs`), graph projection (`graph.mjs`).
 - `src/organize/` & `src/forgetting/` — L1 water-level analysis, organize proposal queue/executor, time-decay scoring, and cold archive search.
 - `src/semantic/` — Optional local embedding engine (`@huggingface/transformers`, default `Xenova/bge-small-zh-v1.5`, `provider: "none" | "local"`).
-- `src/plugin/` — Schemastery config & root verification (`config.mjs`), plugin lifecycle controller (`controller.mjs`), 17 tool schemas & TypeRT descriptors (`tool-schemas.mjs`, `typert-descriptors.mjs`), Web UI RPC (`client-rpc.mjs`).
+- `src/plugin/` — Schemastery config & root verification (`config.mjs`), plugin lifecycle controller (`controller.mjs`), 19 tool schemas & TypeRT descriptors (`tool-schemas.mjs`, `typert-descriptors.mjs`), Web UI RPC (`client-rpc.mjs`).
 - `client/index.js` — Browser Web UI client bundle (water-level bar, spark knowledge graph, organize queue review, topic browser).
 
 ### Hard Invariants (Do Not Break)

@@ -1,8 +1,9 @@
-// Shiori P5-PLUGIN · 17 工具输出 schema 唯一权威（slot P）。
+// Shiori P5-PLUGIN · 19 工具输出 schema 唯一权威（slot P）。
 //
 // 契约（CONTRACTS §4）：所有宿主工具提供 output:{schema,render}；输出 schema
 // 覆盖所有读分支 / nullable / changes / 写回执；严禁空对象闭合 schema；实际
-// 9 兼容工具 + topic_create + group_manage（S3）+ 6 Spark 工具共 17 个。
+// 9 兼容工具 + topic_create + group_manage（S3）+ 8 Spark 工具共 19 个
+// （0.5-5C：Spark 新增 spark_link / spark_unlink，工具面 17→19）。
 //
 // schema 形状按真实 DSH dsh-tools 0.2.1-rc.2 的 author-facing value schema DSL
 // 编写（lib/index.js compileValueSchema，本文件形状已经真实 defineTool 编译验证）：
@@ -139,7 +140,7 @@ const sparkReceiptProperties = {
   vitality: { oneOf: [{ type: "string" }, { type: "null" }], required: true },
 };
 
-/** 17 个工具的输出 schema（name → schema；S3 起含 group_manage）。 */
+/** 19 个工具的输出 schema（name → schema；0.5-5C 起含 spark_link/spark_unlink）。 */
 export const TOOL_OUTPUT_SCHEMAS = Object.freeze({
   // ── L0 persona ──────────────────────────────────────────────
   soul_read: {
@@ -292,6 +293,28 @@ export const TOOL_OUTPUT_SCHEMAS = Object.freeze({
       sourceEventId: { oneOf: [{ type: "string" }, { type: "null" }], required: true },
     },
   },
+  // 0.5-5C：人工边单条增删（幂等）。changed=false 表示幂等空转（已有同边 /
+  // 无此边），此时 revision 保持不变；rel 回显实际生效的关系名（缺省 related）。
+  spark_link: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      ...sparkReceiptProperties,
+      target: { type: "string", required: true },
+      rel: { type: "string", required: true },
+      changed: { type: "boolean", required: true },
+    },
+  },
+  spark_unlink: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      ...sparkReceiptProperties,
+      target: { type: "string", required: true },
+      rel: { type: "string", required: true },
+      changed: { type: "boolean", required: true },
+    },
+  },
   spark_graph: {
     type: "object",
     additionalProperties: false,
@@ -326,13 +349,14 @@ export const TOOL_OUTPUT_SCHEMAS = Object.freeze({
   },
 });
 
-/** 17 个工具名（契约清单；S3 起含 group_manage）。 */
+/** 19 个工具名（契约清单；0.5-5C 起含 spark_link/spark_unlink）。 */
 export const TOOL_NAMES = Object.freeze([
   "soul_read", "soul_update",
   "memory_read", "memory_search", "memory_append", "memory_rewrite",
   "core_write", "topic_append", "topic_create", "memory_list_topics",
   "group_manage",
   "spark_save", "spark_read", "spark_update", "spark_forget", "spark_feedback", "spark_graph",
+  "spark_link", "spark_unlink",
 ]);
 
 /**

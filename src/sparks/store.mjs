@@ -117,6 +117,13 @@ const LIMITS = Object.freeze({
   linksMax: 32,
 });
 
+// [0.5-5C] 自动连线保留前缀与每卡上限。rel 以 "auto:" 开头的边是系统维护的
+// 派生数据（spark_save/spark_update 经 opts.autoLinks 写入，只挂当前卡自身），
+// 人工写面（save input / update patch / link）一律拒绝该前缀，与人工边分开管理。
+// 本文件不 import auto-link.mjs（它拖着 transformers.js 依赖图），只约定前缀。
+const AUTO_LINK_PREFIX = 'auto:';
+const AUTO_LINKS_MAX = 3;
+
 // 与 P1 paths.mjs 的文件名规则同源：禁止 Windows 保留设备名做首段
 const WINDOWS_RESERVED = new Set([
   'CON', 'PRN', 'AUX', 'NUL',
@@ -243,8 +250,11 @@ function checkLinkTarget(target, label, nth) {
   }
 }
 
-/** 单条连线的 rel：规则同通用 checkString(min=1, max=relChars) + 非纯空白，四种情形给人话。 */
-function checkLinkRel(rel, label, nth) {
+/** 单条连线的 rel：规则同通用 checkString(min=1, max=relChars) + 非纯空白，四种情形给人话。
+ *  [0.5-5C] "auto:" 前缀是系统自动连线的保留命名空间，人工写面（save/patch/link/
+ *  organize plan）一律拒绝——自动边只经 opts.autoLinks 写入，与人工边分开管理。
+ *  allowAutoPrefix 仅 validateAutoLinks（opts.autoLinks 通道）为 true。 */
+function checkLinkRel(rel, label, nth, { allowAutoPrefix = false } = {}) {
   const at = `${label}第 ${nth} 条连线`;
   if (rel === undefined || rel === null) {
     throw invalidInput(`${at}的关系名是空的或没填：${linkRelHint()}`, { index: nth - 1 });
@@ -262,6 +272,12 @@ function checkLinkRel(rel, label, nth) {
     throw invalidInput(
       `${at}的关系名太长（实际 ${rel.length} 个字，最多 ${LIMITS.relChars}）`,
       { index: nth - 1, length: rel.length },
+    );
+  }
+  if (!allowAutoPrefix && rel.startsWith(AUTO_LINK_PREFIX)) {
+    throw invalidInput(
+      `${at}的关系名以 "${AUTO_LINK_PREFIX}" 开头：这是系统自动连线的保留前缀，人工连线请改用其他名字（如 related）`,
+      { index: nth - 1, rel },
     );
   }
   assertEncodableUtf8(rel, `${at}的关系名`);
@@ -293,6 +309,111 @@ function checkLinks(value, field, { where }) {
     if (!seen.has(key)) { seen.add(key); out.push({ target, rel }); }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// [0.5-5C] 自动连线（opts.autoLinks）：形状校验与锁内合并
+// ---------------------------------------------------------------------------
+
+/**
+ * [0.5-5C] opts.autoLinks 形状校验（入口、锁外 fail-fast）：数组 ≤3 条，每项
+ * 恰好 target/rel（可选 score）——rel 必须以 auto: 开头（与 checkLinkRel 的
+ * 人工面拒绝规则互补：只有这条通道允许 auto 前缀）；score 可选，须为 [0,1]
+ * 有限数值（相似度分存独立字段，不塞 rel）。target 存在性/active 与去重上限
+ * 在锁内 mergeAutoLinks 裁决（apply 阶段失效候选静默丢弃，绝不失败保存）。
+ */
+function validateAutoLinks(raw, where) {
+  if (!Array.isArray(raw)) {
+    throw invalidInput(`${where} 必须是 {target, rel, score?} 数组`);
+  }
+  if (raw.length > AUTO_LINKS_MAX) {
+    throw invalidInput(`${where} 最多 ${AUTO_LINKS_MAX} 条（实际 ${raw.length}）`);
+  }
+  const seen = new Set();
+  const out = [];
+  for (const [index, entry] of raw.entries()) {
+    if (!isPlainObject(entry)) {
+      throw invalidInput(`${where} 的每一项必须是对象`);
+    }
+    for (const key of Object.keys(entry)) {
+      if (key !== 'target' && key !== 'rel' && key !== 'score') {
+        throw invalidInput(`${where} 项只允许 target/rel/score 字段，未知键 "${key}"`);
+      }
+    }
+    const target = checkLinkTarget(entry.target, '自动连线：', index + 1);
+    const rel = checkLinkRel(entry.rel, '自动连线：', index + 1, { allowAutoPrefix: true });
+    if (!rel.startsWith(AUTO_LINK_PREFIX)) {
+      throw invalidInput(`自动连线第 ${index + 1} 条的 rel 必须以 "${AUTO_LINK_PREFIX}" 开头（本通道只写系统维护边）`, { rel });
+    }
+    let score = null;
+    if (Object.hasOwn(entry, 'score')) {
+      if (typeof entry.score !== 'number' || !Number.isFinite(entry.score) || entry.score < 0 || entry.score > 1) {
+        throw invalidInput(`自动连线第 ${index + 1} 条的 score 必须是 [0,1] 内的有限数值`, { score: entry.score });
+      }
+      score = entry.score;
+    }
+    const key = `${target}\u0000${rel}`;
+    if (!seen.has(key)) { seen.add(key); out.push(score !== null ? { target, rel, score } : { target, rel }); }
+  }
+  return out;
+}
+
+const isAutoRel = (rel) => typeof rel === 'string' && rel.startsWith(AUTO_LINK_PREFIX);
+
+/**
+ * [0.5-5C] 清理指向被退休卡的 auto: 前缀入边（reviewer 拍板 q-f726d624ac36858f
+ * 选 A，边界原样执行）：其他卡 links 中 target === retiredId 且 rel 以 auto:
+ * 开头的边在本函数就地删除——由调用方（forget 的 apply）在【同一次 mutate】内
+ * 调用，与卡片状态变更同一个 CAS 提交，失败整体不落盘。
+ * - 人工边（rel 不以 auto: 开头）一律不删不改：照旧走 G3 语义（graph 不可见
+ *   但列入 filteredEdges，reason: target-retired，不静默消失）；
+ * - 被退休卡自身的 outgoing links 不处理（节点已不活跃，不参与投影）；
+ * - 被清理方的 revision/updatedAt 不动：links 不参与嵌入文本（向量新鲜度判据
+ *   按 revision 比对），内容未变 bump revision 只会白白作废向量缓存——与
+ *   recordDeliveryHits 的「非内容写不 bump」口径一致。
+ * 返回被清理的卡 id 列表（按 id 码点序；诊断用，不改变返回契约）。
+ */
+function cleanInboundAutoLinks(db, retiredId) {
+  const cleanedFrom = [];
+  for (const otherId of Object.keys(db.cards).sort(byCodepoint)) {
+    if (otherId === retiredId) continue;
+    const other = db.cards[otherId];
+    if (other.state !== 'active') continue;
+    const before = other.links.length;
+    other.links = other.links.filter((l) => !(l.target === retiredId && isAutoRel(l.rel)));
+    if (other.links.length !== before) cleanedFrom.push(otherId);
+  }
+  return cleanedFrom;
+}
+
+/**
+ * [0.5-5C] 锁内把自动连线候选并入当前卡 links（只挂当前卡自身，绝不反向改老卡）：
+ * - 基准 links 中 rel 以 auto: 开头的旧自动边整体替换（自动边是系统派生集合，
+ *   重算即刷新；手动边/统计/正文一律不动）；
+ * - 候选逐条核验 target 存在且 active 且非自身——失效候选【静默丢弃】（自动
+ *   连线是尽力而为的派生数据，绝不因候选失效让保存/更新失败）；
+ * - 按 (target, rel) 去重、候选间按 target 去重（同一目标只留一条自动边）、
+ *   自动边总数 ≤ AUTO_LINKS_MAX（上限优先级：相似度排序由调用方保证）。
+ * 返回 { links, merged }（merged = 实际并入的自动边条数）。
+ */
+function mergeAutoLinks(db, selfId, baseLinks, validated) {
+  const out = [];
+  for (const l of baseLinks) {
+    if (!isAutoRel(l.rel)) out.push(l);
+  }
+  const takenTargets = new Set();
+  let merged = 0;
+  for (const candidate of validated) {
+    if (merged >= AUTO_LINKS_MAX) break;
+    if (candidate.target === selfId) continue;
+    if (takenTargets.has(candidate.target)) continue; // 候选间按 target 去重
+    const targetCard = db.cards[candidate.target];
+    if (targetCard === undefined || targetCard.state !== 'active') continue;
+    takenTargets.add(candidate.target);
+    out.push(candidate.score !== undefined ? { target: candidate.target, rel: candidate.rel, score: candidate.score } : { target: candidate.target, rel: candidate.rel });
+    merged += 1;
+  }
+  return { links: out, merged };
 }
 
 function checkVitality(value, where) {
@@ -1258,16 +1379,22 @@ export async function openSparkStore({ root, scopeId, lockTimeoutMs = 10_000, re
   }
 
   const store = {
-    /** 新建卡片；期望目标不存在（revision 0）。返回创建的完整记录。 */
+    /** 新建卡片；期望目标不存在（revision 0）。返回创建的完整记录。
+     *  [0.5-5C] opts.autoLinks：自动连线候选（{target, rel: "auto:*", score?} ≤3），
+     *  与卡内容同一次 mutate 写进本卡 links（只挂当前卡自身，绝不反向改老卡）；
+     *  不提供 = 不写自动边（provider 关闭/跳过路径行为与 0.4 逐字节一致）。
+     *  autoLinks 不进语义指纹：它是服务端派生数据，重试（同 operationId）时
+     *  候选可能已变，幂等重放一律返回首次结果。 */
     async save(input, opts) {
       ensureOpen();
-      const o = readOpts(opts, ['expectedRevision', 'operationId'], 'save');
+      const o = readOpts(opts, ['expectedRevision', 'operationId', 'autoLinks'], 'save');
       if (Object.hasOwn(o, 'operationId')) validateOperationId(o.operationId);
       const expected = readExpectedRevision(o, { min: 0 });
       if (expected !== undefined && expected !== 0) {
         throw invalidInput('save 的 expectedRevision 只能为 0（断言目标不存在）', { expectedRevision: expected });
       }
       const norm = validateSaveInput(input);
+      const autoLinks = Object.hasOwn(o, 'autoLinks') ? validateAutoLinks(o.autoLinks, 'save opts.autoLinks') : null;
       return runMutation('save', o.operationId, { kind: 'save', input: norm, expectedRevision: expected ?? null }, (db) => {
         if (norm.id !== undefined && Object.hasOwn(db.cards, norm.id)) {
           throw revisionConflict(`id "${norm.id}" 已存在于本 scope（save 期望目标不存在）`, {
@@ -1278,6 +1405,9 @@ export async function openSparkStore({ root, scopeId, lockTimeoutMs = 10_000, re
         if (norm.id !== undefined) assertNoCaseTwin(db, id);
         assertLinksValid(norm.links, db, id);
         const card = buildCard(id, scopeId, norm, nowIso());
+        if (autoLinks !== null) {
+          card.links = mergeAutoLinks(db, id, card.links, autoLinks).links;
+        }
         db.cards[id] = card;
         return card;
       });
@@ -1293,14 +1423,18 @@ export async function openSparkStore({ root, scopeId, lockTimeoutMs = 10_000, re
       return clone(db.cards[id]);
     },
 
-    /** 更新 active 卡的可变字段；revision +1。 */
+    /** 更新 active 卡的可变字段；revision +1。
+     *  [0.5-5C] opts.autoLinks：自动连线候选，语义见 save。与本次 patch 在同一
+     *  mutate 里合并（patch.links 显式给出的内容先落，再替换其中的旧 auto 边并
+     *  并入新候选）；不提供 = 不动已有自动边（跳过 ≠ 重算为空）。 */
     async update(id, patch, opts) {
       ensureOpen();
       validateSparkId(id, 'id');
-      const o = readOpts(opts, ['expectedRevision', 'operationId'], 'update');
+      const o = readOpts(opts, ['expectedRevision', 'operationId', 'autoLinks'], 'update');
       if (Object.hasOwn(o, 'operationId')) validateOperationId(o.operationId);
       const expected = readExpectedRevision(o, { min: 1 });
       const norm = validatePatch(patch);
+      const autoLinks = Object.hasOwn(o, 'autoLinks') ? validateAutoLinks(o.autoLinks, 'update opts.autoLinks') : null;
       return runMutation('update', o.operationId, { kind: 'update', id, patch: norm, expectedRevision: expected ?? null }, (db) => {
         const card = db.cards[id];
         if (card === undefined) {
@@ -1310,9 +1444,82 @@ export async function openSparkStore({ root, scopeId, lockTimeoutMs = 10_000, re
         assertExpectedRevision(card, expected, id);
         if (norm.links !== undefined) assertLinksValid(norm.links, db, id);
         for (const [key, value] of Object.entries(norm)) card[key] = value;
+        if (autoLinks !== null) {
+          card.links = mergeAutoLinks(db, id, card.links, autoLinks).links;
+        }
         card.revision += 1;
         card.updatedAt = nowIso();
         return card;
+      });
+    },
+
+    /**
+     * [0.5-5C] 人工边单条新增（spark_link 存储原语；非公开 tool 语义见门面）。
+     * - rel 走人工写面规则（拒绝 auto: 保留前缀）；opts.rel 缺省 "related"；
+     * - 幂等：已有同 (target, rel) 边 → 成功返回且零变化（revision 不变）；
+     * - target 必须存在且 active 且非自身（assertLinksValid 同款）；
+     * - 返回 { card, changed }（changed=false = 幂等空转）。autoLinks 不参与
+     *   本通道——自动边只由 save/update 的 opts.autoLinks 维护（分开管理）。
+     */
+    async link(id, opts) {
+      ensureOpen();
+      validateSparkId(id, 'id');
+      const o = readOpts(opts, ['target', 'rel', 'expectedRevision', 'operationId'], 'link');
+      if (Object.hasOwn(o, 'operationId')) validateOperationId(o.operationId);
+      const expected = readExpectedRevision(o, { min: 1 });
+      const target = checkLinkTarget(o.target, 'link：', 1);
+      const rel = Object.hasOwn(o, 'rel') ? checkLinkRel(o.rel, 'link：', 1) : 'related';
+      return runMutation('link', o.operationId, { kind: 'link', id, target, rel, expectedRevision: expected ?? null }, (db) => {
+        const card = db.cards[id];
+        if (card === undefined) {
+          throw notFound(`卡片 "${id}" 不存在于 scope "${scopeId}"`, { id, scopeId });
+        }
+        assertCardActive(card, id, 'link');
+        assertExpectedRevision(card, expected, id);
+        assertLinksValid([{ target, rel }], db, id);
+        if (card.links.some((l) => l.target === target && l.rel === rel)) {
+          return { card, changed: false }; // 幂等：已有同边，零变化
+        }
+        card.links = [...card.links, { target, rel }];
+        card.revision += 1;
+        card.updatedAt = nowIso();
+        return { card, changed: true };
+      });
+    },
+
+    /**
+     * [0.5-5C] 人工边单条摘除（spark_unlink 存储原语）。与 link 对称：
+     * - opts.rel 缺省 "related"（与 link 缺省同值，两个工具互为逆操作）；
+     * - 幂等：没有同 (target, rel) 边 → 成功返回且零变化（revision 不变）；
+     * - rel 以 auto: 开头 → INVALID_INPUT（自动边是系统派生集合，由下一次
+     *   save/update 的重算刷新，不经人工摘除——分开管理）；
+     * - 返回 { card, changed }（changed=false = 幂等空转）。
+     */
+    async unlink(id, opts) {
+      ensureOpen();
+      validateSparkId(id, 'id');
+      const o = readOpts(opts, ['target', 'rel', 'expectedRevision', 'operationId'], 'unlink');
+      if (Object.hasOwn(o, 'operationId')) validateOperationId(o.operationId);
+      const expected = readExpectedRevision(o, { min: 1 });
+      const target = checkLinkTarget(o.target, 'unlink：', 1);
+      const rel = Object.hasOwn(o, 'rel') ? checkLinkRel(o.rel, 'unlink：', 1) : 'related';
+      return runMutation('unlink', o.operationId, { kind: 'unlink', id, target, rel, expectedRevision: expected ?? null }, (db) => {
+        const card = db.cards[id];
+        if (card === undefined) {
+          throw notFound(`卡片 "${id}" 不存在于 scope "${scopeId}"`, { id, scopeId });
+        }
+        assertCardActive(card, id, 'unlink');
+        assertExpectedRevision(card, expected, id);
+        if (isAutoRel(rel)) {
+          throw invalidInput(`unlink 不接受 "${AUTO_LINK_PREFIX}" 前缀的 rel：自动边由系统在 save/update 时重算维护，人工摘除会被下次重算覆盖`, { rel });
+        }
+        if (!card.links.some((l) => l.target === target && l.rel === rel)) {
+          return { card, changed: false }; // 幂等：无此边，零变化
+        }
+        card.links = card.links.filter((l) => !(l.target === target && l.rel === rel));
+        card.revision += 1;
+        card.updatedAt = nowIso();
+        return { card, changed: true };
       });
     },
 
@@ -1384,6 +1591,9 @@ export async function openSparkStore({ root, scopeId, lockTimeoutMs = 10_000, re
             replacement.revision += 1;
             replacement.updatedAt = at;
           }
+          // [0.5-5C] reviewer 拍板（q-f726d624ac36858f 选 A）：archive 与 supersede
+          // 都在同一 mutate 内清理「指向本卡的 auto: 前缀入边」；人工边不动（G3）。
+          cleanInboundAutoLinks(db, id);
           return card;
         },
       );

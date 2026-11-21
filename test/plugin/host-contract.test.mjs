@@ -3,7 +3,7 @@
 // 契约（CONTRACTS §8）：真实 DSH 0.2.1-rc.2 工具 runner 必须检查全部成功输出
 // （特别 topic_append 写成功后返回成功）；禁止只 mock defineTool 成功就称输出
 // 校验通过。本文件用本机已安装的真实 @deepseek-ai/dsh-tools：
-// - 真实 defineTool 编译 17 工具的 output schema（assertSupportedJsonSchema 子集
+// - 真实 defineTool 编译 19 工具的 output schema（assertSupportedJsonSchema 子集
 //   检查在 defineTool 内部执行——schema 非法即抛错）；
 // - 真实 validateJsonSchemaValue（与 runner createSuccessResult 同一校验函数，
 //   dsh-tools lib/index.js:3640）逐工具校验成功输出；
@@ -59,7 +59,10 @@ try {
   }
 }
 
-test("真实 defineTool：17 工具 output schema 编译（子集非法即抛）+ 真实 runner 校验函数验证成功输出", async (t) => {
+// 规格连带：工具面 17→19（0.5-5C 新增 spark_link/spark_unlink；白名单批复
+// wlreq-5b550817a9bf386d 边界 ②）——用例名与工具面计数断言同步 17→19，
+// 其余断言（含下方真实 schema 编译/校验行为）原样不动。
+test("真实 defineTool：19 工具 output schema 编译（子集非法即抛）+ 真实 runner 校验函数验证成功输出", async (t) => {
   if (!dshTools) {
     t.skip("real @deepseek-ai/dsh-tools not resolvable on this machine (RESULT.json marks this check not-run)");
     return;
@@ -77,11 +80,11 @@ test("真实 defineTool：17 工具 output schema 编译（子集非法即抛）
   const tools = [
     ...createCompatTools({ service, getSessionInfo: () => ({ sessionId: null, scopeId: "amber" }) }),
     createTopicCreateTool({ service, getSessionInfo: () => ({ sessionId: null, scopeId: "amber" }) }),
-    // S3：第 17 个工具（组清单管理；直接绑真实 service 与磁盘 groups.json）。
+    // S3：组清单管理工具（直接绑真实 service 与磁盘 groups.json）。
     createGroupManageTool({ service, dataRoot, scopeId: "amber" }),
     ...createSparkTools({ scopeId: "amber", store: sparkStore }).tools,
   ];
-  assert.equal(tools.length, 17);
+  assert.equal(tools.length, 19); // 规格连带：工具面 17→19
   assert.deepEqual(tools.map((x) => x.name).sort(), [...TOOL_NAMES].sort());
 
   const compiled = new Map();
@@ -102,7 +105,7 @@ test("真实 defineTool：17 工具 output schema 编译（子集非法即抛）
     assert.equal(defined.name, tool.name);
     compiled.set(tool.name, defined);
   }
-  assert.equal(compiled.size, 17);
+  assert.equal(compiled.size, 19); // 规格连带：工具面 17→19
 
   // 真实 defineTool 保留 output.render：对每个工具断言返回值形状（数组 / text block /
   // 可 JSON 还原原 value）——宿主 createSuccessResult 直接吃这个返回值。
@@ -146,7 +149,7 @@ test("真实 defineTool：17 工具 output schema 编译（子集非法即抛）
     assert.deepEqual(violations, [], `${name} output must pass the real runner schema: ${JSON.stringify(violations)}`);
   }
 
-  // 4) 全部 17 工具成功输出逐一过真实校验（读分支走真实读；写分支走真实 CAS 写）。
+  // 4) 全部 19 工具成功输出逐一过真实校验（读分支走真实读；写分支走真实 CAS 写）。
   const sparkSaved = await compiled.get("spark_save").execute(
     { title: "真实卡", content: "内容。", triggers: ["真实词"], vitality: "evergreen" },
     { agent: { session: { id: "s-real" } } },
@@ -462,7 +465,7 @@ async function bootRealEntry({ extraServices = null, timeoutMs = 10000 } = {}) {
   return { panel, tools, cleanup };
 }
 
-test("B-P2 真实入口 boot：index.mjs apply + 真实 Cordis fiber（不注入 typert）→ 插件激活、17 工具注册、typertRpc 如实回退 src", async (t) => {
+test("B-P2 真实入口 boot：index.mjs apply + 真实 Cordis fiber（不注入 typert）→ 插件激活、19 工具注册、typertRpc 如实回退 src", async (t) => {
   const cordis = await loadCordis();
   if (!cordis) { t.skip("real cordis not resolvable on this machine (RESULT.json marks this check not-run)"); return; }
   if (!existsSync(ENTRY_PATH)) {
@@ -476,8 +479,8 @@ test("B-P2 真实入口 boot：index.mjs apply + 真实 Cordis fiber（不注入
     const diag = panel.diagnostics();
     assert.equal(diag.service, "shiori.panel");
     assert.equal(diag.closed, false);
-    // 17 工具经真实 bindings + 真实 defineTool 注册进宿主 tools 服务。
-    assert.equal(tools.registered.length, 17);
+    // 19 工具经真实 bindings + 真实 defineTool 注册进宿主 tools 服务。
+    assert.equal(tools.registered.length, 19); // 规格连带：工具面 17→19
     // typertRpc 走"registry 缺席"分支（ctx.get 可选读取返回 undefined），
     // 而不是被调用点 try/catch 接住的异常——reason 必须逐字是缺席语义。
     const status = await panel.management.getStatus(
@@ -513,7 +516,7 @@ test("B-P2 真实入口 boot：注入 typert 但 register 抛错 → start 仍�
     },
   });
   try {
-    assert.equal(tools.registered.length, 17, "register 抛错不得阻断 17 工具注册");
+    assert.equal(tools.registered.length, 19, "register 抛错不得阻断 19 工具注册"); // 规格连带：工具面 17→19
     const status = await panel.management.getStatus(
       { session: { id: "boot-probe-s2" }, source: "panel-rpc" }, {},
     );

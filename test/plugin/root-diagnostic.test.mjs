@@ -2,7 +2,7 @@
 //
 // 覆盖：active 模式但任一根 mkdir 失败时，start() 不抛、以只读/内存态降级挂载——
 //   1) 返回值带 degraded:true + 逐根结构化诊断；
-//   2) 17 工具照常注册（宿主工具面不变），执行一律 UNSUPPORTED（含 details.roots）；
+//   2) 19 工具照常注册（宿主工具面不变，0.5-5C 17→19），执行一律 UNSUPPORTED（含 details.roots）；
 //   3) getStatus 纯内存投影可用，diagnostics.roots 面板可见，started 不谎报；
 //   4) diagnostics() 门面同样透出 roots（纯增量字段）；
 //   5) 降级后 stop() 干净收场，再次 start 重新裁决（诊断重算）。
@@ -24,7 +24,7 @@ test.after(() => {
 });
 
 /** bindings 桩：只记录 registerTool 的 def；disposeAll 清空注册表（模拟真实
- * bindings 的代次清理，re-register 后 registeredTools 回到 17）。 */
+ * bindings 的代次清理，re-register 后 registeredTools 回到 19）。 */
 function stubBindingsFactory() {
   const registeredTools = [];
   const factory = () => ({
@@ -64,7 +64,9 @@ function degradedSettings({ dataRoot, stateRoot }) {
   });
 }
 
-test("P1#8：dataRoot 不可写 → start 降级挂载（不抛、degraded:true、17 工具照常注册）", async () => {
+// 规格连带：工具面 17→19（0.5-5C spark_link/spark_unlink；白名单批复
+// wlreq-5b550817a9bf386d 边界 ②）——工具面计数断言、用例名与注释同步 17→19，其余断言不动。
+test("P1#8：dataRoot 不可写 → start 降级挂载（不抛、degraded:true、19 工具照常注册）", async () => {
   const data = blockedRoot("data-blocker");
   const stateRoot = join(TMP_ROOT, "state-ok", "shiori-state");
   const bindings = stubBindingsFactory();
@@ -83,13 +85,13 @@ test("P1#8：dataRoot 不可写 → start 降级挂载（不抛、degraded:true�
   assert.equal(result.mode, "active");
   assert.equal(result.degraded, true, "start must report degraded mount");
   assert.equal(result.sections.length, 0, "L0/L1 sections must not register in degraded mode");
-  assert.equal(result.tools.length, 17, "all 17 host tools must stay registered");
+  assert.equal(result.tools.length, 19, "all 19 host tools must stay registered"); // 规格连带：工具面 17→19
   assert.equal(result.roots.length, 1);
   assert.equal(result.roots[0].root, "dataRoot");
   assert.equal(result.roots[0].path, data.root);
   assert.equal(result.roots[0].code, "ENOTDIR");
   assert.ok(result.roots[0].reason.length > 0);
-  assert.equal(bindings.registeredTools.length, 17, "stub must have observed 17 registerTool calls");
+  assert.equal(bindings.registeredTools.length, 19, "stub must have observed 19 registerTool calls"); // 规格连带：工具面 17→19
 
   // started 不宣称：getStatus 保持纯内存投影（面板可见诊断，不撞 scope 资源）。
   assert.equal(controller.diagnostics().started, false, "degraded mount must not claim started");
@@ -176,12 +178,12 @@ test("P1#8：两根同时不可写 → 两条诊断；stop 后再次 start 重�
   await controller.stop();
 
   // 再次 start：重新探测、再次降级（诊断重算，不残留旧代状态；上一代工具
-  // 已由 stop 的 disposeAll 撤销，本轮重注册后注册表回到 17）。
+  // 已由 stop 的 disposeAll 撤销，本轮重注册后注册表回到 19）。
   const second = await controller.start();
   assert.equal(second.degraded, true);
   assert.deepEqual(second.roots.map((d) => d.root), ["dataRoot", "stateRoot"]);
-  assert.equal(second.tools.length, 17, "tools re-registered on the retry attempt");
-  assert.equal(bindings.registeredTools.length, 17, "registry holds only the current generation");
+  assert.equal(second.tools.length, 19, "tools re-registered on the retry attempt"); // 规格连带：工具面 17→19
+  assert.equal(bindings.registeredTools.length, 19, "registry holds only the current generation"); // 规格连带：工具面 17→19
   await controller.stop();
 });
 

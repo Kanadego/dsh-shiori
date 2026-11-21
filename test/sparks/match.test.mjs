@@ -470,3 +470,56 @@ test("同一卡多条扩散路径时按稳定键取最小 via（link 优先于 e
   });
   assert.equal(two.related[0].via.kind, "link");
 });
+
+// ---------------------------------------------------------------------------
+// 0.5-5C：auto:similar 边在 1 跳扩散里当普通 related；反向不带出
+// （任务书完成判据：聊到新卡带出老卡，反向不带出；maxRelated 语义不变）
+// ---------------------------------------------------------------------------
+
+test("auto:similar 边：聊到新卡（种子）带出老卡（1 跳 related，与普通显式边同权）", () => {
+  const newCard = card({ id: "new", triggers: ["洋葱"], links: [{ target: "old", rel: "auto:similar", score: 0.86 }] });
+  const oldCard = card({ id: "old", triggers: ["切洋葱"] }); // 自身 trigger 不命中本轮正文
+  const result = matchSparks({
+    scopeId: SCOPE, sessionId: SESSION, contextEpoch: EPOCH,
+    userText: "洋葱", sparks: [newCard, oldCard],
+  });
+  assert.deepEqual(ids(result, "seeds"), ["new"]);
+  assert.deepEqual(ids(result, "related"), ["old"], "auto 边当普通 related 扩散出老卡");
+  assert.equal(result.related[0].via.kind, "link");
+  assert.equal(result.related[0].via.rel, "auto:similar", "via 如实带 auto rel（普通边语义，无特判）");
+});
+
+test("auto:similar 边反向不带出：聊到老卡（种子）不会经新卡的 auto 边把新卡拉进来", () => {
+  const newCard = card({ id: "new", triggers: ["梗二"], links: [{ target: "old", rel: "auto:similar", score: 0.9 }] });
+  const oldCard = card({ id: "old", triggers: ["洋葱"] });
+  const result = matchSparks({
+    scopeId: SCOPE, sessionId: SESSION, contextEpoch: EPOCH,
+    userText: "洋葱", sparks: [newCard, oldCard],
+  });
+  assert.deepEqual(ids(result, "seeds"), ["old"]);
+  assert.deepEqual(ids(result, "related"), [], "auto 边只挂在新卡自身 links，老卡反向扩散不带出新卡");
+});
+
+test("auto:similar 边参与 maxRelated 名额竞争（无特判：普通 related 语义）", () => {
+  const newCard = card({
+    id: "new", triggers: ["洋葱"],
+    links: [
+      { target: "viaManual", rel: "related" },
+      { target: "viaAuto", rel: "auto:similar", score: 0.9 },
+    ],
+  });
+  const manual = card({ id: "viaManual" });
+  const auto = card({ id: "viaAuto" });
+  const result = matchSparks({
+    scopeId: SCOPE, sessionId: SESSION, contextEpoch: EPOCH,
+    userText: "洋葱", sparks: [newCard, manual, auto], maxRelated: 1,
+  });
+  // 候选稳定键 [kind(0), 卡 id, 源 id, rel]：viaAuto 的 rel "auto:similar" < viaManual 的 "related"，
+  // 同为显式 link 类、id 同源，rel 字典序决定 viaAuto 先出线；maxRelated=1 只带一条。
+  assert.deepEqual(ids(result, "related"), ["viaAuto"]);
+  const two = matchSparks({
+    scopeId: SCOPE, sessionId: SESSION, contextEpoch: EPOCH,
+    userText: "洋葱", sparks: [newCard, manual, auto], maxRelated: 2,
+  });
+  assert.deepEqual(ids(two, "related").sort(), ["viaAuto", "viaManual"], "两条都在名额内时都出线");
+});

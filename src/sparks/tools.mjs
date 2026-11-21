@@ -2,7 +2,9 @@
 //
 // 纯 host-agnostic 门面：接收【可信】的 scopeId 与 store 实例（来自宿主工厂，
 // 见 CONTRACTS.md §G 的 openSparkStore），暴露 DESIGN.md §6 的六个 L2 工具的
-// 无 host 描述与执行函数。真实 DSH client panel 注册 / GenUI 渲染是后续集成
+// 无 host 描述与执行函数；0.5-5C 起新增 spark_link / spark_unlink（人工边单条
+// 增删，幂等，与 auto: 保留前缀的自动边分开管理），工具面 6→8（宿主工具面
+// 17→19）。真实 DSH client panel 注册 / GenUI 渲染是后续集成
 // （not-run，见 docs/sparks/tools-graph.md）。
 //
 // 硬边界：
@@ -192,6 +194,24 @@ function receipt(tool, scopeId, operationId, result, extra = {}) {
 }
 
 /**
+ * 自动连线候选的尽力获取（0.5-5C 模块 2）。autoLinker 由宿主工厂注入
+ * （controller 用 provider + 向量索引 + cardEmbedText 口径组装；provider 关闭时
+ * 传 null/undefined = 永久关闭，行为与 0.4 逐字节一致）。契约：返回数组（可为空
+ * = 重算成功但无人过线）或 null（= 跳过本次：provider/索引不可用或查询失败，
+ * 不写也不清自动边）。本包装再兜一层 try：自动连线是派生数据，任何故障都不许
+ * 让保存/更新失败。
+ */
+async function tryAutoLinks(autoLinker, input) {
+  if (typeof autoLinker !== "function") return null;
+  try {
+    const candidates = await autoLinker(input);
+    return Array.isArray(candidates) ? candidates : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 构造 L2 spark 工具门面。
  *
  * @param {object} deps
@@ -201,14 +221,22 @@ function receipt(tool, scopeId, operationId, result, extra = {}) {
  *   时写行为与 0.1 完全一致）。外部写锁持续持有进入只读态后，写工具（spark_save /
  *   spark_update / spark_forget / spark_feedback）抛 code="HOST_LOCKED"；
  *   spark_read / spark_graph 照常。
+ * @param {(input: {title, summary?, content, excludeId?}) => Promise<Array|null>} [deps.autoLinker]
+ *   0.5-5C 自动连线器（createAutoLinker 产物；缺省 = 关闭）。spark_save /
+ *   spark_update 提交时取相似 top-k（阈值 0.80、每卡上限 3、去重），候选与卡片
+ *   本体在同一次 store mutate 里只写进当前卡自身 links（auto:similar + 独立
+ *   score 字段）；返回 null = 跳过（provider/索引不可用），零报错、绝不异步补写。
  * @returns {{scopeId:string, tools:Array, names:string[], list:()=>Array, execute:(name:string,payload:object)=>Promise<object>}}
  */
-export function createSparkTools({ scopeId, store, readonlyGuard } = {}) {
+export function createSparkTools({ scopeId, store, readonlyGuard, autoLinker } = {}) {
   if (!nonEmptyString(scopeId)) {
     return fail("INVALID_INPUT", "createSparkTools requires a non-empty string scopeId from a trusted source", { scopeId: typeof scopeId });
   }
   if (!isPlainRecord(store)) {
     return fail("INVALID_INPUT", "createSparkTools requires a spark store instance", { store: typeof store });
+  }
+  if (autoLinker !== undefined && autoLinker !== null && typeof autoLinker !== "function") {
+    return fail("INVALID_INPUT", "createSparkTools: autoLinker must be a function (createAutoLinker product) or null/undefined", { autoLinker: typeof autoLinker });
   }
   validateReadonlyGuard(readonlyGuard);
   for (const method of ["save", "read", "update", "forget", "feedback", "listActive"]) {
@@ -258,6 +286,11 @@ export function createSparkTools({ scopeId, store, readonlyGuard } = {}) {
         if (links !== undefined) input.links = links;
         const options = { operationId };
         if (expectedRevision !== undefined) options.expectedRevision = expectedRevision;
+        // 0.5-5C 自动连线：候选与卡片本体同一次 mutate 落库（Agent 拿到的 revision
+        // 即最终值）。autoLinker 为 null（provider 关闭）或返回 null（跳过）都不传，
+        // store 行为与 0.4 逐字节一致。
+        const autoCandidates = await tryAutoLinks(autoLinker, { title, summary: summary ?? "", content, excludeId: null });
+        if (autoCandidates !== null) options.autoLinks = autoCandidates;
         const result = await store.save(input, options);
         return receipt("spark_save", scopeId, operationId, result);
       },
@@ -340,6 +373,23 @@ export function createSparkTools({ scopeId, store, readonlyGuard } = {}) {
 
         const options = { operationId };
         if (expectedRevision !== undefined) options.expectedRevision = expectedRevision;
+        // 0.5-5C 自动连线：按「patch 后的卡片内容」取相似候选（需读当前卡合并
+        // 出最终 title/summary/content；读失败按跳过处理，update 随后自会以
+        // 同一错误失败）。候选与 patch 同一次 mutate 落库。
+        if (autoLinker !== undefined && autoLinker !== null) {
+          try {
+            const current = await store.read(id);
+            const autoCandidates = await tryAutoLinks(autoLinker, {
+              title: a.patch.title ?? (typeof current?.title === "string" ? current.title : ""),
+              summary: a.patch.summary ?? (typeof current?.summary === "string" ? current.summary : ""),
+              content: a.patch.content ?? (typeof current?.content === "string" ? current.content : ""),
+              excludeId: id,
+            });
+            if (autoCandidates !== null) options.autoLinks = autoCandidates;
+          } catch {
+            // 读当前卡失败（如 NOT_FOUND）：跳过自动连线，错误交给 store.update 原样抛。
+          }
+        }
         const result = await store.update(id, a.patch, options);
         return receipt("spark_update", scopeId, operationId, result);
       },
@@ -412,6 +462,82 @@ export function createSparkTools({ scopeId, store, readonlyGuard } = {}) {
         if (sourceEventId !== undefined) options.sourceEventId = sourceEventId;
         const result = await store.feedback(id, options);
         return receipt("spark_feedback", scopeId, operationId, result, { used: a.used, sourceEventId: sourceEventId ?? null });
+      },
+    },
+    {
+      name: "spark_link",
+      description: "Add ONE manual link from a spark card to another card in the CURRENT scope (single-edge, idempotent). rel defaults to \"related\"; the \"auto:\" prefix is reserved for system-managed similarity edges (auto:similar, written automatically on spark_save/spark_update) and is rejected here — manual and auto edges are managed separately. Linking the same (target, rel) again succeeds with no change (revision untouched). CAS: pass expectedRevision from spark_read/spark_save; retry with the same operationId.",
+      inputSchema: {
+        id: { type: "string", required: true, description: "Spark id the link is attached to (must be active)." },
+        target: { type: "string", required: true, description: "Target spark id; must exist and be active in the same scope, and differ from id." },
+        rel: { type: "string", description: 'Relation label (1-64 chars, not blank). Default "related". Must NOT start with "auto:" (reserved for system-managed edges).' },
+        expectedRevision: { oneOf: [{ type: "string" }, { type: "number" }, { type: "null" }], description: "Opaque revision for CAS from the latest read." },
+        operationId: { type: "string", description: "Idempotency key; reuse it verbatim on retry." },
+      },
+      outputSchema: TOOL_OUTPUT_SCHEMAS["spark_link"],
+      outputRender: renderToolOutput,
+      async execute(args) {
+        const a = requireObject(args, "spark_link");
+        rejectTrustedKeys(a, "spark_link");
+        assertNotHostLocked(readonlyGuard);
+        rejectUnknownKeys(a, "spark_link", ["id", "target", "rel", "expectedRevision", "operationId"]);
+        const id = requireString(a, "spark_link", "id");
+        const target = requireString(a, "spark_link", "target");
+        const rel = optionalString(a, "spark_link", "rel");
+        if (rel !== undefined && rel.startsWith("auto:")) {
+          return fail("INVALID_INPUT", "spark_link: `rel` must not start with \"auto:\" — that prefix is reserved for system-managed similarity edges (auto:similar); use a plain label like \"related\"", { tool: "spark_link", rel });
+        }
+        const operationId = optionalOperationId(a, "spark_link");
+        const expectedRevision = optionalExpectedRevision(a, "spark_link");
+
+        const options = { target, operationId };
+        if (rel !== undefined) options.rel = rel;
+        if (expectedRevision !== undefined) options.expectedRevision = expectedRevision;
+        const result = await store.link(id, options);
+        const card = isPlainRecord(result) && isPlainRecord(result.card) ? result.card : {};
+        return receipt("spark_link", scopeId, operationId, card, {
+          target,
+          rel: rel ?? "related",
+          changed: isPlainRecord(result) ? result.changed === true : false,
+        });
+      },
+    },
+    {
+      name: "spark_unlink",
+      description: "Remove ONE manual link from a spark card in the CURRENT scope (single-edge, idempotent). rel defaults to \"related\" — the same default spark_link uses, so the two tools are exact inverses; pass the rel you used when linking for non-default edges. \"auto:\"-prefixed edges are system-managed (recomputed on spark_save/spark_update) and are rejected here. Removing an edge that does not exist succeeds with no change (revision untouched). CAS: pass expectedRevision from spark_read/spark_save; retry with the same operationId.",
+      inputSchema: {
+        id: { type: "string", required: true, description: "Spark id to detach the link from (must be active)." },
+        target: { type: "string", required: true, description: "Target spark id of the edge to remove." },
+        rel: { type: "string", description: 'Relation label of the edge to remove. Default "related" (matching spark_link\'s default). Must NOT start with "auto:".' },
+        expectedRevision: { oneOf: [{ type: "string" }, { type: "number" }, { type: "null" }], description: "Opaque revision for CAS from the latest read." },
+        operationId: { type: "string", description: "Idempotency key; reuse it verbatim on retry." },
+      },
+      outputSchema: TOOL_OUTPUT_SCHEMAS["spark_unlink"],
+      outputRender: renderToolOutput,
+      async execute(args) {
+        const a = requireObject(args, "spark_unlink");
+        rejectTrustedKeys(a, "spark_unlink");
+        assertNotHostLocked(readonlyGuard);
+        rejectUnknownKeys(a, "spark_unlink", ["id", "target", "rel", "expectedRevision", "operationId"]);
+        const id = requireString(a, "spark_unlink", "id");
+        const target = requireString(a, "spark_unlink", "target");
+        const rel = optionalString(a, "spark_unlink", "rel");
+        if (rel !== undefined && rel.startsWith("auto:")) {
+          return fail("INVALID_INPUT", 'spark_unlink: `rel` must not start with "auto:" — auto:similar edges are system-managed and refreshed on the next spark_save/spark_update; manual removal would be silently overwritten', { tool: "spark_unlink", rel });
+        }
+        const operationId = optionalOperationId(a, "spark_unlink");
+        const expectedRevision = optionalExpectedRevision(a, "spark_unlink");
+
+        const options = { target, operationId };
+        if (rel !== undefined) options.rel = rel;
+        if (expectedRevision !== undefined) options.expectedRevision = expectedRevision;
+        const result = await store.unlink(id, options);
+        const card = isPlainRecord(result) && isPlainRecord(result.card) ? result.card : {};
+        return receipt("spark_unlink", scopeId, operationId, card, {
+          target,
+          rel: rel ?? "related",
+          changed: isPlainRecord(result) ? result.changed === true : false,
+        });
       },
     },
     {

@@ -9,7 +9,7 @@
 //   工具 / section / 锁；同一 scope 资源复用（不每会话另开同 scope 独占锁）；
 // - inert：shadow 且 dataRoot/stateRoot 皆 null → 不启 runtime、不接管工具 /
 //   section、不读写业务数据；仅 management.getStatus 可用，其余 NOT_CONFIGURED；
-// - active：17 工具（9 兼容 + topic_create + group_manage + 6 Spark）经真实 defineTool 注册；
+// - active：19 工具（9 兼容 + topic_create + group_manage + 8 Spark，0.5-5C 17→19）经真实 defineTool 注册；
 //   L0/L1 真实 async system-prompt/assemble waterfall 刷新；L2 经 agent/pre-step
 //   投递（仅 l2.enabled）；压缩探针订阅完成事件（同 callId direct/PTC 仅推进一次）；
 // - 0.5：语义向量写后增量维护——spark 写工具成功 → 防抖批量 embed/upsert（forget
@@ -19,7 +19,7 @@
 // - shadow（配置了 root）：纯内存只读挂载 —— 不注册工具 / section / waterfall /
 //   pre-step，不打开 completion 锁 / scope 资源 / receipt（抢独占锁会把真的
 //   active 实例挤成 LOCK_BUSY）；management 仅纯内存 getStatus。
-// - degraded（P1#8：active 但任一根 mkdir 失败）：只读/内存态降级挂载 —— 17 工具
+// - degraded（P1#8：active 但任一根 mkdir 失败）：只读/内存态降级挂载 —— 19 工具
 //   照常注册但执行一律 UNSUPPORTED（宿主工具入口 registeredToolDefs 的降级闸 +
 //   management.executeTool 的降级前置检查——面板路径不再先撞 requireStarted 的
 //   INVALID_STATE），跳过一切触盘步骤，started 不宣称；诊断经
@@ -49,6 +49,7 @@ import { createTopicActivityLedger } from "../storage/topic-activity.mjs";
 import { normalizeTemperatureParams, validateTemperatureParams } from "../forgetting/params.mjs";
 import { createSeatGuard } from "../host/seat.mjs";
 import { createSparkTools } from "../sparks/tools.mjs";
+import { createAutoLinker } from "../sparks/auto-link.mjs";
 import { createCompressProbe } from "../host/compress-probe.mjs";
 import { mapRawSessionEvent } from "../host/dsh-adapter.mjs";
 import { openCompletionState } from "../completion/index.mjs";
@@ -103,9 +104,10 @@ const WRITE_TOOL_NAMES = new Set([
   "topic_append", "topic_create",
   "group_manage",
   "spark_save", "spark_update", "spark_forget", "spark_feedback",
+  "spark_link", "spark_unlink",
 ]);
 
-/** 17 工具全名（契约清单；S3 起含 group_manage）。 */
+/** 19 工具全名（契约清单；0.5-5C 起含 spark_link/spark_unlink，工具面 17→19）。 */
 const ALL_TOOL_NAMES = Object.freeze([
   "soul_read", "soul_update", "memory_read", "memory_search",
   "memory_append", "memory_rewrite", "core_write", "topic_append",
@@ -113,12 +115,13 @@ const ALL_TOOL_NAMES = Object.freeze([
   "group_manage",
   "spark_save", "spark_read", "spark_update", "spark_forget",
   "spark_feedback", "spark_graph",
+  "spark_link", "spark_unlink",
 ]);
 
 // F1b：语义向量重建的保留名。它不是宿主工具——绝不加入 ALL_TOOL_NAMES、绝不
 // 经 defineTool 注册；只经 management.executeTool（wire 的 name 是自由字符串，
 // protocol.mjs 未收缩枚举）在本文件内部分发拦截，供面板「重建向量」按钮调用。
-// dispatchTool 在 ALL_TOOL_NAMES 检查之前识别它（见该函数），宿主工具面保持 17 个不变。
+// dispatchTool 在 ALL_TOOL_NAMES 检查之前识别它（见该函数），宿主工具面保持 19 个不变。
 const SEMANTIC_REBUILD_TOOL = "semantic_rebuild";
 
 // S5：模型下载的保留名（与 semantic_rebuild 同一通道：不是宿主工具，绝不加入
@@ -296,7 +299,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
      *  getStatus.diagnostics.roots 透出面板可见。
      *  每次 start 重算（修复权限 stop→start 后自动恢复完整挂载）。 */
     rootDiagnostics: [],
-    /** R3：降级挂载是否已把 17 工具注册进宿主（started 仍为 false）。真实
+    /** R3：降级挂载是否已把 19 工具注册进宿主（started 仍为 false）。真实
      *  bindings 上不 stop 再 start 会二次注册同名工具——requireStartable 以此
      *  拦下并给出明确错误；cleanupGeneration 的 disposeAll 之后复位。 */
     degradedRegistered: false,
@@ -522,6 +525,32 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       // 遗忘执行器/management 完全透明（读路径与其余方法原样透传）。
       sparkStoreForScope = wrapSparkStoreWithIncrementalHooks(sparkStore, semanticQueue);
     }
+    // ── 0.5-5C 自动连线器（模块 2）：spark_save / spark_update 提交时取相似
+    //    top-k（阈值 0.80、每卡上限 3、去重），候选与卡片本体同一次 mutate 只写
+    //    当前卡自身 links（auto:similar + 独立 score）。provider 关闭时 null：
+    //    门面不传 store 的 autoLinks，行为与 0.4 逐字节一致；embed/索引失败在
+    //    linker 内部收敛为跳过（null），零报错、绝不异步补写。嵌入文本口径复用
+    //    同一个 cardEmbedText（与增量队列/重建同源）。
+    let autoLinker = null;
+    if (semanticProvider !== null && settings.stateRoot !== null) {
+      autoLinker = createAutoLinker({
+        scopeId,
+        provider: semanticProvider,
+        openVectorStore,
+        listActive: () => sparkStore.listActive(),
+        embedText: cardEmbedText,
+        // 与增量队列同一把模型闸：模型未装时自动连线静默跳过，绝不经
+        // provider.embed 的懒加载触发真实下载（写路径零下载副作用）。
+        canEmbed: () => {
+          const dir = modelDirResolved();
+          return dir !== null && isLocalModelInstalled({
+            cacheDir: dir,
+            model: settings.semantic.local.model,
+            dtype: settings.semantic.local.dtype,
+          });
+        },
+      });
+    }
     // 冷搜门面（显式 includeArchived 专用；只读、不复活、不自动匹配）。
     const coldSearch = createColdSearch({ store: sparkStoreForScope, scopeId });
     // service 包装：补 searchArchived（基线 service 冻结对象，中性 target Proxy）。
@@ -545,7 +574,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       },
     });
     // 每 scope 工具集：与真实工具路径同校验 / coordinator / CAS。
-    // 9 兼容 + topic_create + group_manage（S3）+ 6 Spark = 17（契约清单）。
+    // 9 兼容 + topic_create + group_manage（S3）+ 8 Spark = 19（契约清单；0.5-5C 17→19）。
     // M3：sessionId 取自 dispatchTool 的 AsyncLocalStorage 证据（真实会话 id，
     // 供工具侧「当前会话锁定」身份校验），不再固定 null。
     const getSessionInfo = () => ({
@@ -585,7 +614,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
         // 0.5-2B R3：topic_create 成功→updated。
         activity: topicActivity,
       }),
-      // S3：第 17 个宿主工具（组清单管理；topic 组迁移经 service.mutate 走
+      // S3：组清单管理工具（topic 组迁移经 service.mutate 走
       // store 提交协议，不绕存储层）。
       createGroupManageTool({
         service: serviceForTools,
@@ -599,6 +628,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       scopeId,
       store: sparkStoreForScope,
       readonlyGuard: ctrl.readonlyGuard ?? undefined,
+      autoLinker,
     }).tools;
     const all = [...compatTools, ...sparkTools];
     const toolByName = new Map(all.map((t) => [t.name, t]));
@@ -2114,7 +2144,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   function requireStartable() {
     if (ctrl.starting) fail("INVALID_STATE", "controller start already in progress", {});
     if (ctrl.started) fail("INVALID_STATE", "controller already started; call stop() first", {});
-    // R3：降级挂载不宣称 started，但 17 个宿主工具已经注册。此时不 stop 直接
+    // R3：降级挂载不宣称 started，但 19 个宿主工具已经注册。此时不 stop 直接
     // 再 start 会在真实 bindings 上二次注册同名工具（撞名抛错，且依赖底层报错
     // 文本才看得懂）。重启的唯一合法路径是 stop()→start()；这里给出明确错误，
     // 不让「直接重启」这句旧注释继续骗人。
@@ -2189,7 +2219,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       // 诊断）。apply 的 verify 降级调用不再因 mkdir 失败 throw——这里以磁盘真值
       // 决定挂载形态：任一根不可写 → 降级只读/内存态（零落盘：不建组清单 / 锁 /
       // 索引 / 座位文件）：
-      // 17 工具照常注册（宿主工具面不变，执行统一 UNSUPPORTED：宿主工具走
+      // 19 工具照常注册（宿主工具面不变，执行统一 UNSUPPORTED：宿主工具走
       // registeredToolDefs 的入口降级闸，面板走 management.executeTool 的降级
       // 前置检查），跳过一切触盘步骤（completion 锁 / 座位 / persona 预校验 /
       // scope 资源 / L0/L1 / L2）；started 不宣称（getStatus 走纯内存投影，
@@ -2329,7 +2359,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       // 真实 async waterfall：固定可信 scope → await 刷新/校验 → 仅替换本包
       // section。B4：入口排空追踪；B7：体内错误隔离。
       bindings.registerAssembleWaterfall((assembly, context, next) => trackInFlight(assembleWaterfall(assembly, context, next)));
-      // 17 工具经真实 defineTool 注册。
+      // 19 工具经真实 defineTool 注册。
       for (const def of registeredToolDefs()) {
         await bindings.registerTool(def);
       }
@@ -2362,7 +2392,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       // 触数据方法按 INVALID_STATE 拒绝，与未启动同口径），工具层经宿主工具入口
       // 的降级闸 / management.executeTool 的降级前置检查返回 UNSUPPORTED。
       // R3（语义修正）：started 留 false，但修复权限后**只有 stop()→start()**
-      // 才是合法重启——降级态已把 17 个工具注册进宿主，不 stop 再 start 会二次
+      // 才是合法重启——降级态已把 19 个工具注册进宿主，不 stop 再 start 会二次
       // 注册同名工具；requireStartable 以 degradedRegistered 给出明确 INVALID_STATE。
       if (result?.degraded !== true) {
         ctrl.started = true;

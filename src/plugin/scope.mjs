@@ -131,13 +131,20 @@ function validateModuleSwitch(value, field) {
     // forgetting 缺省也带默认策略（30/240/.25）：供执行门面直接消费。
     return field === "forgetting"
       ? { enabled: false, policy: normalizeForgetPolicy({}) }
-      : { enabled: false };
+      : field === "l2"
+        // 0.5-5C：l2 缺省也带分簇规则版本（与 config normalizePluginConfig 同默认）。
+        ? { enabled: false, clustersVersion: 1 }
+        : { enabled: false };
   }
   if (!isPlainRecord(value) || !Object.hasOwn(value, "enabled") || typeof value.enabled !== "boolean") {
     fail("INVALID_INPUT", `settings.${field}.enabled must be a boolean`, { field });
   }
   const keys = Object.keys(value);
-  const allowed = field === "forgetting" ? ["enabled", "policy"] : ["enabled"];
+  // 0.5-5C：l2 段放行 clustersVersion（闪回图谱分簇规则版本；仅这一个额外键，
+  // organize 仍只认 enabled）。
+  const allowed = field === "forgetting"
+    ? ["enabled", "policy"]
+    : field === "l2" ? ["enabled", "clustersVersion"] : ["enabled"];
   for (const key of keys) {
     if (!allowed.includes(key)) {
       fail("INVALID_INPUT", `settings.${field} has unknown property "${key}"`, { field, key });
@@ -149,6 +156,16 @@ function validateModuleSwitch(value, field) {
       result.policy = normalizeForgetPolicy(value.policy ?? {});
     } catch (error) {
       fail("INVALID_INPUT", `settings.forgetting.policy invalid: ${error instanceof Error ? error.message : String(error)}`, {});
+    }
+  }
+  if (field === "l2") {
+    const version = value.clustersVersion;
+    if (version === undefined) {
+      result.clustersVersion = 1;
+    } else if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
+      fail("INVALID_INPUT", `settings.l2.clustersVersion must be a natural number >= 1, got ${JSON.stringify(version)}`, {});
+    } else {
+      result.clustersVersion = version;
     }
   }
   return result;

@@ -190,7 +190,10 @@ test("inert：shadow 且无 root → needs-configuration；getStatus 可用，�
   await controller.stop();
 });
 
-test("active start 注册 17 工具 + 2 section + waterfall；工具输出 schema 覆盖真实成功分支（无空闭合 schema）", async (t) => {
+// 规格连带：工具面 17→19（0.5-5C 新增 spark_link/spark_unlink；白名单批复
+// wlreq-5b550817a9bf386d 边界 ②）——本用例的工具面计数断言与用例名同步 17→19，
+// 其余断言原样不动。
+test("active start 注册 19 工具 + 2 section + waterfall；工具输出 schema 覆盖真实成功分支（无空闭合 schema）", async (t) => {
   const roots = await tempRoots();
   t.after(roots.cleanup);
   const bindings = fakeBindingsFactory();
@@ -198,10 +201,10 @@ test("active start 注册 17 工具 + 2 section + waterfall；工具输出 schem
   const started = await controller.start();
   assert.deepEqual([...bindings.registered.sections].sort(), ["shiori:core", "shiori:persona"]);
   assert.equal(bindings.registered.waterfall !== null, true);
-  assert.equal(bindings.registered.tools.length, 17);
-  assert.deepEqual(started.tools.length, 17);
-  // 17 工具名与契约清单逐一对齐；每个都有非空 output schema 且非空闭合对象。
-  assert.deepEqual(TOOL_NAMES.length, 17);
+  assert.equal(bindings.registered.tools.length, 19); // 规格连带：工具面 17→19
+  assert.deepEqual(started.tools.length, 19); // 规格连带：工具面 17→19
+  // 19 工具名与契约清单逐一对齐；每个都有非空 output schema 且非空闭合对象。
+  assert.deepEqual(TOOL_NAMES.length, 19); // 规格连带：工具面 17→19
   for (const name of bindings.registered.tools) {
     assert.ok(TOOL_NAMES.includes(name), `unexpected tool ${name}`);
     const schema = TOOL_OUTPUT_SCHEMAS[name];
@@ -414,7 +417,7 @@ test("B2 宿主 complete section：启动探测命中 → 不注册 L0/L1 sectio
   const started = await controller.start();
   assert.deepEqual(started.sections, []); // 不注册（注册也会被宿主快照回填丢弃）
   assert.equal(started.l0l1Effective, false);
-  assert.equal(started.tools.length, 17); // 工具与 L2 不受影响
+  assert.equal(started.tools.length, 19); // 工具与 L2 不受影响（规格连带：工具面 17→19）
   const d = controller.diagnostics();
   assert.equal(d.completeShadowed.length, 1);
   assert.equal(d.completeShadowed[0].name, "deployment:persona-prefix");
@@ -700,7 +703,7 @@ test("P-C typert 注册失败不阻断启动：无 typert 注册面 → 回退 S
   // fakeCtx 无 typert 注册面 → registerShioriTypert 回退 SRC。
   const controller = await createShioriPluginController(fakeCtx(), activeSettings(roots), { bindings });
   const started = await controller.start();
-  assert.equal(started.tools.length, 17);
+  assert.equal(started.tools.length, 19); // 规格连带：工具面 17→19
   const d = controller.diagnostics();
   assert.equal(d.typertRpc.codec, "src");
   assert.match(d.typertRpc.reason, /typert registry unavailable/);
@@ -839,7 +842,7 @@ test("S3 active start：scope 的 groups.json 按默认模板初始化（单组 
   const bindings = fakeBindingsFactory();
   const controller = await createShioriPluginController(fakeCtx(), activeSettings(roots), { bindings });
   const started = await controller.start();
-  assert.ok(started.tools.includes("group_manage"), "group_manage 在第 17 工具面");
+  assert.ok(started.tools.includes("group_manage"), "group_manage 在 19 工具面"); // 规格连带：工具面 17→19
   const groupsFile = path.join(roots.dataRoot, "scopes", "amber", "groups.json");
   await access(groupsFile); // active 启动即初始化（缺文件才写）
   const data = JSON.parse(await import("node:fs/promises").then((m) => m.readFile(groupsFile, "utf8")));

@@ -666,7 +666,8 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
 
 /**
  * P5 topic_create 工具（独立工厂：保持既有 createCompatTools 恒为 9 个兼容工具，
- * controller 负责把 topic_create、group_manage 与 6 个 Spark 工具一起追加成 17 工具全集）。
+ * controller 负责把 topic_create、group_manage 与 8 个 Spark 工具一起追加成 19 工具全集
+ * ——0.5-5C 起 Spark 含 spark_link / spark_unlink，工具面 17→19）。
  * 创建走 service.mutate（kind:topic + expectedRevision null）：派生目录 / 索引
  * 增长 / 完整 L1 预算由底层 policy 在候选快照上统一裁决，绝不绕 policy 直接 fs 写。
  *
@@ -786,7 +787,7 @@ function noteMigrationTookEffect(error, { key, migrateTo, retried }) {
 }
 
 /**
- * S3 group_manage 工具（第 17 个宿主工具，agent 可调；action=list/create/update/delete，
+ * S3 group_manage 工具（agent 可调；action=list/create/update/delete，
  * 0.4 收尾新增 action=repair：清理 list 里 dangling 字段报出的悬空组引用）。
  * 组清单文件 I/O 复用 src/storage/groups.mjs（P1#7 解环后 groups.json 读写 / CAS
  * 住 storage 层），迁移计划等纯逻辑来自 src/core/groups.mjs；topic 文件的组迁移

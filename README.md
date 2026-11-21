@@ -43,16 +43,16 @@ dsh plugin --profile web add dsh-shiori
 ## 核心保障
 
 - **Web 原生管理面板**：插件详情页内建 **状态 / 最近变更 / 记忆 L0·L1 / Spark 力导向图谱 / 整理与遗忘 / L3 主题 / 闪回命中 / 预算** 八个标签页，可视化编辑卡片连线、预览整理计划。
-- **17 个模型侧工具**：涵盖人设读写、L1 核心改写、L3 专题分组/检索与追加、L2 卡片增删改与图谱读取，均由模型自主调用。
+- **19 个模型侧工具**：涵盖人设读写、L1 核心改写、L3 专题分组/检索与追加、L2 卡片增删改、单条连线管理与图谱读取，均由模型自主调用。
 - **数据不丢、不乱覆盖**：全明文落盘在包外目录，卸载不删数据；写操作强制带 `operationId`（幂等重试）与 `CAS revision`（防并发覆盖）；多进程抢同一目录时自动单写者锁降级只读；「遗忘」只归档不物理删除。
 
 ## 文档导航
 
 | 想看什么 | 去哪里 |
 | --- | --- |
-| **AI Agent 专属速查（17 个工具调用规范、Scope 规则、测试命令与代码红线）** | **[AGENTS.md](AGENTS.md)** |
+| **AI Agent 专属速查（19 个工具调用规范、Scope 规则、测试命令与代码红线）** | **[AGENTS.md](AGENTS.md)** |
 | 开发者架构设计、双根磁盘布局、参数与错误码全量字典 | **[DESIGN.md](DESIGN.md)** |
-| 完整配置项、面板 8 个 Tab 详解、17 个工具签名、常见报错排查 | **[docs/USAGE-GUIDE.md](docs/USAGE-GUIDE.md)** |
+| 完整配置项、面板 8 个 Tab 详解、19 个工具签名、常见报错排查 | **[docs/USAGE-GUIDE.md](docs/USAGE-GUIDE.md)** |
 | 安装、首次配置、升级与卸载步骤 | **[docs/plugin/INSTALL.md](docs/plugin/INSTALL.md)** |
 | 面板 RPC 通道、授权边界与宿主降级行为 | **[docs/plugin/client.md](docs/plugin/client.md)** |
 | 历史版本发布说明与变更记录 | **[docs/releases/README.md](docs/releases/README.md)** |

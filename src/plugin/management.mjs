@@ -792,6 +792,16 @@ export function createManagement(deps) {
       const resources = await resourcesFor(scope.scopeId, sessionEvidenceFromRpc(trustedContext).agent);
       const records = await resources.sparkStore.listActive();
       const { projectGraph, clusterProjection, normalizeGraphRecords } = await import("../sparks/graph.mjs");
+      // 0.5-5C：实体归一别名表（dataRoot/aliases.json）与人工分簇覆盖 sidecar
+      // （dataRoot/spark-clusters.json）。两者都是可选辅助配置：缺失/损坏由 loader
+      // 降级为空表并留 error（本处不外泄——sidecar 语义就是「尽力覆盖」，绝不
+      // 让手写配置把图谱打挂）。数据根缺省（直构/inert 不可能到这，防御性兜底）。
+      const { loadAliasTable, loadClusterOverrides } = await import("../sparks/aliases.mjs");
+      const dataRootForSidecar = typeof settings.dataRoot === "string" ? settings.dataRoot : null;
+      const [aliasTable, clusterSidecar] = await Promise.all([
+        loadAliasTable(dataRootForSidecar),
+        loadClusterOverrides(dataRootForSidecar, scope.scopeId),
+      ]);
       const normalized = normalizeGraphRecords(records);
       // F2 闪回命中可见性：投影节点只带 id/title/summary/vitality/revision，
       // 投递统计（hitCount/lastHitAt）与存续起点（createdAt）按 id 从卡片记录补回。
@@ -862,6 +872,10 @@ export function createManagement(deps) {
                 ? committedMap[entry.deliveryId].committedAt
                 : (typeof entry.createdAt === "string" ? entry.createdAt : "")),
             sessionId: typeof entry.session === "string" ? entry.session : "",
+            // 0.5-5C：投递触发消息的稳定 id（controller.recordPending 写入的
+            // sourceMessageId；§11.5 turnRef 投影）。旧账本记录可能没有该字段
+            // ——缺省 null，绝不因旧记录崩。
+            sourceMessageId: typeof entry.sourceMessageId === "string" ? entry.sourceMessageId : null,
             cards: delivered.map((d) => {
               const m = typeof d?.id === "string" && meta[d.id] !== null && typeof meta[d.id] === "object" ? meta[d.id] : {};
               return {
@@ -900,7 +914,13 @@ export function createManagement(deps) {
         // 保证 {level:1, cluster:"任意"} 一定返回 clusters/total 齐全的 level=1 形状）。
         // level=2 没带 cluster：不崩，按未知簇退化为空视图（key 为空串必不命中）。
         const cluster = payload.level === 2 ? (payload.cluster ?? "") : undefined;
-        const projection = clusterProjection({ scopeId: scope.scopeId, records: normalized, cluster });
+        const projection = clusterProjection({
+          scopeId: scope.scopeId,
+          records: normalized,
+          cluster,
+          aliases: aliasTable.table,
+          clusterOverrides: clusterSidecar.overrides,
+        });
         if (payload.level === 1) {
           return {
             scope: scope.scopeId,
@@ -921,7 +941,7 @@ export function createManagement(deps) {
           deliveryStats,
         };
       }
-      const projection = projectGraph({ scopeId: scope.scopeId, records: normalized });
+      const projection = projectGraph({ scopeId: scope.scopeId, records: normalized, aliases: aliasTable.table });
       return {
         scope: scope.scopeId,
         nodes: projection.nodes.map(nodeOut),

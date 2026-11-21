@@ -139,6 +139,82 @@ function makeFakeStore({ scopeId = SCOPE, leaky = false } = {}) {
       });
     },
 
+    // 0.5-5C：spark_link / spark_unlink 存储原语的最小语义（幂等、CAS、单边增删）。
+    async link(id, options = {}) {
+      calls.push({ method: "link", id, options: { ...options } });
+      return applyIdempotency("link", { id, options }, () => {
+        const record = findOwn(id);
+        if (!record) {
+          const error = new Error(`no spark ${id} in scope`);
+          error.code = "NOT_FOUND";
+          throw error;
+        }
+        if (options.expectedRevision !== undefined && options.expectedRevision !== record.revision) {
+          const error = new Error("revision conflict");
+          error.code = "REVISION_CONFLICT";
+          throw error;
+        }
+        const target = options.target;
+        const rel = options.rel ?? "related";
+        if (typeof target !== "string" || target.length === 0 || target === id) {
+          const error = new Error("invalid link target");
+          error.code = "INVALID_INPUT";
+          throw error;
+        }
+        if (!findOwn(target)) {
+          const error = new Error(`no spark ${target} in scope`);
+          error.code = "INVALID_INPUT";
+          throw error;
+        }
+        if (findOwn(target).state !== "active") {
+          const error = new Error(`target ${target} is not active`);
+          error.code = "INVALID_INPUT";
+          throw error;
+        }
+        if (record.links.some((l) => l.target === target && l.rel === rel)) {
+          return { card: { ...record }, changed: false };
+        }
+        record.links = [...record.links, { target, rel }];
+        record.revision += 1;
+        return { card: { ...record }, changed: true };
+      });
+    },
+
+    async unlink(id, options = {}) {
+      calls.push({ method: "unlink", id, options: { ...options } });
+      return applyIdempotency("unlink", { id, options }, () => {
+        const record = findOwn(id);
+        if (!record) {
+          const error = new Error(`no spark ${id} in scope`);
+          error.code = "NOT_FOUND";
+          throw error;
+        }
+        if (options.expectedRevision !== undefined && options.expectedRevision !== record.revision) {
+          const error = new Error("revision conflict");
+          error.code = "REVISION_CONFLICT";
+          throw error;
+        }
+        const target = options.target;
+        const rel = options.rel ?? "related";
+        if (typeof rel === "string" && rel.startsWith("auto:")) {
+          const error = new Error("auto: prefix is reserved");
+          error.code = "INVALID_INPUT";
+          throw error;
+        }
+        if (typeof target !== "string" || target.length === 0) {
+          const error = new Error("invalid link target");
+          error.code = "INVALID_INPUT";
+          throw error;
+        }
+        if (!record.links.some((l) => l.target === target && l.rel === rel)) {
+          return { card: { ...record }, changed: false };
+        }
+        record.links = record.links.filter((l) => !(l.target === target && l.rel === rel));
+        record.revision += 1;
+        return { card: { ...record }, changed: true };
+      });
+    },
+
     async graph() {
       calls.push({ method: "graph" });
       // leaky：全库原样返回（异 scope / archived / superseded 混入），门面必须过滤。
@@ -190,11 +266,13 @@ test("factory rejects invalid scopeId / store shape", async () => {
   await rejectsCode(() => createSparkTools({ scopeId: SCOPE, store: noListActive }), "INVALID_INPUT");
 });
 
-test("exposes six L2 tools; list() carries no execute functions", () => {
+test("exposes eight L2 tools; list() carries no execute functions", () => {
   const { facade } = tools();
   assert.deepEqual(facade.names,
-    ["spark_save", "spark_read", "spark_update", "spark_forget", "spark_feedback", "spark_graph"]);
-  assert.equal(facade.tools.length, 6);
+    ["spark_save", "spark_read", "spark_update", "spark_forget", "spark_feedback", "spark_link", "spark_unlink", "spark_graph"]);
+  // 规格连带：工具面 17→19（0.5-5C spark_link/spark_unlink；spark 门面 6→8，
+  // 与宿主工具面计数同源）。
+  assert.equal(facade.tools.length, 8);
   for (const descriptor of facade.list()) {
     assert.equal(typeof descriptor.name, "string");
     assert.equal(typeof descriptor.description, "string");
@@ -680,4 +758,131 @@ test(`G×I integration with real openSparkStore [${realG?.source ?? "unavailable
   assert.equal(g3.summary.edges, 0, "its edge must leave too");
 
   assert.equal(graphCalled, 0, "facade must never call store.graph()");
+});
+
+// ── 0.5-5C：spark_link / spark_unlink（人工边单条增删，幂等）────────────────
+
+test("spark_link adds one manual edge with default rel; replaying is an idempotent no-op", async () => {
+  const { facade, store } = tools();
+  const a = await facade.execute("spark_save", { ...VALID_SAVE, operationId: "link-save-a" });
+  const b = await facade.execute("spark_save", { ...VALID_SAVE, title: "梗二", triggers: ["梗二"], operationId: "link-save-b" });
+
+  const linked = await facade.execute("spark_link", { id: a.id, target: b.id, operationId: "link-1" });
+  assert.equal(linked.ok, true);
+  assert.equal(linked.tool, "spark_link");
+  assert.equal(linked.id, a.id);
+  assert.equal(linked.target, b.id);
+  assert.equal(linked.rel, "related");
+  assert.equal(linked.changed, true);
+  assert.equal(linked.revision, 2, "content mutation bumps revision once");
+
+  // 幂等：同 (target, rel) 再连 → 成功回执、零变化、revision 不动
+  const replay = await facade.execute("spark_link", { id: a.id, target: b.id, operationId: "link-2" });
+  assert.equal(replay.ok, true);
+  assert.equal(replay.changed, false);
+  assert.equal(replay.revision, 2, "idempotent replay must not bump revision");
+
+  // 显式 rel 与缺省 rel 是两条不同的边
+  const custom = await facade.execute("spark_link", { id: a.id, target: b.id, rel: "explains", operationId: "link-3" });
+  assert.equal(custom.changed, true);
+  assert.equal(custom.rel, "explains");
+  const readBack = await facade.execute("spark_read", { id: a.id });
+  assert.deepEqual(readBack.links, [
+    { target: b.id, rel: "related" },
+    { target: b.id, rel: "explains" },
+  ]);
+  assert.equal(store.calls.filter((c) => c.method === "link").length, 3);
+});
+
+test("spark_unlink removes exactly one edge and mirrors spark_link's default rel", async () => {
+  const { facade } = tools();
+  const a = await facade.execute("spark_save", { ...VALID_SAVE, operationId: "ul-save-a" });
+  const b = await facade.execute("spark_save", { ...VALID_SAVE, title: "梗二", triggers: ["梗二"], operationId: "ul-save-b" });
+  await facade.execute("spark_link", { id: a.id, target: b.id, operationId: "ul-1" });
+  await facade.execute("spark_link", { id: a.id, target: b.id, rel: "explains", operationId: "ul-2" });
+
+  // rel 缺省 = related（与 spark_link 缺省对称，互为逆操作）；只摘掉这一条
+  const removed = await facade.execute("spark_unlink", { id: a.id, target: b.id, operationId: "ul-3" });
+  assert.equal(removed.ok, true);
+  assert.equal(removed.tool, "spark_unlink");
+  assert.equal(removed.changed, true);
+  assert.equal(removed.rel, "related");
+  const afterOne = await facade.execute("spark_read", { id: a.id });
+  assert.deepEqual(afterOne.links, [{ target: b.id, rel: "explains" }]);
+
+  // 幂等：摘除不存在的边 → 成功、零变化、revision 不动
+  const again = await facade.execute("spark_unlink", { id: a.id, target: b.id, operationId: "ul-4" });
+  assert.equal(again.ok, true);
+  assert.equal(again.changed, false);
+  const readBack = await facade.execute("spark_read", { id: a.id });
+  assert.equal(readBack.revision, again.revision, "idempotent unlink must not bump revision");
+
+  // 显式 rel 摘除最后一条
+  const removedCustom = await facade.execute("spark_unlink", { id: a.id, target: b.id, rel: "explains", operationId: "ul-5" });
+  assert.equal(removedCustom.changed, true);
+  const empty = await facade.execute("spark_read", { id: a.id });
+  assert.deepEqual(empty.links, []);
+});
+
+test("spark_link/spark_unlink reject auto: prefix, self-links and unknown targets", async () => {
+  const { facade } = tools();
+  const a = await facade.execute("spark_save", { ...VALID_SAVE, operationId: "rej-save-a" });
+  const b = await facade.execute("spark_save", { ...VALID_SAVE, title: "梗二", triggers: ["梗二"], operationId: "rej-save-b" });
+
+  // auto: 前缀是系统保留命名空间（人工边与自动边分开管理）
+  await rejectsCode(() => facade.execute("spark_link", { id: a.id, target: b.id, rel: "auto:similar" }), "INVALID_INPUT");
+  await rejectsCode(() => facade.execute("spark_unlink", { id: a.id, target: b.id, rel: "auto:similar" }), "INVALID_INPUT");
+  // 自环 / 未知目标 / 目标已归档
+  await rejectsCode(() => facade.execute("spark_link", { id: a.id, target: a.id }), "INVALID_INPUT");
+  await rejectsCode(() => facade.execute("spark_link", { id: a.id, target: "spark-ghost" }), "INVALID_INPUT");
+  await facade.execute("spark_forget", { id: b.id, mode: "archive", operationId: "rej-forget-b" });
+  await rejectsCode(() => facade.execute("spark_link", { id: a.id, target: b.id }), "INVALID_INPUT");
+});
+
+test("spark_save/spark_update forward autoLinker candidates in the same mutate; skip (null) passes nothing", async () => {
+  const candidates = [{ target: "spark-1", rel: "auto:similar", score: 0.86 }];
+  const linkerCalls = [];
+  const autoLinker = async (input) => {
+    linkerCalls.push(input);
+    return candidates;
+  };
+  const { facade, store } = tools();
+  const facadeWithLinker = createSparkTools({ scopeId: SCOPE, store, autoLinker });
+
+  const saved = await facadeWithLinker.execute("spark_save", { ...VALID_SAVE, operationId: "al-1" });
+  assert.equal(saved.ok, true);
+  const saveCall = store.calls.find((c) => c.method === "save");
+  assert.deepEqual(saveCall.options.autoLinks, candidates, "candidates ride the same mutate via opts.autoLinks");
+  assert.equal(linkerCalls.length, 1);
+  assert.equal(linkerCalls[0].excludeId, null, "save excludes nothing (new card)");
+
+  const updated = await facadeWithLinker.execute("spark_update", { id: saved.id, patch: { content: "改后正文" }, operationId: "al-2" });
+  assert.equal(updated.ok, true);
+  const updateCall = store.calls.find((c) => c.method === "update");
+  assert.deepEqual(updateCall.options.autoLinks, candidates);
+  assert.equal(linkerCalls[1].excludeId, saved.id, "update excludes self from candidates");
+
+  // 跳过（linker 返回 null / 不注入 linker）→ 不传 autoLinks，store 语义与 0.4 一致
+  const nullLinker = async () => null;
+  const facadeNull = createSparkTools({ scopeId: SCOPE, store, autoLinker: nullLinker });
+  await facadeNull.execute("spark_save", { ...VALID_SAVE, title: "跳过卡", triggers: ["跳过"], operationId: "al-3" });
+  const skipCall = store.calls.filter((c) => c.method === "save").pop();
+  assert.equal(Object.hasOwn(skipCall.options, "autoLinks"), false, "skip must not pass autoLinks");
+  const plain = await facade.execute("spark_save", { ...VALID_SAVE, title: "无linker卡", triggers: ["无linker"], operationId: "al-4" });
+  assert.equal(plain.ok, true);
+  const plainCall = store.calls.filter((c) => c.method === "save").pop();
+  assert.equal(Object.hasOwn(plainCall.options, "autoLinks"), false, "no linker = 0.4-identical behavior");
+});
+
+test("autoLinker failures never fail the save (linker throw and non-array are both skipped)", async () => {
+  const store = makeFakeStore();
+  const throwing = createSparkTools({ scopeId: SCOPE, store, autoLinker: async () => { throw new Error("provider exploded"); } });
+  const saved = await throwing.execute("spark_save", { ...VALID_SAVE, operationId: "boom-1" });
+  assert.equal(saved.ok, true, "auto-link failure must not fail the save");
+
+  const lying = createSparkTools({ scopeId: SCOPE, store, autoLinker: async () => "not-an-array" });
+  const saved2 = await lying.execute("spark_save", { ...VALID_SAVE, title: "说谎卡", triggers: ["说谎"], operationId: "boom-2" });
+  assert.equal(saved2.ok, true);
+  const call = store.calls.filter((c) => c.method === "save").pop();
+  assert.equal(Object.hasOwn(call.options, "autoLinks"), false);
 });

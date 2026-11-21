@@ -101,8 +101,10 @@ test("真实宿主：preset-minimal 的 complete persona 不误杀 L0/L1，globa
       assert.equal(started.completeProbe, "none");
       assert.deepEqual(started.completeShadowed, []);
       assert.equal(started.l0l1Effective, true);
-      assert.equal(started.tools.length, 17);
-      assert.equal(registeredTools.length, 17);
+      // 规格连带：工具面 17→19（0.5-5C spark_link/spark_unlink；白名单批复
+      // wlreq-5b550817a9bf386d 边界 ②）。
+      assert.equal(started.tools.length, 19);
+      assert.equal(registeredTools.length, 19);
 
       // 1) global 装配（无 scope）：人设卡与 core 的真实文本必须出现在系统提示里。
       const globalAssembly = await root.systemPrompt.assemble({ agent: { session: { id: "s-real-global" } } });
