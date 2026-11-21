@@ -340,7 +340,7 @@ test("core 正文自带派生索引一律拒绝：core_write / memory_rewrite / 
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createGroupManageTool, createTopicCreateTool } from "../../src/host/tools.mjs";
+import { createGroupManageTool, createTopicCreateTool, createCompatTools } from "../../src/host/tools.mjs";
 import { ensureGroupsFile, writeGroups } from "../../src/storage/groups.mjs";
 import { groupsFilePath } from "../../src/storage/paths.mjs";
 import { withLock } from "../../src/storage/lockfile.mjs";
@@ -707,4 +707,236 @@ test("S3 group_manage delete + migrateTo：窗口内目标组被删（重试预�
   assert.deepEqual((await service.readTopic("proj-x")).group, ["project"], "迁移已生效");
   const raw = JSON.parse(await fsp.readFile(file, "utf8"));
   assert.ok(raw.groups.some((g) => g.key === "dev"), "dev 条目未删（整体失败）");
+});
+
+// ---------------------------------------------------------------------------
+// 0.5-2B：memory_read 组目录读法（R1）+ topic-activity 事件入账（R3）。
+// 组目录走真实 groups.json（临时 root）+ createCompatTools 直配——controller 是
+// 生产接线点；host bridge 旧路径（src/host/index.mjs）不带 dataRoot 时按设计
+// 降级为 0.4 行为，此处不经过 bridge。事件入账用记录器桩（真实账本的落盘/
+// 原子/坏行语义由 test/storage/topic-activity.test.mjs 覆盖）。
+// ---------------------------------------------------------------------------
+
+/** fake service 对齐真实语义：缺 topic 抛 NOT_FOUND（真实 store 语义；组目录分支挂在这条路径上）。 */
+function notFoundAlignedService(initial = {}) {
+  const base = createFakeService(initial);
+  return {
+    ...base,
+    async readTopic(key) {
+      try {
+        return await base.readTopic(key);
+      } catch {
+        const error = new Error(`topic "${key}" does not exist`);
+        error.code = "NOT_FOUND";
+        throw error;
+      }
+    },
+  };
+}
+
+/** R3 事件记录器：按序记录入账事件（工具层只关心「记了什么」，落盘语义归 storage 测试）。 */
+function activityRecorder() {
+  const events = [];
+  return {
+    events,
+    append(event) {
+      events.push({ ...event });
+      return Promise.resolve({ ok: true });
+    },
+  };
+}
+
+async function makeReadFixture(t, { topics } = {}) {
+  const base = await fsp.mkdtemp(path.join(os.tmpdir(), "shiori-05b-groupread-"));
+  t.after(async () => {
+    await fsp.rm(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {});
+  });
+  await writeGroups({ dataRoot: base, scopeId: "amber", groups: FOUR_GROUPS, expectedRevision: null });
+  const service = notFoundAlignedService({ scopeId: "amber", topics: topics ?? [] });
+  const activity = activityRecorder();
+  const tools = createCompatTools({
+    service,
+    getSessionInfo: () => ({ sessionId: null, scopeId: "amber" }),
+    dataRoot: base,
+    activity,
+  });
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+  return {
+    base,
+    service,
+    activity,
+    read: byName.get("memory_read"),
+    search: byName.get("memory_search"),
+    appendTool: byName.get("memory_append"),
+    rewrite: byName.get("memory_rewrite"),
+  };
+}
+
+test("0.5-2B 组目录：成员齐全（主组+多组挂载都算成员）、七字段目录、绝不含正文", async (t) => {
+  const { read, activity } = await makeReadFixture(t, {
+    topics: [
+      { key: "proj-x", title: "项目X", summary: "排障手册", body: "# 项目X\n机密正文内容", group: ["dev"] },
+      { key: "build", title: "构建流水", summary: "CI 与脚本", body: "构建正文", group: ["dev", "life"] },
+      { key: "diary", title: "日记", summary: "生活记录", body: "日记正文", group: ["life"] },
+    ],
+  });
+  const out = await read.execute({ topic: "dev" });
+  assert.equal(out.exists, true);
+  assert.equal(out.kind, "group", "判别字段 kind=group");
+  assert.equal(out.topic, "dev");
+  assert.equal(out.groupTitle, "开发与配置");
+  assert.equal(out.groupSummary, "DSH / 插件 / 发版 / 沙箱");
+  assert.equal(out.content, "", "组目录绝不含正文（content 恒空串）");
+  assert.equal(out.bytes, 0);
+  assert.equal(out.truncated, false);
+  assert.deepEqual(out.members.map((m) => m.key), ["proj-x", "build"], "主组挂载 + 多组挂载都算成员");
+  for (const member of out.members) {
+    assert.deepEqual(
+      Object.keys(member).sort(),
+      ["archived", "chars", "key", "retention", "summary", "title", "updated"],
+      "成员条目恰好七个字段（key/title/summary/retention/archived/updated/chars）",
+    );
+    assert.ok(!("body" in member) && !("content" in member), "成员条目绝无正文字段");
+    assert.equal(member.archived, false);
+    assert.equal(member.retention, "standing", "A 线字段未落地时按方案缺省口径补齐");
+    assert.ok(typeof member.chars === "number" && member.chars > 0, "chars 是正数（正文体积计数）");
+  }
+  assert.equal(out.members[0].title, "项目X");
+  assert.equal(out.members[0].summary, "排障手册");
+  // R3：组目录读取入账 group_list（不记 read）。
+  assert.deepEqual(activity.events, [{ kind: "group_list", scopeId: "amber", groupKey: "dev" }]);
+});
+
+test("0.5-2B 同名冲突：topic 优先（正文语义不变），附 note 说明同名组，且不产生 group_list 事件", async (t) => {
+  const { read, activity } = await makeReadFixture(t, {
+    topics: [{ key: "dev", title: "同名专题", summary: "与组同名的 topic", body: "topic 正文内容" }],
+  });
+  const out = await read.execute({ topic: "dev" });
+  assert.equal(out.kind, undefined, "topic 读分支不带 kind 判别字段");
+  assert.equal(out.content, "topic 正文内容", "正文读取语义不变");
+  assert.equal(out.topic, "dev");
+  assert.match(out.note, /同名组/, "同名冲突必须附 note");
+  assert.match(out.note, /group_manage/, "note 指路组清单工具");
+  assert.deepEqual(activity.events, [{ kind: "read", scopeId: "amber", topicKey: "dev" }],
+    "同名冲突走 topic 正文语义：记 read、不记 group_list");
+});
+
+test("0.5-2B 未知 key：NOT_FOUND 原样保留 code，提示 memory_list_topics；失败调用不入账", async (t) => {
+  const { read, activity } = await makeReadFixture(t, {
+    topics: [{ key: "proj-x", title: "项目X", summary: "排障手册", body: "正文", group: ["dev"] }],
+  });
+  await assert.rejects(
+    () => read.execute({ topic: "ghost" }),
+    (e) => {
+      assert.equal(e.code, "NOT_FOUND", "code 原样保留");
+      assert.match(e.message, /memory_list_topics/);
+      assert.match(e.message, /组 key/, "文案同时说明组目录读法");
+      return true;
+    },
+  );
+  assert.deepEqual(activity.events, [], "未知 key 是失败调用：不入任何账");
+});
+
+test("0.5-2B 降级：dataRoot 未注入时组 key 报 NOT_FOUND（0.4 行为不变），topic 正文读不受影响", async (t) => {
+  const service = notFoundAlignedService({
+    scopeId: "amber",
+    topics: [{ key: "proj-x", title: "项目X", summary: "排障手册", body: "正文", group: ["dev"] }],
+  });
+  const activity = activityRecorder();
+  const tools = createCompatTools({
+    service,
+    getSessionInfo: () => ({ sessionId: null, scopeId: "amber" }),
+    activity, // 账本可用但 dataRoot 缺席：组目录特性停用，入账照常
+  });
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+  await assert.rejects(
+    () => byName.get("memory_read").execute({ topic: "dev" }),
+    (e) => e.code === "NOT_FOUND" && /memory_list_topics/.test(e.message),
+  );
+  const out = await byName.get("memory_read").execute({ topic: "proj-x" });
+  assert.equal(out.content, "正文");
+  assert.equal(out.note, undefined, "无组清单可查时不臆造同名组提示");
+  assert.deepEqual(activity.events, [{ kind: "read", scopeId: "amber", topicKey: "proj-x" }],
+    "未知 key 不入账，topic 正文读取记 read");
+});
+
+test("0.5-2B R3：memory_search 每个最终命中入账一条 search_hit（scopeId 取命中条目，缺省回落当前 scope）", async (t) => {
+  const { search, activity, service } = await makeReadFixture(t, {
+    topics: [
+      { key: "alpha", title: "Alpha", summary: "关于 alpha 的专题", body: "正文", group: [] },
+      { key: "beta", title: "Beta", summary: "无关专题", body: "正文", group: [] },
+    ],
+  });
+  const out = await search.execute({ query: "alpha" });
+  assert.equal(out.matches.length, 1);
+  assert.deepEqual(activity.events, [{ kind: "search_hit", scopeId: "amber", topicKey: "alpha" }]);
+
+  // fake service 缺 scopeId 的命中条目：回落当前 scope（绝不漏记）。
+  service.search = async () => [{ key: "no-scope", title: "无 scope 命中", summary: "s", score: 1 }];
+  await search.execute({ query: "s" });
+  assert.deepEqual(activity.events.at(-1), { kind: "search_hit", scopeId: "amber", topicKey: "no-scope" });
+
+  // limit 截断：只有最终返回的命中入账（limit=1 只记第一条）。
+  service.search = async () => [
+    { key: "one", title: "一", summary: "命中一", scopeId: "amber", score: 3 },
+    { key: "two", title: "二", summary: "命中二", scopeId: "amber", score: 2 },
+  ];
+  await search.execute({ query: "命中", limit: 1 });
+  assert.deepEqual(activity.events.at(-1), { kind: "search_hit", scopeId: "amber", topicKey: "one" });
+});
+
+test("0.5-2B R3：memory_append / memory_rewrite 成功入账 updated（core 分支无 topicKey）；CAS 冲突失败不入账", async (t) => {
+  const { appendTool, rewrite, activity, service } = await makeReadFixture(t, {
+    topics: [{ key: "proj-x", title: "项目X", summary: "排障手册", body: "正文", group: ["dev"] }],
+  });
+  await appendTool.execute({ section: "core 段", content: "core 追加" });
+  assert.deepEqual(activity.events.at(-1), { kind: "updated", scopeId: "amber" },
+    "core 分支 updated 不带 topicKey");
+  await appendTool.execute({ section: "topic 段", content: "topic 追加", topic: "proj-x" });
+  assert.deepEqual(activity.events.at(-1), { kind: "updated", scopeId: "amber", topicKey: "proj-x" });
+  await rewrite.execute({ content: "重写正文", topic: "proj-x" });
+  assert.deepEqual(activity.events.at(-1), { kind: "updated", scopeId: "amber", topicKey: "proj-x" });
+  const before = activity.events.length;
+
+  // CAS 冲突（写失败）：不入账——账本不记未发生的操作。
+  const conflicting = {
+    ...service,
+    async mutate() {
+      throw Object.assign(new Error("conflict"), { code: "REVISION_CONFLICT" });
+    },
+  };
+  const byName = new Map(createCompatTools({
+    service: conflicting,
+    getSessionInfo: () => ({ sessionId: null, scopeId: "amber" }),
+    activity,
+  }).map((tool) => [tool.name, tool]));
+  await assert.rejects(
+    () => byName.get("memory_rewrite").execute({ content: "覆盖尝试" }),
+    (e) => e.code === "REVISION_CONFLICT",
+  );
+  assert.equal(activity.events.length, before, "写失败不入账");
+});
+
+test("0.5-2B：账本故障绝不影响工具（append 抛错 / 缺 append 接口 / null 账本照常返回）", async (t) => {
+  const topics = [{ key: "proj-x", title: "项目X", summary: "排障手册", body: "正文", group: ["dev"] }];
+  const make = (activityDeps) => {
+    const service = notFoundAlignedService({ scopeId: "amber", topics });
+    return createCompatTools({
+      service,
+      getSessionInfo: () => ({ sessionId: null, scopeId: "amber" }),
+      ...activityDeps,
+    }).find((tool) => tool.name === "memory_read");
+  };
+  // append 同步抛错：读工具照常返回。
+  const throwing = make({ activity: { append() { throw new Error("boom"); } } });
+  const out1 = await throwing.execute({ topic: "proj-x" });
+  assert.equal(out1.content, "正文");
+  // 缺 append 接口：照常返回（noteActivity 可选链兜底）。
+  const noAppend = make({ activity: {} });
+  const out2 = await noAppend.execute({ topic: "proj-x" });
+  assert.equal(out2.content, "正文");
+  // null 账本：照常返回。
+  const none = make({ activity: null });
+  const out3 = await none.execute({ topic: "proj-x" });
+  assert.equal(out3.content, "正文");
 });

@@ -111,6 +111,21 @@ export function appendBlock(existingText, section, content, date) {
 }
 
 /**
+ * 0.5-2B R3：topic-activity 事件入账（fire-and-forget，绝不阻塞工具返回）。
+ * 账本 append 内部已兜底（永不抛 / 永不 reject，写失败只记账本诊断）；这里再兜
+ * 一层是防调用方注入缺 append 接口的对象。事件在工具成功路径上入账——失败的
+ * 工具调用（校验拒绝 / CAS 冲突）不入账，账本不记未发生的操作。
+ * scopeId 由调用方按 targetScopeId 口径给出（被操作记忆所属 scope），本函数不猜。
+ */
+function noteActivity(activity, event) {
+  try {
+    activity?.append?.(event);
+  } catch {
+    // 双保险：账本故障绝不影响工具语义。
+  }
+}
+
+/**
  * 统一从 mutate 回执构造工具回执。
  * 投影状态恒为 written-pending-projection：已落盘、待投影，绝不提前声称已生效。
  */
@@ -138,8 +153,16 @@ function writeReceipt(mutateResult, scopeFallback) {
  *   缺省时写行为与 0.1 完全一致）。外部写锁持续持有进入只读态后，本工厂的写工具
  *   （soul_update / memory_append / memory_rewrite / core_write / topic_append）
  *   抛 code="HOST_LOCKED"；读工具与 L0/L1 注入不受影响。
+ * @param {string} [deps.dataRoot] 数据根（绝对路径；0.5-2B R1 组目录读法的数据来源，
+ *   groups.json 位于 <dataRoot>/scopes/<scopeId>/）。缺省时组目录特性整体停用，
+ *   memory_read 行为与 0.4 完全一致（controller 是生产接线点；host bridge 旧路径
+ *   未传时按设计降级）。读路径绝不写盘。
+ * @param {object} [deps.activity] 0.5-2B R3 topic-activity 账本
+ *   （createTopicActivityLedger 产物）。缺省时事件入账停用（行为与 0.4 一致）；
+ *   注入后 memory_read / memory_search 的成功读与 memory_append / memory_rewrite
+ *   的成功写在返回后 fire-and-forget 入账，绝不阻塞、绝不影响工具语义。
  */
-export function createCompatTools({ service, getSessionInfo, config, now, readonlyGuard } = {}) {
+export function createCompatTools({ service, getSessionInfo, config, now, readonlyGuard, dataRoot, activity } = {}) {
   if (!service || typeof service.mutate !== "function") {
     throw INVALID_INPUT("service with mutate() is required", {});
   }
@@ -152,6 +175,23 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
   async function scopeIdOf() {
     try {
       return getSessionInfo?.()?.scopeId ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 0.5-2B R1：读当前 scope 组清单（memory_read 组目录分支与同名组 note 共用）。
+   * dataRoot 未注入（host bridge 旧路径 / 嵌入直构）或清单缺失、dataRoot 缺失、
+   * 读取失败（含 LOCK_BUSY / IO_ERROR）时返回 null——组目录与 note 是读路径上的
+   * 增强特性，绝不让既有「topic 正文读取 / NOT_FOUND」语义因组清单不可读而退化
+   * （这是有意的降级口径：memory_read 在 0.4 及以前完全不依赖 groups.json）。
+   */
+  async function readGroupsSafe(scopeId) {
+    if (typeof dataRoot !== "string" || dataRoot.length === 0 || scopeId === null) return null;
+    try {
+      const { revision, data } = await readGroups({ dataRoot, scopeId });
+      return { revision, groups: data.groups };
     } catch {
       return null;
     }
@@ -230,9 +270,12 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
     // ── L1 core 读取 ──────────────────────────────────────────────────────
     {
       name: "memory_read",
-      description: "Read long-term memory. Without arguments returns the complete rendered L1 view (core body + derived topic index). With a topic key returns that topic's full body. Scope is fixed by the host; it cannot be passed.",
+      description: "Read long-term memory. Without arguments returns the complete rendered L1 view (core body + derived topic index). With a topic key returns that topic's full body. With a group key (a key in the current scope's group list that is not a topic) returns the group's member directory: kind='group', one entry per member topic with key/title/summary/retention/archived/updated/chars — never any body text (content is empty; pick a member key and read it separately). If a key matches both a topic and a group, the topic body wins and the response carries a note about the same-named group. An unknown key (neither topic nor group) is NOT_FOUND — use memory_list_topics to see existing topics. Scope is fixed by the host; it cannot be passed.",
       inputSchema: {
-        topic: { type: "string", description: "Optional topic key. Omit or pass core/core.md for the rendered core view (legacy alias)." },
+        topic: {
+          type: "string",
+          description: "Optional key. Omit or pass core/core.md for the rendered core view (legacy alias). Topic key → that topic's full body. Group key (not a topic) → the group's member directory (metadata only, no bodies).",
+        },
       },
       outputSchema: TOOL_OUTPUT_SCHEMAS["memory_read"],
       outputRender: renderToolOutput,
@@ -241,9 +284,13 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
         rejectScope(a);
         const topicArg = optionalString(a, "topic");
         const topic = resolveTopicArg(topicArg); // core / core.md / 空 → core 路径
+        const sessionScope = await scopeIdOf();
         if (topic === null) {
           const view = await service.readCoreView();
           const text = view?.text ?? "";
+          // 0.5-2B R3：core 正文读取入账 read 事件（成功返回后 fire-and-forget）。
+          // core 无 topicKey；scopeId 取 core 视图所属 scope（global 回落时是 global）。
+          noteActivity(activity, { kind: "read", scopeId: view?.scopeId ?? sessionScope });
           return {
             exists: text.length > 0,
             bytes: byteLen(text),
@@ -257,7 +304,64 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
             pinned: false,
           };
         }
-        const t = await service.readTopic(topic);
+        let t = null;
+        try {
+          t = await service.readTopic(topic);
+        } catch (error) {
+          // 非 NOT_FOUND（fake service 的 INVALID_STATE / 其他 IO 失败）原样上抛，
+          // 与 0.4 行为逐字节一致；组目录探测只挂在 NOT_FOUND 路径上。
+          if (error?.code !== "NOT_FOUND") throw error;
+          // 0.5-2B R1 组目录分支：key 不是可见 topic，但可能是当前 scope 的组 key。
+          // 组清单不可读（dataRoot 未注入 / 缺失 / 失败）时 readGroupsSafe 返回 null，
+          // 直接落 NOT_FOUND（组目录特性整体降级，不改变既有语义）。
+          const listing = await readGroupsSafe(sessionScope);
+          const group = listing?.groups.find((g) => g?.key === topic) ?? null;
+          if (group === null) {
+            // 未知 key：NOT_FOUND 原样保留 code，文案补 memory_list_topics 提示。
+            error.message += `（如需查看现有 topic 清单，请使用 memory_list_topics；`
+              + `传组 key 可读组成员目录）`;
+            throw error;
+          }
+          // 成员目录：与 group_manage list 的成员口径一致——当前 scope 可见 topic
+          // 快照按 t.group.includes(组key) 过滤（主组/多组挂载都算成员）。绝不含正文。
+          const topics = await service.listTopics();
+          const members = (Array.isArray(topics) ? topics : [])
+            .filter((x) => Array.isArray(x?.group) && x.group.includes(group.key))
+            .map((x) => ({
+              key: x.key,
+              title: x.title,
+              summary: x.summary,
+              // retention 是 0.5 阶段 A 的 A 线字段（默认 standing）；本线不改数据层，
+              // fake/旧 service 缺该字段时按方案缺省口径补齐，A 线落地后透传真值。
+              retention: x.retention === undefined ? "standing" : x.retention,
+              archived: x.archived === true,
+              updated: x.updated ?? null,
+              chars: (x.body ?? "").length,
+            }));
+          // R3：组目录读取入账 group_list 事件（组清单挂在当前 scope）。
+          noteActivity(activity, { kind: "group_list", scopeId: sessionScope, groupKey: group.key });
+          return {
+            exists: true,
+            kind: "group",
+            bytes: 0,
+            truncated: false,
+            source: sessionScope,
+            topic: group.key,
+            // 组目录绝不含正文：content 恒空串、bytes 恒 0（schema required 字段给
+            // 确定缺省形状，与 core 分支同款口径）。
+            content: "",
+            revision: listing.revision,
+            groupTitle: group.title ?? "",
+            groupSummary: group.summary ?? "",
+            members,
+          };
+        }
+        // topic 正文分支（同名组冲突规则写死：topic 优先，正文读取语义不变）。
+        const sameNameListing = await readGroupsSafe(sessionScope);
+        const sameNameGroup = sameNameListing?.groups.find((g) => g?.key === t.key) ?? null;
+        // R3：topic 正文读取入账 read 事件（scopeId=targetScopeId；global 回落的
+        // topic 归属 global，绝不记成当前活跃 scope）。
+        noteActivity(activity, { kind: "read", scopeId: t.scopeId ?? sessionScope, topicKey: t.key });
         return {
           exists: true,
           bytes: byteLen(t.body ?? ""),
@@ -269,6 +373,12 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
           // S3：分组元数据随读返回（fake/旧 service 缺字段时按缺省口径补齐）。
           group: Array.isArray(t.group) ? t.group : [],
           pinned: t.pinned === true,
+          // 0.5-2B R1 同名组：仅当当前 scope 存在同 key 组时附 note（不改变正文语义）。
+          ...(sameNameGroup !== null ? {
+            note: `同名组提示：当前 scope 存在与 topic "${t.key}" 同名的组；本回执按 topic 正文语义返回`
+              + `（topic 优先于同名组），该组成员目录不可经本工具按此 key 读取，`
+              + `可用 group_manage action=list 查看组清单`,
+          } : {}),
         };
       },
     },
@@ -295,6 +405,7 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
           }
           limit = a.limit;
         }
+        const sessionScope = await scopeIdOf();
         const matches = await service.search(query);
         const result = { matches: Array.isArray(matches) ? matches.slice(0, limit) : [] };
         if (a.includeArchived === true) {
@@ -311,6 +422,16 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
             ...(Array.isArray(archived) ? archived : []).map((m) => ({ score: 0, ...m, state: "archived" })),
           ];
           result.matches = merged.slice(0, limit);
+        }
+        // 0.5-2B R3：每个最终返回给模型的命中入账一条 search_hit（每命中一条一条，
+        // 含归档冷命中——模型确实看到了这些摘要条目）。scopeId 取命中条目的
+        // targetScopeId，fake/旧 service 缺该字段时回落当前 scope。
+        for (const match of result.matches) {
+          noteActivity(activity, {
+            kind: "search_hit",
+            scopeId: match?.scopeId ?? sessionScope,
+            topicKey: match?.key,
+          });
         }
         return result;
       },
@@ -344,7 +465,11 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
             operationId,
             changes: [{ kind: "core", text: candidate, expectedRevision: current.revision }],
           });
-          return writeReceipt(result, current.scopeId);
+          const receipt = writeReceipt(result, current.scopeId);
+          // 0.5-2B R3：成功提交后入账 updated（core 分支无 topicKey；scopeId 取
+          // 提交回执的实际落点 scope——global 回落的写会落在活跃 scope）。
+          noteActivity(activity, { kind: "updated", scopeId: receipt.scope ?? current.scopeId });
+          return receipt;
         }
         const current = await service.readTopic(topic);
         const candidate = appendBlock(current.body ?? "", section, content, clock());
@@ -358,7 +483,10 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
             topic: { title: current.title, summary: current.summary },
           }],
         });
-        return writeReceipt(result, current.scopeId);
+        const receipt = writeReceipt(result, current.scopeId);
+        // 0.5-2B R3：成功提交后入账 updated（scopeId 同上，取提交回执实际落点）。
+        noteActivity(activity, { kind: "updated", scopeId: receipt.scope ?? current.scopeId, topicKey: current.key });
+        return receipt;
       },
     },
     {
@@ -385,7 +513,10 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
             operationId,
             changes: [{ kind: "core", text: content, expectedRevision: current.revision }],
           });
-          return writeReceipt(result, current.scopeId);
+          const receipt = writeReceipt(result, current.scopeId);
+          // 0.5-2B R3：成功提交后入账 updated（core 分支无 topicKey）。
+          noteActivity(activity, { kind: "updated", scopeId: receipt.scope ?? current.scopeId });
+          return receipt;
         }
         const current = await service.readTopic(topic);
         const result = await service.mutate({
@@ -398,7 +529,10 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
             topic: { title: current.title, summary: current.summary },
           }],
         });
-        return writeReceipt(result, current.scopeId);
+        const receipt = writeReceipt(result, current.scopeId);
+        // 0.5-2B R3：成功提交后入账 updated（scopeId 取提交回执实际落点 scope）。
+        noteActivity(activity, { kind: "updated", scopeId: receipt.scope ?? current.scopeId, topicKey: current.key });
+        return receipt;
       },
     },
 
@@ -539,8 +673,10 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
  * @param {() => {sessionId:string|null, scopeId:string|null}} [deps.getSessionInfo]
  * @param {() => Date} [deps.now] 时钟注入
  * @param {object} [deps.readonlyGuard] F7 只读守卫（可选；只读态下 topic_create 抛 HOST_LOCKED）
+ * @param {object} [deps.activity] 0.5-2B R3 topic-activity 账本（可选；成功创建后
+ *   fire-and-forget 入账 updated 事件，绝不阻塞、绝不影响工具语义）
  */
-export function createTopicCreateTool({ service, getSessionInfo, now, readonlyGuard } = {}) {
+export function createTopicCreateTool({ service, getSessionInfo, now, readonlyGuard, activity } = {}) {
   if (!service || typeof service.mutate !== "function") {
     throw INVALID_INPUT("service with mutate() is required", {});
   }
@@ -619,6 +755,8 @@ export function createTopicCreateTool({ service, getSessionInfo, now, readonlyGu
     });
     const receipt = writeReceipt(result, await scopeIdOf());
     const warning = groupSoftLimitWarning({ key: topicArg, group: Array.isArray(group) ? group : [] });
+    // 0.5-2B R3：成功创建后入账 updated（scopeId 取提交回执实际落点 scope）。
+    noteActivity(activity, { kind: "updated", scopeId: receipt.scope ?? (await scopeIdOf()), topicKey: topicArg });
     return {
       ...receipt,
       created: true,

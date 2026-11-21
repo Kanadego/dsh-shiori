@@ -2048,3 +2048,130 @@ test("0.5 启动差集兜底：重启后索引与卡片漂移（过期 revision 
   assert.ok(inc.startupSyncs >= 1, "启动差集轮可观测（诊断可见）");
   await controller2.stop();
 });
+
+// ---------------------------------------------------------------------------
+// 0.5-2B：topic-activity 事件账本接线（R3）——controller 是生产接线点。
+// 用真实 createTopicActivityLedger（真实 stateRoot 落盘）验证：两个 scope 交叉
+// 操作的事件按 targetScopeId 归属；写失败（账本路径被目录占位）只进诊断、工具
+// 照常返回。真实账本的行级语义由 test/storage/topic-activity.test.mjs 覆盖。
+// ---------------------------------------------------------------------------
+
+import { mkdir as actMkdir, stat as actStat } from "node:fs/promises";
+import { readTopicActivity, topicActivityFilePath } from "../../src/storage/topic-activity.mjs";
+
+test("0.5-2B 接线：两个 scope 交叉操作 → 四类事件按 targetScopeId 归属（组目录端到端）", async (t) => {
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  const workspaceDir = path.join(roots.base, "project-bravo");
+  const ctx = {
+    systemPrompt: { section: () => () => {} },
+    tools: { register: () => () => {} },
+    on: () => () => {},
+    // 宿主 workingDirectory 服务（只读 get；s-ws 会话路由到 bravo 卡 scope）。
+    workingDirectory: { get: (session) => (session?.id === "s-ws" ? workspaceDir : path.join(roots.base, "other")) },
+  };
+  const bindings = fakeBindingsFactory();
+  const controller = await createShioriPluginController(ctx, {
+    ...activeSettings(roots),
+    defaultPersona: "amber",
+    workspacePersonas: [{ workspace: workspaceDir, persona: "bravo" }],
+  }, { bindings });
+  await controller.start();
+
+  // 账本诊断可见（stateRoot 已配置 → 账本存在，落点即 <stateRoot>/topic-activity.jsonl）。
+  const d0 = controller.diagnostics();
+  assert.ok(d0.topicActivity !== null && typeof d0.topicActivity.appended === "number");
+  assert.equal(d0.topicActivity.file, topicActivityFilePath(roots.stateRoot));
+
+  const wsContext = { session: { id: "s-ws" }, agent: { session: { id: "s-ws" } }, source: "panel-rpc" };
+  const amberContext = { session: { id: "s-other" }, agent: { session: { id: "s-other" } }, source: "panel-rpc" };
+
+  // 交叉序列（bravo 与 amber 交替操作，事件必须各归各的 targetScopeId）：
+  //  1 bravo topic_create        → updated@bravo
+  //  2 amber memory_read{}       → read@amber（core 无 topicKey）
+  //  3 amber topic_create        → updated@amber
+  //  4 amber memory_search       → search_hit@amber
+  //  5 bravo memory_read         → read@bravo
+  //  6 amber group_manage create → 不在接线清单：零事件
+  //  7 amber topic_create(group) → updated@amber
+  //  8 amber memory_read 组目录  → group_list@amber
+  const createdBravo = await controller.management.executeTool(wsContext, {
+    name: "topic_create", args: { topic: "ws-note", title: "WS", summary: "in bravo scope" },
+  });
+  assert.equal(createdBravo.created, true);
+  await controller.management.executeTool(amberContext, { name: "memory_read", args: {} });
+  await controller.management.executeTool(amberContext, {
+    name: "topic_create", args: { topic: "alpha", title: "Alpha", summary: "searchable alpha topic" },
+  });
+  const found = await controller.management.executeTool(amberContext, {
+    name: "memory_search", args: { query: "alpha" },
+  });
+  assert.equal(found.matches.length, 1);
+  assert.equal(found.matches[0].key, "alpha");
+  await controller.management.executeTool(wsContext, { name: "memory_read", args: { topic: "ws-note" } });
+  await controller.management.executeTool(amberContext, {
+    name: "group_manage", args: { action: "create", key: "dev", title: "Dev", summary: "dev stuff", order: 10 },
+  });
+  await controller.management.executeTool(amberContext, {
+    name: "topic_create", args: { topic: "alpha2", title: "Alpha2", summary: "grouped member", group: ["dev"] },
+  });
+  const directory = await controller.management.executeTool(amberContext, {
+    name: "memory_read", args: { topic: "dev" },
+  });
+  assert.equal(directory.kind, "group", "controller 接线后组目录读法端到端可用");
+  assert.deepEqual(directory.members.map((m) => m.key), ["alpha2"]);
+  assert.equal(directory.members[0].chars, 0, "成员目录只给体积计数，绝不含正文");
+
+  // fire-and-forget 入账：轮询 diagnostics 的 appended 计数（等待全部落盘）。
+  assert.ok(
+    await waitFor(async () => controller.diagnostics().topicActivity.appended >= 7, 5000),
+    "7 条事件全部入账（group_manage 不接线不计）",
+  );
+  const { events, skipped } = await readTopicActivity({ stateRoot: roots.stateRoot });
+  assert.equal(skipped, 0);
+  assert.deepEqual(events.map((e) => [e.scopeId, e.kind, e.topicKey ?? e.groupKey ?? null]), [
+    ["bravo", "updated", "ws-note"],
+    ["amber", "read", null],
+    ["amber", "updated", "alpha"],
+    ["amber", "search_hit", "alpha"],
+    ["bravo", "read", "ws-note"],
+    ["amber", "updated", "alpha2"],
+    ["amber", "group_list", "dev"],
+  ], "四类事件按执行序落盘，scopeId 与 targetScopeId 逐一对应（两个 scope 交叉操作不错记不漏记）");
+  await controller.stop();
+});
+
+test("0.5-2B 写失败降级：账本路径被目录占位 → 工具照常返回、失败只进诊断（绝不阻塞工具）", async (t) => {
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  // 破坏手法：把 <stateRoot>/topic-activity.jsonl 预先建成目录——appendFile 必失败
+  // （EISDIR/EPERM 视平台而定），且不影响 store/persona/组清单等其他落盘路径。
+  await actMkdir(path.join(roots.stateRoot, "topic-activity.jsonl"), { recursive: true });
+  const bindings = fakeBindingsFactory();
+  const controller = await createShioriPluginController(fakeCtx(), activeSettings(roots), { bindings });
+  await controller.start();
+  const trustedContext = { session: { id: "s-blocked" }, source: "panel-rpc" };
+
+  // 读工具照常返回（账本入账失败不影响语义）。
+  const view = await controller.management.executeTool(trustedContext, { name: "memory_read", args: {} });
+  assert.equal(view.exists, false);
+  assert.equal(view.truncated, false);
+
+  // 写工具照常返回（updated 入账同样 fire-and-forget 失败降级）。
+  const created = await controller.management.executeTool(trustedContext, {
+    name: "topic_create", args: { topic: "blocked", title: "B", summary: "write path intact" },
+  });
+  assert.equal(created.created, true, "写工具不受账本写失败影响");
+
+  // 失败只进诊断：failed 增长、appended 恒 0、lastError 记录（错误码平台相关，不钉死）。
+  assert.ok(
+    await waitFor(async () => controller.diagnostics().topicActivity.failed >= 2, 5000),
+    "两次入账（read + updated）都失败并计数",
+  );
+  const stats = controller.diagnostics().topicActivity;
+  assert.equal(stats.appended, 0);
+  assert.ok(typeof stats.lastError === "string" && stats.lastError.length > 0);
+  const stat = await actStat(topicActivityFilePath(roots.stateRoot));
+  assert.ok(stat.isDirectory(), "占位目录原样保留（没有任何文件被写出）");
+  await controller.stop();
+});

@@ -39,6 +39,9 @@ import { openSparkStore } from "../sparks/store.mjs";
 import { createCompatTools, createTopicCreateTool, createGroupManageTool } from "../host/tools.mjs";
 // S3：scope 首次进 active 时初始化组清单（幂等；shadow/inert 不建资源不写盘）。
 import { ensureGroupsFile } from "../storage/groups.mjs";
+// 0.5-2B：topic-activity 事件账本（非阻塞入账；事件按 targetScopeId 归属，
+// 落 <stateRoot>/topic-activity.jsonl，供 0.5 阶段 B 温度引擎回放）。
+import { createTopicActivityLedger } from "../storage/topic-activity.mjs";
 import { createSeatGuard } from "../host/seat.mjs";
 import { createSparkTools } from "../sparks/tools.mjs";
 import { createCompressProbe } from "../host/compress-probe.mjs";
@@ -176,6 +179,15 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   // 覆盖，不是死代码。inert 下不启 runtime、不触盘，仅 management.getStatus 可用。
   const isInert = settings.mode === "shadow" && settings.dataRoot === null && settings.stateRoot === null;
   const nowIso = () => now().toISOString();
+
+  // 0.5-2B：topic-activity 事件账本（每实例一个；事件自带 targetScopeId 归属，
+  // 全 scope 共享同一 <stateRoot>/topic-activity.jsonl）。构造零 IO（尾部探测与
+  // 落盘都惰性到首次 append）；工具层成功路径 fire-and-forget 入账，写失败只记
+  // 账本诊断（diagnostics().topicActivity 可观测），绝不阻塞/影响工具返回。
+  // inert 直构（stateRoot null）不建账本，diagnostics 透出 null。
+  const topicActivity = settings.stateRoot !== null
+    ? createTopicActivityLedger({ stateRoot: settings.stateRoot, now })
+    : null;
 
   // F1b：语义 provider。provider="local" 时构造是零 IO 的（懒加载契约：
   // transformers 运行时推迟到首次 embed 才 import，见 semantic/local.mjs）；
@@ -513,12 +525,19 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
         config: coreBudgetsOf(settings.budgets),
         now,
         readonlyGuard: ctrl.readonlyGuard ?? undefined,
+        // 0.5-2B R1：组目录读法的数据来源（groups.json 按 scope 落 <dataRoot>/scopes/）。
+        dataRoot: settings.dataRoot,
+        // 0.5-2B R3：事件账本（memory_read 正文→read、组目录→group_list、
+        // memory_search 命中→search_hit、memory_append/rewrite 成功→updated）。
+        activity: topicActivity,
       }),
       createTopicCreateTool({
         service: serviceForTools,
         getSessionInfo,
         now,
         readonlyGuard: ctrl.readonlyGuard ?? undefined,
+        // 0.5-2B R3：topic_create 成功→updated。
+        activity: topicActivity,
       }),
       // S3：第 17 个宿主工具（组清单管理；topic 组迁移经 service.mutate 走
       // store 提交协议，不绕存储层）。
@@ -2287,6 +2306,10 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       /** F7 只读状态（writable/readonly + 持有者 + 座位心跳细节）；未启动恒 null。 */
       readonly: ctrl.seatGuard?.status() ?? null,
       counters: { ...ctrl.diag },
+      // 0.5-2B：topic-activity 账本诊断（appended/failed/lastError/pending；
+      // null = 无账本——inert 直构或 stateRoot 未配置）。写失败只进这里的诊断，
+      // 绝不影响工具返回。
+      topicActivity: topicActivity?.stats() ?? null,
       // B2：启动期 global 探测（三态）+ 本次装配遮蔽计数，L0/L1 有效性不谎报。
       completeShadowed: [...ctrl.completeShadowed],
       completeProbe: ctrl.completeProbe,

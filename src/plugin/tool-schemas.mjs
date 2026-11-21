@@ -78,6 +78,22 @@ const matchEntry = {
   },
 };
 
+// 0.5-2B：memory_read 组目录读分支（kind:"group"）的成员条目——key/title/summary/
+// retention/archived/updated/chars，绝不含正文（正文体积只以 chars 计数体现）。
+const groupMemberEntry = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    key: { type: "string", required: true },
+    title: { oneOf: [{ type: "string" }, { type: "null" }] },
+    summary: { oneOf: [{ type: "string" }, { type: "null" }] },
+    retention: { type: "string" },
+    archived: { type: "boolean" },
+    updated: { oneOf: [{ type: "string" }, { type: "null" }] },
+    chars: { type: "integer" },
+  },
+};
+
 // S3 group_manage 输出条目：组清单行（list 的 groups 元素）与迁移计划行（delete
 // 的 migrated 元素）。order 用 number（DSL 不限整数，模板用整数但 update 可改）。
 const groupEntry = {
@@ -154,6 +170,16 @@ export const TOOL_OUTPUT_SCHEMAS = Object.freeze({
       // S3：topic 读分支的分组元数据（core 读分支缺省 [] / false）。
       group: { type: "array", items: { type: "string" } },
       pinned: { type: "boolean" },
+      // 0.5-2B：组目录读分支（topic 参数传组 key；kind:"group" 为判别字段，
+      // 正文读分支不带）。content 恒空串、bytes 恒 0（绝不含正文），members 为
+      // 成员目录；revision 是组清单（groups.json）的内容哈希。
+      kind: { type: "string" },
+      groupTitle: { type: "string" },
+      groupSummary: { type: "string" },
+      members: { type: "array", items: groupMemberEntry },
+      // 0.5-2B：同名组冲突提示（topic 读分支专用——key 同为 topic 与组时，
+      // topic 正文优先，note 说明另有同名组）。
+      note: { type: "string" },
     },
   },
   memory_search: {
