@@ -13,6 +13,30 @@ import { isCanonicalIso, isIsoDateOrTimestamp } from '../storage/fsutil.mjs';
 const PREFIX = 'shiori-r1.';
 const guards = new AsyncLocalStorage();
 const hash = text => createHash('sha256').update(text).digest('hex');
+// 0.5 批次 4 D 线：memory_search 归档排序的状态权重（active 1.0 / cold 0.75 /
+// frozen 0.5）。0.75 / 0.5 均为二进制精确值，整数词法分 × 权重不引入浮点误差，
+// 同分稳定排序（按 key 码点序）不受影响。
+export const TOPIC_STATE_WEIGHTS = Object.freeze({ active: 1.0, cold: 0.75, frozen: 0.5 });
+
+/**
+ * 归档排序的状态权重判定（评审拍板的纯函数口径）：
+ *   - archived === false 或缺省（undefined）→ active 1.0（未归档）；
+ *   - archived === true 且 archiveOrigin === "auto-inactive" → frozen 0.5
+ *     （系统温度引擎自动冷却 = 深冷）；
+ *   - archived === true 其余一切（manual / 缺省 / 未知异常值）→ cold 0.75
+ *     （人工归档；storage 层已把「有 archivedAt 但无来源」补成 manual，
+ *     未知值保守回落 cold——不抛、绝不静默升到 active 1.0）。
+ * 口径说明：service 层只有 dataRoot，拿不到 stateRoot 的 topic-activity 账本，
+ * 温度用 archiveOrigin 代理；批次 5 接温度回放后按 T 重算。
+ */
+export function stateWeightOf({ archived, archiveOrigin } = {}) {
+  if (archived === true) {
+    return archiveOrigin === 'auto-inactive' ? TOPIC_STATE_WEIGHTS.frozen : TOPIC_STATE_WEIGHTS.cold;
+  }
+  if (archived === false || archived === undefined) return TOPIC_STATE_WEIGHTS.active;
+  // archived 为其他真值/垃圾形状（1、"yes" 等）：保守按归档处理（cold 兜底）。
+  return TOPIC_STATE_WEIGHTS.cold;
+}
 // A5/P2-5 威胁模型核实结论（2026-11-08）：token 确实会到达不可信面（memory_read
 // 把含 projectionHash 的 readCoreView token 交给模型；剥掉该字段 + 无密钥 SHA-256
 // 重签可绕过「渲染视图未变」乐观锁），绕过路径真实可达。
@@ -229,23 +253,35 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
     const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
     if (!words.length) fail('INVALID_INPUT', 'query must not be empty');
     // 搜索范围默认包含已归档 topic（冷搜），但归档结果只回 key/title/summary
-    // 摘要级信息：state 标 'archived'、score 置 0、排在未归档结果之后，绝不返回正文；
+    // 摘要级信息：state 标 'archived'、排在未归档结果之后，绝不返回正文；
     // 要看全文用 memory_read(key)。与 spark 冷卡 searchArchived 的 includeArchived
     // 语义无关，spark 行为不受影响。
+    //
+    // 0.5 批次 4 D 线：归档条目不再一律 score:0——保留词法命中分（score 字段 =
+    // 命中词数），排序用 finalScore = score × stateWeightOf(topic)（active 1.0 /
+    // cold 0.75 / frozen 0.5，权重口径见 stateWeightOf）。修复「精确命中的深冷
+    // 文档被较新的冷文档按 key 排序掩盖」；同分（finalScore 相等）按 key 码点序
+    // 稳定排序，与既有平局规则一致。权重只在归档条目之间比大小，活跃条目仍恒
+    // 排在归档条目之前。输出形状不变：不新增 finalScore 字段、state 恒为
+    // 'archived'、不回正文。
     const active = [];
-    const archived = [];
+    const archivedPairs = [];
     for (const t of await listTopics()) {
       const score = words.filter(w => (t.key + ' ' + t.title + ' ' + t.summary + ' ' + t.body).toLowerCase().includes(w)).length;
       if (!score) continue;
       if (t.archived) {
-        archived.push({ key: t.key, title: t.title, summary: t.summary, scopeId: t.scopeId, score: 0, state: 'archived' });
+        archivedPairs.push({
+          entry: { key: t.key, title: t.title, summary: t.summary, scopeId: t.scopeId, score, state: 'archived' },
+          finalScore: score * stateWeightOf(t),
+        });
       } else {
         active.push({ key: t.key, title: t.title, summary: t.summary, scopeId: t.scopeId, score });
       }
     }
     active.sort((a, b) => b.score - a.score || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-    archived.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-    return [...active, ...archived];
+    archivedPairs.sort((a, b) => b.finalScore - a.finalScore
+      || (a.entry.key < b.entry.key ? -1 : a.entry.key > b.entry.key ? 1 : 0));
+    return [...active, ...archivedPairs.map(p => p.entry)];
   }
   async function readPersona() {
     return personaAdapter ? personaAdapter.read() : { name: null, text: null };

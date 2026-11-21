@@ -3013,7 +3013,7 @@ test("P1-1：重建轮询——发起后切换会话，旧会话的轮询停止�
   assert.deepEqual(statusCalls, ["session-A", "session-A"], "both calls were for the original session");
 });
 
-test("R8：tab 栏八项冻结顺序（含 F2 闪回命中 / F4 最近变更）", async () => {
+test("R8：tab 栏九项冻结顺序（含 F2 闪回命中 / F4 最近变更 / 0.5-4D 投递体检）", async () => {
   const services = {
     "remote.session": { list: async () => ({ ok: true, value: { items: [{ sessionId: "session-A" }] } }) },
     "remote.shiori": { getStatus: async () => ({ ok: true, value: { mode: "active", configured: true } }) },
@@ -3024,8 +3024,9 @@ test("R8：tab 栏八项冻结顺序（含 F2 闪回命中 / F4 最近变更）"
     .filter((n) => n.type === "button" && String((n.props && n.props.className) || "").includes("dshi_tab"))
     .map((n) => [].concat(n.children).join(""));
   // U6 改口径：tab 名按 GLOSSARY 第三章目标名落地（记忆内容 / 闪回图谱 / 专题 / 记忆预算），
-  // tab id 与顺序不变。
-  assert.deepEqual(labels, ["状态", "最近变更", "记忆内容", "闪回图谱", "遗忘", "专题", "闪回命中", "记忆预算"]);
+  // tab id 与顺序不变。0.5-4D：新增第 9 页签「投递体检」，插在闪回命中与记忆预算之间
+  // （方案 §11.4 第 5 条；评审 q-7f42e56c92c486a1 拍板，只改本清单断言）。
+  assert.deepEqual(labels, ["状态", "最近变更", "记忆内容", "闪回图谱", "遗忘", "专题", "闪回命中", "投递体检", "记忆预算"]);
   await cleanup();
 });
 

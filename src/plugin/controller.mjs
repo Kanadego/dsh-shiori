@@ -52,6 +52,9 @@ import { mapRawSessionEvent } from "../host/dsh-adapter.mjs";
 import { openCompletionState } from "../completion/index.mjs";
 import { evaluateMutation } from "../core/index.mjs";
 import { buildSparkAttachment, commitDelivery } from "../sparks/delivery.mjs";
+// 0.5 批次 4 D 线：投递诊断账本（每轮 pre-step 一条不含正文的记录）与
+// 面板「投递体检」数据聚合。纯函数聚合在 diagnostics.mjs，账本在 state.mjs。
+import { buildRoundRecord, readDiagnostics, DIAGNOSTICS_RETENTION_DAYS } from "../sparks/diagnostics.mjs";
 import { createColdSearch } from "../forgetting/cold-search.mjs";
 import { createEmbeddingProvider } from "../semantic/index.mjs";
 // S5：模型下载与安装校验（与 provider 同住 semantic/local.mjs；controller 只做
@@ -311,6 +314,13 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       preSteps: 0,
       preStepDeliveries: 0,
       preStepEmpty: 0,
+      /** 0.5-4D 投递诊断账本写侧计数：appended=成功落账；failed=IO 失败（账本
+       *  层折叠为 {ok:false} 只计数）；skipped=记录构造/形状校验/守卫读取异常
+       *  （评审 R8：只读宿主与 stateRoot 未配置属正常静默跳过，不计入 skipped）。
+       *  诊断数据路径绝不阻塞投递，全部只在这里留痕。 */
+      deliveryDiagAppended: 0,
+      deliveryDiagFailed: 0,
+      deliveryDiagSkipped: 0,
       acceptedReceipts: 0,
       l2Recoveries: 0,
       l2RecoveredFromSessionLog: 0,
@@ -628,6 +638,14 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       }
     }
     ctrl.scopes.clear();
+    // 评审 R16：焚毁（destroyData → invalidateScopeResources = 本函数）后必须
+    // 失效投递体检的内存快照与重算链——否则下一次 getStatus 经兜底重开 scope
+    // 前命中旧快照，会把已焚毁卡片的 title/triggers/覆盖率继续返回面板（S6
+    // 同类隐私/陈旧数据回归）。此处运行时调用，两 Map 的 const 初始化早已完成
+    // （无 TDZ）；清空后下一次 getStatus 走兜底重算（scope 已关 → available:
+    // false / scope-not-open，重开后从零开始）。
+    deliveryCheckupSnapshots.clear();
+    deliveryCheckupRefreshChains.clear();
     return errors;
   }
 
@@ -1644,6 +1662,62 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     }
     delivery.hitMeta = hitMeta;
 
+    // ── 0.5-4D：投递诊断账本——每轮召回后追加一条不含正文的记录 ──────────
+    // 记录字段严格白名单（diagnostics.mjs assertRecordShape），只含 id 与数字
+    // 证据，绝不携带 title/summary/content。写入口径（评审 R4/R9 修订）：
+    //  - R4：写延后到投递定局之后——deliveredIds 只收真正附加进本轮的卡
+    //    （appendedIds）；空投、已 committed、pending 去重、next 非 enter 的
+    //    轮次写 deliveredIds: []，已构建未追加的候选落 slot_full（命中/达标
+    //    但没投出），不虚增「窗口投递次数」；
+    //  - R9：判定 + 构造整体包进 try——readonlyGuard.status() 抛错也只计数，
+    //    绝不冒泡打断 pre-step/投递；
+    //  - shadow：pre-step 根本不注册（只有 active 挂 pre-step），天然不写；
+    //  - 只读宿主（HOST_LOCKED，写权被其他实例持有）与 stateRoot 未配置：
+    //    正常静默跳过（不计 skipped，R8 口径）；
+    //  - 非阻塞：appendRecord 不 await（topic-activity 同款异步缓冲；账本层
+    //    IO 失败折叠为 {ok:false} 只计数），写失败只进 ctrl.diag 计数。
+    const writeDiagnosticsRecord = (appendedIds) => {
+      try {
+        if (settings.stateRoot === null) return;
+        if ((ctrl.readonlyGuard?.status?.().writable ?? true) !== true) return;
+        const diagnosticsRecord = buildRoundRecord({
+          at: nowIso(),
+          scopeId: scope.scopeId,
+          cards: records,
+          match,
+          semantic: recall.semantic,
+          delivery,
+          appendedIds,
+          threshold: settings.semantic.minSimilarity,
+        });
+        const writePromise = state.diagnosticsStore.appendRecord(scope.scopeId, diagnosticsRecord).then(
+          (result) => {
+            if (result?.ok === false) {
+              ctrl.diag.deliveryDiagFailed += 1;
+              return;
+            }
+            ctrl.diag.deliveryDiagAppended += 1;
+            // R5：落账成功即异步刷新面板内存快照（后台串行，不阻塞投递）。
+            void refreshDeliveryCheckupSnapshot(scope.scopeId);
+          },
+          () => {
+            // appendRecord 理论上不 reject（IO 已折叠）；防御一层防止未处理 rejection。
+            ctrl.diag.deliveryDiagFailed += 1;
+          },
+        );
+        // 不 await（诊断路径绝不阻塞投递），但登记在途 promise：stop 时统一排空，
+        // 避免迟到写盘与「store 关闭 / 临时目录删除」竞态（attempt-3 ENOTEMPTY 根因）。
+        deliveryDiagWrites.add(writePromise);
+        void writePromise.then(
+          () => deliveryDiagWrites.delete(writePromise),
+          () => deliveryDiagWrites.delete(writePromise),
+        );
+      } catch {
+        // 记录构造/形状校验/守卫读取异常：计数留痕，诊断路径不炸投递（R9）。
+        ctrl.diag.deliveryDiagSkipped += 1;
+      }
+    };
+
     const markAllScanned = async () => {
       // B6：扫批标记后置于 recordPending/决策之后——「已扫」只记录已定局的消息。
       for (const m of fresh) {
@@ -1655,6 +1729,8 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       ctrl.diag.preStepEmpty += 1;
       await markAllScanned();
       const decision = await next();
+      // R4：空投轮也落账（归因数据源），deliveredIds 恒空。
+      writeDiagnosticsRecord([]);
       return decision;
     }
     const deliveryId = state.l2Store.deliveryIdFor({
@@ -1666,6 +1742,8 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     if (await state.l2Store.isCommitted(scope.scopeId, deliveryId)) {
       await markAllScanned();
       const decision = await next();
+      // R4：包早已在此前轮次投出（deliveryId 去重命中）→ 本轮不虚增投递。
+      writeDiagnosticsRecord([]);
       return decision;
     }
     // 崩溃窗口去重（B6）：同 deliveryId 的 pending 已存在（上一次 recordPending
@@ -1692,6 +1770,8 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       }
       await markAllScanned();
       const decision = await next();
+      // R4：pending 去重命中（上一轮已落账待回执）→ 本轮不虚增投递。
+      writeDiagnosticsRecord([]);
       return decision;
     }
     // 独立 text context message（source.kind=shiori-sparks/form=recall）；不使用
@@ -1719,7 +1799,13 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     await markAllScanned();
     ctrl.diag.preStepDeliveries += 1;
     const decision = await next();
-    if (decision?.kind !== "enter") return decision;
+    if (decision?.kind !== "enter") {
+      // R4：宿主未放行本轮（非 enter）→ 包没有真正附加，deliveredIds 恒空；
+      // 已构建的候选落 slot_full（命中/达标但没投出）。
+      writeDiagnosticsRecord([]);
+      return decision;
+    }
+    writeDiagnosticsRecord(delivery.delivered.map((d) => d.id));
     return {
       kind: "enter",
       messages: [...decision.messages, message],
@@ -1788,8 +1874,9 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   });
 
   // M4-drain：management 数据方法全部纳入在途排空——stop 等待收场（带上限），
-  // 不得在 store 关闭后让在途 RPC 撞 INVALID_STATE。getStatus 为纯内存投影，
-  // 不占在途。
+  // 不得在 store 关闭后让在途 RPC 撞 INVALID_STATE。getStatus 稳态读 pre-step
+  // 快照（纯内存）；首轮/快照重算失败兜底读盘（错误折叠），不占在途（评审 R15
+  // 注释同步：本路径并非全程纯内存，如实口径见 deliveryCheckupFor）。
   // 0.5 批次 4 · C 线：契约扩展 11 → 14（+ 整理向导 onboardingPreview/Apply/Mark；
   // 评审拍板独立三方法，previewPlan/executePlan 不动）。
   const DRAINED_MANAGEMENT_METHODS = [
@@ -1888,6 +1975,70 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     }
     return diag;
   }
+  // ── 0.5-4D：面板「投递体检」数据源（getStatus.diagnostics.delivery）──────
+  // wire 的 diagnostics 块 additionalProperties:true，纯增量注入（与 roots /
+  // semantic 同款：不改方法数、不改描述符、不加 RPC 方法）。内容 = readDiagnostics
+  // 聚合（每卡覆盖率 + 「从未投递」「高频投递但低使用」两清单）+ 账本写侧计数。
+  //
+  // 评审 R5 内存快照方案（如实口径，本路径不是纯内存投影）：pre-step 每轮落账
+  // 成功后异步重算并刷新快照（按 scope 串行、后台执行，不阻塞投递）；getStatus
+  // 稳态只读内存快照。磁盘只在两种兜底时机被读：① 实例启动后该 scope 还没有
+  // 任何快照（首次 getStatus 算一次并缓存）；② 快照重算失败后的下一次读取重试
+  // （失败不缓存）。账本只被 appendRecord（pre-step 路径）变化、写后即刷新，
+  // 快照与账本一致；其他实例持写锁写同一账本的跨进程窗口不在保证内（只读态
+  // 本就不落账）。重算与 stop 的竞态由折叠兜住：store 关闭后 listActive 抛
+  // INVALID_STATE → 保持旧快照/返回 { available:false }，绝不外溢打断 getStatus。
+  const deliveryCheckupSnapshots = new Map();     // scopeId → { at, value }
+  const deliveryCheckupRefreshChains = new Map(); // scopeId → Promise（重算串行化）
+  // 在途投递诊断写 promise（fire-and-forget 落账的登记处）：stop 时统一排空，
+  // 避免「store 已关 / 临时目录已删」与迟到写盘竞态（attempt-3 观察到的
+  // ENOTEMPTY 竞态根因）。
+  const deliveryDiagWrites = new Set();
+  async function computeDeliveryCheckup(scopeId) {
+    const resources = ctrl.scopes.get(scopeId);
+    const checkup = await readDiagnostics({
+      scopeId,
+      days: DIAGNOSTICS_RETENTION_DAYS,
+      readRecords: (sid) => state.diagnosticsStore.readRecords(sid),
+      listCards: () => resources.sparkStore.listActive(),
+      now: now(),
+      // 评审 R14：语义开关注入归因——provider=none（默认）时 not-scored 卡的
+      // 面板文案不得建议「重建向量」（状态页该按钮此时是禁用的）。
+      semanticEnabled: semanticProvider !== null,
+    });
+    return { available: true, ...checkup, writer: state.diagnosticsStore.writerStats(scopeId) };
+  }
+  function refreshDeliveryCheckupSnapshot(scopeId) {
+    const previous = deliveryCheckupRefreshChains.get(scopeId) ?? Promise.resolve();
+    const next = previous
+      .then(() => computeDeliveryCheckup(scopeId))
+      .then(
+        (value) => { deliveryCheckupSnapshots.set(scopeId, { at: Date.now(), value }); },
+        () => { /* 重算失败：保留旧快照；下次写/读兜底重试，诊断路径绝不外溢 */ },
+      );
+    deliveryCheckupRefreshChains.set(scopeId, next);
+    return next;
+  }
+  function deliveryCheckupFor(scopeId) {
+    // R13③：stateRoot 未配置（inert/降级）给明确 reason，面板文案可区分。
+    if (settings.stateRoot === null) {
+      return Promise.resolve({ available: false, reason: "state-root-missing" });
+    }
+    if (typeof scopeId !== "string" || !ctrl.scopes.has(scopeId)) {
+      return Promise.resolve({ available: false, reason: "scope-not-open" });
+    }
+    const snapshot = deliveryCheckupSnapshots.get(scopeId);
+    if (snapshot) return Promise.resolve(snapshot.value);
+    // 兜底：首轮 getStatus 算一次并缓存（之后稳态恒纯内存）。
+    return computeDeliveryCheckup(scopeId).then(
+      (value) => {
+        deliveryCheckupSnapshots.set(scopeId, { at: Date.now(), value });
+        return value;
+      },
+      (error) => ({ available: false, error: error instanceof Error ? error.message : String(error) }),
+    );
+  }
+
   const baseGetStatus = managementFacade.getStatus;
   management.getStatus = async function getStatusWithSemantic(trustedContext, payload) {
     const status = await baseGetStatus.call(managementFacade, trustedContext, payload);
@@ -1905,6 +2056,19 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       status.diagnostics = {
         ...(status.diagnostics ?? {}),
         semantic: { error: `语义诊断注入失败: ${error instanceof Error ? error.message : String(error)}` },
+      };
+    }
+    // 0.5-4D：diagnostics.delivery 注入（纯增量，同上口径）。体检聚合带磁盘读，
+    // 失败折叠为 { available:false, error }，绝不打断 getStatus。
+    try {
+      status.diagnostics = {
+        ...(status.diagnostics ?? {}),
+        delivery: await deliveryCheckupFor(status.scope),
+      };
+    } catch (error) {
+      status.diagnostics = {
+        ...(status.diagnostics ?? {}),
+        delivery: { available: false, error: `投递体检注入失败: ${error instanceof Error ? error.message : String(error)}` },
       };
     }
     return status;
@@ -2246,6 +2410,14 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       if (settled !== true) {
         errors.push(`drain (${phase}): ${ctrl.inFlight.size} in-flight task(s) did not settle within ${drainCapMs}ms`);
       }
+    }
+    // 3.5) 0.5-4D：排空在途投递诊断写（评审 R18：唯一排空点）。必须在 in-flight
+    // drain 之后——此刻全部 preStep 已收场、其诊断写均已登记；早于它排空会漏掉
+    // 「stop 时 preStep 仍在途、drain 期间才登记」的写（实测 stop 返回后 400ms
+    // 才落盘）。放在 closeAllScopes 之前，账本仍可用；in-flight 超限未收场的
+    // 任务已在 errors 如实记录（其迟到写由 appendRecord 自身失败折叠兜底，不抛）。
+    if (deliveryDiagWrites.size > 0) {
+      await Promise.allSettled([...deliveryDiagWrites]);
     }
     // 4) flush + close 完成状态。
     if (ctrl.completion !== null) {

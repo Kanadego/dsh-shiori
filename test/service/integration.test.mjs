@@ -217,7 +217,7 @@ test('memory_read 不受归档影响：归档专题照常返回全文', async t 
   assert.equal(topic.title, 'Cold');
 });
 
-test('memory_search 冷搜：默认包含归档 topic，但只回摘要级（state=archived、score=0、排后、无正文）', async t => {
+test('memory_search 冷搜：默认包含归档 topic，但只回摘要级（state=archived、归档保留词法分、排后、无正文）', async t => {
   const { service, store } = await fixture(t);
   await store.commit({ operationId: 'seed-2', changes: [
     { kind: 'topic', key: 'warm', expectedRevision: null,
@@ -228,10 +228,12 @@ test('memory_search 冷搜：默认包含归档 topic，但只回摘要级（sta
   ] });
 
   const hits = await service.search('排障手册');
-  assert.deepEqual(hits.map(h => [h.key, h.score, h.state ?? null]), [
-    ['warm', 1, null],   // 未归档在前，正常计分
-    ['cold', 0, 'archived'], // 归档在后，score 恒 0，state 标 archived
-  ]);
+  // 0.5 批次 4 D 线规格变更（评审 q-50d63bd04a86684e 拍板 + R3 复核收敛授权范围）：
+  // 未归档条目保持原精确断言 score===1；仅归档条目按拍板改为 >0（不写死精确数字，
+  // 避免样例微调就脆）。排序断言（未归档在前、归档在后）与 6 键深比较原样保留。
+  assert.deepEqual([hits[0].key, hits[0].score, hits[0].state ?? null], ['warm', 1, null]); // 未归档精确断言（原样保留）
+  assert.ok(hits[1].score > 0, '归档条目保留词法命中分（原规格恒 0，本线改为保留）');
+  assert.deepEqual([hits[1].key, hits[1].state ?? null], ['cold', 'archived']); // 归档在后
   for (const hit of hits) {
     const expectedKeys = hit.state === 'archived'
       ? ['key', 'title', 'summary', 'scopeId', 'score', 'state']

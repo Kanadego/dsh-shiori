@@ -214,9 +214,9 @@ test("U8 壳层：选择器行与 tab 栏包进壳条、壳条不吸顶（S2-4 �
     const inside = flattenVNode(sticky);
     // 会话选择器（首帧 sessions 未出 → input 分支）在壳条内。
     assert.ok(inside.some((n) => n.type === "input" && n.props.placeholder === "session id"), "会话选择器在壳条内");
-    // 八个 tab 按钮都在壳条内（F2 闪回命中 + F4 最近变更各加一项）。
+    // 九个 tab 按钮都在壳条内（F2 闪回命中 + F4 最近变更 + 0.5-4D 投递体检）。
     const tabs = inside.filter((n) => n.type === "button" && String(n.props.className).includes("dshi_tab"));
-    assert.equal(tabs.length, 8, "tab 栏在壳条内");
+    assert.equal(tabs.length, 9, "tab 栏在壳条内");
     // 提示行不粘：壳条外仍有 hint 容器位（壳条本身不包含 dshi_hint 提示行）。
     assert.equal(flattenVNode(sticky).filter((n) => n.type === "div" && n.props.className === "dshi_hint").length, 0, "提示行不进壳条");
     // S2-3：选择器统一进一条水平行（选工作区 / 选会话 / 记忆卡 / 工作区默认卡 同容器）。
@@ -250,10 +250,10 @@ test("U8 壳层：选择器行与 tab 栏包进壳条、壳条不吸顶（S2-4 �
 // ---------------------------------------------------------------------------
 
 // （0.3：第四项 tab 名「整理与遗忘」→「遗忘」，顺序与八项数不变。）
-const TAB_LABELS = ["状态", "最近变更", "记忆内容", "闪回图谱", "遗忘", "专题", "闪回命中", "记忆预算"];
-const TAB_IDS = ["status", "timeline", "memory", "graph", "candidates", "topics", "flashbacks", "budgets"];
+const TAB_LABELS = ["状态", "最近变更", "记忆内容", "闪回图谱", "遗忘", "专题", "闪回命中", "投递体检", "记忆预算"];
+const TAB_IDS = ["status", "timeline", "memory", "graph", "candidates", "topics", "flashbacks", "delivery", "budgets"];
 
-test("U8 tab：八项 label 逐字一致（含 F2/F4 两项新增），每项带图标（伪元素图形 + 每 tab 专属 mask）", async () => {
+test("U8 tab：九项 label 逐字一致（含 F2/F4 两项新增 + 0.5-4D 投递体检），每项带图标（伪元素图形 + 每 tab 专属 mask）", async () => {
   const fake = makeFakeDocument();
   const previousDocument = globalThis.document;
   globalThis.document = fake.doc;
@@ -261,7 +261,7 @@ test("U8 tab：八项 label 逐字一致（含 F2/F4 两项新增），每项带
     const mod = loadClientModule();
     const { cleanup, tree } = await mountSection(mod);
     const tabs = flattenVNode(tree).filter((n) => n.type === "button" && String(n.props.className).includes("dshi_tab"));
-    assert.equal(tabs.length, 8);
+    assert.equal(tabs.length, 9);
     // label 一个字都不许改（与 R8 断言同口径：children join 后逐项比较）。
     assert.deepEqual(tabs.map((n) => [].concat(n.children).join("")), TAB_LABELS);
     // 图标节点存在：按钮带 dshi_tabIco + 每 tab 专属类；图标本体是 CSS mask

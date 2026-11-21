@@ -171,6 +171,8 @@ window.__ModuleLoader__.load({
     // F4「最近变更」tab 图标（时钟；URL 编码口径与既有图标一致，避免裸 http:// 触发
     // 无外部资源检查）与 F7 只读黄条/置灰提示、时间线扫描截断提示的样式。
 ".dshi_tabIco-timeline{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%278%27 cy=%278%27 r=%276.2%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3Cpath d=%27M8 4.6V8l2.4 1.6%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linecap=%27round%27/%3E%3C/svg%3E')}" +
+    // 0.5-4D「投递体检」tab 图标（监护仪波形容器；URL 编码口径与既有图标一致）。
+".dshi_tabIco-delivery{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Crect x=%271%27 y=%273%27 width=%2714%27 height=%2710%27 rx=%271.5%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3Cpath d=%27M3 8h2.2l1.3-2.4L9 10.4l1.3-2.4H13%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}" +
 ".dshi_roBanner{border:1px solid var(--dshi-warn);background:rgba(180,83,9,.10);color:var(--dshi-warn);border-radius:8px;padding:8px 12px;font-size:12px;line-height:1.5;word-break:break-word}" +
 ".dshi_roHint{font-size:11px;color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:8px;padding:4px 8px;word-break:break-word}" +
 ".dshi_tlScan{font-size:11px;color:var(--dshi-warn)}" +
@@ -6346,6 +6348,229 @@ window.__ModuleLoader__.load({
             "（每页 " + TIMELINE_PAGE_SIZE + " 条）")) : null);
     }
 
+    // ── 0.5-4D：投递体检（getStatus.diagnostics.delivery）──────────────────
+    // 回答「一张卡没触发，是那段时间没聊到，还是聊到了但没识别出来」：
+    // 清单一「从未投递」（服务端三态归因）+ 清单二「高频投递但低使用」。
+    // 「生成 spark_update 补丁」只拼参数进下方预览框（可复制），本页绝不调
+    // executeTool——应用与否、改成什么内容，永远由用户核对后自行执行。
+    // 数据口径：近 7 天有效召回轮次；「投递」= 卡片进入对话附件包，不代表被
+    // 使用（used 只由 spark_feedback 记；面板 used 列为累计口径，见服务端
+    // coverage.usedScope）。
+    function deliveryAttributionText(attr) {
+      if (!attr || typeof attr !== "object") return "—";
+      if (attr.kind === "no-recall-rounds") {
+        return "该卡创建以来还没有任何触发召回的输入（轮次 0）——那段时间没聊到，卡片无需修改。";
+      }
+      if (attr.kind === "below-threshold") {
+        var scored = Number(attr.scoredRounds) || 0;
+        var top = typeof attr.topScore === "number" && Number.isFinite(attr.topScore) ? attr.topScore.toFixed(2) : "—";
+        return "有召回轮次但分数始终低于阈值（轮次 " + String(Number(attr.rounds) || 0)
+          + "，被语义评分 " + scored + " 轮，最高分 " + top + "）。";
+      }
+      if (attr.kind === "not-scored") {
+        // 评审 R14：从未被评分 ≠ 分数不达标；语义未开启（默认 provider=none）时
+        // 状态页「重建向量」按钮是禁用的，不得指过去。
+        return attr.semanticEnabled === true
+          ? "有召回轮次但从未被语义评分（轮次 " + String(Number(attr.rounds) || 0)
+            + "）——多半是向量索引过期/缺失，点状态页「重建向量」可修复。"
+          : "有召回轮次但从未被语义评分（轮次 " + String(Number(attr.rounds) || 0)
+            + "）——语义召回未开启（provider=none）或向量缺失；可在插件设置开启语义召回后再重建。";
+      }
+      if (attr.kind === "evidence-truncated") {
+        // 评审 R6：明细封顶的代价要如实说——证据不足 ≠ 分数不达标。
+        return "有召回轮次，但逐卡证据被明细封顶截断（轮次 " + String(Number(attr.rounds) || 0)
+          + "，证据不足轮次 " + String(Number(attr.truncatedRounds) || 0)
+          + "），无法精确归因；可缩小卡片规模后重看。";
+      }
+      if (attr.kind === "matched-not-delivered") {
+        return "有命中轮次但从未投出（槽满 " + String(Number(attr.slotFullRounds) || 0)
+          + " 轮 / 冷却 " + String(Number(attr.seenCooldownRounds) || 0)
+          + " 轮）——卡已被识别，只是没挤进 3+2 名额。";
+      }
+      return String(attr.kind || "—");
+    }
+
+    function DeliveryCheckupTab(props) {
+      var dataState = useState(null);
+      var data = dataState[0];
+      var setData = dataState[1];
+      var errorState = useState(null);
+      var error = errorState[0];
+      var setError = errorState[1];
+      // P1-2：本 tab 的会话守卫 holder（与既有数据 tab 同款）。
+      var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
+      var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
+      tabGuard.track();
+      // 补丁预览：{ title, text } —— 只进预览框，绝不自动执行 spark_update。
+      var patchState = useState(null);
+      var patch = patchState[0];
+      var setPatch = patchState[1];
+      // 逐卡触发词草稿（从未投递卡补触发词用）：id → 输入框文本。
+      var triggerDraftState = useState({});
+      var triggerDrafts = triggerDraftState[0];
+      var setTriggerDrafts = triggerDraftState[1];
+      var copyState = useState("");
+      var copyFeedback = copyState[0];
+      var setCopyFeedback = copyState[1];
+      // 两个清单各 10 条一页（与闪回命中同款 paginateRows/pageBar）。
+      var neverPageState = useState(1);
+      var neverPage = neverPageState[0];
+      var setNeverPage = neverPageState[1];
+      var lowUsePageState = useState(1);
+      var lowUsePage = lowUsePageState[0];
+      var setLowUsePage = lowUsePageState[1];
+
+      var load = async function () {
+        var origin = tabGuard.mark();
+        setError(null);
+        try {
+          var status = await props.dsh.call("getStatus", props.sessionId, {});
+          if (tabGuard.isStale(origin)) return;
+          var delivery = status && status.diagnostics && typeof status.diagnostics === "object"
+            && status.diagnostics.delivery && typeof status.diagnostics.delivery === "object"
+            ? status.diagnostics.delivery
+            : { available: false, reason: "服务端未返回 diagnostics.delivery（旧版本插件？）" };
+          setData(delivery);
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setData(null); if (!reportSessionUnavailable(e, props, setError)) setError(e);
+        }
+      };
+      useEffect(function () { load(); }, [props.sessionId]);
+
+      var rounds = data && Number.isInteger(data.rounds) && data.rounds >= 0 ? data.rounds : null;
+      var coverage = data && Array.isArray(data.coverage) ? data.coverage : [];
+      var neverDelivered = data && Array.isArray(data.neverDelivered) ? data.neverDelivered : [];
+      var lowUse = data && Array.isArray(data.highDeliveryLowUsage) ? data.highDeliveryLowUsage : [];
+      var unavailable = data !== null && data.available === false;
+      var writerFailed = data && data.writer && Number.isInteger(data.writer.failed) && data.writer.failed > 0
+        ? data.writer.failed
+        : null;
+
+      var cardTitle = function (entry) {
+        return typeof entry.title === "string" && entry.title !== "" ? entry.title : shortId(String((entry && entry.id) || ""));
+      };
+
+      // spark_update 补丁装配（纯本地字符串；绝不调用 executeTool）。
+      var buildPatchText = function (entry, patchBody) {
+        var args = { id: String((entry && entry.id) || ""), patch: patchBody };
+        if (entry && Number.isInteger(entry.revision)) args.expectedRevision = entry.revision;
+        return JSON.stringify(args, null, 2);
+      };
+      var setDraft = function (id, value) {
+        var next = Object.assign({}, triggerDrafts);
+        next[id] = value;
+        setTriggerDrafts(next);
+      };
+      var makeTriggerPatch = function (entry) {
+        var raw = String(triggerDrafts[entry.id] || "");
+        var triggers = raw.split(/[,，;；\s]+/).map(function (s) { return s.trim(); }).filter(function (s) { return s !== ""; });
+        if (triggers.length === 0) {
+          setPatch(null);
+          setCopyFeedback("先在输入框里填至少一个新触发词，再生成补丁。");
+          return;
+        }
+        setPatch({ title: "spark_update 补丁 · " + cardTitle(entry), text: buildPatchText(entry, { triggers: triggers }) });
+        setCopyFeedback("");
+      };
+      var makeEphemeralPatch = function (entry) {
+        setPatch({ title: "spark_update 补丁 · " + cardTitle(entry), text: buildPatchText(entry, { vitality: "ephemeral" }) });
+        setCopyFeedback("");
+      };
+      var copyPatch = async function () {
+        if (!patch || typeof patch.text !== "string" || patch.text === "") {
+          setCopyFeedback("暂无补丁可复制。");
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(patch.text);
+          setCopyFeedback("已复制到剪贴板。");
+        } catch (e) {
+          setCopyFeedback("复制失败：" + ((e && e.message) ? String(e.message) : String(e)) + "（请手动选择文本复制）");
+        }
+      };
+
+      var neverPageData = paginateRows(neverDelivered, neverPage);
+      var lowUsePageData = paginateRows(lowUse, lowUsePage);
+
+      return h("div", { className: "dshi_card" },
+        h("div", { className: "dshi_row" },
+          h("span", { className: "dshi_cardTitle" }, "投递体检"),
+          h("button", { className: "dshi_btn", onClick: load }, "刷新")),
+        h("div", { className: "dshi_hint" },
+          "回答「一张卡没触发，是那段时间没聊到，还是聊到了但没识别出来」。口径：近 7 天有效召回轮次（有触发召回的输入才计一轮）；「投递」= 卡片进入对话附件包，不代表被使用（used 只由 spark_feedback 记）。"),
+        ErrorBox(error),
+        data === null && !error ? h("div", { className: "dshi_loading" }, "加载中…") : null,
+        unavailable ? h("div", { className: "dshi_empty" },
+          "投递体检数据暂不可用：" + (data.reason === "state-root-missing"
+            ? "诊断账本未配置（stateRoot 缺失）"
+            : data.reason === "scope-not-open" ? "记忆 scope 未打开"
+            : String(data.reason || data.error || "未知原因"))
+          + "（shadow / 只读宿主不落诊断账本；active 运行一段时间后这里才有数据。）") : null,
+        data !== null && data.available === true ? h(fragment, null,
+          h("div", { className: "dshi_hint" },
+            "近 7 天有效召回轮次：" + (rounds === null ? "—" : String(rounds))
+            + " · 覆盖卡片 " + coverage.length + " 张"
+            + (writerFailed !== null ? " · 诊断落账失败 " + writerFailed + " 次（只告警，不影响投递）" : "")),
+          h("div", { className: "dshi_bgroup" },
+            h("div", { className: "dshi_cardTitle" }, "从未投递（" + neverDelivered.length + " 张）"),
+            neverDelivered.length > 0 ? h("div", null,
+              h("div", { className: "dshi_items" }, neverPageData.items.map(function (entry) {
+                var attr = entry.attribution || {};
+                var patchable = attr.kind !== "no-recall-rounds";
+                return h("div", { key: entry.id, className: "dshi_item" },
+                  h("div", { className: "dshi_itemHead" },
+                    h("span", null, cardTitle(entry)),
+                    h("span", { className: "dshi_badge" },
+                      attr.kind === "no-recall-rounds" ? "没聊到"
+                        : attr.kind === "below-threshold" ? "没识别出来"
+                        : attr.kind === "not-scored" ? "从未被评分"
+                        : attr.kind === "evidence-truncated" ? "证据不足" : "命中未投出")),
+                  h("span", { className: "dshi_hint" }, deliveryAttributionText(attr)),
+                  patchable ? h("div", { className: "dshi_row" },
+                    h("input", {
+                      className: "dshi_input",
+                      placeholder: "补触发词（顿号/逗号/空格分隔），如：洋葱, 切菜",
+                      value: String(triggerDrafts[entry.id] || ""),
+                      onChange: function (e) { setDraft(entry.id, e.target.value); }
+                    }),
+                    h("button", { className: "dshi_btn", onClick: function () { makeTriggerPatch(entry); } },
+                      "生成 spark_update 补丁"))
+                  : null);
+              })),
+              pageBar(neverPageData.page, neverPageData.totalPages, setNeverPage, false))
+            : h("div", { className: "dshi_empty" },
+              coverage.length === 0
+                ? "当前 scope 没有 active 卡片：先用 spark_save 保存几张卡，运行一段时间后再来体检。"
+                : "窗口内每张卡都至少投出过一次。")),
+          h("div", { className: "dshi_bgroup" },
+            h("div", { className: "dshi_cardTitle" }, "高频投递但低使用（" + lowUse.length + " 张）"),
+            lowUse.length > 0 ? h("div", null,
+              h("div", { className: "dshi_items" }, lowUsePageData.items.map(function (entry) {
+                return h("div", { key: entry.id, className: "dshi_item" },
+                  h("div", { className: "dshi_itemHead" },
+                    h("span", null, cardTitle(entry)),
+                    h("span", { className: "dshi_badge" }, "投递 " + entry.deliveries + " 次 · used 0 次")),
+                  h("span", { className: "dshi_hint" },
+                    "窗口内被投进对话 ≥3 次但从未被标记 used。可考虑降为 ephemeral（更快衰减、减少无效投递）、精简触发词或归档。"),
+                  h("div", { className: "dshi_row" },
+                    h("button", { className: "dshi_btn", onClick: function () { makeEphemeralPatch(entry); } },
+                      "生成 spark_update 补丁")));
+              })),
+              pageBar(lowUsePageData.page, lowUsePageData.totalPages, setLowUsePage, false))
+            : h("div", { className: "dshi_empty" }, "没有「反复投递却从未被标记有用」的卡片。")),
+          patch ? h("div", { className: "dshi_bgroup" },
+            h("div", { className: "dshi_cardTitle" }, patch.title + "（预览，不自动写入）"),
+            h("pre", { className: "dshi_hint", style: { whiteSpace: "pre-wrap", userSelect: "all", margin: "0" } }, patch.text),
+            h("div", { className: "dshi_row" },
+              h("button", { className: "dshi_btn", onClick: copyPatch }, "复制补丁"),
+              copyFeedback !== "" ? h("span", { className: "dshi_hint" }, copyFeedback) : null),
+            h("div", { className: "dshi_hint" },
+              "核对无误后，请用命令行 spark_update 或「闪回图谱」的卡片编辑自行应用；本页绝不自动执行写操作。"))
+          : null)
+        : null);
+    }
+
     var TABS = [
       { id: "status", label: "状态" },
       { id: "timeline", label: "最近变更" },
@@ -6357,6 +6582,9 @@ window.__ModuleLoader__.load({
       { id: "candidates", label: "遗忘" },
       { id: "topics", label: "专题" },
       { id: "flashbacks", label: "闪回命中" },
+      // 0.5-4D：投递体检（两清单 + spark_update 补丁预览；数据源 getStatus.diagnostics.delivery，
+      // wire 纯增量块，不新增 RPC 方法）。插在闪回命中之后——同为投递域。
+      { id: "delivery", label: "投递体检" },
       { id: "budgets", label: "记忆预算" }
     ];
 
@@ -7222,6 +7450,8 @@ var personaScopeTarget = personaScopeExplicit
                   tab === "candidates" && (modeStatus === null || mode === "active") ? h(CandidatesTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow }) : null,
                   tab === "topics" && (modeStatus === null || mode === "active") ? h(TopicsTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow, focusTarget: jumpRef.current && jumpRef.current.tab === "topics" ? jumpRef.current : null }) : null,
                   tab === "flashbacks" && (modeStatus === null || mode === "active") ? h(FlashbacksTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow }) : null,
+                  // 0.5-4D：投递体检（数据源 getStatus.diagnostics.delivery；页面无写操作按钮）。
+                  tab === "delivery" && (modeStatus === null || mode === "active") ? h(DeliveryCheckupTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,
                   // key=sessionId：切会话整组件重挂，分页/批缓存状态一并归零
                   //（评审 attempt-3 阻塞 A 的宿主侧兜底；stub 直渲 tab 不走此路径）。
                   tab === "timeline" && (modeStatus === null || mode === "active") ? h(TimelineTab, { key: sessionId, dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, onJump: jumpFromTimeline }) : null));

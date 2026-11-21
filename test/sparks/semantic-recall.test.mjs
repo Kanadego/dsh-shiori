@@ -343,3 +343,73 @@ test("过期/缺失向量不补位；索引与卡片维度不符跳过不抛", a
 test("阈值常量 = 0.45（实测校准值，见源码注释；防止无意漂移）", () => {
   assert.equal(SEMANTIC_SIMILARITY_THRESHOLD, 0.45);
 });
+
+// ---------------------------------------------------------------------------
+// 0.5-4D（评审 R12）：诊断块新增 topScore/scored/cooledIds 后，四条早退路径的
+// diag 键集必须完全一致（8 键恒在），既有 enabled/used/threshold/candidates/error
+// 行为不变——面板与投递诊断账本按此形状消费。
+// ---------------------------------------------------------------------------
+
+test("诊断块键集在四条早退路径完全一致（disabled/空文本/embed 抛错/ranked 空），既有字段行为不变", async () => {
+  const baseArgs = {
+    scopeId: SCOPE,
+    userText: "聊聊今天的天气",
+    sparks: [card("a", { triggers: ["洋葱"] }), card("b", { triggers: ["奶茶"] })],
+    seenKeys: [],
+    sessionId: SESSION,
+    contextEpoch: EPOCH,
+    maxSeeds: 3,
+    maxRelated: 2,
+  };
+  // 评审 R10 同款口径：形状钉死字面值，不引用实现常量拼断言。
+  const expectedKeys = ["candidates", "cooledIds", "enabled", "error", "scored", "threshold", "topScore", "used"];
+
+  // ① provider=null（语义关闭）
+  const disabled = await mergeSemanticRecall({ ...baseArgs, provider: null, vectorsFor: null });
+  assert.deepEqual(Object.keys(disabled.semantic).sort(), expectedKeys);
+  assert.equal(disabled.semantic.enabled, false);
+  assert.equal(disabled.semantic.topScore, null);
+  assert.deepEqual(disabled.semantic.scored, {});
+  assert.deepEqual(disabled.semantic.cooledIds, []);
+
+  // ② 无正文（userText 空串）→ 字面直通早退（连 embed 都不做）
+  const emptyText = await mergeSemanticRecall({
+    ...baseArgs, userText: "", provider: fakeProvider([1, 0, 0, 0]), vectorsFor: vectorIndex(new Map()),
+  });
+  assert.deepEqual(Object.keys(emptyText.semantic).sort(), expectedKeys);
+  assert.equal(emptyText.semantic.topScore, null);
+  assert.deepEqual(emptyText.semantic.scored, {});
+  assert.deepEqual(emptyText.semantic.cooledIds, []);
+
+  // ③ embed 抛错（provider 不可用）→ 错误进诊断，键集不变、分数证据恒空
+  const throwing = {
+    kind: "local", dims: 4,
+    async embed() { throw new Error("本地 embedding 运行时加载失败"); },
+  };
+  const errored = await mergeSemanticRecall({
+    ...baseArgs, provider: throwing, vectorsFor: vectorIndex(new Map()),
+  });
+  assert.deepEqual(Object.keys(errored.semantic).sort(), expectedKeys);
+  assert.equal(errored.semantic.error, "本地 embedding 运行时加载失败");
+  assert.equal(errored.semantic.topScore, null);
+  assert.deepEqual(errored.semantic.scored, {});
+
+  // ④ ranked 为空（向量都在阈值之下）→ scored 有逐卡分数、topScore = 最高余弦
+  const ortho = Float32Array.from([0, 1, 0, 0]); // 与 query [1,0,0,0] 正交 → cos = 0
+  const vectors = vectorIndex(new Map([
+    ["a", { revision: 1, vec: ortho }],
+    ["b", { revision: 1, vec: ortho }],
+  ]));
+  const emptyRanked = await mergeSemanticRecall({
+    ...baseArgs, provider: fakeProvider([1, 0, 0, 0]), vectorsFor: vectors,
+  });
+  assert.deepEqual(Object.keys(emptyRanked.semantic).sort(), expectedKeys);
+  assert.equal(emptyRanked.semantic.candidates, 0);
+  assert.equal(emptyRanked.semantic.topScore, 0, "越没越线都如实记最高余弦");
+  assert.deepEqual(Object.keys(emptyRanked.semantic.scored).sort(), ["a", "b"]);
+  // 既有字段行为不变
+  assert.equal(emptyRanked.semantic.enabled, true);
+  assert.equal(emptyRanked.semantic.used, false);
+  assert.equal(emptyRanked.semantic.threshold, SEMANTIC_SIMILARITY_THRESHOLD);
+  assert.equal(emptyRanked.semantic.error, null);
+});

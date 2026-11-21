@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createShioriService } from '../../src/service/index.mjs';
+import { createShioriService, stateWeightOf } from '../../src/service/index.mjs';
 import { validateConfig } from '../../src/core/index.mjs';
 
 const config = validateConfig({});
@@ -154,4 +154,58 @@ test('archiveOrigin 显式写入 auto-inactive + archivedAt 组合，全程透�
   const listed = await service.listTopics();
   assert.equal(listed[0].archived, true);
   assert.equal(listed[0].archiveOrigin, 'auto-inactive');
+});
+
+// ---------------------------------------------------------------------------
+// 0.5 批次 4 D 线：memory_search 归档排序 finalScore = 词法分 × stateWeightOf。
+// 用例设计带变异自证：把 stateWeight 全设 1.0（或退化按 key 排序）会让
+// 「b-cold 排在 a-frozen 之前」这条断言变红（见任务书「变红自证」要求）。
+// ---------------------------------------------------------------------------
+
+/** 建一张已归档 topic（archiveOrigin 显式指定；title/summary 含查询词）。 */
+async function seedArchived(service, key, { origin, title = '归档', summary = '排障' } = {}) {
+  await service.mutate({ operationId: `seed-${key}`, changes: [{ kind: 'topic', key, expectedRevision: null,
+    text: '归档正文\n', topic: { title, summary, updated: '2026-11-01T00:00:00.000Z' } }] });
+  const item = await service.readTopic(key);
+  await service.mutate(topicWrite(`archive-${key}`, item, item.body,
+    { archivedAt: '2026-11-10T00:00:00.000Z', archiveOrigin: origin }));
+}
+
+test('D 线：stateWeightOf 四分支 + 缺失/未知值回落（评审 q-50d63bd04a86684e 拍板口径）', () => {
+  assert.equal(stateWeightOf({ archived: false }), 1.0, '未归档 → active');
+  assert.equal(stateWeightOf({}), 1.0, 'archived 缺失 → 未归档（storage 缺省即未归档）');
+  assert.equal(stateWeightOf({ archived: true, archiveOrigin: 'auto-inactive' }), 0.5, '系统自动冷却 → frozen');
+  assert.equal(stateWeightOf({ archived: true, archiveOrigin: 'manual' }), 0.75, '人工归档 → cold');
+  assert.equal(stateWeightOf({ archived: true }), 0.75, 'origin 缺失 → 人工归档缺省口径（storage 补 manual）');
+  assert.equal(stateWeightOf({ archived: true, archiveOrigin: 'bogus' }), 0.75, '未知 origin 保守回落 cold，不静默变 active');
+  assert.equal(stateWeightOf({ archived: 1, archiveOrigin: undefined }), 0.75, '垃圾真值按归档保守处理');
+});
+
+test('D 线：search 归档排序 finalScore = 词法分 × stateWeightOf；活跃恒在前；score 字段保留词法分', async t => {
+  const { service } = await fixture(t);
+  // 关键区分度：a-frozen 与 b-cold 同词法分（1），键序 a-frozen < b-cold。
+  // 权重生效时 b-cold（0.75）排在 a-frozen（0.5）前；权重全 1.0 或退化按 key
+  // 排序时 a-frozen 会反超 → 断言红（变异自证）。
+  await seedArchived(service, 'a-frozen', { origin: 'auto-inactive', summary: '排障' });
+  await seedArchived(service, 'b-cold', { origin: 'manual', summary: '排障' });
+  await seedArchived(service, 'c-strong', { origin: 'auto-inactive', summary: '排障 深冷' });
+  await service.mutate({ operationId: 'seed-warm-z', changes: [{ kind: 'topic', key: 'warm-z', expectedRevision: null,
+    text: '热正文\n', topic: { title: 'Warm', summary: '排障', updated: '2026-11-01T00:00:00.000Z' } }] });
+
+  const hits = await service.search('排障 深冷');
+  assert.deepEqual(hits.map(h => [h.key, h.state ?? null]), [
+    ['warm-z', null],          // 活跃恒在前（权重只在归档条目之间比大小）
+    ['c-strong', 'archived'],  // 2 词 × frozen 0.5 = 1.0
+    ['b-cold', 'archived'],    // 1 词 × cold 0.75 = 0.75
+    ['a-frozen', 'archived'],  // 1 词 × frozen 0.5 = 0.5
+  ]);
+  assert.deepEqual(hits.map(h => h.score), [1, 2, 1, 1], 'score 字段 = 保留的词法命中分（不再恒 0）');
+});
+
+test('D 线：同分（finalScore 相等）按 key 码点序稳定排序', async t => {
+  const { service } = await fixture(t);
+  await seedArchived(service, 't2-auto', { origin: 'auto-inactive', summary: '排障' });
+  await seedArchived(service, 't1-auto', { origin: 'auto-inactive', summary: '排障' });
+  const hits = await service.search('排障');
+  assert.deepEqual(hits.map(h => h.key), ['t1-auto', 't2-auto'], '同为 frozen 0.5 → key 序稳定');
 });

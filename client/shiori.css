@@ -130,6 +130,8 @@
 .dshi_restartText{flex:1;word-break:break-word}
 .dshi_restartClose{border:1px solid currentColor;background:none;color:inherit;font:inherit;font-size:var(--dshi-font-xs);border-radius:6px;padding:2px 8px;cursor:pointer}
 .dshi_tabIco-timeline{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%278%27 cy=%278%27 r=%276.2%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3Cpath d=%27M8 4.6V8l2.4 1.6%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linecap=%27round%27/%3E%3C/svg%3E')}
+/* 0.5-4D「投递体检」tab 图标（监护仪波形容器；URL 编码口径与既有图标一致）。 */
+.dshi_tabIco-delivery{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Crect x=%271%27 y=%273%27 width=%2714%27 height=%2710%27 rx=%271.5%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3Cpath d=%27M3 8h2.2l1.3-2.4L9 10.4l1.3-2.4H13%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}
 .dshi_roBanner{border:1px solid var(--dshi-warn);background:rgba(180,83,9,.10);color:var(--dshi-warn);border-radius:8px;padding:8px 12px;font-size:12px;line-height:1.5;word-break:break-word}
 .dshi_roHint{font-size:11px;color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:8px;padding:4px 8px;word-break:break-word}
 .dshi_tlScan{font-size:11px;color:var(--dshi-warn)}

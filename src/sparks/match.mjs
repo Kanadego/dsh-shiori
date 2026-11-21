@@ -221,7 +221,7 @@ export function matchSparks({
   const seen = requireSeenKeys(seenKeys);
   const text = resolveUserText(userText);
 
-  const emptyResult = { scopeId, sessionId, contextEpoch, seeds: [], related: [], anchors: [] };
+  const emptyResult = { scopeId, sessionId, contextEpoch, seeds: [], related: [], anchors: [], literalHitIds: [] };
   if (text === null || text.length === 0) {
     return emptyResult;
   }
@@ -328,5 +328,13 @@ export function matchSparks({
     .slice(0, relatedCap)
     .map(({ card, via }) => ({ id: card.id, revision: card.revision, spark: card, via }));
 
-  return { scopeId, sessionId, contextEpoch, seeds, related, anchors };
+  // 0.5-4D（评审 R1）：全量字面命中 id——含被 seedCap/MAX_ANCHORS 截断的种子与
+  // 锚点候选（slice 之外的命中原来直接丢弃，投递诊断会把它们误归因为
+  // literal_miss「没识别出来」，实际是「命中但没进槽」）。只加字段不改任何
+  // 既有字段与判定；按 id 码点序稳定输出。召回合并层经 { ...literal } 展开
+  // 原样透传，投递诊断（diagnostics.mjs buildRoundRecord）消费。
+  const literalHitIds = hits
+    .map(({ card }) => card.id)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return { scopeId, sessionId, contextEpoch, seeds, related, anchors, literalHitIds };
 }

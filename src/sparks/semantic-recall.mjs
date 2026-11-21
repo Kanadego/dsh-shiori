@@ -94,8 +94,15 @@ function userTextForEmbedding(userText) {
  * @param {number} [args.threshold] 相似度阈值（默认 SEMANTIC_SIMILARITY_THRESHOLD）。
  * @returns {Promise<{match: object, semantic: object}>}
  *   match：投递层消费的合并结果（provider 为 null / 不可用时 = 纯字面结果本体）；
- *   semantic：诊断块 {enabled, used, threshold, candidates, error}（controller
- *   转存进 getStatus.diagnostics.semantic；不进入 match，不影响投递层）。
+ *   semantic：诊断块 {enabled, used, threshold, candidates, error, topScore,
+ *   scored, cooledIds}（controller 转存进 getStatus.diagnostics.semantic，并随
+ *   0.5-4D 投递诊断账本逐轮落账；不进入 match，不影响投递层）。0.5-4D 新增：
+ *   topScore = 本轮实际评分的最高余弦（无人被评分时 null，越线与否都如实记，
+ *   「差多少才命中」由此回答）；scored = { sparkId: 余弦分 }（本轮真正被评分的
+ *   逐卡分数——只含合格且向量新鲜且未 seen 的卡，是投递诊断
+ *   semantic_below_threshold 归因与最高分证明的数据源）；cooledIds = 语义可行
+ *   （合格 + 向量新鲜）但被 seen 冷却预过滤掉的卡 id（投递诊断 seen_cooldown
+ *   归因的语义侧证据；字面侧来自 match.anchors）。
  */
 export async function mergeSemanticRecall({
   scopeId,
@@ -122,6 +129,11 @@ export async function mergeSemanticRecall({
     threshold,
     candidates: 0,
     error: null,
+    // 0.5-4D：逐卡评分证据（见 @returns）。所有 return 路径形状一致——
+    // 未走到评分段的路径 scored 恒空 / topScore 恒 null / cooledIds 恒空。
+    topScore: null,
+    scored: {},
+    cooledIds: [],
   };
   if (!diag.enabled) {
     return { match: literal, semantic: diag };
@@ -164,16 +176,24 @@ export async function mergeSemanticRecall({
     const seenOk = !seen.has(seenKeyFor({
       scopeId, sessionId, contextEpoch, sparkId: card.id, revision: card.revision,
     }));
-    if (!seenOk) continue; // 闸门一（预过滤）：已冷却的卡绝不因相似度翻红
+    if (!seenOk) {
+      // 0.5-4D：语义可行但被冷却——seen_cooldown 归因的语义侧证据。
+      diag.cooledIds.push(card.id);
+      continue; // 闸门一（预过滤）：已冷却的卡绝不因相似度翻红
+    }
     let cos;
     try {
       cos = cosineSimilarity(query, entry.vec);
     } catch {
       continue; // 维度/数值异常已在上面防住；再兜一层，不让单条坏数据炸掉召回
     }
+    diag.scored[card.id] = cos; // 0.5-4D：逐卡评分证据（阈值上下都记）
     if (cos >= threshold) ranked.push({ card, cos });
   }
   diag.candidates = ranked.length;
+  // 0.5-4D：本轮最高余弦（阈值越没越线都如实记——「差多少才命中」的依据）。
+  const scoredValues = Object.values(diag.scored);
+  if (scoredValues.length > 0) diag.topScore = Math.max(...scoredValues);
   if (ranked.length === 0) {
     return { match: literal, semantic: diag };
   }

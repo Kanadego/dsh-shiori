@@ -19,6 +19,9 @@ import path from "node:path";
 import { promises as fsp } from "node:fs";
 import { withLock } from "../storage/lockfile.mjs";
 import { atomicReplace, readFileOrNull, sha256Buffer, stableStringify } from "../storage/fsutil.mjs";
+// 0.5 批次 4 D 线：投递诊断记录的形状白名单与滚动裁旧唯一权威在
+// sparks/diagnostics.mjs（纯函数，零 IO）；账本层只负责落盘与计数。
+import { assertRecordShape, trimRecords } from "../sparks/diagnostics.mjs";
 
 function fail(code, message, details) {
   const error = new Error(message);
@@ -122,6 +125,7 @@ function createLedger({ file, empty, lockRoot }) {
  *   <stateRoot>/plans/<scopeId>.json               plan 账（organize/forgetting，不可变）
  *   <stateRoot>/queues/<scopeId>.json              候选队列快照
  *   <stateRoot>/waterline/<scopeId hex>.json       F5 前置 · L1 水位采样侧表（低频）
+ *   <stateRoot>/diagnostics/<scopeId hex>.json     0.5-4D · L2 投递诊断账本（每轮一条，7 天滚动）
  */
 export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
   if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) {
@@ -173,6 +177,12 @@ export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
   const projectionLedger = (scopeId) => createLedger({
     file: path.join(stateRoot, "projections", `${safeSegment(scopeId)}.json`),
     empty: () => ({ l1: null }),
+    lockRoot: stateRoot,
+  });
+
+  const diagnosticsLedger = (scopeId) => createLedger({
+    file: path.join(stateRoot, "diagnostics", `${safeSegment(scopeId)}.json`),
+    empty: () => ({ records: [] }),
     lockRoot: stateRoot,
   });
 
@@ -303,6 +313,68 @@ export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
   function readWaterlineFor(scopeId, opts) {
     return readWaterline(stateRoot, scopeId, opts);
   }
+
+  // ------------------------------------------------------------------
+  // 0.5 批次 4 D 线 · L2 投递诊断账本（<stateRoot>/diagnostics/<scopeId hex>.json）
+  // ------------------------------------------------------------------
+
+  /**
+   * 写侧诊断计数（topic-activity 同款口径：append 绝不抛、失败只计数留痕，
+   * 调用方（controller pre-step）fire-and-forget，写失败只告警不阻塞投递）。
+   * 评审 R17：按 scope 记数——writerStats(scopeId) 返回该 scope 的计数，
+   * 多 scope 面板各自读各自的账，不再串号。
+   */
+  const diagnosticsWriteStatsByScope = new Map(); // scopeId → { appended, failed, lastError, lastSuccessAt }
+  function writeStatsFor(scopeId) {
+    if (typeof scopeId !== "string" || scopeId.length === 0) {
+      fail("INVALID_INPUT", "writerStats requires a non-empty scopeId");
+    }
+    let entry = diagnosticsWriteStatsByScope.get(scopeId);
+    if (entry === undefined) {
+      entry = { appended: 0, failed: 0, lastError: null, lastSuccessAt: null };
+      diagnosticsWriteStatsByScope.set(scopeId, entry);
+    }
+    return entry;
+  }
+
+  const diagnosticsStore = {
+    /**
+     * 追加一条投递诊断记录（每轮 pre-step 一条，不含卡片正文）。形状白名单
+     * 违规直接抛（编程错误走严格口径）；IO 失败折叠为 { ok:false }（诊断数据
+     * 路径绝不打断召回/投递主链路），失败计数进 writerStats(scopeId) 面板可见（按 scope 记数）。
+     * 落盘前按 7 天滚动裁旧 + 硬上限（裁旧用 store 注入时钟，测试可推时间）。
+     */
+    async appendRecord(scopeId, record) {
+      assertRecordShape(record);
+      try {
+        await diagnosticsLedger(scopeId).mutate((state) => {
+          const records = Array.isArray(state.records) ? state.records : [];
+          records.push(structuredClone(record));
+          state.records = trimRecords(records, { now: nowDate().getTime() });
+          return state;
+        });
+        const stats = writeStatsFor(scopeId);
+        stats.appended += 1;
+        stats.lastSuccessAt = new Date().toISOString();
+        return { ok: true };
+      } catch (error) {
+        const stats = writeStatsFor(scopeId);
+        stats.failed += 1;
+        stats.lastError = error instanceof Error ? error.message : String(error);
+        return { ok: false, error: stats.lastError };
+      }
+    },
+    /** 全量记录读取（裁旧在 readDiagnostics 侧做；账本读侧不重复裁）。 */
+    async readRecords(scopeId) {
+      const state = await diagnosticsLedger(scopeId).read();
+      return Array.isArray(state.records) ? structuredClone(state.records) : [];
+    },
+    /** 写侧计数快照（getStatus.diagnostics.delivery.writer 数据源；按 scope
+     * 记数——评审 R17，多 scope 不串号）。 */
+    writerStats(scopeId) {
+      return { ...writeStatsFor(scopeId) };
+    },
+  };
 
   // ------------------------------------------------------------------
   // 工具 operationId 重放账
@@ -836,5 +908,5 @@ export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
     return { kind: "state-store", stateRoot };
   }
 
-  return { toolOpStore, l2Store, planStore, queueStore, onboardingStore, projectionStore, analyzeOpStore, waterlineStore, readWaterline: readWaterlineFor, diagnostics };
+  return { toolOpStore, l2Store, planStore, queueStore, onboardingStore, projectionStore, analyzeOpStore, waterlineStore, diagnosticsStore, readWaterline: readWaterlineFor, diagnostics };
 }
