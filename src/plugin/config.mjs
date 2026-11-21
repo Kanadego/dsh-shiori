@@ -20,7 +20,9 @@
 //   - 0.4-S1 起 normalizePluginConfig 对 null 根自动解析默认根 <DSH_HOME>/shiori-data
 //     与 <DSH_HOME>/shiori-state（DSH_HOME 取 process.env.DSH_HOME，缺省 ~/.dsh）；
 //     apply 阶段 verifyPluginRoots 校验通过后 mkdir -p——inert 不再因 root 缺失触发
-//     （needs-configuration 退役）；
+//     （needs-configuration 退役）；P1#8 起 apply 以 degradeOnMkdirFailure:true 调用
+//     （缺省行为逐字节不变，公共契约语义保留）：mkdir 失败逐根记结构化诊断
+//     （rootDiagnostics）随返回值透出，插件由 controller 以只读/内存态降级挂载；
 //   - mode 默认仍为 shadow（安全取向不变），只有 mode=active 且 allowActive===true 才进 active；
 //   - verifyPluginRoots 保留双根皆 null → 默认根的兜底解析（直构 settings 时生效）；
 //   - profileRoot 只在宿主 bootstrap 能证明可信时由调用方显式传入（本批 DSH 0.2.1-rc.2
@@ -687,16 +689,63 @@ function textualRootRelation(a, b) {
 }
 
 /**
+ * 逐根 mkdir -p 探测（P1#8）：对每个非空根尝试 mkdir -p（已存在是 no-op，幂等），
+ * 失败只记一条结构化诊断（{root, path, reason, code}）并继续下一根，绝不 throw。
+ * 供 verifyPluginRoots（apply 阶段）与 controller.start（挂载期二次裁决）共用——
+ * 两侧都只做「尝试创建 + 失败记账」，谁先成功谁生效；同一次启动最多重复一次
+ * mkdir 系统调用，幂等无副作用。null / 非字符串根（inert 直构）跳过不探测。
+ *
+ * @param {{dataRoot: ?string, stateRoot: ?string}} roots 待探测的两根。
+ * @returns {Array<{root: "dataRoot"|"stateRoot", path: string, reason: string, code: string}>}
+ *   诊断数组（空数组 = 两根就绪）。code 取 fs 错误的 .code（EACCES / EPERM /
+ *   ENOTDIR / EEXIST / EROFS 等），缺失时兜底 "UNKNOWN"。
+ */
+export function probeRootsWritable({ dataRoot, stateRoot } = {}) {
+  const diagnostics = [];
+  for (const [field, root] of [["dataRoot", dataRoot], ["stateRoot", stateRoot]]) {
+    if (typeof root !== "string" || root.length === 0) continue;
+    try {
+      mkdirSync(root, { recursive: true });
+    } catch (error) {
+      diagnostics.push({
+        root: field,
+        path: root,
+        reason: error instanceof Error ? error.message : String(error),
+        code: typeof error?.code === "string" && error.code.length > 0 ? error.code : "UNKNOWN",
+      });
+    }
+  }
+  return Object.freeze(diagnostics);
+}
+
+/**
  * apply 阶段统一真实路径校验：真实 link（junction/symlink）解析后仍要求绝对、
  * 互不嵌套；校验通过后对两个根 mkdir -p（0.4-S1：装完即用，目录在默认位置就绪）。
- * 0.4-S1 起双根皆 null 不再返回 inert——解析为 <DSH_HOME>/shiori-data 与
+ * 0.4-S1 起 双根皆 null 不再返回 inert——解析为 <DSH_HOME>/shiori-data 与
  * <DSH_HOME>/shiori-state 默认根（DSH_HOME 取 env，缺省 ~/.dsh），inert 不再因
  * root 缺失触发。失败抛带 .code 的 Error（含可读的根目录创建诊断）。
  *
+ * P1#8（degradeOnMkdirFailure，apply 专用降级开关——reviewer 答复 q-2dac64b1f233f6c1
+ * 拍板 B 方案）：缺省不传时行为逐字节不变（mkdir 失败照旧整体 throw，公共契约
+ * 的既有语义不翻动，第三方直接调用方零感知）。仅插件入口 index.mjs apply 传
+ * { degradeOnMkdirFailure: true }：两条根各自 mkdir 失败只记一条结构化诊断
+ * （{root, path, reason, code}，root ∈ "dataRoot"|"stateRoot"），不再整体 throw；
+ * 返回值新增 rootDiagnostics（正常路径为空数组）随 verified 透出，插件由
+ * controller.start 以只读/内存态降级挂载（工具一律 UNSUPPORTED），面板
+ * getStatus.diagnostics.roots 可见。路径安全类失败（非绝对 / 解析后嵌套）在
+ * 两种模式下都照旧抛出——那是配置错误，不是环境降级。
+ *
  * @param {object} settings normalizePluginConfig 的返回值。
- * @returns {{inert: boolean, dataRoot: string, stateRoot: string}}
+ * @param {{degradeOnMkdirFailure?: boolean}} [options] apply 专用降级开关（缺省 false）。
+ * @returns {{inert: boolean, dataRoot: string, stateRoot: string,
+ *            rootDiagnostics?: Array<{root: string, path: string, reason: string, code: string}>}}
+ *   缺省模式返回形状与既有完全一致（不含 rootDiagnostics）；降级模式额外带
+ *   rootDiagnostics（空数组 = 两根就绪）。
  */
-export function verifyPluginRoots(settings) {
+export function verifyPluginRoots(settings, { degradeOnMkdirFailure = false } = {}) {
+  if (degradeOnMkdirFailure !== undefined && typeof degradeOnMkdirFailure !== "boolean") {
+    fail(`verifyPluginRoots: options.degradeOnMkdirFailure must be a boolean, got ${String(degradeOnMkdirFailure)}`);
+  }
   let { dataRoot, stateRoot } = settings;
   if (dataRoot === null && stateRoot === null) {
     // 0.4-S1：root 缺失 → 默认根（不再 inert）。默认落点 shiori-data / shiori-state
@@ -721,6 +770,14 @@ export function verifyPluginRoots(settings) {
   // 无条件 mkdir 是有意行为（0.4 装完即用，reviewer P3 确认口径）：shadow 态同样
   // 在 apply 时把默认（或显式）目录创建就绪——空目录创建幂等、无副作用，用户打开
   // 面板即可见具体路径，不必先点「启用」；mkdir -p 对已存在目录是 no-op。
+  if (degradeOnMkdirFailure) {
+    // P1#8 降级模式（仅 apply 传开关）：单根 mkdir 失败只记诊断不抛——用户目录
+    // 权限/磁盘问题不该让插件整体卸载；降级为只读/内存态挂载后，用户在面板上
+    // 能看到具体是哪条根、为什么。探测经 probeRootsWritable 与 controller.start
+    // 的挂载期二次裁决共用同一实现。
+    const rootDiagnostics = probeRootsWritable({ dataRoot: resolvedData, stateRoot: resolvedState });
+    return { inert: false, dataRoot: resolvedData, stateRoot: resolvedState, rootDiagnostics };
+  }
   try {
     mkdirSync(resolvedData, { recursive: true });
     mkdirSync(resolvedState, { recursive: true });

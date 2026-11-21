@@ -905,3 +905,99 @@ test("0.4-S2：config.mjs 的 comparableRoot 直接 re-export 自 path-canon（�
     assert.equal(comparableRoot(value), comparableRootFromCanon(value), `折叠结果必须同源：${value}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// P1#8 · 根目录 mkdir 失败降级（reviewer 答复 q-2dac64b1f233f6c1 拍板 B 方案）：
+// verifyPluginRoots(settings, { degradeOnMkdirFailure: true })——apply 专用降级
+// 开关；缺省（不传）行为逐字节不变（mkdir 失败照旧整体 throw，见上方既有用例
+// 「目录创建失败给出可读诊断」，零改动）。降级模式逐根记结构化诊断（{root, path,
+// reason, code}）随返回值透出（rootDiagnostics），不再 throw。
+// 夹具：用「路径穿过一个已存在的普通文件」制造确定性的 mkdir 失败（Windows /
+// POSIX 都给 ENOTDIR），不依赖平台 ACL；「根本身是文件」给 EEXIST 作补充形态。
+// ---------------------------------------------------------------------------
+
+/** 与 index.mjs apply 同款调用形态（降级开关常量，避免散落字面量）。 */
+const DEGRADE = { degradeOnMkdirFailure: true };
+
+test("P1#8：降级模式下单根 mkdir 失败不抛——记一条结构化诊断，另一根照常创建", () => {
+  const base = join(TMP_ROOT, "p1-degrade");
+  mkdirSync(base, { recursive: true });
+  // dataRoot 的父级是一个普通文件：mkdirSync 递归创建必然失败（ENOTDIR，跨平台确定）。
+  const blocker = join(base, "blocked.txt");
+  writeFileSync(blocker, "not a directory", "utf8");
+  const dataRoot = join(blocker, "shiori-data");
+  const stateRoot = join(base, "shiori-state");
+  let verified = null;
+  try {
+    verified = verifyPluginRoots(normalizePluginConfig({ dataRoot, stateRoot }), DEGRADE);
+  } catch (error) {
+    assert.fail(`mkdir failure must degrade instead of throwing (got ${error.code}: ${error.message})`);
+  }
+  assert.equal(verified.inert, false);
+  // 正常字段照常回填（解析后的词法路径；ENOTDIR 不影响解析结果）。
+  assert.equal(verified.dataRoot, dataRoot);
+  assert.equal(verified.stateRoot, stateRoot);
+  // 恰好一条诊断，字段齐全：root 归属、路径、原因、code。
+  assert.equal(verified.rootDiagnostics.length, 1, "exactly one diagnostic for the failing root");
+  const diag = verified.rootDiagnostics[0];
+  assert.equal(diag.root, "dataRoot");
+  assert.equal(diag.path, dataRoot);
+  assert.equal(typeof diag.reason, "string");
+  assert.ok(diag.reason.length > 0, "reason must carry the underlying error message");
+  assert.equal(diag.code, "ENOTDIR");
+  // 逐根独立：失败不牵连另一根，stateRoot 照常创建（mkdir -p 既有语义保留）；
+  // 失败根零落盘（不创建任何东西，业务文件由降级挂载态的 controller 负责不建）。
+  assert.equal(existsSync(stateRoot), true, "the healthy root must still be created");
+  assert.equal(existsSync(dataRoot), false, "the failing root must not be created");
+});
+
+test("P1#8：降级模式下双根各自失败 → 两条诊断（各自带路径与 code）", () => {
+  const base = join(TMP_ROOT, "p1-degrade-both");
+  mkdirSync(base, { recursive: true });
+  const dataBlocker = join(base, "data.txt");
+  const stateBlocker = join(base, "state.txt");
+  writeFileSync(dataBlocker, "x", "utf8");
+  writeFileSync(stateBlocker, "x", "utf8");
+  const verified = verifyPluginRoots(normalizePluginConfig({
+    dataRoot: join(dataBlocker, "shiori-data"),
+    stateRoot: join(stateBlocker, "shiori-state"),
+  }), DEGRADE);
+  assert.equal(verified.rootDiagnostics.length, 2, "one diagnostic per failing root");
+  assert.deepEqual(verified.rootDiagnostics.map((d) => d.root), ["dataRoot", "stateRoot"]);
+  for (const diag of verified.rootDiagnostics) {
+    assert.equal(diag.code, "ENOTDIR");
+    assert.ok(diag.reason.length > 0);
+    assert.ok(diag.path.startsWith(base), "diagnostic path must point at the declared root");
+  }
+});
+
+test("P1#8：降级模式下根本身是文件 → EEXIST 诊断；缺省模式仍抛（两向覆盖）", () => {
+  const base = join(TMP_ROOT, "p1-degrade-eexist");
+  mkdirSync(base, { recursive: true });
+  const fileRoot = join(base, "shiori-data");
+  writeFileSync(fileRoot, "occupied by a regular file", "utf8");
+  const stateRoot = join(base, "shiori-state");
+  // 降级模式：EEXIST 记诊断、不抛。
+  const verified = verifyPluginRoots(normalizePluginConfig({ dataRoot: fileRoot, stateRoot }), DEGRADE);
+  const diag = verified.rootDiagnostics.find((d) => d.root === "dataRoot");
+  assert.ok(diag, "dataRoot (a regular file) must be diagnosed");
+  assert.equal(diag.code, "EEXIST");
+  assert.equal(diag.path, fileRoot);
+  // 缺省模式（不传开关）：同一夹具（dataRoot 是普通文件）照旧整体 throw——既有
+  // 公共契约语义逐字节保留（上方既有用例「目录创建失败给出可读诊断」锁的就是
+  // 这条路，零改动）。
+  assert.throws(
+    () => verifyPluginRoots(normalizePluginConfig({ dataRoot: fileRoot, stateRoot: join(base, "s2-default") })),
+    (error) => error.code === "INVALID_INPUT" && /cannot create shiori root directories/.test(error.message),
+    "default mode must keep throwing on mkdir failure (unchanged public contract)",
+  );
+  // 对照组：降级模式两根就绪 → rootDiagnostics 为空数组（纯增量字段）。
+  const healthy = verifyPluginRoots(normalizePluginConfig({
+    dataRoot: join(base, "ok-data"),
+    stateRoot: join(base, "ok-state"),
+  }), DEGRADE);
+  assert.deepEqual(healthy.rootDiagnostics, [], "healthy roots must produce an empty diagnostics array");
+  assert.equal(healthy.inert, false);
+  assert.equal(existsSync(join(base, "ok-data")), true);
+  assert.equal(existsSync(join(base, "ok-state")), true);
+});

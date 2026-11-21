@@ -17,8 +17,10 @@
 // S5：模型下载（progress_callback 驱动）也住本模块——它同样是 transformers.js
 // 运行时之上的薄层，与 embed 共享同一套懒加载/环境配置口径；测试经
 // loadTransformers 注入假模块，绝不真下载（F1b 铁律不变）。
-import { existsSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, dirname } from "node:path";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 function fail(code, message, details) {
   const error = new Error(message);
@@ -591,4 +593,255 @@ export function createLocalModelDownloader({
   }
 
   return Object.freeze({ download });
+}
+
+// ─────────────────────────────────────────────────────────
+// P2#12a · 0.3.x 旧模型缓存一次性迁移
+// ─────────────────────────────────────────────────────────
+//
+// 背景：0.3.x 时期 semantic.local.cacheDir 留空时，createLocalEmbeddingProvider
+// 不设置 env.cacheDir，模型交给 transformers.js 的默认缓存位置。经查证
+// （node_modules/@huggingface/transformers@3.8.1 src/env.js）：
+//   DEFAULT_CACHE_DIR = path.join(dirname(dirname(fileURLToPath(import.meta.url))), ".cache")
+// env.js 位于 <包根>/src/ 下，上两级即包根——旧缓存永远在「0.3.x 实际安装的
+// transformers 包根」下的 .cache。
+//
+// 包根在哪（R1，attempt-1 评审打回项）：npm 安装普遍做依赖提升（hoisting），包
+// 可能挂在插件目录自己的 node_modules（嵌套布局），也可能提升到任意上层
+// node_modules（提升布局）——只拼 <pluginDir>/node_modules/... 会对多数升级
+// 用户静默 no-op。解析顺序：
+//   ① createRequire（以 pluginDir 为基准）resolve 真实包入口 → 向上定位包根
+//     （与运行时 import 同一解析算法，穿透 junction/symlink 得到真实安装位置）；
+//   ② 解析失败（未安装 / exports 变动 / 解析 API 缺失）→ 从 pluginDir 逐级上溯
+//     探测 <dir>/node_modules/@huggingface/transformers/.cache（覆盖嵌套与各级
+//     提升布局），第一个真实存在的 .cache 胜出；
+//   ③ 全部落空 → null（迁移层按 absent 零动作处理）。
+//
+// 边界：
+// - 本模块顶层 / 本函数绝不 import transformers 运行时（apply 路径铁律）：
+//   旧落点由 legacyPluginModelCacheDir 纯路径拼装得出，不做任何模块解析。
+// - 迁移策略选「搬」（同卷 rename；跨卷 EXDEV 回退拷贝+删源），不选软链：
+//   Windows 符号链接需要特权，junction 不可跨卷且会让 dataRoot 备份/焚毁
+//   （purgeDataRoot）语义变复杂——搬运后 dataRoot 自包含，语义最干净。
+// - 幂等口径：marker 存在 → skipped；旧落点缺失 → absent（零动作，不写
+//   marker——此后每次启动只多一次 readdir 级探测）；旧落点为空 → empty（零
+//   动作）；全部条目处理成功（含与目标重名被跳过的）→ 写 marker 只做一次；
+//   任一 IO 失败 → failed，不写 marker，下次启动自动重试。
+// - 不覆盖目标已有条目（重名跳过并记录）：迁移永不破坏新缓存里的现成模型。
+// - 失败只返回结构化结果，由调用方（index.mjs apply）告警，绝不阻塞启动。
+
+/** 迁移完成标记文件名（落在目标缓存目录内；仅实际处理过旧落点才写）。 */
+export const LEGACY_MODEL_MIGRATION_MARKER = ".shiori-legacy-0.3-models-migrated.json";
+
+/** 从包入口文件向上定位包根（<dir>/package.json 的 name 匹配为止；有界防逃逸）。 */
+function packageRootOfEntry(entryPath) {
+  let dir = dirname(entryPath);
+  for (let hops = 0; hops < 8 && dirname(dir) !== dir; hops += 1) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+      if (manifest?.name === "@huggingface/transformers") return dir;
+    } catch {
+      // 该层无 manifest / 解析失败 → 继续上溯（有界，到文件系统根自动停）。
+    }
+    dir = dirname(dir);
+  }
+  return null;
+}
+
+/**
+ * 生产默认的包根解析（R1）：createRequire 以 pluginDir 为基准 resolve
+ * @huggingface/transformers 真实包入口 → 向上定位包根。与运行时 import 走同一
+ * 份 Node 解析算法（穿透 junction/symlink），解析到哪旧缓存就在哪的包根下。
+ * 失败（未安装 / exports 变动 / 解析异常）返回 null，调用方走候选回退。
+ */
+function resolveTransformersPackageRootDefault(pluginDir) {
+  try {
+    const entry = createRequire(join(pluginDir, "package.json")).resolve("@huggingface/transformers");
+    // createRequire.resolve 常规返回绝对路径；个别运行时可能给 file:// URL，归一化。
+    const entryPath = typeof entry === "string" && entry.startsWith("file:") ? fileURLToPath(entry) : entry;
+    return packageRootOfEntry(entryPath);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 解析 0.3.x 旧模型缓存的真实落点（R1：兼容 npm 依赖提升布局）。
+ *
+ * 候选顺序：① 注入点解析出的包根下的 .cache（生产 = createRequire 真实解析，
+ * 穿透 junction 得到 0.3.x 实际安装位置）；② 从 pluginDir 逐级上溯（有界 8 层）
+ * 探测 <dir>/node_modules/@huggingface/transformers/.cache——嵌套布局（level 0）
+ * 与 reviewer 所列 pluginDir/../node_modules、pluginDir/../../node_modules 等
+ * 各级提升位置的超集。取第一个真实存在的 .cache；全部落空返回 null
+ * （migrateLegacyModelCache 按 absent 零动作处理，绝不猜一个不存在的路径）。
+ *
+ * @param {string} pluginDir 插件目录（index.mjs 所在目录；生产 = 装插件的那个目录）。
+ * @param {{resolvePackageRoot?: (pluginDir: string) => ?string}} [options]
+ *   包根解析注入点（缺省 createRequire 实现；测试注入桩替换）。
+ * @returns {?string} 真实存在的旧缓存目录；不存在 → null。
+ * @throws {Error} code="INVALID_INPUT"：pluginDir 缺失或非非空字符串。
+ */
+export function legacyPluginModelCacheDir(pluginDir, { resolvePackageRoot = resolveTransformersPackageRootDefault } = {}) {
+  if (typeof pluginDir !== "string" || pluginDir.length === 0) {
+    fail("INVALID_INPUT", `legacyPluginModelCacheDir: pluginDir must be a non-empty string, got ${String(pluginDir)}`, {
+      received: pluginDir === undefined ? "absent" : String(pluginDir),
+    });
+  }
+  if (resolvePackageRoot !== undefined && typeof resolvePackageRoot !== "function") {
+    fail("INVALID_INPUT", "legacyPluginModelCacheDir: resolvePackageRoot must be a function when provided", {});
+  }
+  const candidates = [];
+  const resolvedRoot = resolvePackageRoot(pluginDir);
+  if (typeof resolvedRoot === "string" && resolvedRoot.length > 0) {
+    candidates.push(join(resolvedRoot, ".cache"));
+  }
+  // 回退候选：从插件目录逐级上溯探测（嵌套布局与各级依赖提升位置的超集）。
+  let dir = pluginDir;
+  for (let hops = 0; hops < 8 && dirname(dir) !== dir; hops += 1) {
+    candidates.push(join(dir, "node_modules", "@huggingface", "transformers", ".cache"));
+    dir = dirname(dir);
+  }
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) return candidate;
+    } catch {
+      // 探测失败（权限等）→ 换下一个候选，绝不因单点探测异常放弃整条链。
+    }
+  }
+  return null;
+}
+
+/** 迁移入参的路径校验（与 localModelDir 同口径：非空、绝对路径、拒 .. 逃逸）。 */
+function requireMigratablePath(value, field) {
+  if (typeof value !== "string" || value.length === 0) {
+    fail("INVALID_INPUT", `migrateLegacyModelCache: ${field} must be a non-empty string, got ${String(value)}`, {});
+  }
+  if (!isAbsolute(value)) {
+    fail("INVALID_INPUT", `migrateLegacyModelCache: ${field} must be an absolute path, got "${value}"`, {});
+  }
+  if (value.split(/[\\/]+/).includes("..")) {
+    fail("INVALID_INPUT", `migrateLegacyModelCache: ${field} must not contain ".." path segments, got "${value}"`, {});
+  }
+}
+
+/**
+ * 把 0.3.x 默认缓存里的模型一次性搬到新缓存根（P2#12a）。
+ *
+ * 状态机：skipped（marker 已存在 / 新旧同目录）→ absent（旧落点不存在，零动作
+ * 不写 marker）→ empty（旧落点存在但为空，零动作不写 marker）→ migrated（条目
+ * 全部处理成功，写 marker 只做一次）→ failed（任一 IO 失败，不写 marker，
+ * 下次启动重试；已搬成功的条目保留在目标侧）。
+ *
+ * @param {object} options
+ * @param {string} options.targetCacheDir  新缓存根（controller 口径：显式
+ *   semantic.local.cacheDir 优先，否则 <dataRoot>/models）。只在这里 mkdir。
+ * @param {?string} options.legacyCacheDir  旧缓存根（legacyPluginModelCacheDir 的
+ *   产物；null = 解析不到旧包位置 → absent 零动作，R1 契约）。
+ * @param {string} [options.markerPath]    标记文件路径；缺省 <targetCacheDir>/.shiori-legacy-0.3-models-migrated.json。
+ * @param {() => string} [options.nowIso]  时间戳来源（marker 内容用）。
+ * @param {(from: string, to: string) => void} [options.renameImpl]  rename 注入点
+ *   （缺省 node:fs renameSync）；测试注入 EXDEV 桩验证跨卷回退，生产零行为变化。
+ * @returns {Promise<{status: "skipped"|"absent"|"empty"|"migrated"|"failed",
+ *     markerPath: string, moved?: string[], skippedEntries?: string[], reason?: string, error?: string}>}
+ *   结构化结果；failed 时 error 为有界错误摘要（errorDigest 同款）。本函数自身
+ *   不抛（入参校验的 INVALID_INPUT 除外），调用方按 status 告警即可。
+ */
+export async function migrateLegacyModelCache({
+  targetCacheDir,
+  legacyCacheDir,
+  markerPath,
+  nowIso = () => new Date().toISOString(),
+  renameImpl = renameSync,
+} = {}) {
+  requireMigratablePath(targetCacheDir, "targetCacheDir");
+  const marker = markerPath ?? join(targetCacheDir, LEGACY_MODEL_MIGRATION_MARKER);
+  if (markerPath !== undefined) requireMigratablePath(markerPath, "markerPath");
+  if (renameImpl !== undefined && typeof renameImpl !== "function") {
+    fail("INVALID_INPUT", "migrateLegacyModelCache: renameImpl must be a function when provided", {});
+  }
+  // R1：调用方解析不到旧包位置（包未安装 / 布局变更）→ 无旧模型，absent 零动作。
+  if (legacyCacheDir === null || legacyCacheDir === undefined) {
+    return { status: "absent", markerPath: marker };
+  }
+  requireMigratablePath(legacyCacheDir, "legacyCacheDir");
+  const failedResult = (cause, extra = {}) => ({
+    status: "failed",
+    markerPath: marker,
+    error: errorDigest(cause instanceof Error ? cause : new Error(String(cause))),
+    ...extra,
+  });
+
+  // 1) marker 已存在：只做一次的承诺兑现，直接跳过。
+  try {
+    if (existsSync(marker)) return { status: "skipped", markerPath, reason: "marker-exists" };
+  } catch (cause) {
+    return failedResult(cause);
+  }
+  // 2) 新旧同目录（配置自相矛盾的退化场景）：无东西可搬，视为已处理。
+  if (targetCacheDir === legacyCacheDir) {
+    return { status: "skipped", markerPath: marker, reason: "same-directory" };
+  }
+  // 3) 探测旧落点：缺失 / 非目录（ENOTDIR）→ absent，零动作。
+  let entries;
+  try {
+    entries = readdirSync(legacyCacheDir, { withFileTypes: true });
+  } catch (cause) {
+    if (cause?.code === "ENOENT" || cause?.code === "ENOTDIR") {
+      return { status: "absent", markerPath: marker };
+    }
+    return failedResult(cause);
+  }
+  // 4) 空目录：没有旧模型，零动作（不建目标目录、不写 marker）。
+  if (entries.length === 0) {
+    return { status: "empty", markerPath: marker };
+  }
+  // 5) 逐条目搬运：目标已有同名条目跳过（不覆盖）；同卷 rename、跨卷（EXDEV）
+  //    回退「拷到目标同卷临时名 → 原子改名 → 删源」，拷贝失败清理临时件。
+  const moved = [];
+  const skippedEntries = [];
+  try {
+    mkdirSync(targetCacheDir, { recursive: true });
+    for (const entry of entries) {
+      const from = join(legacyCacheDir, entry.name);
+      const to = join(targetCacheDir, entry.name);
+      if (existsSync(to)) {
+        skippedEntries.push(entry.name);
+        continue;
+      }
+      try {
+        renameImpl(from, to);
+        moved.push(entry.name);
+      } catch (cause) {
+        if (cause?.code !== "EXDEV") throw cause;
+        const staging = `${to}.migrating-${process.pid}-${Date.now()}`;
+        try {
+          cpSync(from, staging, { recursive: true });
+          renameSync(staging, to);
+          rmSync(from, { recursive: true, force: true });
+          moved.push(entry.name);
+        } catch (copyCause) {
+          try {
+            rmSync(staging, { recursive: true, force: true });
+          } catch { /* 清理尽力而为：失败随 failedResult 一并上报 */ }
+          throw copyCause;
+        }
+      }
+    }
+  } catch (cause) {
+    return failedResult(cause, { moved: [...moved], skippedEntries: [...skippedEntries] });
+  }
+  // 6) 全部处理成功：写 marker 只做一次。写失败按 failed 上报（已搬条目保留；
+  //    下次启动旧落点变空 → empty，不会重复搬运）。
+  try {
+    writeFileSync(marker, `${JSON.stringify({
+      migratedAt: nowIso(),
+      from: legacyCacheDir,
+      to: targetCacheDir,
+      moved: [...moved],
+      skippedEntries: [...skippedEntries],
+    }, null, 2)}\n`, "utf8");
+  } catch (cause) {
+    return failedResult(cause, { moved: [...moved], skippedEntries: [...skippedEntries] });
+  }
+  return { status: "migrated", markerPath: marker, moved, skippedEntries };
 }

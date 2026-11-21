@@ -31,6 +31,10 @@ import {
   expectedModelFiles,
   isLocalModelInstalled,
   localModelDir,
+  // P2#12a：0.3.x 旧模型缓存一次性迁移。
+  LEGACY_MODEL_MIGRATION_MARKER,
+  legacyPluginModelCacheDir,
+  migrateLegacyModelCache,
 } from "../../src/semantic/local.mjs";
 import { createEmbeddingProvider } from "../../src/semantic/index.mjs";
 
@@ -660,4 +664,232 @@ test("C-fix C5：下载逐源失败抛普通对象 → attempts.error 取 .messa
     "两个源的 attempts.error 都取 .message（旧实现是 [object Object]）");
   assert.ok(result.error.includes("源内爆炸：磁盘满"), `汇总文案带出真实原因，实际：${result.error}`);
   assert.ok(!result.error.includes("[object Object]"), "不丢信息");
+});
+
+// ---------------------------------------------------------------------------
+// P2#12a · 0.3.x 旧模型缓存一次性迁移（纯 fs 层；绝不 import transformers）。
+// 夹具：真实 tmp 目录；「模型」夹具按 expectedModelFiles("q8") 的文件名摆放，
+// 迁移后用 isLocalModelInstalled（与面板同一判据）证明「新位置可见」。
+// ---------------------------------------------------------------------------
+
+import { mkdtempSync, rmSync, readFileSync, renameSync as realRenameSync } from "node:fs";
+
+const MIGRATION_TMP = mkdtempSync(join(tmpdir(), "shiori-p2-migration-"));
+test.after(() => {
+  rmSync(MIGRATION_TMP, { recursive: true, force: true });
+});
+
+/** 按 transformers.js 落盘布局造一个「已下载完成」的模型夹具（q8 文件名）。 */
+function seedLegacyModel(legacyCacheDir, org = "Xenova", model = "bge-small-zh-v1.5") {
+  const modelDir = join(legacyCacheDir, org, model);
+  mkdirSync(join(modelDir, "onnx"), { recursive: true });
+  writeFileSync(join(modelDir, "config.json"), "{}", "utf8");
+  writeFileSync(join(modelDir, "tokenizer.json"), "{}", "utf8");
+  writeFileSync(join(modelDir, "onnx", "model_quantized.onnx"), "fake-onnx-bytes", "utf8");
+  return modelDir;
+}
+
+test("P2#12a（R1）：legacyPluginModelCacheDir——注入解析命中包根 .cache 优先；非法入参拒绝", () => {
+  const base = join(MIGRATION_TMP, "r1-resolve");
+  const pkgRoot = join(base, "host", "node_modules", "@huggingface", "transformers");
+  mkdirSync(join(pkgRoot, ".cache", "Xenova"), { recursive: true });
+  const found = legacyPluginModelCacheDir(join(base, "plugin"), {
+    resolvePackageRoot: () => pkgRoot,
+  });
+  assert.equal(found, join(pkgRoot, ".cache"), "resolved package root wins when its .cache exists");
+  // 解析命中但该包根下没有 .cache → 不猜路径，按「第一个真实存在的 .cache」口径
+  // 落到候选回退（此处全空 → null，migrate 层按 absent 零动作）。
+  const emptyRoot = join(base, "host2", "node_modules", "@huggingface", "transformers");
+  mkdirSync(emptyRoot, { recursive: true });
+  assert.equal(
+    legacyPluginModelCacheDir(join(base, "plugin"), { resolvePackageRoot: () => emptyRoot }),
+    null,
+    "resolved root without .cache must not be invented",
+  );
+  assert.throws(() => legacyPluginModelCacheDir(""), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => legacyPluginModelCacheDir(undefined), (e) => e.code === "INVALID_INPUT");
+});
+
+test("P2#12a（R1）：嵌套布局（包在插件目录自己的 node_modules）→ 候选回退 level 0 命中", () => {
+  const base = join(MIGRATION_TMP, "r1-nested");
+  const pluginDir = join(base, "plugin");
+  const nestedCache = join(pluginDir, "node_modules", "@huggingface", "transformers", ".cache");
+  mkdirSync(join(nestedCache, "Xenova"), { recursive: true });
+  assert.equal(
+    legacyPluginModelCacheDir(pluginDir, { resolvePackageRoot: () => null }),
+    nestedCache,
+    "fallback walk level 0 must find the nested layout",
+  );
+});
+
+test("P2#12a（R1/R2）：依赖提升布局（插件目录无 node_modules，包提升到上两级）→ 命中且能迁移", async () => {
+  // reviewer R2 夹具：npm 提升后的常见布局——<root>/node_modules 持包（.cache 有
+  // 模型），插件在 <root>/plugins/shiori（自己没有 node_modules）。
+  const base = join(MIGRATION_TMP, "r1-hoisted");
+  const root = join(base, "host-profile");
+  const pluginDir = join(root, "plugins", "shiori");
+  const hoistedCache = join(root, "node_modules", "@huggingface", "transformers", ".cache");
+  seedLegacyModel(hoistedCache);
+  mkdirSync(pluginDir, { recursive: true });
+  const found = legacyPluginModelCacheDir(pluginDir, { resolvePackageRoot: () => null });
+  assert.equal(found, hoistedCache, "fallback walk must find the hoisted .cache above the plugin dir");
+  // 端到端：从提升布局迁移到 <dataRoot>/models，面板同一判据可见（不重复下载）。
+  const targetCacheDir = join(base, "data", "models");
+  const result = await migrateLegacyModelCache({ targetCacheDir, legacyCacheDir: found });
+  assert.equal(result.status, "migrated");
+  assert.equal(
+    isLocalModelInstalled({ cacheDir: targetCacheDir, model: "Xenova/bge-small-zh-v1.5", dtype: "q8" }),
+    true,
+    "hoisted legacy models must land in <dataRoot>/models (no re-download)",
+  );
+});
+
+test("P2#12a（R1）：解析与候选全部落空 → null；migrate 对 null 按 absent 零动作", async () => {
+  const base = join(MIGRATION_TMP, "r1-null");
+  const pluginDir = join(base, "lonely-plugin");
+  mkdirSync(pluginDir, { recursive: true });
+  assert.equal(
+    legacyPluginModelCacheDir(pluginDir, { resolvePackageRoot: () => null }),
+    null,
+    "no package anywhere → null (never invent a path)",
+  );
+  const result = await migrateLegacyModelCache({
+    targetCacheDir: join(base, "models"),
+    legacyCacheDir: null,
+  });
+  assert.equal(result.status, "absent");
+  assert.equal(existsSync(join(base, "models")), false, "zero action on unresolvable legacy root");
+});
+
+test("P2#12a：旧落点不存在 → absent 零动作（不建目标目录、不写 marker）", async () => {
+  const base = join(MIGRATION_TMP, "absent");
+  const result = await migrateLegacyModelCache({
+    targetCacheDir: join(base, "models"),
+    legacyCacheDir: join(base, "node_modules", "@huggingface", "transformers", ".cache"),
+  });
+  assert.equal(result.status, "absent");
+  assert.equal(existsSync(join(base, "models")), false, "target dir must not be created (zero action)");
+  assert.equal(existsSync(join(base, "models", LEGACY_MODEL_MIGRATION_MARKER)), false, "no marker on zero action");
+});
+
+test("P2#12a：旧落点为空目录 → empty 零动作（不建目标目录、不写 marker）", async () => {
+  const base = join(MIGRATION_TMP, "empty-legacy");
+  mkdirSync(join(base, "legacy-cache"), { recursive: true });
+  const result = await migrateLegacyModelCache({
+    targetCacheDir: join(base, "models"),
+    legacyCacheDir: join(base, "legacy-cache"),
+  });
+  assert.equal(result.status, "empty");
+  assert.equal(existsSync(join(base, "models")), false, "target dir must not be created (zero action)");
+  assert.equal(existsSync(join(base, "models", LEGACY_MODEL_MIGRATION_MARKER)), false, "no marker on zero action");
+});
+
+test("P2#12a：旧位置有模型 + 新位置为空 → 搬运成功、marker 只写一次、新位置按面板判据可见", async () => {
+  const base = join(MIGRATION_TMP, "migrate");
+  const legacyCacheDir = join(base, "legacy-cache");
+  const targetCacheDir = join(base, "models");
+  seedLegacyModel(legacyCacheDir);
+  const first = await migrateLegacyModelCache({ targetCacheDir, legacyCacheDir });
+  assert.equal(first.status, "migrated");
+  assert.deepEqual(first.moved, ["Xenova"]);
+  // 搬运语义：目标侧完整可见（目录 + 全部期望文件），源侧条目已移走。
+  assert.equal(isLocalModelInstalled({ cacheDir: targetCacheDir, model: "Xenova/bge-small-zh-v1.5", dtype: "q8" }),
+    true, "moved model must be visible to the same installer check the panel uses (no re-download)");
+  assert.equal(existsSync(join(legacyCacheDir, "Xenova")), false, "source entry must be gone after rename");
+  // marker：目标目录内、JSON 内容带 from/to/moved。
+  const markerPath = join(targetCacheDir, LEGACY_MODEL_MIGRATION_MARKER);
+  assert.equal(existsSync(markerPath), true, "marker must be written exactly after success");
+  const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+  assert.equal(marker.from, legacyCacheDir);
+  assert.equal(marker.to, targetCacheDir);
+  assert.deepEqual(marker.moved, ["Xenova"]);
+  // 幂等：第二次调用直接 skipped，不再搬、不改 marker。
+  const second = await migrateLegacyModelCache({ targetCacheDir, legacyCacheDir });
+  assert.equal(second.status, "skipped");
+  assert.equal(second.reason, "marker-exists");
+  assert.equal(existsSync(join(legacyCacheDir, "Xenova")), false, "no re-move on skipped");
+});
+
+test("P2#12a：目标已有同名条目 → 跳过不覆盖（迁移永不破坏新缓存）", async () => {
+  const base = join(MIGRATION_TMP, "conflict");
+  const legacyCacheDir = join(base, "legacy-cache");
+  const targetCacheDir = join(base, "models");
+  seedLegacyModel(legacyCacheDir);
+  // 目标侧已有同名 org 目录，内含不同文件——迁移必须原样保留。
+  mkdirSync(join(targetCacheDir, "Xenova"), { recursive: true });
+  writeFileSync(join(targetCacheDir, "Xenova", "keepme.txt"), "target-owned", "utf8");
+  const result = await migrateLegacyModelCache({ targetCacheDir, legacyCacheDir });
+  assert.equal(result.status, "migrated");
+  assert.deepEqual(result.moved, [], "conflicting entry must not be renamed over");
+  assert.deepEqual(result.skippedEntries, ["Xenova"]);
+  assert.equal(readFileSync(join(targetCacheDir, "Xenova", "keepme.txt"), "utf8"), "target-owned",
+    "existing target entry must stay untouched");
+  assert.equal(existsSync(join(legacyCacheDir, "Xenova")), true, "skipped entry stays at the legacy location");
+  assert.equal(existsSync(join(targetCacheDir, LEGACY_MODEL_MIGRATION_MARKER)), true,
+    "all entries processed (even skipped) → marker written, no endless re-probe");
+});
+
+test("P2#12a：跨卷回退（EXDEV）→ 拷贝到目标同卷临时名 + 原子改名 + 删源", async () => {
+  const base = join(MIGRATION_TMP, "exdev");
+  const legacyCacheDir = join(base, "legacy-cache");
+  const targetCacheDir = join(base, "models");
+  seedLegacyModel(legacyCacheDir, "Xenova", "bge-small-zh-v1.5");
+  let calls = 0;
+  const exdevOnce = (from, to) => {
+    calls += 1;
+    if (calls === 1) {
+      const error = new Error("cross-device link not permitted");
+      error.code = "EXDEV";
+      throw error;
+    }
+    realRenameSync(from, to);
+  };
+  const result = await migrateLegacyModelCache({ targetCacheDir, legacyCacheDir, renameImpl: exdevOnce });
+  assert.equal(result.status, "migrated");
+  assert.deepEqual(result.moved, ["Xenova"], "EXDEV must fall back to copy+delete, not fail");
+  assert.equal(isLocalModelInstalled({ cacheDir: targetCacheDir, model: "Xenova/bge-small-zh-v1.5", dtype: "q8" }), true);
+  assert.equal(existsSync(join(legacyCacheDir, "Xenova")), false, "source removed after copy fallback");
+  // 不留临时件（staging 名以 .migrating- 开头）。
+  const leftovers = (await import("node:fs")).readdirSync(targetCacheDir).filter((n) => n.includes(".migrating-"));
+  assert.deepEqual(leftovers, [], "no staging leftovers in target");
+});
+
+test("P2#12a：目标不可创建（父路径是文件）→ failed + 结构化错误摘要，不写 marker（下次启动重试）", async () => {
+  const base = join(MIGRATION_TMP, "failed");
+  mkdirSync(base, { recursive: true });
+  const blocker = join(base, "blocker.txt");
+  writeFileSync(blocker, "not a directory", "utf8");
+  const legacyCacheDir = join(base, "legacy-cache");
+  seedLegacyModel(legacyCacheDir);
+  const result = await migrateLegacyModelCache({
+    targetCacheDir: join(blocker, "models"),
+    legacyCacheDir,
+  });
+  assert.equal(result.status, "failed");
+  assert.ok(typeof result.error === "string" && result.error.length > 0, "failed must carry a bounded error digest");
+  assert.equal(existsSync(join(base, "models", LEGACY_MODEL_MIGRATION_MARKER)), false,
+    "no marker on failure → next startup retries");
+  // 源侧未被破坏：旧模型原样保留（搬运失败不丢数据）。
+  assert.equal(isLocalModelInstalled({ cacheDir: legacyCacheDir, model: "Xenova/bge-small-zh-v1.5", dtype: "q8" }), true);
+});
+
+test("P2#12a：入参校验——相对路径 / 含 .. 段拒绝（与 localModelDir 同口径）", async () => {
+  const base = join(MIGRATION_TMP, "args");
+  await assert.rejects(
+    () => migrateLegacyModelCache({ targetCacheDir: "relative/models", legacyCacheDir: join(base, "legacy") }),
+    (e) => e.code === "INVALID_INPUT",
+  );
+  await assert.rejects(
+    () => migrateLegacyModelCache({ targetCacheDir: join(base, "models"), legacyCacheDir: "also-relative" }),
+    (e) => e.code === "INVALID_INPUT",
+  );
+  // 夹具用字符串拼接构造含 .. 片段的绝对路径——path.join 会把 ".." 折叠掉，
+  // 构造不出逃逸写法（config.test.mjs P0#3 用例同一坑，见其注释）。
+  await assert.rejects(
+    () => migrateLegacyModelCache({
+      targetCacheDir: join(base, "models"),
+      legacyCacheDir: join(base, "legacy") + "/../escape",
+    }),
+    (e) => e.code === "INVALID_INPUT",
+  );
 });

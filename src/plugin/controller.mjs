@@ -19,6 +19,9 @@
 // - shadow（配置了 root）：纯内存只读挂载 —— 不注册工具 / section / waterfall /
 //   pre-step，不打开 completion 锁 / scope 资源 / receipt（抢独占锁会把真的
 //   active 实例挤成 LOCK_BUSY）；management 仅纯内存 getStatus。
+// - degraded（P1#8：active 但任一根 mkdir 失败）：只读/内存态降级挂载 —— 17 工具
+//   照常注册但执行一律 UNSUPPORTED（dispatchTool 顶部降级闸），跳过一切触盘步骤，
+//   started 不宣称；诊断经 getStatus.diagnostics.roots / diagnostics().roots 透出。
 //
 // 宿主 complete section（如 dsh-persona preset complete:true）会在 waterfall 后
 // 整体替换 sections —— 启动时探测；命中则不注册 L0/L1 并如实诊断（不谎报刷新）。
@@ -65,7 +68,7 @@ import {
 } from "../semantic/incremental.mjs";
 import { mergeSemanticRecall } from "../sparks/semantic-recall.mjs";
 import { createPersonaAdapter } from "./persona.mjs";
-import { coreBudgetsOf } from "./config.mjs";
+import { coreBudgetsOf, probeRootsWritable } from "./config.mjs";
 import { createStateStore } from "./state.mjs";
 import { createDshBindings, detectCompletePromptSections, detectCompleteSectionsForScope } from "./bindings.mjs";
 import { createManagement } from "./management.mjs";
@@ -241,6 +244,11 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     seatGuard: null,
     /** 工具层守门的合流入口（= seatGuard.guard；只读态抛 HOST_LOCKED）。 */
     readonlyGuard: null,
+    /** P1#8：根目录 mkdir 失败的结构化诊断（{root, path, reason, code}）。
+     *  空数组 = 两根就绪（正常路径）；非空 = start 降级为只读/内存态挂载，
+     *  工具一律 UNSUPPORTED，getStatus.diagnostics.roots 透出面板可见。
+     *  每次 start 重算（修复权限重启后自动恢复完整挂载）。 */
+    rootDiagnostics: [],
     /** 在途异步工作（排空用）。 */
     inFlight: new Set(),
     /** tool/result 归因表（callId → name；direct 模式归因用）。 */
@@ -1046,6 +1054,15 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   }
 
   async function dispatchTool(scope, name, args, exec) {
+    // P1#8 降级挂载（任一根 mkdir 失败）：一律 UNSUPPORTED——检查必须先于
+    // started 检查（降级挂载不宣称 started），也必须先于 semantic 保留名拦截与
+    // resourcesFor（降级态没有 scope 资源可打开，触盘路径必然失败）。读写工具
+    // 同口径：降级态没有可读的 scope 资源，诚实报 UNSUPPORTED 而非底层 fs 错误。
+    if (ctrl.rootDiagnostics.length > 0) {
+      fail("UNSUPPORTED", `shiori root directories are not writable; tool "${String(name)}" is unavailable (degraded read-only mount). 修复目录权限或显式改配 dataRoot/stateRoot 后重启插件即可恢复`, {
+        roots: [...ctrl.rootDiagnostics],
+      });
+    }
     // B4：禁新请求（stop 后）不再执行任何工具。
     if (ctrl.banned || !ctrl.started) {
       fail("INVALID_STATE", "controller is stopped or not started; tool dispatch refused", {});
@@ -1119,6 +1136,14 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       isConcurrencySafe: () => !WRITE_TOOL_NAMES.has(name),
       async execute(args, exec) {
         const evidence = sessionEvidenceFromExec(exec);
+        // P1#8 降级闸（与 dispatchTool 顶部同款、更早）：降级挂载不宣称 started，
+        // 这里的 started 检查会先把调用错报成 INVALID_STATE——降级必须先于它
+        // 判定，工具执行统一 UNSUPPORTED（details.roots 带逐根诊断）。
+        if (ctrl.rootDiagnostics.length > 0) {
+          fail("UNSUPPORTED", `shiori root directories are not writable; tool "${name}" is unavailable (degraded read-only mount). 修复目录权限或显式改配 dataRoot/stateRoot 后重启插件即可恢复`, {
+            roots: [...ctrl.rootDiagnostics],
+          });
+        }
         // B4：代际与禁用检查在 pin 之前（stop 后不再受理新工具请求）。
         if (ctrl.banned || !ctrl.started) {
           fail("INVALID_STATE", "controller is stopped or not started; tool dispatch refused", {});
@@ -1815,6 +1840,10 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   const baseGetStatus = managementFacade.getStatus;
   management.getStatus = async function getStatusWithSemantic(trustedContext, payload) {
     const status = await baseGetStatus.call(managementFacade, trustedContext, payload);
+    // P1#8：diagnostics.roots 注入（wire 的 diagnostics 块 additionalProperties:true，
+    // 纯增量）。逐根 mkdir 失败的结构化诊断（{root, path, reason, code}）——降级
+    // 只读/内存态挂载的可见证据（空数组 = 两根就绪）。纯内存读 ctrl，不可能抛。
+    status.diagnostics = { ...(status.diagnostics ?? {}), roots: [...ctrl.rootDiagnostics] };
     // F1b：diagnostics.semantic 注入（wire 的 diagnostics 块 additionalProperties:true，
     // 纯增量；不改方法数、不改描述符）。semanticDiagnostics 是纯内存投影，正常
     // 不可能抛；一旦抛（未来字段演化引入缺陷），这里显式把 reason 写进
@@ -1898,6 +1927,29 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
           sections: [],
           tools: [],
           completeShadowed: [],
+        };
+      }
+      // P1#8：挂载期根可写性二次裁决（mkdir -p 幂等；与 verifyPluginRoots 的
+      // degradeOnMkdirFailure 降级模式共用 probeRootsWritable，失败逐根记结构化
+      // 诊断）。apply 的 verify 降级调用不再因 mkdir 失败 throw——这里以磁盘真值
+      // 决定挂载形态：任一根不可写 → 降级只读/内存态（零落盘：不建组清单 / 锁 /
+      // 索引 / 座位文件）：
+      // 17 工具照常注册（宿主工具面不变，执行统一 UNSUPPORTED，见 dispatchTool
+      // 顶部降级闸），跳过一切触盘步骤（completion 锁 / 座位 / persona 预校验 /
+      // scope 资源 / L0/L1 / L2）；started 不宣称（getStatus 走纯内存投影，
+      // 诊断面板可见）。用户修复权限（或改配根路径）后重启插件即恢复完整挂载。
+      ctrl.rootDiagnostics = probeRootsWritable({ dataRoot: settings.dataRoot, stateRoot: settings.stateRoot });
+      if (ctrl.rootDiagnostics.length > 0) {
+        for (const def of registeredToolDefs()) {
+          await bindings.registerTool(def);
+        }
+        checkNotStopped("degraded-registration");
+        return {
+          mode: settings.mode,
+          degraded: true,
+          roots: [...ctrl.rootDiagnostics],
+          sections: [],
+          tools: [...bindings.diagnostics.registeredTools],
         };
       }
       ctrl.completion = await openState({ root: settings.stateRoot, scopeId: `shiori-plugin-${settings.ownerId}` });
@@ -2047,7 +2099,13 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
         // 清理交给 stop()（其正在 await 本 promise）。这里直接以失败收场。
         fail("INVALID_STATE", "start aborted: stop requested during startup", {});
       }
-      ctrl.started = true;
+      // P1#8：降级挂载不宣称 started——getStatus 保持纯内存投影（management 的
+      // 触数据方法按 INVALID_STATE 拒绝，与未启动同口径），工具层经 dispatchTool
+      // 顶部的降级闸返回 UNSUPPORTED。started 留 false 同时允许再次 start 重试
+      // （requireStartable 只拦 starting/started，修复权限后可直接重启）。
+      if (result?.degraded !== true) {
+        ctrl.started = true;
+      }
       return result;
     } catch (error) {
       ctrl.diag.startFailures.push(`${error?.code ?? "UNCODED"}: ${error instanceof Error ? error.message : String(error)}`);
@@ -2205,6 +2263,8 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       dataRoot: settings.dataRoot,
       stateRoot: settings.stateRoot,
       rootsSource: settings.rootsSource,
+      // P1#8（纯增量）：逐根 mkdir 失败诊断（降级挂载证据；空数组 = 两根就绪）。
+      roots: [...ctrl.rootDiagnostics],
       configurationState: liveSettingsForScope(settings).defaultPersona === null
         ? "needs-persona"
         : (settings.mode === "active" ? "configured" : "needs-active"),
