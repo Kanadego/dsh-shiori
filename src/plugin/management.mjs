@@ -111,9 +111,14 @@ async function listPersonaNames(dataRoot, readdirImpl) {
  * @param {(agent: object|null) => string|null} [deps.workspaceForAgent] 从宿主 agent 解析可信 workspace（只读）
  * @param {object} [deps.timelineReader] 已构造的时间线读取器（测试注入；省略则按 dataRoot 惰性创建）
  * @param {() => string} [deps.nowIso]
+ * @param {() => Array<{root: string, path: string, reason: string, code: string}>} [deps.getRootDegradation]
+ *   降级挂载（任一根 mkdir 失败）的逐根诊断取值函数（controller 注入；缺省视为
+ *   无降级）。executeTool 在 requireStarted 之前据此返回 UNSUPPORTED +
+ *   details.roots——降级态不宣称 started，否则面板只会拿到 INVALID_STATE。
  * @param {typeof import("node:fs/promises").readdir} [deps.readdir] 人设卡目录读取注入点
  *   （缺省 node:fs/promises readdir；仅测试注入 EACCES 桩验证 R1 降级路径用，
- *   默认行为逐字不变。controller 不传此参。）
+ *   默认行为逐字不变。controller 经 dependencies.personasReaddir 可选透传，
+ *   生产不传。）
  * @param {() => Promise<string[]>} [deps.invalidateScopeResources] scope 资源缓存失效入口
  *   （0.4 S6 中-2：仅 destroyData 使用；async——复用 controller 的 closeAllScopes，
  *   返回 Promise<string[]> 的 close 错误数组，调用方必须 await。存在性在删除之前
@@ -131,6 +136,7 @@ export function createManagement(deps) {
     generation,
     registerGrant,
     executeToolForScope,
+    getRootDegradation,
     nowIso = () => new Date().toISOString(),
   } = deps;
 
@@ -192,6 +198,16 @@ export function createManagement(deps) {
     if (!isStarted()) {
       fail("INVALID_STATE", "controller is not started", {});
     }
+  }
+
+  /**
+   * R1（0.5 批次 3）：降级挂载的逐根诊断（controller 以 getRootDegradation
+   * 注入取值函数；缺省/返回非数组一律当作「无降级」，非降级路径行为逐字不变）。
+   */
+  function rootDegradation() {
+    if (typeof getRootDegradation !== "function") return [];
+    const roots = getRootDegradation();
+    return Array.isArray(roots) ? roots : [];
   }
 
   /**
@@ -568,6 +584,16 @@ export function createManagement(deps) {
     async executeTool(trustedContext, payload) {
       validateManagementPayload("executeTool", payload);
       rejectIdentityFields(payload.args ?? {}, "management.executeTool.args");
+      // R1：降级挂载（roots 不可写）先于 requireActiveDataAccess/requireStarted
+      // 判定——降级态不宣称 started，旧顺序只会把可用性故障错报成 INVALID_STATE
+      // 「尚未启动」。与宿主工具入口同一口径：明确 UNSUPPORTED + details.roots
+      // 说明哪个根不可用、为什么；非降级路径（诊断为空数组）行为逐字不变。
+      const degradation = rootDegradation();
+      if (degradation.length > 0) {
+        fail("UNSUPPORTED", `shiori root directories are not writable; tool "${String(payload.name)}" is unavailable (degraded read-only mount). 修复目录权限或显式改配 dataRoot/stateRoot 后重启插件即可恢复`, {
+          roots: [...degradation],
+        });
+      }
       requireActiveDataAccess("executeTool");
       const scope = await scopeFromTrustedContext(trustedContext);
       return executeToolForScope(scope, payload.name, payload.args ?? {});

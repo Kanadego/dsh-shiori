@@ -678,10 +678,10 @@ function resolveTransformersPackageRootDefault(pluginDir) {
  *   层的 failed + 错误摘要如实上报——探测层不许把故障静默降级成 absent
  *   （与本模块「不把故障伪装成正常」的一贯口径一致）。
  */
-function probeLegacyCacheKind(cacheDir) {
+function probeLegacyCacheKind(cacheDir, readdirImpl = readdirSync) {
   let entries;
   try {
-    entries = readdirSync(cacheDir, { withFileTypes: true });
+    entries = readdirImpl(cacheDir, { withFileTypes: true });
   } catch (cause) {
     if (cause?.code === "ENOENT" || cause?.code === "ENOTDIR") return "absent";
     return "unreadable";
@@ -740,13 +740,19 @@ function packageOwnershipOf(packageDir) {
  * @param {string} pluginDir 插件目录（index.mjs 所在目录；生产 = 装插件的那个目录）。
  * @param {{resolvePackageRoot?: (pluginDir: string) => ?string,
  *     probeTrace?: Array<{candidate: string, source: "resolved"|"fallback",
- *       outcome: "hit"|"skip", reason: string}>}} [options]
- *   包根解析注入点（缺省 createRequire 实现；测试注入桩替换）与探测轨迹收集
- *   数组（可选；传入时逐候选追加，供测试断言「拒绝确实发生过」）。
+ *       outcome: "hit"|"skip", reason: string}>,
+ *     readdirImpl?: typeof readdirSync}} [options]
+ *   包根解析注入点（缺省 createRequire 实现；测试注入桩替换）、探测轨迹收集
+ *   数组（可选；传入时逐候选追加，供测试断言「拒绝确实发生过」）与目录读取
+ *   注入点（缺省 node:fs readdirSync；测试注入 EACCES 桩验证 unreadable 分支）。
  * @returns {?string} 真实存在且可迁移的旧缓存目录；不存在 → null。
  * @throws {Error} code="INVALID_INPUT"：pluginDir 缺失或非非空字符串。
  */
-export function legacyPluginModelCacheDir(pluginDir, { resolvePackageRoot = resolveTransformersPackageRootDefault, probeTrace } = {}) {
+export function legacyPluginModelCacheDir(pluginDir, {
+  resolvePackageRoot = resolveTransformersPackageRootDefault,
+  probeTrace,
+  readdirImpl = readdirSync,
+} = {}) {
   if (typeof pluginDir !== "string" || pluginDir.length === 0) {
     fail("INVALID_INPUT", `legacyPluginModelCacheDir: pluginDir must be a non-empty string, got ${String(pluginDir)}`, {
       received: pluginDir === undefined ? "absent" : String(pluginDir),
@@ -783,7 +789,7 @@ export function legacyPluginModelCacheDir(pluginDir, { resolvePackageRoot = reso
         trace({ candidate: candidate.path, source, outcome: "skip", reason: "wrong-package" });
         continue;
       }
-      const kind = existsSync(candidate.path) ? probeLegacyCacheKind(candidate.path) : "absent";
+      const kind = existsSync(candidate.path) ? probeLegacyCacheKind(candidate.path, readdirImpl) : "absent";
       // R2：absent（不存在/不是目录）与 empty（存在但零条目）都不是命中，
       // 继续扫下一个候选，不让空缓存抢先返回造成漏搬。
       if (kind === "absent" || kind === "empty") {
@@ -837,6 +843,8 @@ function requireMigratablePath(value, field) {
  * @param {() => string} [options.nowIso]  时间戳来源（marker 内容用）。
  * @param {(from: string, to: string) => void} [options.renameImpl]  rename 注入点
  *   （缺省 node:fs renameSync）；测试注入 EXDEV 桩验证跨卷回退，生产零行为变化。
+ * @param {typeof readdirSync} [options.readdirImpl] 旧落点目录读取注入点
+ *   （缺省 node:fs readdirSync）；测试注入 EACCES 桩验证 unreadable → failed。
  * @returns {Promise<{status: "skipped"|"absent"|"empty"|"migrated"|"failed",
  *     markerPath: string, moved?: string[], skippedEntries?: string[], reason?: string, error?: string}>}
  *   结构化结果；failed 时 error 为有界错误摘要（errorDigest 同款）。本函数自身
@@ -848,6 +856,7 @@ export async function migrateLegacyModelCache({
   markerPath,
   nowIso = () => new Date().toISOString(),
   renameImpl = renameSync,
+  readdirImpl = readdirSync,
 } = {}) {
   requireMigratablePath(targetCacheDir, "targetCacheDir");
   const marker = markerPath ?? join(targetCacheDir, LEGACY_MODEL_MIGRATION_MARKER);
@@ -880,7 +889,7 @@ export async function migrateLegacyModelCache({
   // 3) 探测旧落点：缺失 / 非目录（ENOTDIR）→ absent，零动作。
   let entries;
   try {
-    entries = readdirSync(legacyCacheDir, { withFileTypes: true });
+    entries = readdirImpl(legacyCacheDir, { withFileTypes: true });
   } catch (cause) {
     if (cause?.code === "ENOENT" || cause?.code === "ENOTDIR") {
       return { status: "absent", markerPath: marker };

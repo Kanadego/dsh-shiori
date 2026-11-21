@@ -23,7 +23,7 @@ process.env.DSH_HOME = DSH_HOME_TMP;
 test.after(() => rm(DSH_HOME_TMP, { recursive: true, force: true }));
 
 /** 可编程合成 bindings：记录注册并支持注入失败。 */
-function fakeBindingsFactory({ failOn = null } = {}) {
+function fakeBindingsFactory({ failOn = null, disposeErrors = [], disposeThrows = null } = {}) {
   const registered = { sections: [], tools: [], waterfall: null, preStep: null, sessionEvents: null, disposed: 0 };
   const factory = (ctx, settings, deps) => ({
     registerSystemSection({ name }) {
@@ -61,7 +61,8 @@ function fakeBindingsFactory({ failOn = null } = {}) {
       registered.waterfall = null;
       registered.preStep = null;
       registered.sessionEvents = null;
-      return { disposed: true, errors: [] };
+      if (disposeThrows !== null) throw disposeThrows;
+      return { disposed: true, errors: [...disposeErrors] };
     },
     // 与真实 bindings.diagnostics 同形（registeredSections/registeredTools）。
     get diagnostics() {
@@ -2174,4 +2175,137 @@ test("0.5-2B 写失败降级：账本路径被目录占位 → 工具照常返�
   const stat = await actStat(topicActivityFilePath(roots.stateRoot));
   assert.ok(stat.isDirectory(), "占位目录原样保留（没有任何文件被写出）");
   await controller.stop();
+});
+
+// ── 0.5 批次 3 · R1/R3/R4②：降级挂载的面板口径与重启语义 ──────────────────────
+// 夹具沿用本文件既有 tempRoots / fakeBindingsFactory / activeSettings；不可写根
+// 用「父级是普通文件」造确定性 mkdir ENOTDIR（跨平台一致，不依赖 ACL/管理员）。
+
+test("R1/R3（0.5 批次 3）：降级态面板 executeTool 先报 UNSUPPORTED + details.roots；不 stop 再 start 明确拒绝；stop→start 恢复", async (t) => {
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  const blocker = path.join(roots.base, "data-blocker");
+  await writeFile(blocker, "not a directory", "utf8");
+  const dataRoot = path.join(blocker, "shiori-root");
+  const bindings = fakeBindingsFactory();
+  const controller = await createShioriPluginController(
+    fakeCtx(),
+    activeSettings({ ...roots, dataRoot }),
+    { bindings },
+  );
+
+  const started = await controller.start();
+  assert.equal(started.degraded, true, "不可写根 → 降级挂载");
+  assert.equal(started.roots.length, 1);
+  assert.equal(started.roots[0].root, "dataRoot");
+  assert.equal(started.roots[0].code, "ENOTDIR");
+  assert.equal(controller.diagnostics().started, false, "降级不宣称 started");
+
+  // R1：面板路径先拿降级诊断，而不是 INVALID_STATE「尚未启动」。
+  const trustedContext = { session: { id: "s-degraded" }, source: "panel-rpc" };
+  await assert.rejects(
+    () => controller.management.executeTool(trustedContext, { name: "memory_append", args: { section: "x", content: "y" } }),
+    (e) => {
+      assert.equal(e.code, "UNSUPPORTED", "降级态面板必须拿 UNSUPPORTED，不是 INVALID_STATE");
+      assert.equal(e.details.roots.length, 1);
+      assert.equal(e.details.roots[0].root, "dataRoot");
+      assert.equal(e.details.roots[0].path, dataRoot);
+      assert.equal(e.details.roots[0].code, "ENOTDIR");
+      return true;
+    },
+  );
+  // getStatus 纯内存投影：diagnostics.roots 面板可见（不触 scope 资源）。
+  const status = await controller.management.getStatus(trustedContext, {});
+  assert.equal(status.diagnostics.roots.length, 1);
+  assert.equal(status.diagnostics.roots[0].root, "dataRoot");
+
+  // R3：降级后不 stop 再 start 会撞名——给出明确错误，要求先 stop()。
+  await assert.rejects(
+    () => controller.start(),
+    (e) => {
+      assert.equal(e.code, "INVALID_STATE");
+      assert.match(String(e.message), /stop\(\)/);
+      return true;
+    },
+  );
+
+  // 修复目录后，重启的唯一合法路径是 stop()→start()；恢复后工具正常工作。
+  await controller.stop();
+  await rm(blocker, { force: true });
+  await mkdir(dataRoot, { recursive: true });
+  const recovered = await controller.start();
+  assert.equal(recovered.degraded, undefined, "根就绪后不得再降级");
+  assert.equal(controller.diagnostics().started, true);
+  const created = await controller.management.executeTool(trustedContext, {
+    name: "topic_create",
+    args: { topic: "r1-recovered", title: "R1 恢复", summary: "recovered after stop->start" },
+  });
+  assert.equal(created.created, true, "stop→start 恢复后工具应正常落盘");
+  await controller.stop();
+});
+
+test("R4②（0.5 批次 3）：diagnostics.roots 与 personasError 在面板 getStatus 上并存（不整抛）", async (t) => {
+  const { writeFile } = await import("node:fs/promises");
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  const blocker = path.join(roots.base, "persona-blocker");
+  await writeFile(blocker, "not a directory", "utf8");
+  const dataRoot = path.join(blocker, "shiori-root");
+  const eacces = new Error("EACCES: permission denied, scandir '" + dataRoot + "/persona'");
+  eacces.code = "EACCES";
+  const bindings = fakeBindingsFactory();
+  const controller = await createShioriPluginController(
+    fakeCtx(),
+    activeSettings({ ...roots, dataRoot }),
+    { bindings, personasReaddir: async () => { throw eacces; } },
+  );
+  // 故障并存：根不可写（降级） + 人设卡目录读不了（EACCES）。getStatus 不得
+  // 因后者整抛，否则 controller 注入的 diagnostics.roots 到不了面板。
+  const started = await controller.start();
+  assert.equal(started.degraded, true);
+  const trustedContext = { session: { id: "s-degraded-persona" }, source: "panel-rpc" };
+  const status = await controller.management.getStatus(trustedContext, {});
+  assert.deepEqual(status.personas, [], "读不了目录 → 空清单，不整抛");
+  assert.equal(status.diagnostics.roots.length, 1);
+  assert.equal(status.diagnostics.roots[0].root, "dataRoot");
+  assert.equal(status.diagnostics.roots[0].code, "ENOTDIR");
+  assert.equal(typeof status.diagnostics.personasError, "string");
+  assert.match(status.diagnostics.personasError, /EACCES/);
+  await controller.stop();
+});
+
+test("R3/rework：disposeAll 报错或抛错 → degradedRegistered 保留，后续 start 仍被 INVALID_STATE 拦下", async (t) => {
+  const { writeFile } = await import("node:fs/promises");
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  const blocker = path.join(roots.base, "dispose-blocker");
+  await writeFile(blocker, "not a directory", "utf8");
+  const dataRoot = path.join(blocker, "shiori-root");
+
+  // 生产 bindings 的 disposeAll 不抛、失败走 errors 数组——两种失败形态都必须
+  // 保留二次注册闸（注册表可能残留，直接 start 会撞名）。
+  for (const failure of [
+    { label: "errors 数组", options: { disposeErrors: ["injected disposer failure"] } },
+    { label: "抛出异常", options: { disposeThrows: new Error("injected disposeAll throw") } },
+  ]) {
+    const bindings = fakeBindingsFactory(failure.options);
+    const controller = await createShioriPluginController(
+      fakeCtx(),
+      activeSettings({ ...roots, dataRoot }),
+      { bindings },
+    );
+    const started = await controller.start();
+    assert.equal(started.degraded, true, `${failure.label}：先造降级挂载`);
+    const stopped = await controller.stop();
+    assert.ok(stopped.errors.length > 0, `${failure.label}：stop 如实上报撤销失败`);
+    await assert.rejects(
+      () => controller.start(),
+      (e) => {
+        assert.equal(e.code, "INVALID_STATE", `${failure.label}：撤销不干净时 start 必须仍被拦`);
+        assert.match(String(e.message), /stop\(\)/);
+        return true;
+      },
+    );
+  }
 });

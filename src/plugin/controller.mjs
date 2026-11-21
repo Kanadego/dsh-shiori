@@ -20,8 +20,11 @@
 //   pre-step，不打开 completion 锁 / scope 资源 / receipt（抢独占锁会把真的
 //   active 实例挤成 LOCK_BUSY）；management 仅纯内存 getStatus。
 // - degraded（P1#8：active 但任一根 mkdir 失败）：只读/内存态降级挂载 —— 17 工具
-//   照常注册但执行一律 UNSUPPORTED（dispatchTool 顶部降级闸），跳过一切触盘步骤，
-//   started 不宣称；诊断经 getStatus.diagnostics.roots / diagnostics().roots 透出。
+//   照常注册但执行一律 UNSUPPORTED（宿主工具入口 registeredToolDefs 的降级闸 +
+//   management.executeTool 的降级前置检查——面板路径不再先撞 requireStarted 的
+//   INVALID_STATE），跳过一切触盘步骤，started 不宣称；诊断经
+//   getStatus.diagnostics.roots / diagnostics().roots 透出。重启只支持
+//   stop()→start()（降级态已注册工具，直接再 start 会二次注册同名工具）。
 //
 // 宿主 complete section（如 dsh-persona preset complete:true）会在 waterfall 后
 // 整体替换 sections —— 启动时探测；命中则不注册 L0/L1 并如实诊断（不谎报刷新）。
@@ -170,6 +173,10 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     // 0.5 写后增量的防抖毫秒（任务书 ~300ms）。只作依赖 seam 供测试缩短等待，
     // 不进 settings 冻结契约（config.mjs 不在本次白名单）；非法值回落缺省。
     semanticIncrementalDebounceMs = SEMANTIC_INCREMENTAL_DEBOUNCE_MS,
+    // R4②：人设卡目录读取注入点（仅测试注入 EACCES 桩；生产不传 → 门面缺省用
+    // node:fs readdir，正常路径行为逐字不变）。用于端到端验证
+    // diagnostics.personasError 与 diagnostics.roots 在面板 getStatus 上并存。
+    personasReaddir,
   } = dependencies;
 
   // inert 判定（0.4-S1 起，reviewer P2① 口径）：仅由 mode 与根校验共同决定——
@@ -258,9 +265,14 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     readonlyGuard: null,
     /** P1#8：根目录 mkdir 失败的结构化诊断（{root, path, reason, code}）。
      *  空数组 = 两根就绪（正常路径）；非空 = start 降级为只读/内存态挂载，
-     *  工具一律 UNSUPPORTED，getStatus.diagnostics.roots 透出面板可见。
-     *  每次 start 重算（修复权限重启后自动恢复完整挂载）。 */
+     *  工具一律 UNSUPPORTED（宿主入口 + management.executeTool 两道同源闸），
+     *  getStatus.diagnostics.roots 透出面板可见。
+     *  每次 start 重算（修复权限 stop→start 后自动恢复完整挂载）。 */
     rootDiagnostics: [],
+    /** R3：降级挂载是否已把 17 工具注册进宿主（started 仍为 false）。真实
+     *  bindings 上不 stop 再 start 会二次注册同名工具——requireStartable 以此
+     *  拦下并给出明确错误；cleanupGeneration 的 disposeAll 之后复位。 */
+    degradedRegistered: false,
     /** 在途异步工作（排空用）。 */
     inFlight: new Set(),
     /** tool/result 归因表（callId → name；direct 模式归因用）。 */
@@ -1073,15 +1085,11 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   }
 
   async function dispatchTool(scope, name, args, exec) {
-    // P1#8 降级挂载（任一根 mkdir 失败）：一律 UNSUPPORTED——检查必须先于
-    // started 检查（降级挂载不宣称 started），也必须先于 semantic 保留名拦截与
-    // resourcesFor（降级态没有 scope 资源可打开，触盘路径必然失败）。读写工具
-    // 同口径：降级态没有可读的 scope 资源，诚实报 UNSUPPORTED 而非底层 fs 错误。
-    if (ctrl.rootDiagnostics.length > 0) {
-      fail("UNSUPPORTED", `shiori root directories are not writable; tool "${String(name)}" is unavailable (degraded read-only mount). 修复目录权限或显式改配 dataRoot/stateRoot 后重启插件即可恢复`, {
-        roots: [...ctrl.rootDiagnostics],
-      });
-    }
+    // R2（0.5 批次 3 变异审计 M2）：这里不再放降级闸——它此前就是死代码。
+    // 宿主工具走 registeredToolDefs().execute 里更早的同款闸；面板路径走
+    // management.executeTool，那里已在 requireStarted 之前用注入的
+    // getRootDegradation 判定（否则会先撞 INVALID_STATE「尚未启动」）。
+    // 两条入口都在 dispatchTool 之前拦截，本函数在降级态不可达。
     // B4：禁新请求（stop 后）不再执行任何工具。
     if (ctrl.banned || !ctrl.started) {
       fail("INVALID_STATE", "controller is stopped or not started; tool dispatch refused", {});
@@ -1155,9 +1163,11 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       isConcurrencySafe: () => !WRITE_TOOL_NAMES.has(name),
       async execute(args, exec) {
         const evidence = sessionEvidenceFromExec(exec);
-        // P1#8 降级闸（与 dispatchTool 顶部同款、更早）：降级挂载不宣称 started，
-        // 这里的 started 检查会先把调用错报成 INVALID_STATE——降级必须先于它
-        // 判定，工具执行统一 UNSUPPORTED（details.roots 带逐根诊断）。
+        // P1#8 降级闸（R2 起是宿主工具路径上唯一的一道，dispatchTool 里的重复
+        // 死代码已删）：降级挂载不宣称 started，这里的 started 检查会先把调用
+        // 错报成 INVALID_STATE——降级必须先于它判定，工具执行统一 UNSUPPORTED
+        // （details.roots 带逐根诊断）。面板路径由 management.executeTool 的
+        // getRootDegradation 前置检查承担同一口径。
         if (ctrl.rootDiagnostics.length > 0) {
           fail("UNSUPPORTED", `shiori root directories are not writable; tool "${name}" is unavailable (degraded read-only mount). 修复目录权限或显式改配 dataRoot/stateRoot 后重启插件即可恢复`, {
             roots: [...ctrl.rootDiagnostics],
@@ -1751,6 +1761,14 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     workspaceForAgent,
     executeToolForScope: (scope, name, args) => trackInFlight(dispatchTool(scope, name, args, null)),
     nowIso,
+    // R1（0.5 批次 3）：降级诊断注入。降级挂载时 started 恒 false，面板
+    // management.executeTool 若先走 requireStarted 只会报 INVALID_STATE
+    // 「尚未启动」——把 mount 的逐根诊断交给门面，让它先判降级、返回带
+    // details.roots 的 UNSUPPORTED。读 ctrl 是纯内存投影，不可能抛。
+    getRootDegradation: () => [...ctrl.rootDiagnostics],
+    // R4②：人设卡目录读取注入点（仅测试注入 EACCES 桩验证 personasError 与
+    // diagnostics.roots 并存；生产不传，门面缺省用 node:fs readdir）。
+    readdir: personasReaddir,
     // P-C 诚实度：getStatus.diagnostics 暴露 typertRpc（wire 契约的
     // diagnostics 块为 additionalProperties:true，纯增量），真实入口 boot
     // 与面板都能观察到严格 codec 的实际状态。
@@ -1885,6 +1903,13 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   function requireStartable() {
     if (ctrl.starting) fail("INVALID_STATE", "controller start already in progress", {});
     if (ctrl.started) fail("INVALID_STATE", "controller already started; call stop() first", {});
+    // R3：降级挂载不宣称 started，但 17 个宿主工具已经注册。此时不 stop 直接
+    // 再 start 会在真实 bindings 上二次注册同名工具（撞名抛错，且依赖底层报错
+    // 文本才看得懂）。重启的唯一合法路径是 stop()→start()；这里给出明确错误，
+    // 不让「直接重启」这句旧注释继续骗人。
+    if (ctrl.degradedRegistered) {
+      fail("INVALID_STATE", "previous degraded start already registered host tools; call stop() before start() to retry (restarting without stop would re-register duplicate tool names)", {});
+    }
   }
 
   /** B7：active 启动前对配置的全部 persona 做预校验（坏卡 fail-fast 可操作）。 */
@@ -1953,8 +1978,9 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       // 诊断）。apply 的 verify 降级调用不再因 mkdir 失败 throw——这里以磁盘真值
       // 决定挂载形态：任一根不可写 → 降级只读/内存态（零落盘：不建组清单 / 锁 /
       // 索引 / 座位文件）：
-      // 17 工具照常注册（宿主工具面不变，执行统一 UNSUPPORTED，见 dispatchTool
-      // 顶部降级闸），跳过一切触盘步骤（completion 锁 / 座位 / persona 预校验 /
+      // 17 工具照常注册（宿主工具面不变，执行统一 UNSUPPORTED：宿主工具走
+      // registeredToolDefs 的入口降级闸，面板走 management.executeTool 的降级
+      // 前置检查），跳过一切触盘步骤（completion 锁 / 座位 / persona 预校验 /
       // scope 资源 / L0/L1 / L2）；started 不宣称（getStatus 走纯内存投影，
       // 诊断面板可见）。用户修复权限（或改配根路径）后重启插件即恢复完整挂载。
       ctrl.rootDiagnostics = probeRootsWritable({ dataRoot: settings.dataRoot, stateRoot: settings.stateRoot });
@@ -1963,6 +1989,9 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
           await bindings.registerTool(def);
         }
         checkNotStopped("degraded-registration");
+        // R3：工具已进宿主注册表——标记出来，requireStartable 据此拦「不 stop
+        // 再 start」的二次注册；stop/start 失败的 cleanupGeneration 负责复位。
+        ctrl.degradedRegistered = true;
         return {
           mode: settings.mode,
           degraded: true,
@@ -2119,9 +2148,11 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
         fail("INVALID_STATE", "start aborted: stop requested during startup", {});
       }
       // P1#8：降级挂载不宣称 started——getStatus 保持纯内存投影（management 的
-      // 触数据方法按 INVALID_STATE 拒绝，与未启动同口径），工具层经 dispatchTool
-      // 顶部的降级闸返回 UNSUPPORTED。started 留 false 同时允许再次 start 重试
-      // （requireStartable 只拦 starting/started，修复权限后可直接重启）。
+      // 触数据方法按 INVALID_STATE 拒绝，与未启动同口径），工具层经宿主工具入口
+      // 的降级闸 / management.executeTool 的降级前置检查返回 UNSUPPORTED。
+      // R3（语义修正）：started 留 false，但修复权限后**只有 stop()→start()**
+      // 才是合法重启——降级态已把 17 个工具注册进宿主，不 stop 再 start 会二次
+      // 注册同名工具；requireStartable 以 degradedRegistered 给出明确 INVALID_STATE。
       if (result?.degraded !== true) {
         ctrl.started = true;
       }
@@ -2177,8 +2208,15 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     // 1) 撤销注册与订阅（bindings 逆序 dispose）。
     try {
       const disposed = bindings.disposeAll();
-      errors.push(...disposed.errors.map((e) => `bindings.dispose (${phase}): ${e}`));
+      const disposeErrors = Array.isArray(disposed?.errors) ? disposed.errors : [];
+      errors.push(...disposeErrors.map((e) => `bindings.dispose (${phase}): ${e}`));
+      // R3：只有确认注册表干净撤销后才解除二次注册闸。生产 bindings 的
+      // disposeAll 不抛、失败走 errors 数组——按「有没有抛」判断不够：有报错
+      // 时注册表可能残留，仍须拦住后续 start。
+      if (disposeErrors.length === 0) ctrl.degradedRegistered = false;
     } catch (error) {
+      // R3：撤销本身失败时保留 degradedRegistered——宁可继续拦住 start（二次
+      // 注册同名工具），也不放行撞名。
       errors.push(`bindings.dispose (${phase}): ${error instanceof Error ? error.message : String(error)}`);
     }
     // 2) 撤销 grants（stop/断连撤销）。

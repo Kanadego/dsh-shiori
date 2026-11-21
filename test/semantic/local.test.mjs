@@ -672,7 +672,7 @@ test("C-fix C5：下载逐源失败抛普通对象 → attempts.error 取 .messa
 // 迁移后用 isLocalModelInstalled（与面板同一判据）证明「新位置可见」。
 // ---------------------------------------------------------------------------
 
-import { mkdtempSync, rmSync, readFileSync, renameSync as realRenameSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, readFileSync, renameSync as realRenameSync } from "node:fs";
 
 const MIGRATION_TMP = mkdtempSync(join(tmpdir(), "shiori-p2-migration-"));
 test.after(() => {
@@ -1005,4 +1005,64 @@ test("P2#12a（R2）：解析命中的包根 .cache 为空 → 不算命中，�
     { candidate: join(pluginDir, "node_modules", "@huggingface", "transformers", ".cache"), source: "fallback", outcome: "skip", reason: "absent" },
     { candidate: join(base, "node_modules", "@huggingface", "transformers", ".cache"), source: "fallback", outcome: "hit", reason: "populated" },
   ]);
+});
+
+// ── 0.5 批次 3 · R4①：unreadable 分支（.cache 存在但 readdir EACCES）────────────
+// 生产环境里 readdir 抛 EACCES 依赖平台 ACL，测试用注入桩制造确定性 EACCES
+// （与 renameImpl 同一注入口径）：探测层必须把「读不了但存在」按命中返回并在
+// 轨迹标 unreadable（不静默降级成 absent）；迁移层必须 failed + 错误摘要如实
+// 上报、不写 marker（下次启动重试），绝不假装迁移成功。
+
+test("P2#12a（R4①）：旧 .cache 存在但 readdir EACCES → 探测层命中且轨迹标 unreadable", () => {
+  const base = join(MIGRATION_TMP, "r4-unreadable-probe");
+  const pluginDir = join(base, "plugin");
+  const cache = join(pluginDir, "node_modules", "@huggingface", "transformers", ".cache");
+  mkdirSync(cache, { recursive: true });
+  writeFileSync(join(cache, "sentinel.bin"), "x", "utf8");
+  const eacces = new Error(`EACCES: permission denied, scandir '${cache}'`);
+  eacces.code = "EACCES";
+  const readdirImpl = (dir, options) => {
+    if (dir === cache) throw eacces;
+    return readdirSync(dir, options);
+  };
+  mkdirSync(pluginDir, { recursive: true });
+  const trace = [];
+  const found = legacyPluginModelCacheDir(pluginDir, {
+    resolvePackageRoot: () => null,
+    probeTrace: trace,
+    readdirImpl,
+  });
+  assert.equal(found, cache, "unreadable cache must still be returned as a candidate (not silently absent)");
+  assert.deepEqual(trace, [
+    { candidate: cache, source: "fallback", outcome: "hit", reason: "unreadable" },
+  ]);
+});
+
+test("P2#12a（R4①）：旧 .cache 存在但 readdir EACCES → migrate failed + 错误摘要，不写 marker", async () => {
+  const base = join(MIGRATION_TMP, "r4-unreadable-migrate");
+  const legacyCacheDir = join(base, "legacy-cache");
+  seedLegacyModel(legacyCacheDir);
+  const targetCacheDir = join(base, "models");
+  const eacces = new Error(`EACCES: permission denied, scandir '${legacyCacheDir}'`);
+  eacces.code = "EACCES";
+  const readdirImpl = (dir, options) => {
+    if (dir === legacyCacheDir) throw eacces;
+    return readdirSync(dir, options);
+  };
+  const result = await migrateLegacyModelCache({ targetCacheDir, legacyCacheDir, readdirImpl });
+  assert.equal(result.status, "failed", "unreadable 旧落点必须如实 failed，不许冒充 absent/empty");
+  assert.ok(
+    typeof result.error === "string" && result.error.includes("EACCES"),
+    `失败摘要须带 EACCES，实际：${result.error}`,
+  );
+  assert.equal(
+    existsSync(join(targetCacheDir, LEGACY_MODEL_MIGRATION_MARKER)),
+    false,
+    "failed 不写 marker → 下次启动自动重试",
+  );
+  // 源侧未被破坏：旧模型原样保留（读不了不等于搬走了）。
+  assert.equal(
+    isLocalModelInstalled({ cacheDir: legacyCacheDir, model: "Xenova/bge-small-zh-v1.5", dtype: "q8" }),
+    true,
+  );
 });

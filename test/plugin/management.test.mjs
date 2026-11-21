@@ -2423,3 +2423,49 @@ test("getStatus.personas：ENOENT（目录不存在）不写 personasError——
   assert.equal(status.diagnostics.personasError, undefined, "ENOENT 是「没有卡」，不是故障，不出 personasError 键");
   await assert.rejects(() => stat(path.join(dataRoot, "persona")), { code: "ENOENT" }, "R1 不得顺手创建 persona 目录");
 });
+
+// ── 0.5 批次 3 · R1：降级挂载下面板 executeTool 的判定顺序 ─────────────────────
+// 降级挂载不宣称 started：旧顺序先 requireStarted，面板只会拿到 INVALID_STATE
+// 「尚未启动」——把可用性故障错报成状态故障。controller 注入 getRootDegradation
+// 后，executeTool 必须先判降级、返回带 details.roots 的 UNSUPPORTED；非降级
+// （缺省注入或空数组）行为与错误码逐字不变。
+
+test("R1：getRootDegradation 非空 → executeTool 先报 UNSUPPORTED + details.roots；为空/缺省仍 INVALID_STATE", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-r1-mgmt-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const dataRoot = path.join(base, "data");
+  const stateRoot = path.join(base, "state");
+  const settings = { ...shadowSettings({ dataRoot, stateRoot }), mode: "active", allowActive: true };
+  const build = (extra) => createManagement({
+    settings,
+    dataRoot,
+    state: createStateStore({ stateRoot }),
+    resourcesFor: async () => { throw new Error("not used"); },
+    isStarted: () => false,
+    generation: () => 1,
+    registerGrant: () => { throw new Error("not used"); },
+    executeToolForScope: async () => { throw new Error("must not reach executeToolForScope in degraded mode"); },
+    ...extra,
+  }).management;
+  const trusted = { session: { id: "s-degraded" }, source: "panel-rpc" };
+  const roots = [{ root: "dataRoot", path: dataRoot, reason: `ENOTDIR: not a directory, mkdir '${dataRoot}'`, code: "ENOTDIR" }];
+
+  const degraded = build({ getRootDegradation: () => roots });
+  await assert.rejects(
+    () => degraded.executeTool(trusted, { name: "memory_read", args: {} }),
+    (e) => {
+      assert.equal(e.code, "UNSUPPORTED", "降级态必须是 UNSUPPORTED，不是 INVALID_STATE");
+      assert.ok(String(e.message).includes("not writable"), "文案须点出根不可写");
+      assert.deepEqual(e.details.roots, roots, "details.roots 带逐根诊断（哪个根、为什么）");
+      return true;
+    },
+  );
+  // 非降级路径：未启动仍是 INVALID_STATE——缺省注入与返回空数组同口径。
+  for (const extra of [{}, { getRootDegradation: () => [] }]) {
+    const normal = build(extra);
+    await assert.rejects(
+      () => normal.executeTool(trusted, { name: "memory_read", args: {} }),
+      (e) => e.code === "INVALID_STATE",
+    );
+  }
+});
