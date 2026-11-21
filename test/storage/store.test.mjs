@@ -9,7 +9,7 @@ import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 
 import { createFileStore, groupsFilePath } from '../../src/storage/index.mjs';
-import { ensureGroupsFile, readGroups, writeGroups } from '../../src/core/groups.mjs';
+import { ensureGroupsFile, readGroups, writeGroups } from '../../src/storage/groups.mjs';
 import {
   sha256, stubRenderL1, stubEvaluateMutation, TEST_CONFIG,
   makeTmpRoot, topicObject,

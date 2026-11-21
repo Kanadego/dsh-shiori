@@ -34,6 +34,7 @@ import {
 import {
   validateKey, validateScopeId, validateOperationId,
   assertNoCaseCollision, assertNoEscapeViaSymlink, assertRealInsideRoot, joinUnder,
+  groupsFilePath,
 } from './paths.mjs';
 import { withLock } from './lockfile.mjs';
 import { serializeTopicFile, parseTopicFile } from './frontmatter.mjs';
@@ -41,12 +42,17 @@ import {
   computePayloadHash, readJournal, saveJournal, listJournals, newJournal,
 } from './journal.mjs';
 import { assertEncodableUtf8, decodeUtf8Strict } from './fsutil.mjs';
-// S3 分组（0.4）：commit 侧组存在性校验复用 S3-a 的 groups.mjs（assertGroupsExist
-// 语义 / readGroups 锁内读取）。有向依赖 storage→core/groups：groups.mjs 只依赖
-// storage 的 errors/paths/lockfile/fsutil 叶子模块，不反向依赖 store，无循环。
+// S3 分组（0.4）+ P1#7 解环（0.5-1A）：commit 侧组存在性校验复用 core/groups.mjs
+// 的纯逻辑（assertGroupsExist / validateGroupsData / 序列化，语义不变）；
+// readGroups 的文件 I/O 已下沉到本目录 groups.mjs（锁与原子写与 store 同一套地基）。
+// 依赖方向收敛为 storage → core 纯逻辑单向：core/groups.mjs 不再 import 任何
+// ../storage/* 模块，依赖图无环。
 // 锁可重入（lockfile.mjs withLock 对同 root 的嵌套调用直接执行），commit 持锁
 // 期间调用 readGroups 不会死锁。
-import { assertGroupsExist, readGroups, GROUPS_VERSION } from '../core/groups.mjs';
+import {
+  assertGroupsExist, GROUPS_VERSION, validateGroupsData, serializeGroupsFile, parseGroupsFile,
+} from '../core/groups.mjs';
+import { readGroups } from './groups.mjs';
 
 const FAULT_POINTS = new Set(['prepare', 'backup', 'first-rename', 'renames', 'marker']);
 
@@ -447,7 +453,7 @@ class FileStore {
 
   // ---------- 提交 ----------
 
-  async commit({ operationId, expectedGeneration, changes }) {
+  async commit({ operationId, expectedGeneration, changes, groups }) {
     validateOperationId(operationId);
     if (expectedGeneration !== undefined && expectedGeneration !== null
         && (!Number.isInteger(expectedGeneration) || expectedGeneration < 0)) {
@@ -456,10 +462,41 @@ class FileStore {
     if (!Array.isArray(changes) || changes.length === 0) {
       throw invalidInput('changes 必须是非空数组');
     }
+    // P2#12b（0.5-1A）删组单事务：groups 变更（组清单全量替换，含删组）作为本
+    // 提交的一个条目，与 core/topic 变更走同一 journal/staging/备份/原子替换/
+    // 崩溃恢复路径——成员重挂与组条目删除要么一起生效、要么整体不生效，不存在
+    // 「迁移已提交、删组失败」的半迁移状态。形状校验在此完成（service 层只透传）；
+    // CAS 与并发复核在锁内做（下方 groupsEntry 构建处）。
+    let groupsRequest = null;
+    if (groups !== undefined) {
+      if (groups === null || typeof groups !== 'object' || Array.isArray(groups)) {
+        throw invalidInput('groups 变更必须是对象 {expectedRevision, groups}', { got: typeof groups });
+      }
+      if (!('expectedRevision' in groups)) {
+        throw invalidInput('groups.expectedRevision 必须显式提供（groups.json 不存在为 null）');
+      }
+      if (groups.expectedRevision !== null && !isHex64(groups.expectedRevision)) {
+        throw invalidInput('groups.expectedRevision 必须是 null 或 64 位 hex sha256', {
+          got: groups.expectedRevision,
+        });
+      }
+      groupsRequest = {
+        expectedRevision: groups.expectedRevision,
+        // 形状校验（复用 core 纯逻辑，与 writeGroups 同口径）；锁内构建条目时
+        // serializeGroupsFile 会再验一次，两处同一实现。
+        data: validateGroupsData({ version: GROUPS_VERSION, groups: groups.groups }, 'groups.json(待写入)'),
+      };
+    }
     // R1：payload 身份包含可信 activeScopeId——同 root 不同 scope 的相同请求
-    // 是不同操作，不得命中彼此的幂等结果
+    // 是不同操作，不得命中彼此的幂等结果。
+    // groups 变更属于操作身份：同 operationId 重放必须逐字段重复原 groups 载荷，
+    // 否则视为不同 payload 拒绝（防「换清单重放」命中旧幂等结果）。
     const payloadHash = computePayloadHash({
-      scopeId: this.activeScopeId, expectedGeneration, changes,
+      scopeId: this.activeScopeId,
+      expectedGeneration,
+      changes: groupsRequest !== null
+        ? [...changes, { kind: 'groups', expectedRevision: groupsRequest.expectedRevision, groups: groupsRequest.data.groups }]
+        : changes,
     });
 
     return this.withLock(async () => {
@@ -576,8 +613,47 @@ class FileStore {
         });
       }
 
+      // ---- P2#12b：groups 变更条目（CAS 在锁内；与 core/topic 同一 entries 管线）----
+      // 条目进入同一 staging/备份/journal/逐文件 rename/崩溃恢复路径，绝不旁路写盘。
+      let groupsEntry = null;
+      if (groupsRequest !== null) {
+        const file = groupsFilePath(this.rootReal, this.activeScopeId);
+        await assertNoEscapeViaSymlink(this.rootReal, file);
+        const raw = await readFileOrNull(file);
+        const current = raw === null ? null : sha256Buffer(raw);
+        if (current !== groupsRequest.expectedRevision) {
+          throw revisionConflict('groups.json revision CAS 失败：磁盘内容与期望哈希不一致（含手改检测）', {
+            file, expectedRevision: groupsRequest.expectedRevision, actualRevision: current,
+          });
+        }
+        // before 清单用于「被删组」集合计算（候选复核用）；文件缺失视为空清单。
+        const beforeData = raw === null
+          ? { version: GROUPS_VERSION, groups: [] }
+          : parseGroupsFile(raw, `groups.json(${this.activeScopeId})`);
+        const buffer = serializeGroupsFile(groupsRequest.data);
+        groupsEntry = {
+          change: { kind: 'groups' },
+          index: entries.length,
+          kind: 'groups',
+          key: undefined,
+          file,
+          buffer,
+          beforeGroups: beforeData.groups,
+          afterGroups: groupsRequest.data.groups,
+          // 规范化后的完整清单数据（{version, groups}），供提交后组存在性校验使用。
+          afterData: groupsRequest.data,
+          beforeRevision: current,
+          afterRevision: sha256Buffer(buffer),
+          stagingFile: joinUnder(this.rootReal, 'staging', operationId, `after-${entries.length}.bin`),
+          backupFile: joinUnder(this.rootReal, 'staging', operationId, `backup-${entries.length}.bin`),
+        };
+        entries.push(groupsEntry);
+      }
+
       // ---- S3 分组：本批写入携带的 group 必须已建组（组清单校验在预算评估前）----
-      await this.#assertCommitGroupsExist(entries);
+      // P2#12b：本事务自带组清单变更时，按「提交后」的清单校验——迁移改挂只引用
+      // 存活组，引用被删组在提交前即拒。
+      await this.#assertCommitGroupsExist(entries, groupsEntry?.afterData ?? null);
 
       // ---- 预算：完整可见快照经注入渲染器生成 current/candidate 文本 ----
       const view = await this.#effectiveView();
@@ -609,6 +685,30 @@ class FileStore {
       }
       const candidateTopics = [...topicMap.values()]
         .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+      // ---- P2#12b：删组并发复核（候选视图整体验证）----
+      // 被删组 = before 有、after 没有的组 key。候选视图（磁盘真值 + 本批改挂结果）
+      // 里仍挂着被删组的 topic = 快照之后并发新挂进来的成员——整个提交拒绝回滚
+      //（topic 改挂与组条目删除都未生效），任何时刻不产生悬空 key、不留半迁移；
+      // 调用方重跑时会把新成员一并纳入迁移计划后成功。
+      if (groupsEntry !== null) {
+        const afterKeys = new Set(groupsEntry.afterGroups.map((g) => g.key));
+        const removedKeys = groupsEntry.beforeGroups
+          .map((g) => g.key)
+          .filter((k) => !afterKeys.has(k));
+        if (removedKeys.length > 0) {
+          const offenders = candidateTopics
+            .filter((t) => Array.isArray(t.group) && t.group.some((g) => removedKeys.includes(g)))
+            .map((t) => ({ key: t.key, group: t.group }));
+          if (offenders.length > 0) {
+            throw invalidState(
+              `组 "${removedKeys.join('、')}" 正在本事务删除，但提交复核发现仍有 topic 挂载`
+              + `（${offenders.map((o) => o.key).join('、')}）——本事务整体回滚（改挂与删组均未生效），`
+              + '请重跑删组（重跑会把这些新成员一并迁移）',
+              { removedKeys, offenders },
+            );
+          }
+        }
+      }
       const candidateRendered = this.renderL1({ coreText: candidateCoreText, topics: candidateTopics });
       if (!candidateRendered || typeof candidateRendered.text !== 'string') {
         throw invalidInput('renderL1 必须返回 {text,chars,bytes,indexText}');
@@ -806,10 +906,12 @@ class FileStore {
    * S3 分组（0.4 §S3.1）：本批提交落盘后携带的 group（结构化 topic 与裸 text 的
    * front-matter 都覆盖——统一以最终 buffer 解析结果为准）必须已存在于 active
    * scope 的组清单；清单缺失时视为「无任何组」，非空 group 一律拒绝。
+   * P2#12b（0.5-1A）：本事务自带组清单变更（nextGroupsData 非 null）时，校验
+   * 对照「提交后」的清单而非磁盘现状——迁移改挂只引用存活组。
    * 必须在锁内调用：readGroups 与 store 共用同一把跨进程锁，重入安全；
    * 读路径绝不写盘（组清单的初始化由宿主激活路径显式调 ensureGroupsFile）。
    */
-  async #assertCommitGroupsExist(entries) {
+  async #assertCommitGroupsExist(entries, nextGroupsData = null) {
     const groupKeys = new Set();
     for (const e of entries) {
       if (e.kind !== 'topic') continue;
@@ -820,11 +922,15 @@ class FileStore {
     }
     if (groupKeys.size === 0) return;
     let data;
-    try {
-      data = (await readGroups({ dataRoot: this.rootReal, scopeId: this.activeScopeId })).data;
-    } catch (error) {
-      if (error?.code !== 'NOT_FOUND') throw error;
-      data = { version: GROUPS_VERSION, groups: [] };
+    if (nextGroupsData !== null) {
+      data = nextGroupsData;
+    } else {
+      try {
+        data = (await readGroups({ dataRoot: this.rootReal, scopeId: this.activeScopeId })).data;
+      } catch (error) {
+        if (error?.code !== 'NOT_FOUND') throw error;
+        data = { version: GROUPS_VERSION, groups: [] };
+      }
     }
     assertGroupsExist(data, [...groupKeys], 'changes 的 group');
   }
@@ -956,9 +1062,13 @@ class FileStore {
         for (let i = 0; i < j.changes.length; i += 1) {
           const entry = j.changes[i];
           try {
+            // P2#12b：groups 条目（组清单）与 core/topic 同一恢复路径——目标文件
+            // 由 (scopeId, kind) 权威推导，防 journal 内伪造路径越界。
             const expectedFile = entry.kind === 'core'
               ? this.coreFile(j.scopeId)
-              : this.topicFile(j.scopeId, validateKey(entry.key));
+              : entry.kind === 'groups'
+                ? groupsFilePath(this.rootReal, j.scopeId)
+                : this.topicFile(j.scopeId, validateKey(entry.key));
             const expectedStaging = joinUnder(this.rootReal, 'staging', j.operationId, `after-${i}.bin`);
             const expectedBackup = joinUnder(this.rootReal, 'staging', j.operationId, `backup-${i}.bin`);
             if (entry.file !== expectedFile || entry.stagingFile !== expectedStaging

@@ -17,7 +17,7 @@ import {
   MANAGEMENT_METHODS, MANAGEMENT_METHOD_NAMES, validateManagementPayload, MANAGEMENT_ERROR_CODES,
 } from "../../src/plugin/protocol.mjs";
 import { createGroupManageTool } from "../../src/host/tools.mjs";
-import { ensureGroupsFile, readGroups, writeGroups } from "../../src/core/groups.mjs";
+import { ensureGroupsFile, readGroups, writeGroups } from "../../src/storage/groups.mjs";
 
 // 默认组模板已收敛成一个「通用」组；组相关用例仍需要 dev/life 这套多组夹具，
 // 显式写四组，避免用例被模板变更牵连。

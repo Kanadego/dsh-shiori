@@ -341,7 +341,8 @@ import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createGroupManageTool, createTopicCreateTool } from "../../src/host/tools.mjs";
-import { ensureGroupsFile, groupsFilePath, writeGroups } from "../../src/core/groups.mjs";
+import { ensureGroupsFile, writeGroups } from "../../src/storage/groups.mjs";
+import { groupsFilePath } from "../../src/storage/paths.mjs";
 import { withLock } from "../../src/storage/lockfile.mjs";
 import { atomicReplace } from "../../src/storage/fsutil.mjs";
 

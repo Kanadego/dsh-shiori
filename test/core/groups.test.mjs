@@ -9,6 +9,9 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+// P1#7 解环（0.5-1A）：core/groups.mjs 只留纯逻辑；文件 I/O（readGroups /
+// ensureGroupsFile / writeGroups / deleteGroup）改从 src/storage/groups.mjs 导入，
+// groupsFilePath 来自 src/storage/paths.mjs。既有用例与断言原样保留。
 import {
   GROUPS_VERSION,
   DEFAULT_GROUPS_TEMPLATE,
@@ -19,12 +22,14 @@ import {
   assertGroupsExist,
   migrateGroupArray,
   planGroupMigration,
-  groupsFilePath,
+} from "../../src/core/groups.mjs";
+import {
   readGroups,
   ensureGroupsFile,
   writeGroups,
   deleteGroup,
-} from "../../src/core/groups.mjs";
+} from "../../src/storage/groups.mjs";
+import { groupsFilePath } from "../../src/storage/paths.mjs";
 import { serializeTopicFile, parseTopicFile } from "../../src/storage/frontmatter.mjs";
 
 async function makeRoot() {
@@ -548,5 +553,32 @@ test("frontmatter 序列化：group/pinned 非法入参显式拒绝；空数组/
     const text = serializeTopicFile(meta, "").toString("utf8");
     assert.doesNotMatch(text, /^group:/m);
     assert.doesNotMatch(text, /^pinned:/m);
+  }
+});
+
+// ---------- P1#7 解环（0.5-1A）：core/groups.mjs 无 storage 导入 ----------
+
+test("P1#7：core/groups.mjs 源码零 storage 导入（纯逻辑层不触 storage 模块）", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { fileURLToPath } = await import("node:url");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const source = await readFile(path.join(here, "..", "..", "src", "core", "groups.mjs"), "utf8");
+  // 剥掉注释再扫，避免说明文字里的「storage」字样误报；import/export 语句里
+  // 出现 ../storage/ 即违规（core 只依赖 node 内置模块与 core 内部模块）。
+  const stripped = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+  assert.doesNotMatch(stripped, /['"]\.\.\/storage\//, "core/groups.mjs 不得 import ../storage/*");
+  // 依赖白名单：除 node: 内置与 core 内部相对导入外，不允许任何其他来源。
+  const sources = [...stripped.matchAll(/(?:^|\n)\s*(?:import|export)\s[^;]*?from\s*['"]([^'"]+)['"]/g)]
+    .map((m) => m[1]);
+  for (const src of sources) {
+    assert.ok(
+      src.startsWith("node:") || src.startsWith("./") || src.startsWith("../"),
+      `core/groups.mjs 的导入来源越界: ${src}`,
+    );
+    if (src.startsWith("../")) {
+      assert.ok(!src.includes("storage"), `core/groups.mjs 不得越级导入 storage 层: ${src}`);
+    }
   }
 });

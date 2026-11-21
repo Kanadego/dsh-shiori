@@ -38,7 +38,7 @@ import { createShioriService } from "../service/index.mjs";
 import { openSparkStore } from "../sparks/store.mjs";
 import { createCompatTools, createTopicCreateTool, createGroupManageTool } from "../host/tools.mjs";
 // S3：scope 首次进 active 时初始化组清单（幂等；shadow/inert 不建资源不写盘）。
-import { ensureGroupsFile } from "../core/groups.mjs";
+import { ensureGroupsFile } from "../storage/groups.mjs";
 import { createSeatGuard } from "../host/seat.mjs";
 import { createSparkTools } from "../sparks/tools.mjs";
 import { createCompressProbe } from "../host/compress-probe.mjs";

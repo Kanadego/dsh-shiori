@@ -228,6 +228,9 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
     if (personas.length) {
       if (!personaAdapter) fail('UNSUPPORTED', 'soul_update requires an explicit independent personaAdapter');
       if (input.changes.length !== 1) fail('UNSUPPORTED', 'persona and memory cannot form a cross-adapter atomic batch');
+      // P2#12b（0.5-1A）：groups 变更走 store 提交协议，persona 走独立 adapter——
+      // 同批会把 groups 静默丢弃，显式拒绝（防静默丢数据，groups 通路自身防线）。
+      if (input.groups !== undefined) fail('INVALID_INPUT', 'persona changes cannot carry a groups field');
       const c = personas[0]; text(c.text, 'persona text');
       if (!('expectedRevision' in c)) fail('INVALID_INPUT', 'expectedRevision is required');
       if (!c.text.length || c.text.length > validated.persona.maxChars) fail('INVALID_INPUT', 'persona length outside configured limit');
@@ -329,7 +332,14 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
           }
         }
       };
-      const result = await guards.run(guard, () => store.commit({ operationId: input.operationId, expectedGeneration, changes }));
+      // P2#12b（0.5-1A）：groups 字段只透传不解释——组清单变更（删组单事务）的
+      // 形状/CAS/并发复核全部留在 store.commit；service 层不复制任何校验逻辑。
+      const result = await guards.run(guard, () => store.commit({
+        operationId: input.operationId,
+        expectedGeneration,
+        changes,
+        ...(input.groups !== undefined ? { groups: input.groups } : {}),
+      }));
       // C writeReceipt reads changes[0].scope, not B's source fallback scope.
       return { ...result, changes: result.changes.map(c => Object.fromEntries(
         Object.entries({ ...c, scope: activeScopeId }).filter(([, value]) => value !== undefined),

@@ -23,10 +23,11 @@ import { TOOL_OUTPUT_SCHEMAS, renderToolOutput } from "../plugin/tool-schemas.mj
 import { assertNotHostLocked, validateReadonlyGuard } from "./readonly-guard.mjs";
 // S3：group 软上限提示文案（超限只 warning 不报错，与 A 层口径一致）。
 import { groupSoftLimitWarning } from "../core/topics.mjs";
-// S3 group_manage：组清单数据层（groups.json 读写 / CAS / 迁移计划 / 条目校验）。
-import {
-  readGroups, writeGroups, deleteGroup, planGroupMigration, validateGroupEntry,
-} from "../core/groups.mjs";
+// S3 group_manage（P1#7 解环，0.5-1A）：组清单文件 I/O（groups.json 读写 / CAS /
+// 删组）从 src/storage/groups.mjs 导入；迁移计划与条目校验等纯逻辑仍从
+// core/groups.mjs 导入。core 只留纯逻辑、storage 承接文件 I/O，依赖单向无环。
+import { readGroups, writeGroups, deleteGroup } from "../storage/groups.mjs";
+import { planGroupMigration, validateGroupEntry } from "../core/groups.mjs";
 
 /** 派生索引标题（= src/core/render.mjs 的 INDEX_HEADER）。正文与索引在读取时拼接，正文里不得自带。 */
 const DERIVED_INDEX_HEADER = "## 主题记忆索引";
@@ -647,20 +648,19 @@ function noteMigrationTookEffect(error, { key, migrateTo, retried }) {
 /**
  * S3 group_manage 工具（第 17 个宿主工具，agent 可调；action=list/create/update/delete，
  * 0.4 收尾新增 action=repair：清理 list 里 dangling 字段报出的悬空组引用）。
- * 组清单数据层复用 S3-a 的 src/core/groups.mjs（groups.json 读写 / CAS / 迁移计划），
- * topic 文件的组迁移改写走 service.mutate（store 提交协议：journal/CAS/预算），
- * 绝不绕过存储层直写。
+ * 组清单文件 I/O 复用 src/storage/groups.mjs（P1#7 解环后 groups.json 读写 / CAS
+ * 住 storage 层），迁移计划等纯逻辑来自 src/core/groups.mjs；topic 文件的组迁移
+ * 改写走 service.mutate（store 提交协议：journal/CAS/预算），绝不绕过存储层直写。
  *
- * 删除语义（§S3.5）：组空直接删；非空必须给 migrateTo（漏给报 INVALID_STATE 并
- * 列出成员）；迁移与删组是两次独立提交、顺序固定——第一步先在单次 store 提交里
- * 改挂组内全部 topic（该提交原子：失败整体回滚，组与成员关系原样保留），第二步
- * 再删组条目（groups.json CAS 防并发改动）。已知边界：两次提交之间的窗口内，并发
- * 提交把新 topic 挂入被删组时不在保护范围——该成员的迁移计划（deleteGroup 返回
- * 的 migration）会被丢弃而组条目仍被删除，留下悬空 key；commit 侧组存在性校验与
- * deleteGroup 的 CAS 只能把窗口压到最小，完全闭合需要跨文件单事务，超出本单范围。
- * 0.4 收尾补了两道自愈：① 第一步迁移已生效而第二步 CAS 失败时，重读 revision 自动
- * 补删组条目一次（不二次迁移），第二次仍失败才上抛；② 悬空 key 由 list 的 dangling
- * 字段显式暴露，action=repair 走 service.mutate（CAS + operationId）只清悬空引用。
+ * 删除语义（§S3.5 + P2#12b 单事务，0.5-1A）：组空直接删（storage 层 CAS 写）；
+ * 非空必须给 migrateTo（漏给报 INVALID_STATE 并列出成员）。非空组的删组收敛为
+ * 一次 CAS 提交：成员重挂（topic changes）与组条目删除（mutate 请求的 groups
+ * 字段）经 service 透传进 store.commit，作为同一 journal 事务的两个条目——
+ * 失败整体回滚，不存在半迁移；提交期候选复核发现并发新挂成员时整体拒绝
+ * （任何时刻无悬空 key），重跑会把新成员一并迁移，repair 对单事务删除的组
+ * 无事可做。service 不认识 groups 字段时（测试 fake / 旧实现）回执无 groups
+ * 条目，回退到既有两步路径（迁移提交 → deleteGroup CAS 删组 + 自愈重试），
+ * 行为与 0.4 收尾版完全一致。
  *
  * @param {object} deps
  * @param {object} deps.service 见 docs/host/README.md 的 service 契约（mutate/readTopic/listTopics）
@@ -720,7 +720,7 @@ export function createGroupManageTool({ service, dataRoot, scopeId, now, readonl
 
   return {
     name: "group_manage",
-    description: "Manage topic groups for the current scope: list groups (with per-group topic counts and the dangling field reporting topic.group entries that point at groups no longer in the list), create/update group metadata (key/title/summary/order), delete a group, or repair dangling references. Create a group once topics naturally cluster: grouping early keeps L1 readable and stops related memories from piling up ungrouped. Deleting a non-empty group requires migrateTo: the group's topics are re-grouped in one commit first, and the group entry is removed afterwards as a second, separate step; if that second step hits a revision conflict after the migration already committed, the revision is re-read and the entry deletion is retried once automatically (never a second migration); if that retry also fails, the error is rethrown annotated with the fact that the migration already took effect (rerunning is not guaranteed to be idempotent). A topic newly attached to the group between the two commits is NOT protected and may be left with a dangling key — action=repair removes exactly those dangling references and reports cleaned/remaining (one CAS'd mutate commit with operationId; cleaned counts only pairs actually removed at write time; valid groups and card bodies untouched; refused with INVALID_STATE when the group list is empty but topics carry mounts, to avoid wiping every mount). repair re-reads the group list right before committing, but that recheck is NOT atomic with the mutate: a group created in the window right after the recheck can still make a fresh mount removable — this residual window is reported as-is, not closed. If the post-commit re-read fails, the result still reports cleaned plus a warning and omits remaining rather than inventing a value. Groups are per-scope and referenced from topic front-matter; a topic's first group is its primary group (soft limit: 3 groups per topic, more only yields a warning).",
+    description: "Manage topic groups for the current scope: list groups (with per-group topic counts and the dangling field reporting topic.group entries that point at groups no longer in the list), create/update group metadata (key/title/summary/order), delete a group, or repair dangling references. Create a group once topics naturally cluster: grouping early keeps L1 readable and stops related memories from piling up ungrouped. Deleting a non-empty group requires migrateTo: the topic re-mounts and the group-entry deletion are committed together as ONE atomic store transaction (same journal, all-or-nothing); if a topic is mounted into the dying group concurrently during the commit, the whole delete is rejected with nothing applied — rerun the delete and the new member is migrated too, so no dangling keys are left for repair to clean. A service that predates the groups transaction field falls back to the legacy two-step flow: the group's topics are re-grouped in one commit first, and the group entry is removed afterwards as a second, separate step; if that second step hits a revision conflict after the migration already committed, the revision is re-read and the entry deletion is retried once automatically (never a second migration); if that retry also fails, the error is rethrown annotated with the fact that the migration already took effect (rerunning is not guaranteed to be idempotent), and a topic newly attached between the two steps may be left with a dangling key — action=repair removes exactly those dangling references and reports cleaned/remaining (one CAS'd mutate commit with operationId; cleaned counts only pairs actually removed at write time; valid groups and card bodies untouched; refused with INVALID_STATE when the group list is empty but topics carry mounts, to avoid wiping every mount). repair re-reads the group list right before committing, but that recheck is NOT atomic with the mutate: a group created in the window right after the recheck can still make a fresh mount removable — this residual window is reported as-is, not closed. If the post-commit re-read fails, the result still reports cleaned plus a warning and omits remaining rather than inventing a value. Groups are per-scope and referenced from topic front-matter; a topic's first group is its primary group (soft limit: 3 groups per topic, more only yields a warning).",
     inputSchema: {
       action: { type: "string", required: true, description: "One of: list, create, update, delete, repair." },
       key: { type: "string", description: "Group key (create/update/delete)." },
@@ -859,9 +859,41 @@ export function createGroupManageTool({ service, dataRoot, scopeId, now, readonl
               topic: { title: current.title, summary: current.summary, group: item.group },
             });
           }
-          await service.mutate({ operationId, changes });
+          // P2#12b 删组单事务（0.5-1A）：成员重挂（changes）与组条目删除（groups
+          // 字段，expectedRevision 取本 action 开头的清单读取）放进同一次 mutate。
+          // 认识该字段的 service（src/service/index.mjs 已透传）把它转成 store
+          // 提交协议里的 groups 条目，与 topic 改挂同一 journal/staging/原子替换/
+          // 崩溃恢复事务：失败整体回滚，不存在「迁移已提交、删组失败」的半迁移；
+          // 提交期候选复核发现并发新挂成员时整体拒绝（任何时刻无悬空 key），重跑
+          // 会把新成员一并纳入迁移计划。不认识该字段的 service（测试 fake / 旧实现）
+          // 会静默丢弃 groups——回执里没有 groups 条目即为信号，走下方回退两步路径。
+          // 单事务提交失败 = 什么都没发生（原子回滚），错误原样上抛，不再需要
+          // 「迁移已生效」的补救注解。
+          const singleReceipt = await service.mutate({
+            operationId,
+            changes,
+            groups: {
+              expectedRevision: revision,
+              groups: data.groups.filter((g) => g.key !== key),
+            },
+          });
+          const appliedGroups = (singleReceipt?.changes ?? []).find((c) => c?.kind === "groups");
+          if (appliedGroups) {
+            // 单事务完成：回执里的 groups 条目即删组凭证（afterRevision 为删组后
+            // 清单哈希），无需任何回退步骤。
+            return {
+              scope: scopeId,
+              action,
+              key,
+              deleted: true,
+              migrated: plan,
+              revision: appliedGroups.afterRevision,
+            };
+          }
           migrated = plan;
         }
+        // 回退路径（P2#12b）：service 丢弃了 groups 字段（测试 fake / 旧实现）——
+        // topic 改挂已生效、组条目还在。以下为 0.4 收尾版的两步删除 + 自愈，原样保留：
         // 组条目删除（CAS：revision 取本 action 开头的清单读取；topic 迁移不改
         // groups.json，CAS 仍成立）。postSnapshot 的读取也放进 try：迁移已提交后
         // 若这里 listTopics 读失败，同样属于「迁移已生效但收尾失败」，必须走下面的
