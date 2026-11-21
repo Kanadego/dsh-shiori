@@ -318,7 +318,7 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
     // ── 追加 / 重写（旧工具：read-then-CAS）────────────────────────────────
     {
       name: "memory_append",
-      description: "Append a dated Markdown block to memory in the CURRENT scope. Omit topic for the always-visible core body; pass a topic key for that topic file. The append is committed through service.mutate with CAS.",
+      description: "Append a dated Markdown block to memory in the CURRENT scope. Write proactively: durable rules, decisions, fixes and facts should be recorded when they happen, not when the user asks — if it matters past this conversation, append it now. Omit topic for the always-visible core body; pass a topic key for that topic file. The append is committed through service.mutate with CAS.",
       inputSchema: {
         section: { type: "string", required: true, description: "Short heading for the entry." },
         content: { type: "string", required: true, description: "The markdown text to remember." },
@@ -362,7 +362,7 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
     },
     {
       name: "memory_rewrite",
-      description: "Replace one memory body in the CURRENT scope: omit topic for the core body, or pass a topic key to replace that topic's body (topic front-matter metadata is preserved by the service). Build the new content from memory_read output unless you deliberately drop entries.",
+      description: "Replace one memory body in the CURRENT scope: omit topic for the core body, or pass a topic key to replace that topic's body (topic front-matter metadata is preserved by the service). Keep bodies accurate — stale wording is worse than no memory. Build the new content from memory_read output unless you deliberately drop entries.",
       inputSchema: {
         content: { type: "string", required: true, description: "The new full body content (markdown)." },
         topic: { type: "string", description: "Optional topic key. Omit or pass core/core.md for the core body (legacy alias)." },
@@ -404,7 +404,7 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
     // ── 新式写工具（expectedRevision 必须显式给出）─────────────────────────
     {
       name: "core_write",
-      description: "Replace the disk core body (L1, without the derived index). Pass the opaque revision from memory_read(); null only when no visible core exists. Global fallback is validated before an active-scope copy is created. The service enforces the complete rendered L1 budget.",
+      description: "Replace the disk core body (L1, without the derived index). Pass the opaque revision from memory_read(); null only when no visible core exists. Global fallback is validated before an active-scope copy is created. The service enforces the complete rendered L1 budget. Keep the core for rules that must be visible in every turn; move detail into topics so the budget stays healthy.",
       inputSchema: {
         content: { type: "string", required: true, description: "The new core body (markdown)." },
         expectedRevision: {
@@ -444,7 +444,7 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
     },
     {
       name: "topic_append",
-      description: "Append a dated section to an L3 topic body. The topic must already exist (P0 does not create topics). Committed through service.mutate with CAS.",
+      description: "Append a dated section to an L3 topic body. Use it whenever a project gains detail worth keeping — findings, fixes, changed decisions, lessons — instead of letting it evaporate with the conversation. The topic must already exist (P0 does not create topics). Committed through service.mutate with CAS.",
       inputSchema: {
         topic: { type: "string", required: true, description: "Topic key." },
         section: { type: "string", required: true, description: "Short heading for the appended section." },
@@ -556,7 +556,7 @@ export function createTopicCreateTool({ service, getSessionInfo, now, readonlyGu
 
   return {
   name: "topic_create",
-  description: "Create a new L3 topic in the CURRENT scope with title and summary (front-matter metadata; the body starts empty). If a topic with the same key exists in the active scope this is a conflict; if it only exists in global fallback an active-scope shadow is created so the active card gets its own copy. The complete visible L1 budget (index growth) is validated by the service before commit.",
+  description: "Create a new L3 topic in the CURRENT scope with title and summary (front-matter metadata; the body starts empty). Create one as soon as a durable theme appears — a new project, a recurring subject, a long investigation; title plus a one-line summary is enough, detail can be appended later. If a topic with the same key exists in the active scope this is a conflict; if it only exists in global fallback an active-scope shadow is created so the active card gets its own copy. The complete visible L1 budget (index growth) is validated by the service before commit.",
   inputSchema: {
     topic: { type: "string", required: true, description: "Topic key (must be a safe filename; 'core' is reserved)." },
     title: { type: "string", required: true, description: "Human-readable topic title." },
@@ -720,7 +720,7 @@ export function createGroupManageTool({ service, dataRoot, scopeId, now, readonl
 
   return {
     name: "group_manage",
-    description: "Manage topic groups for the current scope: list groups (with per-group topic counts and the dangling field reporting topic.group entries that point at groups no longer in the list), create/update group metadata (key/title/summary/order), delete a group, or repair dangling references. Deleting a non-empty group requires migrateTo: the group's topics are re-grouped in one commit first, and the group entry is removed afterwards as a second, separate step; if that second step hits a revision conflict after the migration already committed, the revision is re-read and the entry deletion is retried once automatically (never a second migration); if that retry also fails, the error is rethrown annotated with the fact that the migration already took effect (rerunning is not guaranteed to be idempotent). A topic newly attached to the group between the two commits is NOT protected and may be left with a dangling key — action=repair removes exactly those dangling references and reports cleaned/remaining (one CAS'd mutate commit with operationId; cleaned counts only pairs actually removed at write time; valid groups and card bodies untouched; refused with INVALID_STATE when the group list is empty but topics carry mounts, to avoid wiping every mount). repair re-reads the group list right before committing, but that recheck is NOT atomic with the mutate: a group created in the window right after the recheck can still make a fresh mount removable — this residual window is reported as-is, not closed. If the post-commit re-read fails, the result still reports cleaned plus a warning and omits remaining rather than inventing a value. Groups are per-scope and referenced from topic front-matter; a topic's first group is its primary group (soft limit: 3 groups per topic, more only yields a warning).",
+    description: "Manage topic groups for the current scope: list groups (with per-group topic counts and the dangling field reporting topic.group entries that point at groups no longer in the list), create/update group metadata (key/title/summary/order), delete a group, or repair dangling references. Create a group once topics naturally cluster: grouping early keeps L1 readable and stops related memories from piling up ungrouped. Deleting a non-empty group requires migrateTo: the group's topics are re-grouped in one commit first, and the group entry is removed afterwards as a second, separate step; if that second step hits a revision conflict after the migration already committed, the revision is re-read and the entry deletion is retried once automatically (never a second migration); if that retry also fails, the error is rethrown annotated with the fact that the migration already took effect (rerunning is not guaranteed to be idempotent). A topic newly attached to the group between the two commits is NOT protected and may be left with a dangling key — action=repair removes exactly those dangling references and reports cleaned/remaining (one CAS'd mutate commit with operationId; cleaned counts only pairs actually removed at write time; valid groups and card bodies untouched; refused with INVALID_STATE when the group list is empty but topics carry mounts, to avoid wiping every mount). repair re-reads the group list right before committing, but that recheck is NOT atomic with the mutate: a group created in the window right after the recheck can still make a fresh mount removable — this residual window is reported as-is, not closed. If the post-commit re-read fails, the result still reports cleaned plus a warning and omits remaining rather than inventing a value. Groups are per-scope and referenced from topic front-matter; a topic's first group is its primary group (soft limit: 3 groups per topic, more only yields a warning).",
     inputSchema: {
       action: { type: "string", required: true, description: "One of: list, create, update, delete, repair." },
       key: { type: "string", description: "Group key (create/update/delete)." },
