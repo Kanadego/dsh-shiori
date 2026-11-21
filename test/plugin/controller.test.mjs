@@ -2312,3 +2312,149 @@ test("R3/rework：disposeAll 报错或抛错 → degradedRegistered 保留，后
     );
   }
 });
+
+// ── 0.5 批次 5 · A 线：pre-step auto 调度接线（§11.2.1 触发）─────────────────
+//
+// 人类轮判据：本轮上下文存在 source.kind === "user" 的消息（心跳投递/引擎室轮的
+// source 不是 user → 天然跳过）。调度 fire-and-forget：绝不阻塞主回答、失败静默
+// 进诊断（diagnostics().counters.autoEvaluationFailures 与 getStatus.diagnostics.auto）。
+// 同步手段：auto 记账落盘 <stateRoot>/auto-organize.json，用 waitForAutoState 轮询。
+
+import { writeFile as autoWriteFile, readFile as autoReadFile, mkdir as autoMkdir } from "node:fs/promises";
+
+const AUTO_PRESTEP_TEMPERATURE = {
+  s0Days: 30, sMaxDays: 180, consolidateGain: 0.5, readAlpha: 0.35,
+  updatedFloor: 85, readDedupHours: 24, coolThreshold: 25, restoreThreshold: 50,
+  minCooldownDays: 7, minRestoreGraceDays: 3, maxOpsPerRun: 20, evaluateEveryHours: 6,
+};
+
+async function autoPreStepFixture(t, { autoMode = "suggest", l2 = false } = {}) {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-autopre-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const bindings = fakeBindingsFactory();
+  const controller = await createShioriPluginController(fakeCtx(), {
+    mode: "active", allowActive: true,
+    dataRoot: path.join(base, "data"), stateRoot: path.join(base, "state"),
+    ownerId: "local", defaultPersona: "amber",
+    l2: { enabled: l2 },
+    forgetting: { enabled: true, autoMode },
+    temperature: AUTO_PRESTEP_TEMPERATURE,
+  }, { bindings });
+  await controller.start();
+  // 预置一个冷态 historical topic + search_hit 统计起点（与 management 夹具同款）。
+  const topicsDir = path.join(base, "data", "scopes", "amber", "topics");
+  await autoMkdir(topicsDir, { recursive: true });
+  const updated = new Date(Date.now() - 61 * 86400000).toISOString();
+  await autoWriteFile(path.join(topicsDir, "pre-cold.md"), [
+    "---",
+    "key: pre-cold",
+    "scopeId: amber",
+    "title: 调度夹具",
+    "summary: s",
+    `updated: ${updated}`,
+    "retention: historical",
+    "---",
+    "",
+    "正文。",
+    "",
+  ].join("\n"));
+  await autoMkdir(path.join(base, "state"), { recursive: true });
+  const hitAt = new Date(Date.now() - 8 * 86400000).toISOString();
+  await autoWriteFile(path.join(base, "state", "topic-activity.jsonl"),
+    JSON.stringify({ at: hitAt, scopeId: "amber", kind: "search_hit", topicKey: "pre-cold" }) + "\n");
+  return { controller, bindings, base, stateRoot: path.join(base, "state"), topicsDir };
+}
+
+function autoHumanMessage(id) {
+  return { id, role: "user", source: { kind: "user" }, content: [{ type: "text", text: "人类输入" }] };
+}
+
+function autoHeartbeatMessage(id) {
+  // 心跳投递形状：role=user 但 source.kind ≠ user（引擎室轮）——不构成人类轮。
+  return { id, role: "user", source: { kind: "heartbeat-inject" }, content: [{ type: "text", text: "心跳注入" }] };
+}
+
+async function waitForAutoState(stateRoot, timeoutMs = 3000) {
+  const file = path.join(stateRoot, "auto-organize.json");
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const raw = await autoReadFile(file, "utf8");
+      if (raw.includes("lastEvaluatedAt")) return JSON.parse(raw);
+    } catch { /* 尚未落盘，继续等 */ }
+    if (Date.now() > deadline) throw new Error("auto-organize.json 未在超时内落盘（调度未触发评估）");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+test("pre-step auto 调度：心跳轮不触发（source.kind ≠ user）；人类轮首评触发且绝不阻塞主回答", async (t) => {
+  const { controller, bindings, stateRoot } = await autoPreStepFixture(t, { autoMode: "suggest", l2: false });
+  const preStep = bindings.registered.preStep;
+  const agent = { session: { id: "s-1" } };
+  const nextDecision = { kind: "enter", messages: [] };
+
+  // 心跳轮：不触发调度（auto 记账永不落盘）。
+  const decisionHb = await preStep({ agent, messages: [autoHeartbeatMessage("hb-1")] }, async () => nextDecision);
+  assert.equal(decisionHb.kind, "enter", "心跳轮 preStep 照常放行");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  await assert.rejects(
+    () => autoReadFile(path.join(stateRoot, "auto-organize.json"), "utf8"),
+    (error) => error.code === "ENOENT",
+    "心跳轮不写 auto-organize.json（未评估）",
+  );
+
+  // 人类轮：first-run 基线评估触发（fire-and-forget，preStep 立即返回）。
+  const startedAt = Date.now();
+  const decision = await preStep({ agent, messages: [autoHumanMessage("m-1")] }, async () => nextDecision);
+  assert.equal(decision.kind, "enter", "人类轮 preStep 照常放行（不被 auto 阻塞）");
+  assert.ok(Date.now() - startedAt < 300, "调度构造同步返回（评估在后台跑）");
+  const storeState = await waitForAutoState(stateRoot);
+  assert.equal(storeState.scopes.amber.lastEvaluatedBy, "human-turn", "人类轮评估已记账");
+
+  // 诊断可见：计数为 0 次失败；面板 status 记账同步。
+  assert.equal(controller.diagnostics().counters.autoEvaluationFailures, 0);
+  const status = await controller.management.getAutoStatus({ session: { id: "s-1" }, source: "panel-rpc" }, {});
+  assert.equal(status.lastEvaluatedBy, "human-turn");
+});
+
+test("pre-step auto 调度：L2 关闭时照常调度；auto 模式人类轮直接执行（topic 落 archivedAt）", async (t) => {
+  const { controller, bindings, stateRoot, topicsDir } = await autoPreStepFixture(t, { autoMode: "auto", l2: false });
+  const preStep = bindings.registered.preStep;
+  const agent = { session: { id: "s-1" } };
+  const decision = await preStep({ agent, messages: [autoHumanMessage("m-auto")] }, async () => ({ kind: "enter", messages: [] }));
+  assert.equal(decision.kind, "enter");
+  await waitForAutoState(stateRoot);
+  // auto 模式：调度接执行——冷态 topic 已被归档。
+  const deadline = Date.now() + 3000;
+  let archived = false;
+  while (Date.now() < deadline) {
+    const raw = await autoReadFile(path.join(topicsDir, "pre-cold.md"), "utf8");
+    if (raw.includes("archivedAt")) { archived = true; break; }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(archived, true, "auto 模式人类轮执行了冷却（archivedAt 落盘）");
+  const autoDiag = (await controller.management.getStatus({ session: { id: "s-1" }, source: "panel-rpc" }, {})).diagnostics.auto;
+  assert.ok(autoDiag.runs >= 1, "执行轮数进诊断");
+});
+
+test("pre-step auto 调度：评估失败静默计数（autoStore 损坏 → 记账失败），主回答零影响", async (t) => {
+  const { controller, bindings, stateRoot } = await autoPreStepFixture(t, { autoMode: "suggest", l2: false });
+  // 预写一份损坏的 auto-organize.json（坏 JSON）——markEvaluated 将失败。
+  await autoWriteFile(path.join(stateRoot, "auto-organize.json"), "{ broken json !!!");
+  const preStep = bindings.registered.preStep;
+  const agent = { session: { id: "s-1" } };
+  const decision = await preStep({ agent, messages: [autoHumanMessage("m-fail")] }, async () => ({ kind: "enter", messages: [] }));
+  assert.equal(decision.kind, "enter", "评估失败不打断 pre-step");
+  // 失败计数进诊断（轮询等待后台调度收场）。
+  const deadline = Date.now() + 3000;
+  let failures = 0;
+  while (Date.now() < deadline) {
+    failures = controller.diagnostics().counters.autoEvaluationFailures;
+    if (failures > 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(failures >= 1, `autoEvaluationFailures ≥ 1（实际 ${failures}）`);
+  const autoDiag = (await controller.management.getStatus({ session: { id: "s-1" }, source: "panel-rpc" }, {})).diagnostics.auto;
+  assert.ok(autoDiag.failures >= 1);
+  assert.ok(autoDiag.lastError !== null, "最近错误如实留痕");
+});

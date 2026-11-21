@@ -184,7 +184,8 @@ export async function createShioriPluginController(ctx, settings) {
   // 桩的 management 方法清单同为 CONTRACT_METHODS 镜像（与下方 STUB_PROTOCOL 同步维护；
   // 0.5 批次 4 C 线 wire 11→14：destroyData 之后依次追加 onboardingPreview/Apply/Mark；
   // 0.5 批次 4 B 线 14→17：再追加热度参数三方法）。
-  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"];
+  // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 冷却/恢复四方法并入桩清单）。
+  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"];
   const management = Object.fromEntries(methods.map((method) => [
     method,
     async () => ({ mode: state.mode, method, synthetic: true, started: state.started, stopped: state.stopped }),
@@ -233,6 +234,11 @@ export const MANAGEMENT_METHODS = {
   getTemperatureSettings: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
   simulateTemperature: { inputSchema: { type: "object", required: ["params"] }, outputSchema: { type: "object" } },
   recordTemperatureChange: { inputSchema: { type: "object", required: ["params", "operationId"] }, outputSchema: { type: "object" } },
+  // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 四方法并入镜像）。
+  getAutoStatus: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
+  runAutoEvaluation: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
+  applyAutoChanges: { inputSchema: { type: "object", required: ["operationId"] }, outputSchema: { type: "object" } },
+  undoAutoRun: { inputSchema: { type: "object", required: ["runId"] }, outputSchema: { type: "object" } },
 };
 const ALLOWED = {
   getStatus: [], getMemoryView: [], getGraph: [], listCandidates: [],
@@ -249,6 +255,11 @@ const ALLOWED = {
   getTemperatureSettings: [],
   simulateTemperature: ["params"],
   recordTemperatureChange: ["params", "operationId"],
+  // 规格连带：wire 17→21（auto 四方法入 ALLOWED 白名单键）。
+  getAutoStatus: [],
+  runAutoEvaluation: [],
+  applyAutoChanges: ["operationId"],
+  undoAutoRun: ["runId"],
 };
 export function validateManagementPayload(name, payload) {
   const fail = (message) => { const e = new Error(message); e.code = "INVALID_INPUT"; throw e; };

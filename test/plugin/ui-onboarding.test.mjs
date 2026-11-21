@@ -34,11 +34,13 @@ const CLIENT_SRC = join(WORKQ, "client", "index.js");
 // （= 契约清单去 getStatus）在 controller 构造期有逐字一致断言（缺一处即启动
 // 失败），controller.test.mjs 的每次构造都在跑它。
 // 0.5 批次 4 B 线：wire 14 → 17，新三方法（温度参数读/回放/入账）按声明顺序追加在向导三方法之后。
-test("wire 17 方法（0.5 批次 4 B 线：+ getTemperatureSettings / simulateTemperature / recordTemperatureChange）：MANAGEMENT_METHOD_NAMES ≡ protocol 键序 ≡ CONTRACT_METHODS（逐字同序，评审拍板锁死）", () => {
+test("wire 21 方法（0.5 批次 5 A 线：+ auto 冷却/恢复四方法；规格连带：wire 17→21）：MANAGEMENT_METHOD_NAMES ≡ protocol 键序 ≡ CONTRACT_METHODS（逐字同序，评审拍板锁死）", () => {
   const protocolKeys = Object.keys(MANAGEMENT_METHODS);
   assert.deepEqual([...MANAGEMENT_METHOD_NAMES], [...protocolKeys], "导出清单 ≡ protocol 键序");
   assert.deepEqual([...MANAGEMENT_METHOD_NAMES], [...CONTRACT_METHODS], "protocol 键序 ≡ CONTRACT_METHODS（逐字同序）");
-  assert.deepEqual([...protocolKeys].slice(-6), ["onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"], "向导三方法 + B 线三方法按声明顺序追加在 destroyData 之后");
+  assert.deepEqual([...protocolKeys].slice(11, 17), ["onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"], "向导三方法 + B 线三方法按声明顺序追加在 destroyData 之后（位置不变）");
+  // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 四方法按声明顺序追加在末尾）。
+  assert.deepEqual([...protocolKeys].slice(-4), ["getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"], "auto 四方法追加在 recordTemperatureChange 之后");
 });
 
 // ---------------------------------------------------------------------------

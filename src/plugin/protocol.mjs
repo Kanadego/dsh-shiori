@@ -1048,6 +1048,128 @@ export const MANAGEMENT_METHODS = Object.freeze({
       required: ["recorded", "replay", "changes"],
     },
   },
+
+  // ── 0.5 批次 5 · A 线（wire 18/19/20/21）：auto 冷却/恢复四方法 ───────────────
+  // 触发/评估/执行/撤销的业务语义在 forgetting/auto.mjs（评估纯函数回放零写盘；
+  // auto 只执行可逆的 archive-topic/unarchive-topic，每轮 ≤ maxOpsPerRun；run
+  // 记录供 undoAutoRun 一键撤销）。数值字段（温度 T、天数）在本 JSON Schema 子集
+  // 里没有 number 节点可表达，统一以 additionalProperties:true 块承接；字段存在性
+  // 与业务校验由 forgetting/auto.mjs 在服务端权威把关。
+  getAutoStatus: {
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        // 面板所属 scope（评估/锚/run 过滤口径）。
+        scope: nonEmptyString,
+        // forgetting.enabled（模块开关；false 时本方法不会到达——requireModule 拒绝）。
+        enabled: { type: "boolean" },
+        // 三档模式（settings.forgetting.autoMode，现读）。
+        mode: { enum: ["off", "suggest", "auto"] },
+        // 该 scope 上次成功评估锚（失败/熔断的评估不记账）。
+        lastEvaluatedAt: { oneOf: [nonEmptyString, { type: "null" }] },
+        lastEvaluatedBy: { oneOf: [{ enum: ["manual", "human-turn", "soft-watermark"] }, { type: "null" }] },
+        // 下次触发条件（dueAt/hoursRemaining/requiresHumanTurn/softWatermarkArmed）。
+        nextTrigger: { type: "object", additionalProperties: true },
+        // 熔断与统计健康（computeAutoFuse 产物：fused/reasons/statsValid/…）。
+        fuse: { type: "object", additionalProperties: true },
+        stats: { type: "object", additionalProperties: true },
+        // 12 项参数中与 auto 相关的六项快照（maxOpsPerRun/evaluateEveryHours/…）。
+        params: { type: "object", additionalProperties: true },
+        // 本 scope 最近 5 条 run 摘要（runId/at/trigger/applied/undoneAt）。
+        lastRuns: { type: "array", items: { type: "object", additionalProperties: true } },
+        // auto-organize.json 损坏/版本不识别时的有界摘要（按无记账降级；可选键）。
+        storeError: { type: "string" },
+      },
+      required: ["scope", "enabled", "mode", "lastEvaluatedAt", "lastEvaluatedBy", "nextTrigger", "fuse", "stats", "params", "lastRuns"],
+    },
+  },
+
+  runAutoEvaluation: {
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        scope: nonEmptyString,
+        evaluatedAt: nonEmptyString,
+        trigger: { enum: ["manual", "human-turn", "soft-watermark"] },
+        // 熔断时 fused=true，candidates/plan 恒空（本轮不出任何可执行候选）。
+        fused: { type: "boolean" },
+        fuse: { type: "object", additionalProperties: true },
+        stats: { type: "object", additionalProperties: true },
+        // 回放规模（topics/groups 计数 + alarms），温度明细走 simulateTemperature。
+        replay: { type: "object", additionalProperties: true },
+        // 候选清单（每条带 operationKind/key/scopeId/T/tier/ageDays/reason）。
+        candidates: { type: "array", items: { type: "object", additionalProperties: true } },
+        // 执行计划（≤ maxOpsPerRun 的 ops + truncated + groupRestore + counts）。
+        plan: { type: "object", additionalProperties: true },
+      },
+      required: ["scope", "evaluatedAt", "trigger", "fused", "fuse", "stats", "replay", "candidates", "plan"],
+    },
+  },
+
+  applyAutoChanges: {
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        operationId,
+      },
+      required: ["operationId"],
+    },
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        runId: nonEmptyString,
+        // 同 operationId 重放：返回首次结果，不二次执行。
+        replay: { type: "boolean" },
+        evaluatedAt: nonEmptyString,
+        trigger: { enum: ["manual", "human-turn", "soft-watermark"] },
+        applied: { type: "integer", minimum: 0 },
+        skipped: { type: "integer", minimum: 0 },
+        failed: { type: "integer", minimum: 0 },
+        truncated: { type: "boolean" },
+        // 逐条变更（operationKind/key/scopeId/before/after/operationId/status/reason）。
+        ops: { type: "array", items: { type: "object", additionalProperties: true } },
+        // 连组恢复说明（navigationOnly，绝不连坐成员）。
+        groupRestore: { type: "array", items: { type: "object", additionalProperties: true } },
+        // 候选总数（截断前的 cool/restore/total 计数；重放回执不出此键）。
+        counts: { type: "object", additionalProperties: true },
+      },
+      required: ["runId", "replay", "evaluatedAt", "trigger", "applied", "skipped", "failed", "truncated", "ops", "groupRestore"],
+    },
+  },
+
+  undoAutoRun: {
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        runId: nonEmptyString,
+      },
+      required: ["runId"],
+    },
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        runId: nonEmptyString,
+        // 重复撤销幂等：replay=true，不碰任何盘，回放首次结论。
+        replay: { type: "boolean" },
+        undoneAt: { oneOf: [nonEmptyString, { type: "null" }] },
+        reverted: { type: "integer", minimum: 0 },
+        alreadyUndone: { type: "integer", minimum: 0 },
+        skipped: { type: "integer", minimum: 0 },
+        failed: { type: "integer", minimum: 0 },
+        // 逐条撤销结果（operationKind/key/scopeId/before/after/status）。
+        ops: { type: "array", items: { type: "object", additionalProperties: true } },
+      },
+      required: ["runId", "replay", "undoneAt", "reverted", "alreadyUndone", "skipped", "failed", "ops"],
+    },
+  },
 });
 
 /** 管理 API 方法名集合。 */

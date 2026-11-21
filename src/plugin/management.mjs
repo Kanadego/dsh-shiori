@@ -40,13 +40,15 @@ import { coreBudgetsOf } from "./config.mjs";
 import { createTimelineReader } from "../timeline/index.mjs";
 import { purgeDataRoot, PurgeSafetyError } from "../storage/purge.mjs";
 import { readGroups } from "../storage/groups.mjs";
-import { parseTopicFile } from "../storage/frontmatter.mjs";
-import { isCanonicalIso, readFileOrNull } from "../storage/fsutil.mjs";
-import { parseGroupsFile } from "../core/groups.mjs";
 import { readTopicActivity, createTopicActivityLedger } from "../storage/topic-activity.mjs";
 // 0.5 批次 4 · B 线：回放模拟委托 forgetting/replay.mjs（它再委托 evaluateTopics）；
 // 参数唯一源头 params.mjs（校验 / diff / 审计事件纯构造）。
 import { simulateTemperature as simulateTemperaturePure } from "../forgetting/replay.mjs";
+// 0.5 批次 5 · A 线：auto 冷却/恢复。只读评估装配（topics/groups/账本）以
+// forgetting/auto.mjs 的 createAutoReplaySource 为唯一实现（simulateTemperature
+// 与 auto 引擎共用，杜绝两份装配悄悄分叉）；执行/撤销/状态全部委托 controller
+// 注入的 autoEngine（deps.autoEngine，单实例供面板 RPC 与 pre-step 调度共用）。
+import { createAutoReplaySource } from "../forgetting/auto.mjs";
 import {
   DEFAULT_TEMPERATURE_PARAMS,
   PARAM_SPECS,
@@ -331,6 +333,19 @@ export function createManagement(deps) {
     }
   }
 
+  /**
+   * 0.5 批次 5 · A 线：auto 冷却/恢复引擎取值（controller 注入的单一实例，管理
+   * RPC 与 pre-step 调度共用）。缺失即装配错误（fail-fasted 直构场景在调用四
+   * 个 auto 方法时才暴露，不影响既有方法的直构测试）。
+   */
+  function requireAutoEngine(where) {
+    const engine = deps.autoEngine;
+    if (engine === undefined || engine === null || typeof engine.evaluate !== "function") {
+      fail("INVALID_INPUT", `createManagement requires deps.autoEngine (auto 冷却/恢复引擎，由 controller 注入；${where})`, {});
+    }
+    return engine;
+  }
+
   // ── 队列 ─────────────────────────────────────────────────────
 
   async function loadQueue(scopeId) {
@@ -372,77 +387,10 @@ export function createManagement(deps) {
   // 硬约束：预览 RPC 必须零写入（不 appendRecord、不建目录、不碰 dataRoot）。
   // 因此这里**不**经 resourcesFor / service / storage.groups 的锁内读——那些路径
   // 会 mkdir 数据根目录并写 .shiori-lock/.shiori-lock.guard（dataRoot mtime/size
-  // 会变）。改为直接只读文件：topics 走 <dataRoot>/scopes/<scope>/topics/*.md
-  // （global 先、active 覆盖，与本仓 FileStore.effectiveView 同口径），组清单走
-  // <dataRoot>/scopes/<scope>/groups.json 的纯解析，事件走 readTopicActivity（裸
-  // readFile，无锁）。坏文件按「跳过并计数」降级（与 listTopics 的影子报告同精神），
-  // 不让一个手改坏文件拖垮整次预览。
-  async function readTopicsForReplay(scopeId) {
-    const root = settings.dataRoot;
-    if (typeof root !== "string" || root.length === 0) return { topics: [], skipped: 0 };
-    const scopes = scopeId === "global" ? ["global"] : ["global", scopeId];
-    const byKey = new Map();
-    let skipped = 0;
-    for (const sid of scopes) {
-      const dir = path.join(root, "scopes", sid, "topics");
-      let names;
-      try {
-        names = await fsp.readdir(dir);
-      } catch (error) {
-        if (error?.code === "ENOENT" || error?.code === "ENOTDIR") continue;
-        throw error;
-      }
-      const rows = [];
-      for (const name of names) {
-        if (!name.endsWith(".md")) continue;
-        const key = name.slice(0, -3);
-        let raw;
-        try {
-          raw = await fsp.readFile(path.join(dir, name));
-        } catch (error) {
-          if (error?.code === "ENOENT") { skipped += 1; continue; }
-          throw error;
-        }
-        let parsed;
-        try {
-          parsed = parseTopicFile(raw);
-        } catch {
-          skipped += 1;
-          continue;
-        }
-        if (!parsed.hasFrontMatter) { skipped += 1; continue; }
-        const { meta, body, group, pinned, retention, archiveOrigin } = parsed;
-        if (meta.key !== key || meta.scopeId !== sid) { skipped += 1; continue; }
-        rows.push({
-          key,
-          title: meta.title,
-          summary: meta.summary,
-          body,
-          scopeId: sid,
-          updated: meta.updated,
-          group,
-          pinned,
-          retention,
-          archiveOrigin,
-          ...(isCanonicalIso(meta.archivedAt) ? { archivedAt: meta.archivedAt } : {}),
-        });
-      }
-      for (const row of rows) byKey.set(row.key, row); // active 覆盖 global（同 key）
-    }
-    return { topics: [...byKey.values()], skipped };
-  }
-
-  /** 组清单只读解析（绕过锁/realpath/原子写；缺失或坏 JSON 按空清单降级）。 */
-  async function readGroupsForReplay(scopeId) {
-    if (typeof settings.dataRoot !== "string" || settings.dataRoot.length === 0) return [];
-    const raw = await readFileOrNull(path.join(settings.dataRoot, "scopes", scopeId, "groups.json"));
-    if (raw === null) return [];
-    try {
-      return parseGroupsFile(raw, `groups.json(${scopeId})`).groups;
-    } catch {
-      return [];
-    }
-  }
+  // 会变）。0.5 批次 5 · A 线起装配逻辑收敛到 forgetting/auto.mjs 的
+  // createAutoReplaySource（裸 readFile / readdir，坏文件「跳过并计数」降级），
+  // simulateTemperature 与 auto 评估共用同一实现；本文件只固定可信根。
+  const replaySource = createAutoReplaySource({ dataRoot: settings.dataRoot, stateRoot: settings.stateRoot });
 
   /** 全量账本事件回放源（readTopicActivity 是裸 readFile，无锁）。 */
   async function readEventsForReplay() {
@@ -718,6 +666,10 @@ export function createManagement(deps) {
           // F7：只读状态（writable=false 时面板显示黄条并置灰写按钮）。
           // holder 为外部持有者（座位心跳的 pid/startedAt 等）；缺字段时面板回退 PID。
           readonly: readonlyGuardStatus(),
+          // 0.5 批次 5 · A 线：auto 冷却/恢复调度诊断（纯内存计数 + 最近错误，
+          // controller 注入 deps.autoDiagnostics；纯增量键，wire 的 diagnostics
+          // 块 additionalProperties:true）。未注入（直构测试）时为 null。
+          auto: typeof deps.autoDiagnostics === "function" ? deps.autoDiagnostics() : null,
         },
       };
       // R1：目录读取故障在这里如实出线（有界摘要）；无错不出键——正常路径与
@@ -1869,8 +1821,9 @@ export function createManagement(deps) {
      * 0.5 批次 4 · B 线（wire 16）：回放预览。服务端取 topics（含 archived）/ 组
      * 清单 / 全量 topic-activity 事件 / now，以 baseParams = 当前 settings.temperature
      * 与候选 params 各回放一遍（T 的计算全部委托 evaluateTopics）。严格只读：
-     * 只读文件、不 appendRecord、不建目录、不加存储锁（见 readTopicsForReplay
-     * 头注释）；非法参数按 params.mjs 的 INVALID_INPUT 原样上抛（message 带键名
+     * 只读文件、不 appendRecord、不建目录、不加存储锁（见上方 replaySource
+     * 注释；0.5 批次 5 · A 线起装配与 auto 评估共用 createAutoReplaySource）；
+     * 非法参数按 params.mjs 的 INVALID_INPUT 原样上抛（message 带键名
      * 与允许区间）。
      */
     async simulateTemperature(trustedContext, payload) {
@@ -1881,10 +1834,10 @@ export function createManagement(deps) {
       validateTemperatureParams(params);
       const baseParams = currentLiveTemperature();
       validateTemperatureParams(baseParams);
-      const { topics, skipped: skippedTopics } = await readTopicsForReplay(scope.scopeId);
-      const groups = await readGroupsForReplay(scope.scopeId);
+      const { rows, skipped: skippedTopics } = await replaySource.readTopics(scope.scopeId);
+      const groups = await replaySource.readGroups(scope.scopeId);
       const { events } = await readEventsForReplay();
-      const replayTopics = topics.map((row) => ({
+      const replayTopics = rows.map((row) => ({
         key: row.key,
         scopeId: row.scopeId,
         updated: row.updated,
@@ -1980,6 +1933,76 @@ export function createManagement(deps) {
         }
         return { recorded: true, replay: false, changes: event.changes };
       });
+    },
+
+    // ── 0.5 批次 5 · A 线（wire 18/19/20/21）：auto 冷却/恢复四方法 ─────────────
+    //
+    // 全部走 controller 注入的 autoEngine 单实例（deps.autoEngine；pre-step 调度
+    // 与面板 RPC 共用，状态落 state.mjs 的 autoStore）。门面只做三层守门（协议
+    // 校验 → 数据访问/模块开关 → 可信 scope 解析）+ enabled 出线；业务语义
+    // （触发/评估/执行/撤销/熔断/幂等）在 forgetting/auto.mjs。
+    //
+    // 守门口径（与既有方法对齐）：
+    //   - getAutoStatus / runAutoEvaluation：requireActiveDataAccess（评估只读，
+    //     HOST_LOCKED 也允许——只读宿主「不执行 auto，评估结果只读展示」，§6.2）；
+    //   - applyAutoChanges / undoAutoRun：额外 requireActive + assertHostWritable
+    //     （执行/撤销是写路径，与 executePlan 同口径）；
+    //   - 四个方法全部 requireModule("forgetting")：模块开关关闭时面板不应看到
+    //     半可用的 auto 面（与 analyze / previewPlan 的 requireModule 同款）；
+    //   - 模式门槛在引擎里现读（mode() 取值函数）：runAutoEvaluation 在 off 拒绝
+    //     （off 只记账不计算）；applyAutoChanges 仅 auto 可执行（suggest 只出
+    //     清单）；undoAutoRun 不看当前模式（auto 期执行的 run，切回 suggest 后
+    //     仍要能撤销）。
+
+    /** wire 18：auto 状态视图（模式/上次评估/下次触发/熔断/最近 run 摘要）。 */
+    async getAutoStatus(trustedContext, payload) {
+      validateManagementPayload("getAutoStatus", payload ?? {});
+      requireActiveDataAccess("getAutoStatus");
+      requireModule("forgetting");
+      const engine = requireAutoEngine("getAutoStatus");
+      const scope = await scopeFromTrustedContext(trustedContext);
+      const status = await engine.status({ scopeId: scope.scopeId });
+      return { ...status, enabled: settings.forgetting.enabled === true };
+    },
+
+    /** wire 19：手动评估（只读回放，返回候选 + reason；成功后记账评估锚）。 */
+    async runAutoEvaluation(trustedContext, payload) {
+      validateManagementPayload("runAutoEvaluation", payload ?? {});
+      requireActiveDataAccess("runAutoEvaluation");
+      requireModule("forgetting");
+      const engine = requireAutoEngine("runAutoEvaluation");
+      const scope = await scopeFromTrustedContext(trustedContext);
+      return engine.evaluate({ scopeId: scope.scopeId, trigger: "manual" });
+    },
+
+    /**
+     * wire 20：执行候选（仅 mode=auto；每轮 ≤ maxOpsPerRun；operationId 幂等）。
+     * 守门链（评审 a2 拍板）：shadow/未启动/inert 由 requireActiveDataAccess 一并
+     * 拦截（其 mode 检查先抛「requires active mode」），不再叠加冗余 requireActive
+     * （同判据死代码，删；见 requireActiveDataAccess 注释）。
+     */
+    async applyAutoChanges(trustedContext, payload) {
+      validateManagementPayload("applyAutoChanges", payload);
+      requireActiveDataAccess("applyAutoChanges");
+      assertHostWritable("applyAutoChanges");
+      requireModule("forgetting");
+      const engine = requireAutoEngine("applyAutoChanges");
+      const scope = await scopeFromTrustedContext(trustedContext);
+      return engine.apply({ scopeId: scope.scopeId, trigger: "manual", operationId: payload.operationId });
+    },
+
+    /**
+     * wire 21：一键撤销（按 runId 回滚该 run 的变更；重复撤销幂等）。
+     * 守门链同 applyAutoChanges（requireActiveDataAccess 已含 shadow/started 拦截）。
+     */
+    async undoAutoRun(trustedContext, payload) {
+      validateManagementPayload("undoAutoRun", payload);
+      requireActiveDataAccess("undoAutoRun");
+      assertHostWritable("undoAutoRun");
+      requireModule("forgetting");
+      const engine = requireAutoEngine("undoAutoRun");
+      const scope = await scopeFromTrustedContext(trustedContext);
+      return engine.undo({ scopeId: scope.scopeId, runId: payload.runId });
     },
   };
 

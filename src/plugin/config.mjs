@@ -279,12 +279,16 @@ export const Config = z.object({
   organize: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }).description("整理（候选/计划/执行）开关"),
   forgetting: z.object({
     enabled: z.boolean().default(false).description("遗忘（分析/计划/执行）开关；显式 includeArchived 冷搜不受此开关限制"),
+    // 0.5 批次 5 · A 线（§7 / §11.2.3 三档模式）：off 只记账不计算；suggest 只出
+    // 清单（候选 + reason，绝不执行）；auto 额外允许执行可逆的 archive/unarchive
+    // （每轮 ≤ maxOpsPerRun，run 记录 + 一键撤销）。默认 suggest（§7 首版拍板）。
+    autoMode: z.union([z.const("off"), z.const("suggest"), z.const("auto")]).default("suggest"),
     policy: z.object({
       baseHalfLifeDays: z.number().default(30),
       maxHalfLifeDays: z.number().default(240),
       archiveScore: z.number().default(0.25),
     }).default({ baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 }),
-  }).default({ enabled: false, policy: { baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 } }).description("双轨遗忘"),
+  }).default({ enabled: false, autoMode: "suggest", policy: { baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 } }).description("双轨遗忘"),
   // volatile：0.5 批次 4 起「设置 → 记忆整理」面板要整块热写这 12 项（§11.2.6，
   // 先预览后应用）。宿主 dsh-settings 只收纳「schema 里至少一个 meta.volatile 字段」
   // 的命名空间、write() 对非 volatile 路径直接拒绝——与 budgets / semantic 同款理由，
@@ -569,16 +573,28 @@ function normalizeL2(value) {
 
 function normalizeForgetting(value) {
   if (value === undefined) {
-    return { enabled: false, policy: normalizeForgetPolicy({}) };
+    return { enabled: false, autoMode: "suggest", policy: normalizeForgetPolicy({}) };
   }
   if (!isPlainRecord(value)) fail(`forgetting must be a plain object`);
   for (const key of Object.keys(value)) {
-    if (key !== "enabled" && key !== "policy") fail(`forgetting has unknown property "${key}"`);
+    if (key !== "enabled" && key !== "autoMode" && key !== "policy") fail(`forgetting has unknown property "${key}"`);
   }
   if (!Object.hasOwn(value, "enabled")) fail(`forgetting is missing "enabled"`);
   const enabled = requireBoolean(value.enabled, "forgetting.enabled");
+  // 0.5 批次 5 · A 线（§7 三档模式）：autoMode ∈ off/suggest/auto，缺省 suggest
+  //（首版拍板口径）。显式给出但非法 → 当场拒绝，不静默落默认。
+  const autoMode = value.autoMode === undefined ? "suggest" : requireAutoMode(value.autoMode);
   const policy = value.policy === undefined ? normalizeForgetPolicy({}) : normalizeForgetPolicy(value.policy);
-  return { enabled, policy };
+  return { enabled, autoMode, policy };
+}
+
+/** auto 三档模式校验（与 forgetting/auto.mjs 的 AUTO_MODES 同一取值域；此处
+ *  复制字面量 + 注释互指，避免 config 层反向 import forgetting 引擎模块）。 */
+function requireAutoMode(value) {
+  if (value !== "off" && value !== "suggest" && value !== "auto") {
+    fail(`forgetting.autoMode must be one of "off" / "suggest" / "auto", got ${JSON.stringify(value)}`);
+  }
+  return value;
 }
 
 // ── temperature 段（0.5 批次 4 · A 线，§11.2.6 12 项热度参数）：────────────────

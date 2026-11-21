@@ -23,10 +23,21 @@ const { MANAGEMENT_METHODS, MANAGEMENT_METHOD_NAMES, validateManagementPayload }
 const { CONTRACT_METHODS } = await load("src/plugin/client-rpc.mjs");
 const { createShioriPluginController } = await load("src/plugin/controller.mjs");
 
-test("wire 17：protocol / CONTRACT_METHODS / DRAINED 三处逐字同集合、同顺序（热度参数三方法在末尾）", async () => {
+test("wire 21：protocol / CONTRACT_METHODS / DRAINED 三处逐字同集合、同顺序（auto 四方法在末尾）", async () => {
+  // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 冷却/恢复四方法 getAutoStatus /
+  // runAutoEvaluation / applyAutoChanges / undoAutoRun 追加在末尾；DRAINED 16→20）。
   assert.deepEqual([...MANAGEMENT_METHOD_NAMES], [...CONTRACT_METHODS], "protocol 键序与 CONTRACT_METHODS 逐字一致");
-  assert.equal(CONTRACT_METHODS.length, 17);
-  assert.deepEqual([...CONTRACT_METHODS.slice(-3)], ["getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"]);
+  assert.equal(CONTRACT_METHODS.length, 21);
+  assert.deepEqual(
+    [...CONTRACT_METHODS.slice(14, 17)],
+    ["getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"],
+    "热度参数三方法仍在第 15/16/17 位（B 线位置不动）",
+  );
+  assert.deepEqual(
+    [...CONTRACT_METHODS.slice(-4)],
+    ["getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"],
+    "auto 四方法按声明顺序追加在 recordTemperatureChange 之后",
+  );
 
   const source = readFileSync(join(WORKQ, "src", "plugin", "controller.mjs"), "utf8");
   const match = /const DRAINED_MANAGEMENT_METHODS = \[([\s\S]*?)\];/.exec(source);
@@ -42,6 +53,11 @@ test("wire 17：protocol / CONTRACT_METHODS / DRAINED 三处逐字同集合、�
   assert.equal(typeof controller.management.getTemperatureSettings, "function");
   assert.equal(typeof controller.management.simulateTemperature, "function");
   assert.equal(typeof controller.management.recordTemperatureChange, "function");
+  // 0.5 批次 5 · A 线：auto 四方法挂载即存在（真实 management 入口）。
+  assert.equal(typeof controller.management.getAutoStatus, "function");
+  assert.equal(typeof controller.management.runAutoEvaluation, "function");
+  assert.equal(typeof controller.management.applyAutoChanges, "function");
+  assert.equal(typeof controller.management.undoAutoRun, "function");
 });
 
 test("wire 17：三新方法 schema 闭合（input/output 显式 false）、必填字段与输出键冻结", () => {
@@ -74,4 +90,46 @@ test("wire 17：payload 闭包校验（未知键/缺必填/operationId 非法一
   assert.throws(() => validateManagementPayload("recordTemperatureChange", { params: {}, operationId: "x".repeat(129) }), (e) => e.code === "INVALID_INPUT");
   assert.deepEqual(validateManagementPayload("recordTemperatureChange", { params: { s0Days: 30 }, operationId: "op-1" }),
     { params: { s0Days: 30 }, operationId: "op-1" });
+});
+
+// ── 0.5 批次 5 · A 线（wire 18/19/20/21）：auto 四方法 schema 契约 ─────────────
+
+test("wire 21：auto 四方法 schema 闭合（input/output 显式 false）、必填字段与输出键冻结", () => {
+  const getAutoStatus = MANAGEMENT_METHODS.getAutoStatus;
+  assert.equal(getAutoStatus.inputSchema.additionalProperties, false);
+  assert.deepEqual(getAutoStatus.inputSchema.properties, {});
+  assert.deepEqual(getAutoStatus.outputSchema.required,
+    ["scope", "enabled", "mode", "lastEvaluatedAt", "lastEvaluatedBy", "nextTrigger", "fuse", "stats", "params", "lastRuns"]);
+  assert.equal(getAutoStatus.outputSchema.additionalProperties, false);
+  assert.deepEqual(getAutoStatus.outputSchema.properties.mode, { enum: ["off", "suggest", "auto"] });
+
+  const runAutoEvaluation = MANAGEMENT_METHODS.runAutoEvaluation;
+  assert.deepEqual(runAutoEvaluation.inputSchema.properties, {});
+  assert.deepEqual(runAutoEvaluation.outputSchema.required,
+    ["scope", "evaluatedAt", "trigger", "fused", "fuse", "stats", "replay", "candidates", "plan"]);
+  assert.deepEqual(runAutoEvaluation.outputSchema.properties.trigger, { enum: ["manual", "human-turn", "soft-watermark"] });
+
+  const applyAutoChanges = MANAGEMENT_METHODS.applyAutoChanges;
+  assert.deepEqual(applyAutoChanges.inputSchema.required, ["operationId"]);
+  assert.deepEqual(applyAutoChanges.outputSchema.required,
+    ["runId", "replay", "evaluatedAt", "trigger", "applied", "skipped", "failed", "truncated", "ops", "groupRestore"]);
+  assert.deepEqual(applyAutoChanges.outputSchema.properties.applied, { type: "integer", minimum: 0 });
+
+  const undoAutoRun = MANAGEMENT_METHODS.undoAutoRun;
+  assert.deepEqual(undoAutoRun.inputSchema.required, ["runId"]);
+  assert.deepEqual(undoAutoRun.outputSchema.required,
+    ["runId", "replay", "undoneAt", "reverted", "alreadyUndone", "skipped", "failed", "ops"]);
+  assert.deepEqual(undoAutoRun.outputSchema.properties.replay, { type: "boolean" });
+});
+
+test("wire 21：auto 四方法 payload 闭包校验（未知键/缺必填一律 INVALID_INPUT）", () => {
+  assert.throws(() => validateManagementPayload("getAutoStatus", { rogue: 1 }), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => validateManagementPayload("runAutoEvaluation", { rogue: 1 }), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => validateManagementPayload("applyAutoChanges", {}), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => validateManagementPayload("applyAutoChanges", { operationId: "op-1", rogue: 1 }), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => validateManagementPayload("undoAutoRun", {}), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => validateManagementPayload("undoAutoRun", { runId: "" }), (e) => e.code === "INVALID_INPUT");
+  assert.deepEqual(validateManagementPayload("getAutoStatus", {}), {});
+  assert.deepEqual(validateManagementPayload("applyAutoChanges", { operationId: "op-1" }), { operationId: "op-1" });
+  assert.deepEqual(validateManagementPayload("undoAutoRun", { runId: "auto-1-abc" }), { runId: "auto-1-abc" });
 });

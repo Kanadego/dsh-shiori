@@ -59,6 +59,10 @@ import { buildSparkAttachment, commitDelivery } from "../sparks/delivery.mjs";
 // 面板「投递体检」数据聚合。纯函数聚合在 diagnostics.mjs，账本在 state.mjs。
 import { buildRoundRecord, readDiagnostics, DIAGNOSTICS_RETENTION_DAYS } from "../sparks/diagnostics.mjs";
 import { createColdSearch } from "../forgetting/cold-search.mjs";
+// 0.5 批次 5 · A 线：auto 冷却/恢复引擎（评估/执行/撤销）与只读装配源。
+// 单实例供 management 四个 auto RPC 与本文件 pre-step 调度共用；持久状态落
+// state.mjs 的 autoStore，内存只留调度单飞闸。
+import { createAutoEngine, createAutoReplaySource } from "../forgetting/auto.mjs";
 import { createEmbeddingProvider } from "../semantic/index.mjs";
 // S5：模型下载与安装校验（与 provider 同住 semantic/local.mjs；controller 只做
 // 任务编排——单飞、取消、诊断落点，不自己写下载器）。
@@ -347,6 +351,10 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       deliveryDiagAppended: 0,
       deliveryDiagFailed: 0,
       deliveryDiagSkipped: 0,
+      /** 0.5 批次 5 · A 线：auto 冷却/恢复调度计数（fire-and-forget，失败静默——
+       *  只在 diagnostics().counters 与 getStatus.diagnostics.auto 留痕，绝不打断
+       *  pre-step/主回答）。 */
+      autoEvaluationFailures: 0,
       acceptedReceipts: 0,
       l2Recoveries: 0,
       l2RecoveredFromSessionLog: 0,
@@ -355,6 +363,26 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       /** P0#3：下载完成后自动 rebuild 的触发次数（diagnostics().counters 可观测；
        *  同代次重复完成事件被触发闸拦下时不计数，「恰好一次」可断言）。 */
       autoRebuildAttempts: 0,
+    },
+    /** 0.5 批次 5 · A 线：auto 冷却/恢复调度诊断（getStatus.diagnostics.auto 的
+     *  数据源）。evaluations=成功评估次数；runs=执行轮数；applied/failedOps=逐条
+     *  执行成败计数；undoRuns=撤销轮数；notDue=未到期跳过；busy=单飞闸跳过；
+     *  fused=熔断评估次数；lastEvaluatedAt/lastRunAt/lastRunId/lastError=最近事件。
+     *  全部由 autoEngine 的 onDiagnostics 汇维护，绝不外溢打断主流程。 */
+    auto: {
+      evaluations: 0,
+      runs: 0,
+      applied: 0,
+      failedOps: 0,
+      undoRuns: 0,
+      notDue: 0,
+      busy: 0,
+      fused: 0,
+      failures: 0,
+      lastEvaluatedAt: null,
+      lastRunAt: null,
+      lastRunId: null,
+      lastError: null,
     },
     /** F1b 语义召回运行态（getStatus.diagnostics.semantic 的数据源）：
      *  ready=provider 至少一次 embed 成功；rebuild 是面板「重建向量」的单飞进度。
@@ -1622,8 +1650,60 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   // L2 pre-step 投递
   // ─────────────────────────────────────────────────────────
 
+  /**
+   * 0.5 批次 5 · A 线：auto 冷却/恢复调度（pre-step 人类轮入口，§11.2.1）。
+   *
+   * 人类轮判据：本轮上下文存在 source.kind === "user" 的消息——与心跳插件
+   * turnOriginIsUserSplice 同一套口径；心跳投递 / 引擎室轮的 source 不是 user，
+   * 天然跳过（心跳轮不触发）。挂在 L2 开关之前：L2 关闭时 auto 调度照常可用。
+   *
+   * 绝不阻塞主回答：调度构造同步、引擎调用 fire-and-forget（trackInFlight 登记
+   * 供 stop 排空）；评估/执行/撤销的全部失败在引擎内部转诊断汇（ctrl.auto /
+   * ctrl.diag.autoEvaluationFailures），这里只做兜底 catch——pre-step 的返回值
+   * 与耗时都不受 auto 影响。off / 未 start / 被封禁 / 无可信会话证据一律静默跳过。
+   */
+  function scheduleAutoEvaluationSafely(payload) {
+    try {
+      if (settings.forgetting?.enabled !== true) return;
+      if (ctrl.banned || !ctrl.started) return;
+      const humanTurn = (Array.isArray(payload?.messages) ? payload.messages : [])
+        .some((m) => m?.source?.kind === "user");
+      if (!humanTurn) return; // 心跳轮/引擎室轮不触发
+      const evidence = sessionEvidenceFromAgent(payload?.agent);
+      if (evidence === null) return;
+      const scope = pinScope({
+        settings,
+        sessionId: evidence.sessionId,
+        workspace: workspaceForAgent(evidence.agent),
+        generation: ctrl.generation,
+        source: "pre-step",
+      });
+      const pending = Promise.resolve(autoEngine.onHumanTurn({ scopeId: scope.scopeId }));
+      trackInFlight(pending).catch(() => {
+        // onHumanTurn 理论上不 reject（内部已兜底转诊断）；防御一层防未处理 rejection。
+        ctrl.diag.autoEvaluationFailures += 1;
+      });
+    } catch {
+      // 调度构造失败（evidence/scope 异常等）：计数留痕，绝不打断 pre-step。
+      ctrl.diag.autoEvaluationFailures += 1;
+    }
+  }
+
+  /**
+   * 0.5 批次 5 · A 线：L2 关闭但 auto 开启时的专用人类轮入口（只在 l2.enabled=false
+   * 且 forgetting.enabled=true 时注册）。仅观察 payload 后原样放行——不投递、
+   * 不建消息、不计 preSteps 计数（那属于 L2 投递语义）。
+   */
+  async function autoOnlyPreStep(payload, next) {
+    scheduleAutoEvaluationSafely(payload);
+    return next();
+  }
+
   async function preStepHandler(payload, next) {
     ctrl.diag.preSteps += 1;
+    // 0.5 批次 5 · A 线：auto 调度先行（fire-and-forget，绝不阻塞主回答；
+    // L2 关闭时也照常调度）。详见 scheduleAutoEvaluationSafely 头注释。
+    scheduleAutoEvaluationSafely(payload);
     if (!settings.l2.enabled) return next();
     if (ctrl.banned || !ctrl.started) return next();
     const evidence = sessionEvidenceFromAgent(payload?.agent);
@@ -1886,6 +1966,78 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   // management
   // ─────────────────────────────────────────────────────────
 
+  // ─────────────────────────────────────────────────────────
+  // 0.5 批次 5 · A 线：auto 冷却/恢复引擎（§11.2 触发/评估/执行/撤销）
+  // ─────────────────────────────────────────────────────────
+  //
+  // 单实例：management 的四个 auto RPC（getAutoStatus/runAutoEvaluation/
+  // applyAutoChanges/undoAutoRun）与本文件 pre-step 的人类轮调度共用；全部持久
+  // 状态落 state.autoStore（<stateRoot>/auto-organize.json），内存只有单飞闸。
+  // 评估只读（HOST_LOCKED 也允许——只读宿主「不执行 auto，评估只读展示」）；
+  // 执行/撤销经 assertWritableForAuto（座位守卫）+ service.mutate（CAS + journal
+  // operationId 幂等）。诊断汇只更新 ctrl.auto / ctrl.diag，绝不外溢打断主流程。
+  const autoReplaySource = createAutoReplaySource({ dataRoot: settings.dataRoot, stateRoot: settings.stateRoot });
+  const autoEngine = createAutoEngine({
+    nowIso,
+    // 三档模式现读（§7 off/suggest/auto）：模块开关关闭时按 off 处理（只记账，
+    // 调度不评估）。settings.forgetting 非 volatile——改档需重载插件，引擎每次
+    // 调用现读以便未来热切换不改这里。
+    mode: () => (settings.forgetting.enabled === true ? settings.forgetting.autoMode : "off"),
+    params: () => liveTemperature(),
+    replaySource: autoReplaySource,
+    serviceFor: async (scopeId) => (await resourcesFor(scopeId)).service,
+    store: state.autoStore ?? null,
+    isStarted: () => ctrl.started,
+    readonlyGuard: () => ctrl.readonlyGuard,
+    // L1 软水位（§11.2.1 辅助入口）：读水位采样侧表最新一条，l1Chars 逼近
+    // softChars 即武装。只触发分析，绝不缩短 S、绝不降低冷却阈值。采样缺失
+    // （低频节流）或读失败按未武装降级——水位是尽力而为的辅助信号。
+    watermark: async (scopeId) => {
+      if (settings.stateRoot === null) return false;
+      const softChars = settings.budgets.core.softChars;
+      if (!(typeof softChars === "number" && softChars > 0)) return false;
+      const entries = await state.readWaterline(settings.stateRoot, scopeId);
+      const last = entries.length > 0 ? entries[entries.length - 1] : null;
+      return last !== null && typeof last.l1Chars === "number" && last.l1Chars >= softChars;
+    },
+    onDiagnostics: (entry) => {
+      try {
+        switch (entry.kind) {
+          case "auto-eval":
+            ctrl.auto.evaluations += 1;
+            ctrl.auto.lastEvaluatedAt = entry.at;
+            break;
+          case "auto-eval-fused":
+            ctrl.auto.fused += 1;
+            break;
+          case "auto-run":
+            ctrl.auto.runs += 1;
+            ctrl.auto.applied += entry.applied ?? 0;
+            ctrl.auto.lastRunAt = entry.at;
+            ctrl.auto.lastRunId = entry.runId;
+            break;
+          case "auto-undo":
+            ctrl.auto.undoRuns += 1;
+            ctrl.auto.failedOps += entry.failed ?? 0;
+            break;
+          case "auto-schedule-not-due":
+            ctrl.auto.notDue += 1;
+            break;
+          case "auto-schedule-skipped-busy":
+            ctrl.auto.busy += 1;
+            break;
+          case "auto-schedule-failed":
+            ctrl.auto.failures += 1;
+            ctrl.diag.autoEvaluationFailures += 1;
+            ctrl.auto.lastError = entry.error ?? null;
+            break;
+          default:
+            break;
+        }
+      } catch { /* 诊断汇维护失败静默（绝不影响调度链） */ }
+    },
+  });
+
   const { management: managementFacade } = createManagement({
     settings,
     dataRoot: settings.dataRoot,
@@ -1924,6 +2076,11 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     // 只读态下面板写方法（analyze / reviewCandidate / previewPlan /
     // executePlan）抛 HOST_LOCKED，与写工具同口径。
     readonlyGuard: () => ctrl.readonlyGuard,
+    // 0.5 批次 5 · A 线：auto 冷却/恢复引擎（四个 auto RPC 的业务唯一入口；
+    // pre-step 人类轮调度共用同一实例）与调度诊断数据源（getStatus.diagnostics
+    // 的 auto 块，wire 上 additionalProperties:true 纯增量）。
+    autoEngine,
+    autoDiagnostics: () => ({ ...ctrl.auto }),
     // 0.4 S6（review-rework a1 中-2）：仅 destroyData 使用的 scope 资源缓存
     // 失效入口——复用 stop 的清理路径 closeAllScopes（async，返回 Promise<string[]>
     // 的 close 错误数组；调用方 management.destroyData 必须 await），不新造缓存
@@ -1941,12 +2098,16 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   // 评审拍板独立三方法，previewPlan/executePlan 不动）。
   // 0.5 批次 4 · B 线：契约扩展 14 → 17（+ 热度参数三方法 getTemperatureSettings /
   // simulateTemperature / recordTemperatureChange，追加在 onboardingMark 之后）。
+  // 0.5 批次 5 · A 线：契约扩展 17 → 21（+ auto 冷却/恢复四方法 getAutoStatus /
+  // runAutoEvaluation / applyAutoChanges / undoAutoRun，追加在 recordTemperatureChange
+  // 之后；DRAINED 清单 16 → 20）。
   const DRAINED_MANAGEMENT_METHODS = [
     "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze",
     "reviewCandidate", "previewPlan", "executePlan", "getTimeline",
     "destroyData",
     "onboardingPreview", "onboardingApply", "onboardingMark",
     "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange",
+    "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun",
   ];
   // 三处清单逐字一致断言（评审要求，错位即启动失败）：CONTRACT_METHODS（Q 挂载
   // 闸已断言它与 protocol.MANAGEMENT_METHODS 集合一致）去掉纯内存 getStatus 后
@@ -2311,6 +2472,9 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
         if (settings.l2.enabled) {
           ctrl.createUserMessage = await bindings.loadCreateUserMessage();
           bindings.registerPreStep((payload, next) => trackInFlight(preStepHandler(payload, next)));
+        } else if (settings.forgetting?.enabled === true) {
+          // 0.5 批次 5 · A 线：重启路径同款（L2 关闭 + auto 开启的人类轮入口）。
+          bindings.registerPreStep((payload, next) => trackInFlight(autoOnlyPreStep(payload, next)));
         }
         checkNotStopped("complete-shadowed-registration");
         return {
@@ -2366,6 +2530,12 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       if (settings.l2.enabled) {
         ctrl.createUserMessage = await bindings.loadCreateUserMessage();
         bindings.registerPreStep((payload, next) => trackInFlight(preStepHandler(payload, next)));
+      } else if (settings.forgetting?.enabled === true) {
+        // 0.5 批次 5 · A 线：L2 关闭但 auto 冷却开启——仍需 pre-step 人类轮入口
+        //（§11.2.1）。该入口只观察 payload（人类轮判定 + fire-and-forget 调度）后
+        // 原样放行，绝不投递、不建消息；l2.enabled=true 时由完整 preStepHandler
+        // 顶部同款调度覆盖，不重复注册。
+        bindings.registerPreStep((payload, next) => trackInFlight(autoOnlyPreStep(payload, next)));
       }
       checkNotStopped("active-registration");
 

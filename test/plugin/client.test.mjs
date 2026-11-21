@@ -64,16 +64,35 @@ function loadClientModule() {
 // bundle：形状、wire、CSS 一致性、安全约束
 // ---------------------------------------------------------------------------
 
-test("bundle：ModuleLoader 注册、导出 apply/inject、17 端点 wire 冻结（11 + 整理向导三方法 + 热度参数三方法）", async () => {
+test("bundle：ModuleLoader 注册、导出 apply/inject、wire 冻结（评审拍板临时收窄：bundle 17 端点 ⊆ wire 21 全集，差集恰为 auto 四方法；5B 恢复全集）", async () => {
   const mod = loadClientModule();
   assert.deepEqual(Object.keys(mod).sort(), ["TYPERT_REMOTE", "apply", "ensureLosslessJson", "inject"]);
   assert.deepEqual(mod.inject, ["remote", "slots", "configForms"]);
   assert.equal(mod.TYPERT_REMOTE.package, "dsh-shiori");
 
-  const expected = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"];
+  // wire 全集（服务端 21 个；规格连带：wire 17→21，0.5 批次 5 A 线 auto 四方法并入）。
+  const expected = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"];
   const endpoints = Object.keys(mod.TYPERT_REMOTE.methods).sort();
-  assert.deepEqual(endpoints, [...expected].map((m) => `shiori/${m}`).sort());
+  // 冻结语义按评审拍板（问答 q-e952e44db399e0fd）临时收窄为「bundle 端点 ⊆ wire 全集，
+  // 且差集恰好 = auto 四方法」：客户端 RPC_METHODS 镜像扩展与面板接线归 0.5 批次 5B
+  //（面板待执行变更与撤销入口），不在 5A 范围；5B 落地时把本用例恢复为
+  //「bundle == wire 全集」——这条差集断言就是留给 5B 的绊线。不许动 client/index.js。
+  const bundleEndpointKeys = new Set(endpoints);
+  const missingFromBundle = expected
+    .filter((m) => !bundleEndpointKeys.has(`shiori/${m}`))
+    .map((m) => `shiori/${m}`)
+    .sort();
+  assert.deepEqual(
+    missingFromBundle,
+    ["shiori/applyAutoChanges", "shiori/getAutoStatus", "shiori/runAutoEvaluation", "shiori/undoAutoRun"],
+    "bundle 与 wire 的差集必须恰好是 auto 四方法（5B 接线后恢复全集断言）",
+  );
+  // bundle 侧端点数仍是 17（5B 扩 RPC_METHODS 后改 21）。
   assert.equal(mod.TYPERT_REMOTE.descriptors.length, 17);
+  // bundle 已知端点必须全部仍属于 wire 全集（客户端不得自行发明端点）。
+  for (const endpoint of endpoints) {
+    assert.ok(expected.includes(endpoint.slice("shiori/".length)), endpoint + " 必须在 wire 全集内");
+  }
 
   for (const descriptor of mod.TYPERT_REMOTE.descriptors) {
     assert.equal(descriptor.invocation.kind, "direct");
@@ -234,6 +253,11 @@ export const MANAGEMENT_METHODS = {
   getTemperatureSettings: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
   simulateTemperature: { inputSchema: { type: "object", required: ["params"] }, outputSchema: { type: "object" } },
   recordTemperatureChange: { inputSchema: { type: "object", required: ["params", "operationId"] }, outputSchema: { type: "object" } },
+  // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 冷却/恢复四方法并入镜像）。
+  getAutoStatus: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
+  runAutoEvaluation: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
+  applyAutoChanges: { inputSchema: { type: "object", required: ["operationId"] }, outputSchema: { type: "object" } },
+  undoAutoRun: { inputSchema: { type: "object", required: ["runId"] }, outputSchema: { type: "object" } },
 };
 const ALLOWED = {
   getStatus: [], getMemoryView: [], getGraph: [], listCandidates: [],
@@ -250,6 +274,10 @@ const ALLOWED = {
   getTemperatureSettings: [],
   simulateTemperature: ["params"],
   recordTemperatureChange: ["params", "operationId"],
+  getAutoStatus: [],
+  runAutoEvaluation: [],
+  applyAutoChanges: ["operationId"],
+  undoAutoRun: ["runId"],
 };
 export function validateManagementPayload(name, payload) {
   if (!Object.prototype.hasOwnProperty.call(ALLOWED, name)) { const e = new Error("unknown method"); e.code = "INVALID_INPUT"; throw e; }
@@ -266,7 +294,7 @@ export async function createShioriPluginController(ctx, settings) {
   globalThis.__shioriQLastSettings = settings;
   const state = { created: true, started: 0, stopped: 0, settings };
   const management = {};
-  for (const method of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"]) {
+  for (const method of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"]) {
     management[method] = async (trustedContext, payload) => ({ method, trusted: { source: trustedContext.source, principal: trustedContext.principal.kind, sessionId: trustedContext.session && trustedContext.session.id, hasAgent: Boolean(trustedContext.agent), signalLike: Boolean(trustedContext.signal) }, payload });
   }
   return {
@@ -341,7 +369,8 @@ async function callAs(ctx, service, method, { principal = "owner", session = { i
 test("mountShioriRpc：真实 TypertRemoteService 挂载 + Remote 标记 + owner 授权 + trustedContext", async () => {
   const ctx = fakeCtx();
   const management = {};
-  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"]) {
+  // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 四方法并入 R2 夹具清单）。
+  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"]) {
     management[m] = async (trusted, payload) => ({ ok: true, method: m, trusted, payload });
   }
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
@@ -350,9 +379,10 @@ test("mountShioriRpc：真实 TypertRemoteService 挂载 + Remote 标记 + owner
 
   // 真实 Remote 标记（Gateway source-mode 发现路径）
   const markers = remoteMethods(service);
-  assert.equal(markers.length, 17);
+  // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 四方法并入 Remote 标记断言）。
+  assert.equal(markers.length, 21);
   assert.deepEqual(markers.map((m) => m.exportName ?? m.method).sort(),
-    ["analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView", "getStatus", "getTemperatureSettings", "getTimeline", "listCandidates", "onboardingApply", "onboardingMark", "onboardingPreview", "previewPlan", "recordTemperatureChange", "reviewCandidate", "simulateTemperature"].sort());
+    ["analyze", "applyAutoChanges", "destroyData", "executePlan", "executeTool", "getAutoStatus", "getGraph", "getMemoryView", "getStatus", "getTemperatureSettings", "getTimeline", "listCandidates", "onboardingApply", "onboardingMark", "onboardingPreview", "previewPlan", "recordTemperatureChange", "reviewCandidate", "runAutoEvaluation", "simulateTemperature", "undoAutoRun"].sort());
 
   const out = await callAs(ctx, service, "getStatus");
   assert.equal(out.method, "getStatus");
@@ -369,7 +399,7 @@ test("授权：非 owner / 无 invocation / 非宿主 session 一律拒绝", asy
   const ctx = fakeCtx();
   const noop = async () => ({});
   const management = Object.fromEntries(
-    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"].map((m) => [m, noop]),
+    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"].map((m) => [m, noop]),
   );
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const service = ctx.get("shiori.panel");
@@ -384,7 +414,7 @@ test("code 透传：management 抛 INVALID_INPUT/REVISION_CONFLICT 时 RemoteErr
   const ctx = fakeCtx();
   const boom = (code) => async () => { const e = new Error("biz fail"); e.code = code; throw e; };
   const ok = async () => ({});
-  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"];
+  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"];
   const management = Object.fromEntries(methods.map((m) => [m, m === "reviewCandidate" ? boom("REVISION_CONFLICT") : ok]));
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const service = ctx.get("shiori.panel");
@@ -409,7 +439,7 @@ test("stop：禁新 → 排空在途；幂等；diagnostics 如实", async () =>
   const slow = async () => { await gate; return { slow: true }; };
   const ok = async () => ({});
   const management = Object.fromEntries(
-    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"].map((m) => [m, m === "getGraph" ? slow : ok]),
+    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"].map((m) => [m, m === "getGraph" ? slow : ok]),
   );
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const service = ctx.get("shiori.panel");
@@ -430,14 +460,15 @@ test("stop：禁新 → 排空在途；幂等；diagnostics 如实", async () =>
   assert.equal(diagnostics.namespace, "shiori");
   assert.equal(diagnostics.transport, "typert-gateway");
   assert.equal(diagnostics.ownerOnly, true);
-  assert.equal(diagnostics.methods.length, 17);
+  // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 四方法并入）。
+  assert.equal(diagnostics.methods.length, 21);
 });
 
 test("diagnostics：宿主 typert 缺席时声明 UI unsupported（仅工具模式）", async () => {
   const ctx = fakeCtx({ typert: false });
   const ok = async () => ({});
   const management = Object.fromEntries(
-    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"].map((m) => [m, ok]),
+    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"].map((m) => [m, ok]),
   );
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const diagnostics = rpc.diagnostics();
@@ -448,7 +479,7 @@ test("diagnostics：宿主 typert 缺席时声明 UI unsupported（仅工具模�
 
 test("wire 契约校验：P protocol 方法集不一致或 management 缺方法时拒绝挂载", async () => {
   const ok = async () => ({});
-  const full = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"];
+  const full = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"];
   await assert.rejects(
     () => mountShioriRpc(fakeCtx(), { getStatus: ok }, {}),
     /management is missing methods/,
@@ -467,14 +498,19 @@ test("wire 17 方法（destroyData + 整理向导 + 热度参数）：真实 pro
   // 真实 P protocol（零依赖纯 JSON 模块，synthetic 环境可直接 import）
   const protocol = await import(pathToFileURL(join(WORKQ, "src", "plugin", "protocol.mjs")).href);
   const names = Object.keys(protocol.MANAGEMENT_METHODS);
-  assert.equal(names.length, 17, "0.5 批次 4 起 wire 为 17 个方法（14 + 热度参数三方法）");
+  // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 冷却/恢复四方法并入 wire）。
+  assert.equal(names.length, 21, "0.5 批次 5 起 wire 为 21 个方法（17 + auto 冷却/恢复四方法）");
   assert.equal(names[10], "destroyData", "destroyData 是 MANAGEMENT_METHODS 第 11 位");
   assert.equal(names[11], "onboardingPreview", "onboardingPreview 是 MANAGEMENT_METHODS 第 12 位");
   assert.equal(names[12], "onboardingApply", "onboardingApply 是 MANAGEMENT_METHODS 第 13 位");
   assert.equal(names[13], "onboardingMark", "onboardingMark 是 MANAGEMENT_METHODS 第 14 位");
   assert.equal(names[14], "getTemperatureSettings", "getTemperatureSettings 是 MANAGEMENT_METHODS 第 15 位");
   assert.equal(names[15], "simulateTemperature", "simulateTemperature 是 MANAGEMENT_METHODS 第 16 位");
-  assert.equal(names[16], "recordTemperatureChange", "recordTemperatureChange 是 MANAGEMENT_METHODS 第 17 位");
+  assert.equal(names[16], "recordTemperatureChange", "recordTemperatureChange 是 MANAGEMENT_METHODS 第 17 位"); 
+  assert.equal(names[17], "getAutoStatus", "getAutoStatus 是 MANAGEMENT_METHODS 第 18 位");
+  assert.equal(names[18], "runAutoEvaluation", "runAutoEvaluation 是 MANAGEMENT_METHODS 第 19 位");
+  assert.equal(names[19], "applyAutoChanges", "applyAutoChanges 是 MANAGEMENT_METHODS 第 20 位");
+  assert.equal(names[20], "undoAutoRun", "undoAutoRun 是 MANAGEMENT_METHODS 第 21 位");
   const schema = protocol.MANAGEMENT_METHODS.destroyData;
   // 输入闭合：{ confirm: string }，required + additionalProperties:false
   assert.deepEqual(schema.inputSchema.properties, { confirm: { type: "string" } });
@@ -503,7 +539,8 @@ test("wire 17 方法（destroyData + 整理向导 + 热度参数）：真实 pro
   // 全 17 方法挂载通过（不一致时 mountShioriRpc 的 methodSetMismatch 会先炸）。
   const { mountShioriRpc } = await import(pathToFileURL(join(WORKQ, "src", "plugin", "client-rpc.mjs")).href);
   const noop = async () => ({});
-  const seventeen = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"];
+  // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 四方法并入挂载镜像清单）。
+  const seventeen = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"];
   await assert.rejects(
     () => mountShioriRpc(fakeCtx(), Object.fromEntries(seventeen.filter((m) => m !== "destroyData").map((m) => [m, noop])), {}),
     /management is missing methods: destroyData/,
@@ -654,7 +691,7 @@ const { Context: RealCordisContext } = cordisModule;
 function realCordisFixture(managementOverrides = {}) {
   const recorded = { signals: [], payloads: [], sessions: [] };
   const management = {};
-  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"]) {
+  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"]) {
     management[m] = async (trusted, payload) => {
       recorded.signals.push(trusted.signal);
       recorded.payloads.push(payload);
@@ -671,7 +708,7 @@ async function callViaCordisReceiver(ctx, method, { session = { id: "sess-real" 
   return Reflect.apply(Reflect.get(service, method), service, [session, payload, signal]);
 }
 
-test("R2 回归：真实 Cordis receiver 下全部 17 个方法可用（0.5 批次 4 契约扩展），trustedContext 经 this.ctx 取得", async () => {
+test("R2 回归：真实 Cordis receiver 下全部 21 个方法可用（0.5 批次 5 A 线 wire 扩展，规格连带：wire 17→21），trustedContext 经 this.ctx 取得", async () => {
   const ctx = new RealCordisContext();
   const { management } = realCordisFixture();
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
@@ -689,8 +726,11 @@ test("R2 回归：真实 Cordis receiver 下全部 17 个方法可用（0.5 批�
     onboardingMark: { dismiss: true },
     simulateTemperature: { params: {} },
     recordTemperatureChange: { params: {}, operationId: "o1" },
+    // 规格连带：wire 17→21（auto 四方法的最小合法 payload，stub 协议闭键校验）。
+    applyAutoChanges: { operationId: "o1" },
+    undoAutoRun: { runId: "auto-1-abc" },
   };
-  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"]) {
+  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"]) {
     const out = await callViaCordisReceiver(callContext, m, { payload: samplePayloads[m] ?? {}, signal });
     assert.equal(out.method, m, `method ${m} must pass the real Cordis receiver`);
     assert.equal(out.source, "panel-rpc");
@@ -2721,7 +2761,7 @@ function wireRoundTrip(error) {
   return JSON.parse(JSON.stringify(envelope)); // gateway → JSON over the wire
 }
 
-const RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"];
+const RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"];
 const NOOP_MANAGEMENT = () => Object.fromEntries(RPC_METHODS.map((m) => [m, async () => ({})]));
 const REVIEW_PAYLOAD = { candidateId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", decision: "reviewed", expectedQueueRevision: 5, operationId: "op-1" };
 

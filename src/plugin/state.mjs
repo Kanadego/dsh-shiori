@@ -126,6 +126,7 @@ function createLedger({ file, empty, lockRoot }) {
  *   <stateRoot>/queues/<scopeId>.json              候选队列快照
  *   <stateRoot>/waterline/<scopeId hex>.json       F5 前置 · L1 水位采样侧表（低频）
  *   <stateRoot>/diagnostics/<scopeId hex>.json     0.5-4D · L2 投递诊断账本（每轮一条，7 天滚动）
+ *   <stateRoot>/auto-organize.json                 0.5-5A · auto 冷却/恢复记账（评估锚 + run 审计）
  */
 export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
   if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) {
@@ -904,9 +905,133 @@ export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
     },
   };
 
+  // ------------------------------------------------------------------
+  // 0.5 批次 5 · A 线：auto 冷却/恢复记账（<stateRoot>/auto-organize.json）。
+  //
+  // 与温度统计账本（topic-activity.jsonl）严格分开：这里只存调度记账与 run
+  // 审计（上次成功评估锚 + 每 run 的逐条变更前后值），是「评估/执行/撤销」的
+  // 事实来源；损坏时评估降级（锚视为空、run 不可查），绝不牵连温度统计与
+  // 正常读写。run 记录滚动保留（上限 forgetting/auto.mjs 的 AUTO_RUN_KEEP）。
+  // ------------------------------------------------------------------
+
+  const AUTO_STATE_VERSION = 1;
+  // 滚动上限与 forgetting/auto.mjs 的 AUTO_RUN_KEEP 同源常量（复制数值 + 注释
+  // 互指，避免 storage 层反向 import plugin 层）。
+  const AUTO_RUN_KEEP_LIMIT = 50;
+
+  const autoLedger = createLedger({
+    file: path.join(stateRoot, "auto-organize.json"),
+    empty: () => ({ version: AUTO_STATE_VERSION, scopes: {}, runs: [] }),
+    lockRoot: stateRoot,
+  });
+
+  /** 有界错误摘要（只供诊断展示）。 */
+  function autoErrorSummary(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.length > 200 ? `${message.slice(0, 199)}…` : message;
+  }
+
+  /** 读侧归一：版本不识别 / 形状漂移一律按「无记账」降级（state: null + error 摘要）。 */
+  function normalizeAutoState(raw) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      return { state: null, error: "auto-organize.json 形状不识别，按无记账降级" };
+    }
+    if (raw.version !== AUTO_STATE_VERSION) {
+      return { state: null, error: `auto-organize.json version 不识别（期望 ${AUTO_STATE_VERSION}），按无记账降级` };
+    }
+    return {
+      state: {
+        version: AUTO_STATE_VERSION,
+        scopes: raw.scopes !== null && typeof raw.scopes === "object" && !Array.isArray(raw.scopes) ? raw.scopes : {},
+        runs: Array.isArray(raw.runs) ? raw.runs : [],
+      },
+      error: null,
+    };
+  }
+
+  const autoStore = {
+    /** 读全量记账状态；损坏/版本不识别 → { state: null, error: 摘要 }（绝不抛）。 */
+    async read() {
+      try {
+        return normalizeAutoState(await autoLedger.read());
+      } catch (error) {
+        return { state: null, error: autoErrorSummary(error) };
+      }
+    },
+
+    /** 记账评估锚（该 scope 上次成功评估时间与来源）。锚写入失败如实上抛
+     *  （调用方决定是否降级）；无变更（同值重写）由 createLedger 幂等跳过落盘。 */
+    async markEvaluated(scopeId, atIso, by) {
+      if (typeof scopeId !== "string" || scopeId.length === 0) {
+        fail("INVALID_INPUT", "autoStore.markEvaluated requires a non-empty scopeId", {});
+      }
+      if (typeof atIso !== "string" || atIso.length === 0) {
+        fail("INVALID_INPUT", "autoStore.markEvaluated requires an ISO at", {});
+      }
+      return autoLedger.mutate((state) => {
+        state.version = AUTO_STATE_VERSION;
+        if (state.scopes === null || typeof state.scopes !== "object" || Array.isArray(state.scopes)) {
+          state.scopes = {};
+        }
+        state.scopes[scopeId] = { lastEvaluatedAt: atIso, lastEvaluatedBy: typeof by === "string" ? by : null };
+        return state;
+      });
+    },
+
+    /** 追加 run 审计记录（滚动保留最近 AUTO_RUN_KEEP_LIMIT 条）。 */
+    async recordRun(run) {
+      if (run === null || typeof run !== "object" || Array.isArray(run)) {
+        fail("INVALID_INPUT", "autoStore.recordRun requires a run object", {});
+      }
+      if (typeof run.runId !== "string" || run.runId.length === 0) {
+        fail("INVALID_INPUT", "autoStore.recordRun requires run.runId", {});
+      }
+      return autoLedger.mutate((state) => {
+        state.version = AUTO_STATE_VERSION;
+        if (!Array.isArray(state.runs)) state.runs = [];
+        state.runs.push(run);
+        if (state.runs.length > AUTO_RUN_KEEP_LIMIT) {
+          state.runs = state.runs.slice(state.runs.length - AUTO_RUN_KEEP_LIMIT);
+        }
+        return state;
+      });
+    },
+
+    /** 按 runId 查 run；不存在返回 null；账本损坏上抛（撤销路径需要硬失败）。 */
+    async getRun(runId) {
+      const { state, error } = await this.read();
+      if (state === null) fail("INVALID_STATE", `auto-organize.json 不可读，run 查询失败：${error}`, {});
+      return state.runs.find((run) => run?.runId === runId) ?? null;
+    },
+
+    /** 按 operationId 查 run（apply 幂等重放判据）。 */
+    async getRunByOperationId(operationId) {
+      const { state, error } = await this.read();
+      if (state === null) fail("INVALID_STATE", `auto-organize.json 不可读，run 查询失败：${error}`, {});
+      return state.runs.find((run) => run?.operationId === operationId) ?? null;
+    },
+
+    /** 置 undoneAt（一键撤销完成标记）。run 不存在 → NOT_FOUND（幂等闸由引擎侧把守）。 */
+    async markRunUndone(runId, atIso) {
+      if (typeof atIso !== "string" || atIso.length === 0) {
+        fail("INVALID_INPUT", "autoStore.markRunUndone requires an ISO at", {});
+      }
+      return autoLedger.mutate((state) => {
+        state.version = AUTO_STATE_VERSION;
+        if (!Array.isArray(state.runs)) state.runs = [];
+        const run = state.runs.find((entry) => entry?.runId === runId);
+        if (run === undefined) {
+          fail("NOT_FOUND", `run "${runId}" 不存在，无法标记撤销完成`, {});
+        }
+        run.undoneAt = atIso;
+        return state;
+      });
+    },
+  };
+
   function diagnostics() {
     return { kind: "state-store", stateRoot };
   }
 
-  return { toolOpStore, l2Store, planStore, queueStore, onboardingStore, projectionStore, analyzeOpStore, waterlineStore, diagnosticsStore, readWaterline: readWaterlineFor, diagnostics };
+  return { toolOpStore, l2Store, planStore, queueStore, onboardingStore, projectionStore, analyzeOpStore, waterlineStore, diagnosticsStore, autoStore, readWaterline: readWaterlineFor, diagnostics };
 }

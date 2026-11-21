@@ -68,12 +68,14 @@ async function setup(t) {
 
 // ── protocol（纯 JSON 层）────────────────────────────────────
 
-test("protocol：17 个方法全覆盖（11 + 整理向导三方法 + 热度参数三方法）；闭包拒绝未知键；queueRevision/planDigest/operationId 规则", () => {
+test("protocol：21 个方法全覆盖（11 + 整理向导三方法 + 热度参数三方法 + auto 冷却/恢复四方法）；闭包拒绝未知键；queueRevision/planDigest/operationId 规则", () => {
   assert.deepEqual([...MANAGEMENT_METHOD_NAMES].sort(), [
-    "analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView",
-    "getStatus", "getTemperatureSettings", "getTimeline", "listCandidates", "onboardingApply",
-    "onboardingMark", "onboardingPreview", "previewPlan", "recordTemperatureChange",
-    "reviewCandidate", "simulateTemperature",
+    // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 四方法 getAutoStatus /
+    // runAutoEvaluation / applyAutoChanges / undoAutoRun 并入清单）。
+    "analyze", "applyAutoChanges", "destroyData", "executePlan", "executeTool", "getAutoStatus",
+    "getGraph", "getMemoryView", "getStatus", "getTemperatureSettings", "getTimeline", "listCandidates",
+    "onboardingApply", "onboardingMark", "onboardingPreview", "previewPlan", "recordTemperatureChange",
+    "reviewCandidate", "runAutoEvaluation", "simulateTemperature", "undoAutoRun",
   ].sort());
   for (const name of MANAGEMENT_METHOD_NAMES) {
     assert.ok(MANAGEMENT_METHODS[name].inputSchema);
@@ -1050,6 +1052,10 @@ test("F7：只读宿主上面板写方法一律 HOST_LOCKED（含 executePlan）
     }],
     ["previewPlan", { kind: "forgetting", planId: "fp-missing" }],
     ["executePlan", { planId: "fp-missing", planDigest: "d".repeat(64), operationId: "op-ro-exec", confirmed: true }],
+    // 0.5 批次 5 · A 线（评审 R1）：auto 两个写方法同口径——只读宿主（HOST_LOCKED）
+    // 在 requireModule/engine 之前抛，与 executePlan 同一守门链。
+    ["applyAutoChanges", { operationId: "op-ro-auto" }],
+    ["undoAutoRun", { runId: "auto-ro-1" }],
   ];
   for (const [name, payload] of calls) {
     await assert.rejects(
@@ -1064,6 +1070,29 @@ test("F7：只读宿主上面板写方法一律 HOST_LOCKED（含 executePlan）
   const analysis = await management.analyze(trusted, { kind: "organize", operationId: "op-ro-analyze" });
   assert.equal(analysis.items.length, 0);
   assert.equal(analysis.analysis.kind, "organize");
+});
+
+test("shadow：四个 auto 方法一律 UNSUPPORTED（0.5 批次 5 · A 线，评审 R2——auto 不在只读挂载执行）", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-auto-shadow-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const dataRoot = path.join(base, "data");
+  const stateDir = path.join(base, "state");
+  await mkdir(dataRoot, { recursive: true });
+  await mkdir(stateDir, { recursive: true });
+  const management = createShadowManagement({ dataRoot, stateRoot: stateDir, stateDir });
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
+  for (const [method, payload] of [
+    ["getAutoStatus", {}],
+    ["runAutoEvaluation", {}],
+    ["applyAutoChanges", { operationId: "op-shadow-auto" }],
+    ["undoAutoRun", { runId: "auto-shadow-1" }],
+  ]) {
+    await assert.rejects(
+      () => management[method](trusted, payload),
+      (error) => error.code === "UNSUPPORTED" && /requires active mode/.test(error.message),
+      `${method} 在 shadow 挂载必须 UNSUPPORTED（shadow 只保留纯内存 getStatus）`,
+    );
+  }
 });
 
 test("F7：deps.readonlyGuard 形状非法在第一次写调用时拒绝（不静默放行）", async (t) => {
@@ -2252,11 +2281,14 @@ test("S7 protocol：getGraph 输入新增可选 level/cluster；非法 level 被
   }
   // wire 方法清单：S6 并入后为 11（destroyData 第 11 位）；整理向导扩展 14；
   // 0.5 批次 4 B 线热度参数三方法追加在 onboardingMark 之后（17）。
+  // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 四方法并入清单）。
   assert.deepEqual([...MANAGEMENT_METHOD_NAMES].sort(), [
-    "analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView",
-    "getStatus", "getTemperatureSettings", "getTimeline", "listCandidates", "onboardingApply",
-    "onboardingMark", "onboardingPreview", "previewPlan", "recordTemperatureChange",
-    "reviewCandidate", "simulateTemperature",
+    // 规格连带：wire 17→21（0.5 批次 5 A 线 auto 四方法 getAutoStatus /
+    // runAutoEvaluation / applyAutoChanges / undoAutoRun 并入清单）。
+    "analyze", "applyAutoChanges", "destroyData", "executePlan", "executeTool", "getAutoStatus",
+    "getGraph", "getMemoryView", "getStatus", "getTemperatureSettings", "getTimeline", "listCandidates",
+    "onboardingApply", "onboardingMark", "onboardingPreview", "previewPlan", "recordTemperatureChange",
+    "reviewCandidate", "runAutoEvaluation", "simulateTemperature", "undoAutoRun",
   ].sort());
 
   // degree 出线（#224c65）：输出契约必须先声明——getGraphNodeItem 是
@@ -2723,4 +2755,260 @@ test("B线 recordTemperatureChange：热读 live 值（面板保存后宿主 vol
   const line = (await ledgerLines(fx.stateRoot)).find((entry) => entry.kind === "settings_change");
   assert.equal(line.next.coolThreshold, 32, "审计新值来自热读 live 值");
   assert.equal(line.next.restoreThreshold, 55);
+});
+
+// ── 0.5 批次 5 · A 线：auto 冷却/恢复四方法（全部走真实 management 入口）──────
+//
+// 评估/执行/撤销的业务语义在 forgetting/auto.mjs；本文件验证 management 四方法
+// 的守门（模块开关/模式/只读宿主）、真实磁盘效果（archivedAt/archiveOrigin）、
+// run 记录与一键撤销、operationId 幂等、每轮 ≤ maxOpsPerRun、熔断口径。
+
+const AUTO_TEMPERATURE = {
+  s0Days: 30, sMaxDays: 180, consolidateGain: 0.5, readAlpha: 0.35,
+  updatedFloor: 85, readDedupHours: 24, coolThreshold: 25, restoreThreshold: 50,
+  minCooldownDays: 7, minRestoreGraceDays: 3, maxOpsPerRun: 20, evaluateEveryHours: 6,
+};
+
+/** auto 专用夹具：真实 controller + 预置 topic 文件与账本（search_hit 只当统计起点，不加热）。 */
+async function autoFixture(t, { autoMode = "auto", topics = null, temperature = AUTO_TEMPERATURE, ledgerExtra = "" } = {}) {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-auto-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const controller = await createShioriPluginController(fakeCtx(), {
+    mode: "active", allowActive: true,
+    dataRoot: path.join(base, "data"), stateRoot: path.join(base, "state"),
+    ownerId: "local", defaultPersona: "amber",
+    organize: { enabled: true },
+    forgetting: { enabled: true, autoMode },
+    temperature,
+  }, { bindings: fakeBindingsFactory() });
+  await controller.start();
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
+
+  const rows = topics ?? [
+    { key: "cold-a", title: "冷A", days: 61 },
+    { key: "cold-b", title: "冷B", days: 65 },
+  ];
+  const topicsDir = path.join(base, "data", "scopes", "amber", "topics");
+  await mkdir(topicsDir, { recursive: true });
+  for (const row of rows) {
+    await writeFile(path.join(topicsDir, `${row.key}.md`), [
+      "---",
+      `key: ${row.key}`,
+      "scopeId: amber",
+      `title: ${row.title}`,
+      "summary: auto 夹具",
+      `updated: ${new Date(Date.now() - row.days * 86400000).toISOString()}`,
+      row.retention === undefined ? "retention: historical" : `retention: ${row.retention}`,
+      ...(row.archived ? [`archivedAt: ${new Date(Date.now() - (row.archivedDays ?? 3) * 86400000).toISOString()}`, `archiveOrigin: "${row.archiveOrigin ?? "auto-inactive"}"`] : []),
+      ...(row.pinned ? ["pinned: true"] : []),
+      "---",
+      "",
+      "正文。",
+      "",
+    ].join("\n"));
+  }
+  await mkdir(path.join(base, "state"), { recursive: true });
+  // search_hit 不加热：只给账本一个 ≥ minCooldownDays 的统计起点。
+  const hitAt = new Date(Date.now() - 8 * 86400000).toISOString();
+  const lines = rows.map((row) => JSON.stringify({ at: hitAt, scopeId: "amber", kind: "search_hit", topicKey: row.key })).join("\n");
+  await writeFile(path.join(base, "state", "topic-activity.jsonl"), lines + "\n" + ledgerExtra);
+  return { controller, trusted, base, topicsDir };
+}
+
+test("auto RPC：getAutoStatus / runAutoEvaluation 走真实 management 入口（评估只读、成功记账锚、suggest 出清单不执行）", async (t) => {
+  const fx = await autoFixture(t, { autoMode: "suggest" });
+  const status = await fx.controller.management.getAutoStatus(fx.trusted, {});
+  assert.equal(status.scope, "amber");
+  assert.equal(status.enabled, true);
+  assert.equal(status.mode, "suggest");
+  assert.equal(status.lastEvaluatedAt, null, "从未评估");
+  assert.equal(status.fuse.fused, false);
+  assert.equal(status.fuse.statsValid, true, "账本首事件 8 天前 ≥ minCooldownDays=7");
+  assert.equal(status.params.maxOpsPerRun, 20);
+  assert.deepEqual(status.lastRuns, []);
+
+  const evaluation = await fx.controller.management.runAutoEvaluation(fx.trusted, {});
+  assert.equal(evaluation.fused, false);
+  assert.equal(evaluation.trigger, "manual");
+  assert.deepEqual(evaluation.candidates.map((c) => `${c.operationKind}:${c.key}`).sort(),
+    ["archive-topic:cold-a", "archive-topic:cold-b"]);
+  for (const candidate of evaluation.candidates) {
+    assert.ok(candidate.reason.includes("自动冷却候选"), "每条候选带可解释 reason");
+    assert.ok(candidate.T < 25);
+  }
+  assert.equal(evaluation.plan.truncated, false);
+  // 纯只读：磁盘零变更。
+  const raw = await readFile(path.join(fx.topicsDir, "cold-a.md"), "utf8");
+  assert.ok(!raw.includes("archivedAt"), "suggest 只出清单不执行");
+  // 锚已记账。
+  const status2 = await fx.controller.management.getAutoStatus(fx.trusted, {});
+  assert.equal(status2.lastEvaluatedAt, evaluation.evaluatedAt);
+  assert.equal(status2.lastEvaluatedBy, "manual");
+});
+
+test("auto RPC：off 模式拒绝评估；applyAutoChanges 在 suggest/off 拒绝执行（mode 门槛在引擎现读）", async (t) => {
+  const fx = await autoFixture(t, { autoMode: "off" });
+  await assert.rejects(
+    () => fx.controller.management.runAutoEvaluation(fx.trusted, {}),
+    (e) => e.code === "INVALID_STATE" && /off/.test(e.message),
+  );
+  await assert.rejects(
+    () => fx.controller.management.applyAutoChanges(fx.trusted, { operationId: "op-x" }),
+    (e) => e.code === "INVALID_STATE",
+  );
+
+  const suggest = await autoFixture(t, { autoMode: "suggest" });
+  await suggest.controller.management.runAutoEvaluation(suggest.trusted, {});
+  await assert.rejects(
+    () => suggest.controller.management.applyAutoChanges(suggest.trusted, { operationId: "op-y" }),
+    (e) => e.code === "INVALID_STATE" && /suggest/.test(e.message),
+  );
+  const raw = await readFile(path.join(suggest.topicsDir, "cold-a.md"), "utf8");
+  assert.ok(!raw.includes("archivedAt"), "suggest 模式下 apply 被拒，磁盘零变更");
+});
+
+test("auto RPC：applyAutoChanges 真实执行（archivedAt + archiveOrigin=auto-inactive 落盘）+ operationId 幂等重放 + run 记录可查", async (t) => {
+  const fx = await autoFixture(t, { autoMode: "auto" });
+  const applied = await fx.controller.management.applyAutoChanges(fx.trusted, { operationId: "auto-op-1" });
+  assert.equal(applied.replay, false);
+  assert.equal(applied.applied, 2);
+  assert.equal(applied.failed, 0);
+  assert.ok(applied.runId.startsWith("auto-"));
+  assert.equal(applied.trigger, "manual");
+  for (const op of applied.ops) {
+    assert.equal(op.status, "applied");
+    assert.equal(op.after.archiveOrigin, "auto-inactive");
+    assert.ok(typeof op.after.archivedAt === "string" && op.after.archivedAt.length > 0);
+    assert.ok(op.operationId.length > 0);
+  }
+  // 磁盘核对：两份文件都有 archivedAt + auto-inactive。
+  for (const key of ["cold-a", "cold-b"]) {
+    const raw = await readFile(path.join(fx.topicsDir, `${key}.md`), "utf8");
+    assert.ok(/archivedAt: "/.test(raw), `${key} 已归档`);
+    assert.ok(/archiveOrigin: "auto-inactive"/.test(raw), `${key} 来源=auto-inactive`);
+  }
+  // 同 operationId 重放：返回同一 runId，不二次执行（journal 幂等）。
+  const replayed = await fx.controller.management.applyAutoChanges(fx.trusted, { operationId: "auto-op-1" });
+  assert.equal(replayed.replay, true);
+  assert.equal(replayed.runId, applied.runId);
+  assert.equal(replayed.applied, 2, "重放回执即首次结果");
+  // run 记录进状态视图（lastRuns 摘要）；评估锚同步记账。
+  const status = await fx.controller.management.getAutoStatus(fx.trusted, {});
+  assert.equal(status.lastRuns.length, 1);
+  assert.equal(status.lastRuns[0].runId, applied.runId);
+  assert.equal(status.lastRuns[0].applied, 2);
+  assert.equal(status.lastEvaluatedBy, "manual");
+});
+
+test("auto RPC：每轮 ≤ maxOpsPerRun（参数调小后截断生效、truncated=true、最冷的先执行）", async (t) => {
+  const fx = await autoFixture(t, {
+    autoMode: "auto",
+    topics: [
+      { key: "c1", title: "C1", days: 61 },
+      { key: "c2", title: "C2", days: 62 },
+      { key: "c3", title: "C3", days: 63 },
+    ],
+    temperature: { ...AUTO_TEMPERATURE, maxOpsPerRun: 2 },
+  });
+  const applied = await fx.controller.management.applyAutoChanges(fx.trusted, { operationId: "auto-op-cap" });
+  assert.equal(applied.truncated, true);
+  assert.equal(applied.ops.length, 2, "单轮执行条数 = maxOpsPerRun");
+  assert.equal(applied.applied, 2);
+  // 最冷的先执行（T 升序）：c3（63 天前 updated）最冷。
+  assert.deepEqual(applied.ops.map((op) => op.key), ["c3", "c2"]);
+  const raw = await readFile(path.join(fx.topicsDir, "c1.md"), "utf8");
+  assert.ok(!raw.includes("archivedAt"), "截断外的 topic 本轮不执行");
+});
+
+test("auto RPC：undoAutoRun 一键撤销完整还原 + 二次撤销幂等 + 未知 runId 拒绝", async (t) => {
+  const fx = await autoFixture(t, { autoMode: "auto" });
+  const applied = await fx.controller.management.applyAutoChanges(fx.trusted, { operationId: "auto-op-undo" });
+  assert.equal(applied.applied, 2);
+  const undo = await fx.controller.management.undoAutoRun(fx.trusted, { runId: applied.runId });
+  assert.equal(undo.replay, false);
+  assert.equal(undo.reverted, 2);
+  assert.equal(undo.alreadyUndone, 0);
+  assert.equal(undo.failed, 0);
+  assert.ok(undo.undoneAt !== null);
+  for (const key of ["cold-a", "cold-b"]) {
+    const raw = await readFile(path.join(fx.topicsDir, `${key}.md`), "utf8");
+    assert.ok(!raw.includes("archivedAt"), `${key} 已还原（archivedAt 清行）`);
+    assert.ok(!raw.includes("auto-inactive"), `${key} archiveOrigin 已清行`);
+  }
+  // 二次撤销幂等：不碰盘、回放首次结论。
+  const undo2 = await fx.controller.management.undoAutoRun(fx.trusted, { runId: applied.runId });
+  assert.equal(undo2.replay, true);
+  assert.equal(undo2.reverted, 0);
+  assert.ok(undo2.undoneAt !== null);
+  // 未知 runId。
+  await assert.rejects(
+    () => fx.controller.management.undoAutoRun(fx.trusted, { runId: "auto-nope" }),
+    (e) => e.code === "INVALID_STATE",
+  );
+});
+
+test("auto RPC：熔断（账本坏行）→ runAutoEvaluation fused=true、applyAutoChanges INVALID_STATE（fuse.reasons 出线）", async (t) => {
+  const badLine = "this is not json\n";
+  const fx = await autoFixture(t, { autoMode: "auto", ledgerExtra: badLine });
+  const evaluation = await fx.controller.management.runAutoEvaluation(fx.trusted, {});
+  assert.equal(evaluation.fused, true);
+  assert.deepEqual(evaluation.candidates, [], "熔断不出任何候选");
+  assert.deepEqual(evaluation.plan.ops, []);
+  assert.ok(evaluation.fuse.reasons.some((r) => r.code === "LEDGER_DAMAGED"));
+  await assert.rejects(
+    () => fx.controller.management.applyAutoChanges(fx.trusted, { operationId: "auto-op-fuse" }),
+    (e) => e.code === "INVALID_STATE" && e.details?.fuse?.fused === true,
+  );
+  const raw = await readFile(path.join(fx.topicsDir, "cold-a.md"), "utf8");
+  assert.ok(!raw.includes("archivedAt"), "熔断期间磁盘零变更");
+  // getAutoStatus 如实透出熔断诊断。
+  const status = await fx.controller.management.getAutoStatus(fx.trusted, {});
+  assert.equal(status.fuse.fused, true);
+  // 熔断的评估不记账锚（失败评估不算「上次成功评估」）。
+  assert.equal(status.lastEvaluatedAt, null);
+});
+
+test("auto RPC：手动归档（manual）的冷档永不自动恢复；auto-inactive 的热档才进恢复清单", async (t) => {
+  const fx = await autoFixture(t, {
+    autoMode: "auto",
+    topics: [
+      { key: "hot-auto", title: "热档auto", days: 1, archived: true, archiveOrigin: "auto-inactive" },
+      { key: "hot-manual", title: "热档manual", days: 1, archived: true, archiveOrigin: "manual" },
+    ],
+  });
+  const evaluation = await fx.controller.management.runAutoEvaluation(fx.trusted, {});
+  assert.deepEqual(evaluation.candidates.map((c) => `${c.operationKind}:${c.key}`), ["unarchive-topic:hot-auto"]);
+  assert.ok(evaluation.candidates[0].reason.includes("auto-inactive"));
+  const applied = await fx.controller.management.applyAutoChanges(fx.trusted, { operationId: "auto-op-restore" });
+  assert.deepEqual(applied.ops.map((op) => op.key), ["hot-auto"]);
+  const rawAuto = await readFile(path.join(fx.topicsDir, "hot-auto.md"), "utf8");
+  assert.ok(!rawAuto.includes("archivedAt"), "auto-inactive 热档已恢复");
+  const rawManual = await readFile(path.join(fx.topicsDir, "hot-manual.md"), "utf8");
+  assert.ok(rawManual.includes("archivedAt"), "manual 归档不动");
+  assert.ok(rawManual.includes('archiveOrigin: "manual"'));
+});
+
+test("auto RPC：模块开关关闭时四个方法一律 UNSUPPORTED（requireModule 闸）", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-auto-off-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const controller = await createShioriPluginController(fakeCtx(), {
+    mode: "active", allowActive: true,
+    dataRoot: path.join(base, "data"), stateRoot: path.join(base, "state"),
+    ownerId: "local", defaultPersona: "amber",
+    forgetting: { enabled: false },
+  }, { bindings: fakeBindingsFactory() });
+  await controller.start();
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
+  for (const [method, payload] of [
+    ["getAutoStatus", {}],
+    ["runAutoEvaluation", {}],
+    ["applyAutoChanges", { operationId: "op" }],
+    ["undoAutoRun", { runId: "auto-1-x" }],
+  ]) {
+    await assert.rejects(
+      () => controller.management[method](trusted, payload),
+      (e) => e.code === "UNSUPPORTED",
+      `${method} 在 forgetting.enabled=false 时必须 UNSUPPORTED`,
+    );
+  }
 });
