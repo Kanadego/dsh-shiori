@@ -12,6 +12,8 @@ import { TOOL_NAMES, TOOL_OUTPUT_SCHEMAS } from "../../src/plugin/tool-schemas.m
 import { openCompletionState } from "../../src/completion/index.mjs";
 import { defaultPluginRoots } from "../../src/plugin/config.mjs";
 import { openSemanticVectorStore } from "../../src/semantic/store.mjs";
+import { mergeSemanticRecall } from "../../src/sparks/semantic-recall.mjs";
+import { openSparkStore } from "../../src/sparks/store.mjs";
 import { pinScope } from "../../src/plugin/scope.mjs";
 
 // 0.4-S1（reviewer P3）：测试入口统一注入 DSH_HOME=临时目录——0.4 起缺省根会真实
@@ -1625,4 +1627,424 @@ test("S5 P0#3：自动 rebuild 失败落面板可见错误（不静默）——�
   assert.match(s.diagnostics.semantic.lastError, /尚未安装/, "门禁拒绝文案透传");
   assert.equal(controller.diagnostics().counters.autoRebuildAttempts, 1, "失败也如实计数（触发发生过）");
   await controller.stop();
+});
+
+// ─────────────────────────────────────────────────────────
+// 0.5 · 写后增量向量 + 单飞并发防线 + 启动差集兜底（controller 级集成）
+//
+// 背景：0.4 及以前向量只在 runSemanticRebuild 里建——spark_save / spark_update /
+// spark_forget 的写路径没有向量维护钩子，新卡与改过的卡永久落选。0.5 在
+// controller 接线（src/semantic/incremental.mjs 是队列本体）：写工具成功 →
+// markDirty（同步零 IO）→ 防抖批量 embed → upsert → 落盘；与重建共用单飞闸；
+// scope 首次打开索引时启动差集兜底。provider 关闭时逐字节保持 0.4 行为。
+// ─────────────────────────────────────────────────────────
+
+/** 0.5 集成桩：确定性字符桶 embedding——同主题转述共享大量字符 → 高余弦；
+ *  无关语句字符桶几乎不相交 → 低余弦。calls 记每次成功调用（顺序保留）。 */
+function charBucketStubProvider(dims = 32) {
+  const calls = [];
+  return {
+    kind: "local",
+    dims,
+    calls,
+    async embed(text) {
+      calls.push(text);
+      const vec = new Float32Array(dims);
+      for (const ch of text) vec[ch.codePointAt(0) % dims] += 1;
+      return vec;
+    },
+  };
+}
+
+/** 0.5 集成设置：active + local 语义 + 阈值 0.3（字符桶桩的正/负样本间距按此校准：
+ *  转述对 ≈0.68–0.71，无关对 ≈0–0.15）。 */
+const incrementalSemanticSettings = (roots) => {
+  const settings = localSemanticSettings(roots);
+  settings.semantic = { ...settings.semantic, minSimilarity: 0.3 };
+  return settings;
+};
+
+/** 与 controller 同口径推导面板会话的 scopeId（既有用例同款入口）。 */
+const scopeIdForPanel = (settings) => pinScope({
+  settings: { ...settings, sessionPersonas: [], workspacePersonas: [] },
+  sessionId: "s-panel", workspace: null, generation: 1, source: "panel-rpc",
+}).scopeId;
+
+/** 只读快照：另开索引实例读单条（fresh open，读的永远是磁盘真值）。 */
+async function readIndexEntry(roots, scopeId, settings, sparkId) {
+  const store = await openSemanticVectorStore({
+    stateRoot: roots.stateRoot, scopeId,
+    model: settings.semantic.local.model, dims: settings.semantic.local.dims,
+  });
+  try {
+    return store.get(sparkId);
+  } finally {
+    store.close();
+  }
+}
+
+/** 只读快照：索引条目总数。 */
+async function readIndexSize(roots, scopeId, settings) {
+  const store = await openSemanticVectorStore({
+    stateRoot: roots.stateRoot, scopeId,
+    model: settings.semantic.local.model, dims: settings.semantic.local.dims,
+  });
+  try {
+    return store.size();
+  } finally {
+    store.close();
+  }
+}
+
+/** 真实召回合并层直调（spark 数据与索引文件都取磁盘真值）：证明「controller 维护
+ *  的索引」在 mergeSemanticRecall 的新鲜度判据下可用，而非仅文件存在。 */
+async function recallAgainst(roots, scopeId, settings, provider, query) {
+  const sparkStore = await openSparkStore({ root: roots.dataRoot, scopeId });
+  let sparks;
+  try {
+    sparks = await sparkStore.listActive();
+  } finally {
+    sparkStore.close();
+  }
+  const vectorStore = await openSemanticVectorStore({
+    stateRoot: roots.stateRoot, scopeId,
+    model: settings.semantic.local.model, dims: settings.semantic.local.dims,
+  });
+  try {
+    return await mergeSemanticRecall({
+      scopeId,
+      userText: query,
+      sparks,
+      seenKeys: [],
+      sessionId: "recall-probe",
+      contextEpoch: 0,
+      maxSeeds: 3,
+      maxRelated: 2,
+      provider,
+      vectorsFor: (sparkId) => vectorStore.get(sparkId),
+      threshold: settings.semantic.minSimilarity,
+    });
+  } finally {
+    vectorStore.close();
+  }
+}
+
+/** 事件门控等待：写后增量轮完全收场（running=false 且 pending=0 且指标到位）。 */
+const waitForIncrementalSettled = async (controller, trustedContext, predicate, capMs = 4000) => {
+  return waitFor(async () => {
+    const s = (await controller.management.getStatus(trustedContext, {}))
+      .diagnostics.semantic.incremental;
+    return s.running === false && s.pending === 0 && s.lastFlushAt !== null && predicate(s);
+  }, capMs);
+};
+
+test("0.5 写后增量：spark_save 成功即入队，防抖批处理后索引新鲜——转述 query 语义召回命中（全程不手动 rebuild）", async (t) => {
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  await installFakeModelFiles(roots.dataRoot); // canEmbed 门禁放行（桩 provider 不真加载模型）
+  const settings = incrementalSemanticSettings(roots);
+  const provider = charBucketStubProvider(settings.semantic.local.dims);
+  const controller = await createShioriPluginController(fakeCtx(), settings, {
+    bindings: fakeBindingsFactory(),
+    createEmbeddingProvider: () => provider,
+    semanticIncrementalDebounceMs: 20,
+  });
+  await controller.start();
+  const trustedContext = rpcContext();
+  // triggers=[]：字面召回恒空——seeds 只可能来自向量补位，证明力最纯。
+  const saved = await controller.management.executeTool(trustedContext, {
+    name: "spark_save",
+    args: { title: "团建", content: "榴莲披萨好吃", triggers: [], vitality: "evergreen" },
+  });
+  assert.equal(saved.ok, true, "写路径零报错（工具回执原样）");
+  assert.ok(await waitForIncrementalSettled(controller, trustedContext, (s) => s.embedded === 1 && s.flushes >= 1),
+    "写后增量轮收尾落地（防抖后批量 embed → upsert → 落盘）");
+  // 索引新鲜：不手动 rebuild，新卡已入索引且 revision 与卡对齐。
+  const scopeId = scopeIdForPanel(settings);
+  const entry = await readIndexEntry(roots, scopeId, settings, saved.id);
+  assert.ok(entry !== null, "新卡不手动 rebuild 也能入索引");
+  assert.equal(entry.revision, saved.revision);
+  // 转述表述（只改说法，不命中任何 trigger）→ 语义召回命中。
+  const recall = await recallAgainst(roots, scopeId, settings, provider, "想吃榴莲披萨");
+  assert.equal(recall.semantic.enabled, true);
+  assert.equal(recall.semantic.used, true, "向量补位真的被用上");
+  assert.ok(recall.match.seeds.some((s) => s.id === saved.id), "含转述表述的对话靠语义召回命中新卡");
+  // 无关 query：同桩低余弦，不误命中（正负样本分界有效）。
+  const miss = await recallAgainst(roots, scopeId, settings, provider, "打印报销单");
+  assert.equal(miss.semantic.used, false, "无关表述不误命中");
+  await controller.stop();
+});
+
+test("0.5 spark_update 改 content：新 revision 覆盖旧向量——新表述可召回、旧表述不再命中", async (t) => {
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  await installFakeModelFiles(roots.dataRoot);
+  const settings = incrementalSemanticSettings(roots);
+  const provider = charBucketStubProvider(settings.semantic.local.dims);
+  const controller = await createShioriPluginController(fakeCtx(), settings, {
+    bindings: fakeBindingsFactory(),
+    createEmbeddingProvider: () => provider,
+    semanticIncrementalDebounceMs: 20,
+  });
+  await controller.start();
+  const trustedContext = rpcContext();
+  const saved = await controller.management.executeTool(trustedContext, {
+    name: "spark_save",
+    args: { title: "团建", content: "榴莲披萨好吃", triggers: [], vitality: "evergreen" },
+  });
+  assert.ok(await waitForIncrementalSettled(controller, trustedContext, (s) => s.embedded === 1));
+  const scopeId = scopeIdForPanel(settings);
+  const before = await recallAgainst(roots, scopeId, settings, provider, "想吃榴莲披萨");
+  assert.ok(before.match.seeds.some((s) => s.id === saved.id), "改前旧表述可召回（前置确认）");
+  const updated = await controller.management.executeTool(trustedContext, {
+    name: "spark_update",
+    args: { id: saved.id, patch: { content: "珍珠奶茶" } },
+  });
+  assert.equal(updated.ok, true, "更新零报错");
+  assert.ok(await waitForIncrementalSettled(controller, trustedContext, (s) => s.embedded === 2),
+    "更新后增量轮收尾（重嵌新内容）");
+  const entry = await readIndexEntry(roots, scopeId, settings, saved.id);
+  assert.equal(entry.revision, updated.revision, "索引 revision 跟上更新");
+  const oldHit = await recallAgainst(roots, scopeId, settings, provider, "想吃榴莲披萨");
+  assert.equal(oldHit.match.seeds.length, 0, "旧表述向量已被覆盖：不再命中");
+  assert.equal(oldHit.semantic.used, false);
+  const newHit = await recallAgainst(roots, scopeId, settings, provider, "来杯珍珠奶茶");
+  assert.ok(newHit.match.seeds.some((s) => s.id === saved.id), "新表述靠语义召回命中");
+  await controller.stop();
+});
+
+test("0.5 spark_forget：索引同步剔除，无残留条目", async (t) => {
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  await installFakeModelFiles(roots.dataRoot);
+  const settings = incrementalSemanticSettings(roots);
+  const provider = charBucketStubProvider(settings.semantic.local.dims);
+  const controller = await createShioriPluginController(fakeCtx(), settings, {
+    bindings: fakeBindingsFactory(),
+    createEmbeddingProvider: () => provider,
+    semanticIncrementalDebounceMs: 20,
+  });
+  await controller.start();
+  const trustedContext = rpcContext();
+  const saved = await controller.management.executeTool(trustedContext, {
+    name: "spark_save",
+    args: { title: "团建", content: "榴莲披萨好吃", triggers: [], vitality: "evergreen" },
+  });
+  assert.ok(await waitForIncrementalSettled(controller, trustedContext, (s) => s.embedded === 1));
+  const scopeId = scopeIdForPanel(settings);
+  assert.ok(await readIndexEntry(roots, scopeId, settings, saved.id) !== null, "forget 前条目在索引");
+  const forgotten = await controller.management.executeTool(trustedContext, {
+    name: "spark_forget",
+    args: { id: saved.id, mode: "archive" },
+  });
+  assert.equal(forgotten.ok, true, "forget 零报错");
+  assert.ok(await waitForIncrementalSettled(controller, trustedContext, (s) => s.removed === 1),
+    "forget 后增量轮收尾（剔除）");
+  const entry = await readIndexEntry(roots, scopeId, settings, saved.id);
+  assert.equal(entry, null, "索引无残留条目（内存与磁盘一致）");
+  assert.equal(await readIndexSize(roots, scopeId, settings), 0);
+  await controller.stop();
+});
+
+test("0.5 降级 provider=none：写路径零报错、不产生向量文件、incremental 诊断恒空转", async (t) => {
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  const controller = await createShioriPluginController(fakeCtx(), activeSettings(roots), {
+    bindings: fakeBindingsFactory(),
+  });
+  await controller.start();
+  const trustedContext = rpcContext();
+  const saved = await controller.management.executeTool(trustedContext, {
+    name: "spark_save",
+    args: { title: "普通卡", content: "与语义无关的写路径", triggers: [], vitality: "evergreen" },
+  });
+  assert.equal(saved.ok, true, "provider 关闭：写路径零报错（0.4 行为逐字节不变）");
+  const semantic = (await controller.management.getStatus(trustedContext, {})).diagnostics.semantic;
+  assert.deepEqual(semantic.incremental, {
+    enabled: false, pending: null, running: false, flushes: 0, embedded: 0, removed: 0,
+    startupSyncs: 0, lastFlushAt: null, lastSyncAt: null, lastError: null, lastSkipReason: null,
+  }, "provider 关闭：增量诊断恒空转快照");
+  assert.equal(await fileExists(path.join(roots.stateRoot, "semantic")), false,
+    "provider 关闭绝不产生向量文件");
+  await controller.stop();
+});
+
+test("0.5 降级 模型未装：写路径零报错、增量挂起可诊断、不写索引文件", async (t) => {
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  // 真实 provider（不注入桩），模型未安装：embed 不可用但写路径必须零报错。
+  const controller = await createShioriPluginController(fakeCtx(), localSemanticSettings(roots), {
+    bindings: fakeBindingsFactory(),
+    semanticIncrementalDebounceMs: 20,
+  });
+  await controller.start();
+  const trustedContext = rpcContext();
+  const saved = await controller.management.executeTool(trustedContext, {
+    name: "spark_save",
+    args: { title: "模型未装", content: "写路径照常成功", triggers: [], vitality: "evergreen" },
+  });
+  assert.equal(saved.ok, true, "写路径零报错");
+  assert.ok(await waitFor(async () => {
+    const s = (await controller.management.getStatus(trustedContext, {})).diagnostics.semantic.incremental;
+    return s.lastSkipReason === "model-not-installed" && s.pending === 1 && s.flushes >= 1;
+  }, 4000), "降级原因可见（model-not-installed）、pending 保留待模型就绪");
+  const s = (await controller.management.getStatus(trustedContext, {})).diagnostics.semantic.incremental;
+  assert.equal(s.lastError, null, "降级不是失败：lastError 不留痕");
+  assert.equal(await fileExists(path.join(roots.stateRoot, "semantic")), false,
+    "模型未装：不打开索引不落盘（skip 发生在 openVectorStore 之前）");
+  await controller.stop();
+});
+
+test("0.5 交错防线：force 重建持闸期间增量只标 dirty（索引零写），收尾后差集补齐无覆盖/误删", async (t) => {
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  await installFakeModelFiles(roots.dataRoot);
+  const settings = incrementalSemanticSettings(roots);
+  const dims = settings.semantic.local.dims;
+  // 闸控桩：holdSlowEmbeds 置真后，含「慢卡」的嵌入挂起直到放行——模拟重建慢卡。
+  let holdSlowEmbeds = false;
+  let releaseRebuild = null;
+  const rebuildGate = new Promise((resolve) => { releaseRebuild = resolve; });
+  let slowEmbedCalls = 0;
+  const provider = {
+    kind: "local",
+    dims,
+    async embed(text) {
+      if (holdSlowEmbeds && text.includes("慢卡")) {
+        slowEmbedCalls += 1;
+        await rebuildGate;
+      }
+      const vec = new Float32Array(dims);
+      for (const ch of text) vec[ch.codePointAt(0) % dims] += 1;
+      return vec;
+    },
+  };
+  const controller = await createShioriPluginController(fakeCtx(), settings, {
+    bindings: fakeBindingsFactory(),
+    createEmbeddingProvider: () => provider,
+    semanticIncrementalDebounceMs: 20,
+  });
+  await controller.start();
+  const trustedContext = rpcContext();
+  const savedFast = await controller.management.executeTool(trustedContext, {
+    name: "spark_save",
+    args: { title: "快卡", content: "榴莲披萨好吃", triggers: [], vitality: "evergreen" },
+  });
+  assert.ok(await waitForIncrementalSettled(controller, trustedContext, (s) => s.embedded === 1));
+  const savedSlow = await controller.management.executeTool(trustedContext, {
+    name: "spark_save",
+    args: { title: "慢卡", content: "珍珠奶茶", triggers: [], vitality: "evergreen" },
+  });
+  assert.ok(await waitForIncrementalSettled(controller, trustedContext, (s) => s.embedded === 2 && s.startupSyncs >= 1),
+    "两张卡都已增量入索引（首次开索引的启动差集也已收场）");
+  // 发起 force 全量重建（detached），并让重建对「慢卡」的嵌入挂起持闸。
+  holdSlowEmbeds = true;
+  const rebuild = await controller.management.executeTool(trustedContext, {
+    name: "semantic_rebuild", args: { force: true },
+  });
+  assert.equal(rebuild.started, true);
+  assert.ok(await waitFor(async () => {
+    const r = (await controller.management.getStatus(trustedContext, {})).diagnostics.semantic.rebuild;
+    return r.running === true && slowEmbedCalls >= 1;
+  }, 4000), "重建已持闸并卡在慢卡嵌入");
+  // 重建持闸期间写新卡：只标 dirty，flush 轮启动后被闸拦下，索引零写。
+  const savedNew = await controller.management.executeTool(trustedContext, {
+    name: "spark_save",
+    args: { title: "新卡", content: "打印报销单", triggers: [], vitality: "evergreen" },
+  });
+  assert.ok(await waitFor(async () => {
+    const s = (await controller.management.getStatus(trustedContext, {})).diagnostics.semantic.incremental;
+    return s.running === true && s.pending === 1;
+  }, 4000), "增量轮已启动并被闸拦下（重建中只标 dirty）");
+  assert.equal(await readIndexEntry(roots, scopeIdForPanel(settings), settings, savedNew.id), null,
+    "持闸期间索引零写（严禁与 clear/retainOnly 交错）");
+  releaseRebuild();
+  assert.ok(await waitFor(async () => {
+    const r = (await controller.management.getStatus(trustedContext, {})).diagnostics.semantic.rebuild;
+    return r.running === false && r.phase === "done";
+  }, 4000), "force 重建以 done 收尾");
+  assert.ok(await waitForIncrementalSettled(controller, trustedContext, (s) => s.embedded === 3),
+    "锁释放后按差集补齐新卡");
+  const scopeId = scopeIdForPanel(settings);
+  assert.equal(await readIndexSize(roots, scopeId, settings), 3, "三张卡俱全（无误删）");
+  assert.equal((await readIndexEntry(roots, scopeId, settings, savedFast.id)).revision, savedFast.revision,
+    "重建重嵌不覆盖 revision（无覆盖）");
+  assert.equal((await readIndexEntry(roots, scopeId, settings, savedSlow.id)).revision, savedSlow.revision);
+  assert.equal((await readIndexEntry(roots, scopeId, settings, savedNew.id)).revision, savedNew.revision,
+    "重建快照外的新卡由增量差集补齐");
+  await controller.stop();
+});
+
+test("0.5 启动差集兜底：重启后索引与卡片漂移（过期 revision + 幽灵残留）在 scope 首开索引时后台修复", async (t) => {
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  await installFakeModelFiles(roots.dataRoot);
+  const settings = incrementalSemanticSettings(roots);
+  const dims = settings.semantic.local.dims;
+  // 第一段：正常写入一张卡并等增量收尾，然后停机。
+  const controller1 = await createShioriPluginController(fakeCtx(), settings, {
+    bindings: fakeBindingsFactory(),
+    createEmbeddingProvider: () => charBucketStubProvider(dims),
+    semanticIncrementalDebounceMs: 20,
+  });
+  await controller1.start();
+  const trustedContext = rpcContext();
+  const saved = await controller1.management.executeTool(trustedContext, {
+    name: "spark_save",
+    args: { title: "团建", content: "榴莲披萨好吃", triggers: [], vitality: "evergreen" },
+  });
+  assert.ok(await waitForIncrementalSettled(controller1, trustedContext, (s) => s.embedded === 1));
+  await controller1.stop();
+  // 制造漂移（绕过钩子，模拟外部写者）：裸 store 改一版（revision +1，索引没跟上），
+  // 再往索引塞一个幽灵残留条目。
+  const scopeId = scopeIdForPanel(settings);
+  const bare = await openSparkStore({ root: roots.dataRoot, scopeId });
+  let updated;
+  try {
+    updated = await bare.update(saved.id, { content: "榴莲披萨加菠萝" }, {});
+  } finally {
+    bare.close();
+  }
+  const drift = await openSemanticVectorStore({
+    stateRoot: roots.stateRoot, scopeId,
+    model: settings.semantic.local.model, dims,
+  });
+  try {
+    drift.upsert("sp-ghost", 1, new Float32Array(dims).fill(0.5));
+    await drift.save();
+  } finally {
+    drift.close();
+  }
+  // 第二段：新控制器（同 roots）。首次打开索引由下一张卡的写后增量 flush 触发，
+  // 打开即 kick 启动差集兜底：过期 revision 后台补嵌、幽灵 retainOnly 剔除。
+  const controller2 = await createShioriPluginController(fakeCtx(), settings, {
+    bindings: fakeBindingsFactory(),
+    createEmbeddingProvider: () => charBucketStubProvider(dims),
+    semanticIncrementalDebounceMs: 20,
+  });
+  await controller2.start();
+  const saved2 = await controller2.management.executeTool(trustedContext, {
+    name: "spark_save",
+    args: { title: "会议室", content: "打印报销单", triggers: [], vitality: "evergreen" },
+  });
+  assert.equal(saved2.ok, true);
+  assert.ok(await waitFor(async () => {
+    const store = await openSemanticVectorStore({
+      stateRoot: roots.stateRoot, scopeId,
+      model: settings.semantic.local.model, dims,
+    });
+    try {
+      const drifted = store.get(saved.id);
+      const ghost = store.get("sp-ghost");
+      const fresh = store.get(saved2.id);
+      return drifted !== null && drifted.revision === updated.revision
+        && ghost === null
+        && fresh !== null && fresh.revision === saved2.revision;
+    } finally {
+      store.close();
+    }
+  }, 6000), "启动差集兜底在后台修复漂移：过期卡补嵌、幽灵剔除、新卡入索引");
+  const inc = (await controller2.management.getStatus(trustedContext, {})).diagnostics.semantic.incremental;
+  assert.ok(inc.startupSyncs >= 1, "启动差集轮可观测（诊断可见）");
+  await controller2.stop();
 });

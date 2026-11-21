@@ -12,6 +12,10 @@
 // - active：17 工具（9 兼容 + topic_create + group_manage + 6 Spark）经真实 defineTool 注册；
 //   L0/L1 真实 async system-prompt/assemble waterfall 刷新；L2 经 agent/pre-step
 //   投递（仅 l2.enabled）；压缩探针订阅完成事件（同 callId direct/PTC 仅推进一次）；
+// - 0.5：语义向量写后增量维护——spark 写工具成功 → 防抖批量 embed/upsert（forget
+//   同步剔除），与 runSemanticRebuild 共用单飞闸（clear/retainOnly 零交错），scope
+//   首次打开索引时启动差集兜底；provider 关闭时逐字节保持 0.4 行为。见
+//   src/semantic/incremental.mjs 头注释；
 // - shadow（配置了 root）：纯内存只读挂载 —— 不注册工具 / section / waterfall /
 //   pre-step，不打开 completion 锁 / scope 资源 / receipt（抢独占锁会把真的
 //   active 实例挤成 LOCK_BUSY）；management 仅纯内存 getStatus。
@@ -52,6 +56,13 @@ import {
   DOWNLOAD_RUNTIME_LOAD_FAILED,
 } from "../semantic/local.mjs";
 import { openSemanticVectorStore } from "../semantic/store.mjs";
+// 0.5 写后增量：队列本体 + 单飞闸 + spark store 写钩子包装（语义与边界见模块头注释）。
+import {
+  createSemanticGate,
+  createSemanticIncrementalQueue,
+  wrapSparkStoreWithIncrementalHooks,
+  SEMANTIC_INCREMENTAL_DEBOUNCE_MS,
+} from "../semantic/incremental.mjs";
 import { mergeSemanticRecall } from "../sparks/semantic-recall.mjs";
 import { createPersonaAdapter } from "./persona.mjs";
 import { coreBudgetsOf } from "./config.mjs";
@@ -150,6 +161,9 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     // createDownloader 同款——缺省真实实现（生产行为零变化）；测试注入计数桩，
     // 使 force/增量分叉的断言与可选依赖（@huggingface/transformers）装没装彻底解耦。
     createEmbeddingProvider: createEmbeddingProviderImpl = createEmbeddingProvider,
+    // 0.5 写后增量的防抖毫秒（任务书 ~300ms）。只作依赖 seam 供测试缩短等待，
+    // 不进 settings 冻结契约（config.mjs 不在本次白名单）；非法值回落缺省。
+    semanticIncrementalDebounceMs = SEMANTIC_INCREMENTAL_DEBOUNCE_MS,
   } = dependencies;
 
   // inert 判定（0.4-S1 起，reviewer P2① 口径）：仅由 mode 与根校验共同决定——
@@ -185,6 +199,12 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   const semanticProvider = settings.semantic.provider === "local"
     ? createEmbeddingProviderImpl(semanticProviderConfig())
     : null;
+
+  // 0.5 单飞并发防线（任务书硬要求 2）：语义索引所有写者共用的闸——写后增量
+  // flush、启动差集兜底、runSemanticRebuild 全部经此串行。现有 rebuild 是全局
+  // 单飞状态（ctrl.semantic.rebuild），按现状保守共用同一把全局闸：重建全程
+  // （含 clear 与 retainOnly 收尾）持锁，增量写只在锁外发生，严禁交错。
+  const semanticGate = createSemanticGate();
 
   // 路径校验：active 或配置了任一 root 时必须显式提供两个绝对 root、disjoint、
   // 互不嵌套（含真实 link 解析）。ctx.baseUrl 不是 profileRoot；这里不猜 profileRoot，
@@ -350,8 +370,94 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       now,
     });
     const sparkStore = await createSparkStore({ root: settings.dataRoot, scopeId });
+    // ── 0.5 写后增量向量维护（任务书硬要求 1/2/3；provider 关闭时整段跳过，
+    //    sparkStoreForScope 与裸 store 是同一对象——0.4 行为逐字节不变）──────
+    let semanticQueue = null;
+    let sparkStoreForScope = sparkStore;
+    /**
+     * 惰性打开本 scope 向量索引的共享入口（缓存进 resources.vectorStore；并发
+     * 首开共用同一 promise 防双开——两个写者各开一个实例会互相覆盖落盘）。
+     * vectorStoreFor（召回路径）与增量队列共用这一个入口。打开失败不缓存
+     * rejection，下次调用重试；首次打开成功即 kick 一次启动差集兜底。
+     */
+    let openVectorStorePromise = null;
+    let startupSyncKicked = false;
+    const openVectorStore = async () => {
+      if (semanticProvider === null || settings.stateRoot === null) return null;
+      if (resources.vectorStore !== null) return resources.vectorStore;
+      if (openVectorStorePromise === null) {
+        openVectorStorePromise = openSemanticVectorStore({
+          stateRoot: settings.stateRoot,
+          scopeId,
+          model: settings.semantic.local.model,
+          dims: settings.semantic.local.dims,
+        }).then(
+          (store) => {
+            resources.vectorStore = store;
+            return store;
+          },
+          (error) => {
+            openVectorStorePromise = null; // 不缓存 rejection：下次调用重试
+            throw error;
+          },
+        );
+      }
+      const store = await openVectorStorePromise;
+      // 首次打开成功 → 启动差集兜底（任务书硬要求 3）：异步比对 active 卡
+      // revision 与索引条目，不一致后台补齐、残留 retainOnly 剔除。kick 自带
+      // 错误收敛（进队列 stats），fire-and-forget，不阻塞召回/写路径。
+      // 一次性闩：并发首开（写后 flush 与召回路径同时到达）共用同一 promise，
+      // 只 kick 一次（差集幂等，重复 kick 只是无谓的第二轮）。
+      if (!startupSyncKicked) {
+        startupSyncKicked = true;
+        semanticQueue?.kickStartupSync();
+      }
+      return store;
+    };
+    if (semanticProvider !== null && settings.stateRoot !== null) {
+      semanticQueue = createSemanticIncrementalQueue({
+        scopeId,
+        provider: semanticProvider,
+        openVectorStore,
+        // 读卡真值：NOT_FOUND 归一成 null（物理消失的卡 → 差集剔除），其余错误
+        // 抛回队列按单卡失败计（重试一次 + 保留 pending + 诊断）。
+        readCard: async (id) => {
+          try {
+            return await sparkStore.read(id);
+          } catch (error) {
+            if (error?.code === "NOT_FOUND") return null;
+            throw error;
+          }
+        },
+        listActive: () => sparkStore.listActive(),
+        // 嵌入文本口径与重建路径共用同一个 cardEmbedText（title/summary/content
+        // 按行拼接）——改口径两处同步，不会分叉（任务书硬要求 6）。
+        embedText: cardEmbedText,
+        gate: semanticGate,
+        // 模型未装 → 挂起不 embed（写路径零报错；诊断见 lastSkipReason）。
+        canEmbed: () => {
+          const dir = modelDirResolved();
+          return dir !== null && isLocalModelInstalled({
+            cacheDir: dir,
+            model: settings.semantic.local.model,
+            dtype: settings.semantic.local.dtype,
+          });
+        },
+        // HOST_LOCKED（写权被其他实例持有）→ 挂起不写索引，避免与持写实例的
+        // 落盘互相踩踏；判定与 resourcesFor 的 groups 写入口同口径（fail-open）。
+        canWrite: () => (ctrl.readonlyGuard?.status?.().writable ?? true) === true,
+        // stop/banned 收场检查：轮次在每卡前后查，stop 后立即收场不耗嵌入调用。
+        shouldAbort: () => ctrl.banned || !ctrl.started,
+        debounceMs: semanticIncrementalDebounceMs,
+        nowIso,
+      });
+      // 写后增量（任务书硬要求 1）：save/update/forget 成功 → markDirty(id)
+      // （同步零 IO，不阻塞工具返回；失败的写不挂钩子）。包装对工具门面/冷搜/
+      // 遗忘执行器/management 完全透明（读路径与其余方法原样透传）。
+      sparkStoreForScope = wrapSparkStoreWithIncrementalHooks(sparkStore, semanticQueue);
+    }
     // 冷搜门面（显式 includeArchived 专用；只读、不复活、不自动匹配）。
-    const coldSearch = createColdSearch({ store: sparkStore, scopeId });
+    const coldSearch = createColdSearch({ store: sparkStoreForScope, scopeId });
     // service 包装：补 searchArchived（基线 service 冻结对象，中性 target Proxy）。
     const serviceForTools = new Proxy(Object.create(null), {
       get(_target, prop) {
@@ -418,7 +524,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     ];
     const sparkTools = createSparkTools({
       scopeId,
-      store: sparkStore,
+      store: sparkStoreForScope,
       readonlyGuard: ctrl.readonlyGuard ?? undefined,
     }).tools;
     const all = [...compatTools, ...sparkTools];
@@ -427,7 +533,9 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       scopeId,
       personaAdapter,
       service,
-      sparkStore,
+      /** 0.5：provider 启用时是带写钩子的包装（save/update/forget 成功 → 增量
+       *  入队）；provider 关闭时与裸 store 同一对象（0.4 行为逐字节不变）。 */
+      sparkStore: sparkStoreForScope,
       tools: all,
       toolByName,
       l2Recovered: false,
@@ -435,6 +543,10 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
        *  惰性打开：仅在 semantic provider 已启用且召回/重建真需要时创建；
        *  provider 关闭时恒 null（绝不产生向量文件）。 */
       vectorStore: null,
+      /** 0.5：本 scope 的写后增量队列（provider 关闭时 null；诊断 stats()）。 */
+      semanticQueue,
+      /** 0.5：向量索引共享惰性打开入口（vectorStoreFor 与增量队列共用）。 */
+      openVectorStore,
     };
     ctrl.scopes.set(scopeId, resources);
     return resources;
@@ -448,20 +560,21 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   async function vectorStoreFor(scopeId) {
     if (semanticProvider === null || settings.stateRoot === null) return null;
     const resources = await resourcesFor(scopeId);
-    if (resources.vectorStore === null) {
-      resources.vectorStore = await openSemanticVectorStore({
-        stateRoot: settings.stateRoot,
-        scopeId,
-        model: settings.semantic.local.model,
-        dims: settings.semantic.local.dims,
-      });
-    }
-    return resources.vectorStore;
+    // 0.5：打开收敛到共享入口（并发首开共用同一 promise 防双开；首次打开成功
+    // 即 kick 启动差集兜底——召回路径不阻塞，差集在后台跑）。
+    return resources.openVectorStore();
   }
 
   async function closeAllScopes() {
     const errors = [];
     for (const [scopeId, resources] of ctrl.scopes) {
+      // 0.5：先停写后增量队列（清防抖 timer、丢 pending——stop 场景下未处理的
+      // 卡由下次 start 的启动差集兜底补齐；在途轮次靠 shouldAbort 检查点收场）。
+      try {
+        resources.semanticQueue?.close();
+      } catch (error) {
+        errors.push(`semanticQueue.close(${scopeId}): ${error instanceof Error ? error.message : String(error)}`);
+      }
       try {
         resources.sparkStore.close();
       } catch (error) {
@@ -511,13 +624,26 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   }
 
   /**
-   * 后台分批重建：每批 SEMANTIC_REBUILD_BATCH 张，批间 setTimeout 让出事件循环；
-   * 每批原子落盘（中断/失败后进度可恢复，重试走增量续传）。逐批检查
-   * ctrl.banned / started——stop 后立即中止，不再消耗嵌入调用。
-   * 不进 trackInFlight：重建可能长达数十秒，stop 的排空窗口（10s 上限）
-   * 不该被它拖满；中止语义由批间检查保证。
+   * 后台分批重建（0.5：经 semanticGate 单飞闸进入——见下）。
    */
   async function runSemanticRebuild(scopeId, records, force) {
+    // 0.5 单飞并发防线（任务书硬要求 2）：与写后增量 flush / 启动差集共用同一把
+    // semanticGate。重建全程持锁——从开头 store.clear() 到收尾 retainOnly+save
+    // 都在闸内，增量索引写只在锁外发生，严禁交错；重建期间 markDirty 只标
+    // dirty，锁释放后的下一轮 flush 按差集补齐。锁等待计入 rebuild.running
+    // （置位在 semanticRebuild 同步段），面板可见「排队中」；单飞判定仍由
+    // rebuild.running 承担（语义不变）。
+    return semanticGate.run(() => runSemanticRebuildLocked(scopeId, records, force));
+  }
+
+  /**
+   * 重建主体（必须在 semanticGate 闸内调用）。每批 SEMANTIC_REBUILD_BATCH 张，
+   * 批间 setTimeout 让出事件循环；每批原子落盘（中断/失败后进度可恢复，重试走
+   * 增量续传）。逐批检查 ctrl.banned / started——stop 后立即中止，不再消耗嵌入
+   * 调用。不进 trackInFlight：重建可能长达数十秒，stop 的排空窗口（10s 上限）
+   * 不该被它拖满；中止语义由批间检查保证。
+   */
+  async function runSemanticRebuildLocked(scopeId, records, force) {
     const rebuild = ctrl.semantic.rebuild;
     const store = await vectorStoreFor(scopeId);
     if (store === null) {
@@ -1644,6 +1770,33 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
         const { cancelRequested, ...publicDownload } = ctrl.semantic.download;
         void cancelRequested;
         return publicDownload;
+      })(),
+      /** 0.5 写后增量诊断（任务书硬要求 5「诊断可见」）：pending=本 scope 待补卡
+       *  数（scope 未打开为 null）；running=有 flush/差集轮在跑（含闸上排队）；
+       *  lastSkipReason 记降级原因（host-readonly / model-not-installed /
+       *  vector-store-unavailable，写路径零报错的可见面）；lastError 记最近一次
+       *  增量失败（静默重试仍失败才留痕，成功不回填）。provider 关闭时
+       *  enabled=false 且恒为空转快照（行为与 0.4 一致：无队列无钩子）。 */
+      incremental: (() => {
+        const idle = {
+          enabled: semanticProvider !== null,
+          pending: null,
+          running: false,
+          flushes: 0,
+          embedded: 0,
+          removed: 0,
+          startupSyncs: 0,
+          lastFlushAt: null,
+          lastSyncAt: null,
+          lastError: null,
+          lastSkipReason: null,
+        };
+        if (semanticProvider === null) return idle;
+        if (typeof scopeId === "string" && ctrl.scopes.has(scopeId)) {
+          const queue = ctrl.scopes.get(scopeId).semanticQueue;
+          if (queue !== null && queue !== undefined) return { ...idle, ...queue.stats() };
+        }
+        return idle;
       })(),
     };
     if (diag.modelDir !== null) {
