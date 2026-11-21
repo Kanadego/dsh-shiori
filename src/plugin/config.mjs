@@ -37,6 +37,14 @@ import { homedir } from "node:os";
 import z from "@deepseek-ai/schemastery";
 import { DEFAULT_CONFIG, validateConfig } from "../core/config.mjs";
 import { normalizeForgetPolicy } from "../forgetting/decay.mjs";
+// 0.5 批次 4 · A 线：热度参数唯一源头（§11.2.6）。schema 默认值与字段级校验全部
+// 委托 params.mjs，本文件不复制任何数字、不重复任何范围规则。
+import {
+  DEFAULT_TEMPERATURE_PARAMS,
+  assertKnownTemperatureKeys,
+  normalizeTemperatureParams,
+  validateTemperatureParams,
+} from "../forgetting/params.mjs";
 import { comparableRoot, resolveWithLinks as resolveWithLinksCanon } from "../storage/path-canon.mjs";
 
 /** 本插件在宿主 settings 服务中的命名空间（与 Cordis 插件 id 一致）。 */
@@ -162,6 +170,41 @@ function budgetObject() {
   }).default(defaultBudgets());
 }
 
+// temperature 段 schema（0.5 批次 4 · A 线，§11.2.6）：12 项热度参数。默认值全部
+// 从唯一源头 ../forgetting/params.mjs 的 DEFAULT_TEMPERATURE_PARAMS 派生（不复制
+// 数字）；范围 / 交叉校验的权威在 normalizeTemperature（复用 params.mjs），schema
+// 只声明静态结构与默认值（与 budgets / semantic 同款分工）。maxOpsPerRun 用
+// z.natural()（执行条数无小数语义，与 PARAM_SPECS 的 integer 标记一致）；天数/小时
+// 用 z.number()（公式层允许小数，用户层范围由 params.mjs 把关）。
+function temperatureObject() {
+  return z.object({
+    s0Days: z.number().default(DEFAULT_TEMPERATURE_PARAMS.s0Days)
+      .description("新生 Topic 的初始有效半衰期 S0（天，7–90；须小于 sMaxDays）"),
+    sMaxDays: z.number().default(DEFAULT_TEMPERATURE_PARAMS.sMaxDays)
+      .description("间隔巩固上限 Smax（天，60–365；必须大于 s0Days）"),
+    consolidateGain: z.number().default(DEFAULT_TEMPERATURE_PARAMS.consolidateGain)
+      .description("间隔巩固增益 g（0–1）"),
+    readAlpha: z.number().default(DEFAULT_TEMPERATURE_PARAMS.readAlpha)
+      .description("read 加热系数 alpha（0.1–0.6）"),
+    updatedFloor: z.number().default(DEFAULT_TEMPERATURE_PARAMS.updatedFloor)
+      .description("内容修改后的温度保底（50–100）"),
+    readDedupHours: z.number().default(DEFAULT_TEMPERATURE_PARAMS.readDedupHours)
+      .description("read 全局冷却窗口（小时，6–72）"),
+    coolThreshold: z.number().default(DEFAULT_TEMPERATURE_PARAMS.coolThreshold)
+      .description("冷却线（10–40），低于即 cold；须不高于 restoreThreshold-10"),
+    restoreThreshold: z.number().default(DEFAULT_TEMPERATURE_PARAMS.restoreThreshold)
+      .description("恢复线（30–80），回升到即恢复；须不小于 coolThreshold+10"),
+    minCooldownDays: z.number().default(DEFAULT_TEMPERATURE_PARAMS.minCooldownDays)
+      .description("最小冷却年龄（天，7–90）"),
+    minRestoreGraceDays: z.number().default(DEFAULT_TEMPERATURE_PARAMS.minRestoreGraceDays)
+      .description("手动恢复后的保护期（天，3–30；须不大于 minCooldownDays）"),
+    maxOpsPerRun: z.natural().default(DEFAULT_TEMPERATURE_PARAMS.maxOpsPerRun)
+      .description("auto 单轮最多执行条数（1–50，整数）"),
+    evaluateEveryHours: z.number().default(DEFAULT_TEMPERATURE_PARAMS.evaluateEveryHours)
+      .description("评估周期（小时，6–168；距上次成功评估满该时长才触发）"),
+  }).default(clone(DEFAULT_TEMPERATURE_PARAMS));
+}
+
 /**
  * 把插件层 budgets（含 U2 权威水位 softChars/hardChars）裁剪成 core validateConfig
  * 认识的形状。水位不是 core 契约字段（core/config.mjs 的 section() 拒绝未知键），
@@ -236,6 +279,12 @@ export const Config = z.object({
       archiveScore: z.number().default(0.25),
     }).default({ baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 }),
   }).default({ enabled: false, policy: { baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 } }).description("双轨遗忘"),
+  // volatile：0.5 批次 4 起「设置 → 记忆整理」面板要整块热写这 12 项（§11.2.6，
+  // 先预览后应用）。宿主 dsh-settings 只收纳「schema 里至少一个 meta.volatile 字段」
+  // 的命名空间、write() 对非 volatile 路径直接拒绝——与 budgets / semantic 同款理由，
+  // 所以整块标记（叶子单独标会被 "Config field temperature.s0Days is not volatile"
+  // 挡下）。写入后值落宿主配置层，真正生效点（评估/执行层消费）由批次 5 接线。
+  temperature: temperatureObject().volatile().description("热度参数（§11.2.6 共 12 项，唯一源头 src/forgetting/params.mjs；宿主热提交，不重载插件；面板先预览后应用，保存当刻不触发任何 auto 执行）"),
 });
 
 // ---------------------------------------------------------------------------
@@ -245,7 +294,7 @@ export const Config = z.object({
 const TOP_LEVEL_KEYS = new Set([
   "mode", "allowActive", "dataRoot", "stateRoot", "ownerId", "defaultPersona",
   "sessionPersonas", "workspacePersonas", "budgets", "l2", "organize", "forgetting",
-  "semantic",
+  "semantic", "temperature",
 ]);
 
 function requireBoolean(value, name) {
@@ -507,6 +556,34 @@ function normalizeForgetting(value) {
   return { enabled, policy };
 }
 
+// ── temperature 段（0.5 批次 4 · A 线，§11.2.6 12 项热度参数）：────────────────
+// 字段级校验完全委托唯一源头 ../forgetting/params.mjs（assertKnownTemperatureKeys
+// 未知键 fail-closed + normalizeTemperatureParams 逐项范围 + validateTemperatureParams
+// 三条交叉校验），本文件零复制数字与规则。config 是持久化设置，段内未知键必须
+// fail-closed（typo 直接拒绝，不静默落默认值）——与 params.mjs 运行时对象的
+// 「未知键忽略」是两层有意不同的口径（见 params.mjs 头注释），别「统一」掉。
+// 交叉校验随 normalize 一并前置（校验前置，§11.2.6 UI 纪律 2）：非法配置在 apply
+// 阶段即整体拒绝，不带病挂载。
+// 错误面统一（评审 R13）：未知键 / 范围类型 / 交叉校验三类错误同走一层包装
+// （统一「temperature invalid: 」前缀 + INVALID_INPUT + 保留源错误 details），
+// 对外形状一致；config.test.mjs 的 message 断言按该前缀 + 键名匹配。
+function normalizeTemperature(value) {
+  let params;
+  try {
+    assertKnownTemperatureKeys(value);
+    params = normalizeTemperatureParams(value);
+    validateTemperatureParams(params);
+  } catch (error) {
+    const wrapped = new Error(`temperature invalid: ${error instanceof Error ? error.message : String(error)}`);
+    wrapped.code = "INVALID_INPUT";
+    if (error && typeof error === "object" && error.details !== undefined) {
+      wrapped.details = error.details;
+    }
+    throw wrapped;
+  }
+  return deepFreeze(params);
+}
+
 // ---------------------------------------------------------------------------
 // 根目录：字符串级校验 + profileRoot 可信默认
 // ---------------------------------------------------------------------------
@@ -638,6 +715,9 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
   const forgetting = normalizeForgetting(raw.forgetting);
   // semantic 整块打了 volatile：宿主交过来的是 cosmokit 引用对象，先解包再校验。
   const semantic = normalizeSemantic(unwrapVolatile(raw.semantic));
+  // temperature 整块打了 volatile（0.5 批次 4 · A 线）：同样先解包，再经唯一源头
+  // params.mjs 做范围 + 交叉校验（非法配置在此整体拒绝，不部分提交）。
+  const temperature = normalizeTemperature(unwrapVolatile(raw.temperature));
 
   return deepFreeze({
     mode,
@@ -654,6 +734,7 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
     organize: Object.freeze(organize),
     forgetting: Object.freeze(forgetting),
     semantic: Object.freeze(semantic),
+    temperature,
   });
 }
 

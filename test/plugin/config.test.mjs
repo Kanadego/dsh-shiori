@@ -1001,3 +1001,104 @@ test("P1#8：降级模式下根本身是文件 → EEXIST 诊断；缺省模式�
   assert.equal(existsSync(join(base, "ok-data")), true);
   assert.equal(existsSync(join(base, "ok-state")), true);
 });
+
+// ---------------------------------------------------------------------------
+// 0.5 批次 4 · A 线 · temperature 段（§11.2.6 12 项热度参数）。
+// 评审答复 q-eb62768a0989320f 拍板走 C——这一处契约一次改完整：config 收纳 +
+// normalizePluginConfig 返回值包含 temperature + scope.mjs SETTINGS_KEYS 放行
+// （白名单经评审追加 src/plugin/scope.mjs）。以下全部为新增用例，既有断言零改动；
+// 「真实入口 boot」覆盖复用现有 host-contract.test.mjs 的 B-P2 路径（不在白名单，
+// 本文件不改它），本文件以 validateControllerSettings 直证 controller 挂载入口接受。
+// ---------------------------------------------------------------------------
+
+const { DEFAULT_TEMPERATURE_PARAMS } = await import("../../src/forgetting/params.mjs");
+const { validateControllerSettings } = await import("../../src/plugin/scope.mjs");
+
+test("0.5 批次 4：Config schema 带 temperature 段——默认值从 params.mjs 派生、整块 volatile", () => {
+  const parsed = Config({});
+  assert.equal(typeof parsed.temperature.get, "function", "volatile 字段在宿主侧是引用对象");
+  assert.ok(Object.prototype.hasOwnProperty.call(parsed.temperature, VOLATILE_WRITE));
+  assert.deepEqual(parsed.temperature.get(), { ...DEFAULT_TEMPERATURE_PARAMS }, "schema 默认值与唯一源头逐键一致（不复制数字）");
+  assert.equal(Config.dict.temperature.meta.volatile, true, "整块 volatile：宿主只收纳带 volatile 字段的命名空间（dsh-settings describe）");
+  assert.equal(isVolatilePath(Config, ["temperature", "s0Days"]), true, "面板写入路径（叶子）放行");
+});
+
+test("0.5 批次 4：normalizePluginConfig 收纳并返回 temperature——controller 挂载入口校验可接受", () => {
+  // 显式配置：逐键校验后进返回值（拍板 C：返回值包含 temperature）。
+  const settings = normalizePluginConfig({ temperature: { s0Days: 45, maxOpsPerRun: 10 } });
+  assert.equal(settings.temperature.s0Days, 45);
+  assert.equal(settings.temperature.maxOpsPerRun, 10);
+  assert.equal(settings.temperature.sMaxDays, DEFAULT_TEMPERATURE_PARAMS.sMaxDays, "未给键回落唯一源头默认");
+  assert.ok(Object.isFrozen(settings.temperature));
+  // controller 构造时对 settings 调用的正是这个函数（scope.mjs
+  // validateControllerSettings）：SETTINGS_KEYS 已放行 temperature，真实入口
+  // boot（host-contract B-P2，本文件不改）因此保持绿。
+  const controllerView = validateControllerSettings(settings);
+  assert.equal(controllerView.temperature.s0Days, 45);
+  assert.ok(Object.isFrozen(controllerView.temperature));
+  // 缺省：返回值即唯一源头默认（config 层默认 = scope 层默认 = params.mjs 默认）。
+  const defaults = normalizePluginConfig({});
+  assert.deepEqual({ ...defaults.temperature }, { ...DEFAULT_TEMPERATURE_PARAMS });
+});
+
+test("0.5 批次 4：temperature 非法值在 config 层与 scope 层都被拒，message 带键名与原因", () => {
+  // config 层：范围越界 / 段内未知键 / 交叉校验（回差不足）。评审 R6：rejects 的
+  // 第二参只是失败提示文案、不构成断言——改为对 message 做真实匹配。
+  assert.throws(
+    () => normalizePluginConfig({ temperature: { s0Days: 0 } }),
+    (error) => error.code === "INVALID_INPUT" && /s0Days/.test(error.message) && /超出允许区间/.test(error.message),
+    "config 层拒绝范围越界（下界），message 带键名与区间",
+  );
+  assert.throws(
+    () => normalizePluginConfig({ temperature: { s0Days: 5000 } }),
+    (error) => error.code === "INVALID_INPUT" && /s0Days/.test(error.message) && /超出允许区间/.test(error.message),
+    "config 层拒绝范围越界（上界）",
+  );
+  assert.throws(
+    () => normalizePluginConfig({ temperature: { notAParam: 1 } }),
+    (error) => error.code === "INVALID_INPUT" && /notAParam/.test(error.message) && /unknown property/.test(error.message),
+    "config 层拒绝段内未知键（fail-closed，经 params.mjs assertKnownTemperatureKeys）",
+  );
+  assert.throws(
+    () => normalizePluginConfig({ temperature: { coolThreshold: 40, restoreThreshold: 49 } }),
+    (error) => error.code === "INVALID_INPUT" && /restoreThreshold/.test(error.message),
+    "config 层拒绝交叉校验违规（回差不足）",
+  );
+  // scope 层（直构 settings 也挡得住，不只靠 config 层）：范围越界 / 交叉校验 /
+  // 段内未知键（评审 R4：P 侧同样 fail-closed，typo 不静默落默认值）。
+  assert.throws(
+    () => validateControllerSettings({ temperature: { s0Days: 0 } }),
+    (error) => error.code === "INVALID_INPUT" && /s0Days/.test(error.message),
+    "scope 层拒绝范围越界且 message 带键名",
+  );
+  assert.throws(
+    () => validateControllerSettings({ temperature: { s0Days: 90, sMaxDays: 90 } }),
+    (error) => error.code === "INVALID_INPUT" && /sMaxDays/.test(error.message),
+    "交叉校验（sMaxDays 须大于 s0Days）在 scope 层同样生效",
+  );
+  assert.throws(
+    () => validateControllerSettings({ temperature: { notAParam: 1 } }),
+    (error) => error.code === "INVALID_INPUT" && /notAParam/.test(error.message) && /unknown property/.test(error.message),
+    "scope 层拒绝段内未知键（不静默忽略）",
+  );
+});
+
+test("0.5 批次 4：不写 temperature 时运行期值等于 DEFAULT_TEMPERATURE_PARAMS（scope 缺省回落）", () => {
+  const view = validateControllerSettings({});
+  assert.deepEqual({ ...view.temperature }, { ...DEFAULT_TEMPERATURE_PARAMS });
+  assert.ok(Object.isFrozen(view.temperature), "缺省回落值同样冻结");
+  // normalize 侧缺省一致（config 层默认 = scope 层默认 = 唯一源头默认）。
+  assert.deepEqual({ ...normalizePluginConfig({}).temperature }, { ...DEFAULT_TEMPERATURE_PARAMS });
+});
+
+test("0.5 批次 4：temperature 的 volatile 引用对象被解包后照常校验", () => {
+  const settings = normalizePluginConfig({ temperature: volatileRef({ s0Days: 45 }) });
+  assert.equal(settings.temperature.s0Days, 45);
+  assert.equal(typeof settings.temperature.get, "undefined", "解包后是普通冻结对象");
+  // 评审 R12：对 message 做真实匹配（rejects 的第二参只是失败提示文案）。
+  assert.throws(
+    () => normalizePluginConfig({ temperature: volatileRef({ s0Days: 0 }) }),
+    (error) => error.code === "INVALID_INPUT" && /s0Days/.test(error.message) && /超出允许区间/.test(error.message),
+    "volatile 引用解包后照常校验（范围越界仍拒绝）",
+  );
+});

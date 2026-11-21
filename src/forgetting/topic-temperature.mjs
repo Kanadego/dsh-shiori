@@ -8,8 +8,8 @@
 //   Δt 天     = max(0, (t_now - t_last) / 86400000)（毫秒差除日，不取整）
 //   T(t)      = T_last * 2 ** (-Δt / S)
 //   S 巩固    = min(Smax, S * (1 + g * (1 - T/100)))，且不低于 S0（updated/read 共用）
-//   读加热    = T + alpha * (100 - T)（alpha=0.35）
-//   updated   = 先衰减，S 按上式巩固，再 T = max(T, 85)
+//   读加热    = T + alpha * (100 - T)（alpha 默认 0.35，见 params.mjs）
+//   updated   = 先衰减，S 按上式巩固，再 T = max(T, updatedFloor)
 //   created   = T=100，S=S0（账本尚未产出 created；读取侧兼容未来写入）
 //
 // canCool 的 archiveOrigin 口径：R7 写的「archiveOrigin !== "manual"」按语义实现为
@@ -38,7 +38,8 @@
 //     误塞进 topicKey 的脏数据在此自然滤掉）；
 //   - read 全局时间窗口去重：同一专题距上次「计入加热的 read」不足 heatWindowHours
 //     的重复读取不再加热（也不延长下次窗口，防止连续读把窗口无限续命）；
-//   - updated 是最强使用证据：衰减后 T 顶到 85；search_hit / group_list 完全不加热。
+//   - updated 是最强使用证据：衰减后 T 顶到 params.updatedFloor（默认 85，§11.2.6）；
+//     search_hit / group_list 完全不加热。
 //
 // 存量种子（§6.3 / R6）：专题一条事件都没有时，按最后内容写入时间折算
 //   T0 = 100 * 2 ** (-N / S0)（N = 距 updated 天数；缺 updated 回落 seedFallbackT），
@@ -53,6 +54,10 @@
 //   组内有 standing 或 pinned 活跃成员 → 组 canCool=false。
 
 import { SparkStoreError } from '../sparks/errors.mjs';
+// 0.5 批次 4 · A 线：12 项用户可调参数的唯一源头在 ./params.mjs（§11.2.6）。
+// 本模块的默认值一律由 DEFAULT_TEMPERATURE_PARAMS 经 toFormulaParams 固定映射
+// 派生（不许回写字面量、不许逐键手写映射——同源断言有用例锁死）。
+import { DEFAULT_TEMPERATURE_PARAMS, toFormulaParams } from './params.mjs';
 
 const DAY_MS = 86400000;
 
@@ -67,19 +72,32 @@ export const MIN_AGE_DAYS = 7;
 /** 温度分级（由高到低），供批次 4/5 与面板共用同一份常量。 */
 export const TIER_VALUES = Object.freeze(['active', 'cool', 'cold', 'frozen']);
 
-/** 默认参数（冻结；调用方只读）。expectedStatsStartedAt 不在本模块消费。 */
+/** 公式默认参数（9 键）：12 项唯一源头经 toFormulaParams 固定映射一次成型。
+ *  键序即 FORMULA_KEY_MAP 顺序；回退字面量会被同源断言（params.test.mjs /
+ *  topic-temperature.test.mjs）拦下。 */
+const FORMULA_DEFAULTS = toFormulaParams(DEFAULT_TEMPERATURE_PARAMS);
+
+/** 默认参数（冻结；调用方只读）。expectedStatsStartedAt 不在本模块消费。
+ *
+ *  0.5 批次 4 起：数值全部经 FORMULA_DEFAULTS（= toFormulaParams(DEFAULT_TEMPERATURE_PARAMS)）
+ *  派生，本对象不许出现任何数字字面量（映射键）。
+ *  形状：11 键——较批次 3 的 10 键纯加法扩出 updatedFloor 一个（updated 保底，
+ *  §11.2.6 第 5 项；消费方只有 applyEvent 的 updated 分支那一处）。纯加法扩展
+ *  不影响既有消费方（逐键取值，无键序/键数假设）。
+ *  ⚠ readDedupHours（← readDedupHours 默认 24）：方案 §11.2.6 拍板 24h（本模块
+ *  旧默认 12 以方案为准改 24）。
+ *  coldT / seedFallbackT 不在 §11.2.6 的 12 项里——公式内在常量，非用户可调参数，
+ *  保留字面量（§6.3 缺 updated 回落 50 / R7 分级 10）。 */
 export const TEMPERATURE_DEFAULTS = Object.freeze({
-  S0: 30,
-  Smax: 180,
-  alpha: 0.35,
-  g: 0.5,
-  heatWindowHours: 12,
-  minCooldownDays: 30,
-  seedFallbackT: 50,
-  cooldownT: 25,
-  restoreT: 50,
-  coldT: 10,
+  ...FORMULA_DEFAULTS,
+  seedFallbackT: 50, // 公式内在常量，非用户可调参数
+  coldT: 10, // 公式内在常量，非用户可调参数
 });
+
+/** 公式内参数全集：0.5 批次 4 起与 TEMPERATURE_DEFAULTS 同一形状（11 键）——
+ *  updatedFloor 随「经 toFormulaParams 构造」的重构并入默认形状，normalizeParams
+ *  的逐键校验以它为基准；两个名字保留语义（对外默认 vs 公式内部全集），同一对象。 */
+const INTERNAL_PARAM_DEFAULTS = TEMPERATURE_DEFAULTS;
 
 // ---------------------------------------------------------------------------
 // 基础工具
@@ -155,7 +173,7 @@ function consolidateStability(stabilityDays, temperature, g, smax) {
   return Math.min(smax, next);
 }
 
-/** 窗口 12h 等参数转毫秒。 */
+/** 窗口小时数转毫秒。 */
 function hoursToMs(hours) {
   return hours * 3600000;
 }
@@ -181,11 +199,11 @@ function formatNumber(value) {
 // ---------------------------------------------------------------------------
 
 function normalizeParams(rawParams) {
-  if (rawParams === undefined) return { ...TEMPERATURE_DEFAULTS };
+  if (rawParams === undefined) return { ...INTERNAL_PARAM_DEFAULTS };
   if (!isPlainObject(rawParams)) {
     throw invalidInput('params 必须是普通对象或缺省', { paramsType: typeof rawParams });
   }
-  const params = { ...TEMPERATURE_DEFAULTS };
+  const params = { ...INTERNAL_PARAM_DEFAULTS };
   for (const key of Object.keys(params)) {
     if (!Object.hasOwn(rawParams, key) || rawParams[key] === undefined) continue;
     const value = rawParams[key];
@@ -211,6 +229,13 @@ function normalizeParams(rawParams) {
   }
   if (!(params.seedFallbackT >= 0 && params.seedFallbackT <= 100)) {
     throw invalidInput('params.seedFallbackT 必须落在 [0, 100]', { seedFallbackT: params.seedFallbackT });
+  }
+  // updatedFloor（updated 保底）：公式安全区间 [0, 100]——0/100 是温度刻度常量。
+  // 用户可调区间 50–100 由唯一源头 params.mjs（PARAM_SPECS.updatedFloor）把关，
+  // 这里只挡「会把保底变成负温 / 超过满温」的怪参数，两层口径与 S0 同款
+  // （公式层 >0，用户层 7–90）。
+  if (!(params.updatedFloor >= 0 && params.updatedFloor <= 100)) {
+    throw invalidInput('params.updatedFloor 必须落在 [0, 100]', { updatedFloor: params.updatedFloor });
   }
   if (!(params.coldT >= 0 && params.coldT <= params.cooldownT
     && params.cooldownT <= params.restoreT && params.restoreT <= 100)) {
@@ -424,7 +449,9 @@ function applyEvent(record, event, params) {
         stabilityFloor(params),
         Math.min(stabilityCap(params), consolidateStability(record.stability, record.temperature, params.g, stabilityCap(params))),
       );
-      record.temperature = Math.max(record.temperature, 85);
+      // 0.5 批次 4 · A 线：updated 保底改读 params.updatedFloor（§11.2.6 第 5 项，
+      // 默认 85 由 params.mjs 派生），不再硬编码。
+      record.temperature = Math.max(record.temperature, params.updatedFloor);
       record.lastUpdatedEventMs = atMs;
       record.lastHeatedAt = event.atIso;
       record.hasEvent = true;

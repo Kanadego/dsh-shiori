@@ -67,7 +67,7 @@ test('① 冷读加热：T=15 读一次 → 44.75，S 按间隔巩固', () => {
   assert.equal(result.alarms.length, 0);
 });
 
-test('② 12h 冷却窗口内两次 read 只计一次加热', () => {
+test('② 冷却窗口内（1h < 默认 24h）两次 read 只计一次加热', () => {
   const result = evaluateTopics({
     topics: [topic('a', { updated: iso(NOW_MS - 60 * DAY) })],
     events: [event(NOW_MS - HOUR, 'read', 'a'), event(NOW_MS, 'read', 'a')],
@@ -81,7 +81,8 @@ test('② 12h 冷却窗口内两次 read 只计一次加热', () => {
 });
 
 test('③ 窗口外第二次 read → 跨过 restoreT（≈63.8，理想无衰减上限 64.09）', () => {
-  const params = { S0: S0_FIFTEEN };
+  // 本用例以 12h 窗口为前提，显式固化；默认值已迁至 src/forgetting/params.mjs（0.5 批次 4 · A 线：readDedupHours 默认 24，评审答复 q-3863f18493504ddc 拍板显式固化，三条断言零改动）。
+  const params = { S0: S0_FIFTEEN, heatWindowHours: 12 };
   const result = evaluateTopics({
     topics: [topic('a', { updated: iso(NOW_MS - 60 * DAY) })],
     events: [event(NOW_MS - 12 * HOUR, 'read', 'a'), event(NOW_MS, 'read', 'a')],
@@ -509,4 +510,117 @@ test('入参校验：缺 topics / 坏 now / 坏 updated / 坏 params / 重复组
     groups: [{ key: 'g1' }, { key: 'g1' }],
     now: NOW_MS,
   });
+});
+
+// ---------------------------------------------------------------------------
+// 0.5 批次 4 · A 线追加用例（参数唯一源头同源；评审答复 q-3863f18493504ddc 拍板）
+// 以下全部为新增，既有断言零改动（用例③仅按拍板在调用处显式固化 heatWindowHours: 12）。
+// ---------------------------------------------------------------------------
+
+const { DEFAULT_TEMPERATURE_PARAMS } = await import('../../src/forgetting/params.mjs');
+
+test('批次 4：默认参数下 12h 间隔的第二次 read 在 24h 窗口内被去重（readDedupHours 默认 24）', () => {
+  const twice = evaluateTopics({
+    topics: [topic('a', { updated: iso(NOW_MS - 60 * DAY) })],
+    events: [event(NOW_MS - 12 * HOUR, 'read', 'a'), event(NOW_MS, 'read', 'a')],
+    now: NOW_MS,
+  });
+  const once = evaluateTopics({
+    topics: [topic('a', { updated: iso(NOW_MS - 60 * DAY) })],
+    events: [event(NOW_MS - 12 * HOUR, 'read', 'a')],
+    now: NOW_MS,
+  });
+  const entry = twice.topics[0];
+  // 第二次 read 被窗口去重：温度与只读一次完全相同（不加热、不延长窗口）
+  close(entry.T, once.topics[0].T, '两次 read 与一次 read 等温');
+  assert.equal(entry.lastHeatedAt, once.topics[0].lastHeatedAt);
+  assert.equal(entry.lastHeatedAt, iso(NOW_MS - 12 * HOUR));
+  assert.ok(entry.reason.includes('窗口内跳过 1 次读取'), entry.reason);
+});
+
+test('批次 4：间隔 >24h 的第二次 read 正常加热（窗口外，不受新默认影响）', () => {
+  const twice = evaluateTopics({
+    topics: [topic('a', { updated: iso(NOW_MS - 60 * DAY) })],
+    events: [event(NOW_MS - 25 * HOUR, 'read', 'a'), event(NOW_MS, 'read', 'a')],
+    now: NOW_MS,
+  });
+  const once = evaluateTopics({
+    topics: [topic('a', { updated: iso(NOW_MS - 60 * DAY) })],
+    events: [event(NOW_MS - 25 * HOUR, 'read', 'a')],
+    now: NOW_MS,
+  });
+  const entry = twice.topics[0];
+  assert.ok(entry.T > once.topics[0].T, '第二次 read 应正常加热：T=' + entry.T + ' 单次=' + once.topics[0].T);
+  assert.equal(entry.lastHeatedAt, NOW_ISO);
+  assert.ok(!entry.reason.includes('跳过'), entry.reason);
+});
+
+test('批次 4 同源断言：TEMPERATURE_DEFAULTS 数值全部派生自 DEFAULT_TEMPERATURE_PARAMS（映射固定）', () => {
+  assert.equal(TEMPERATURE_DEFAULTS.S0, DEFAULT_TEMPERATURE_PARAMS.s0Days, 'S0 ← s0Days');
+  assert.equal(TEMPERATURE_DEFAULTS.Smax, DEFAULT_TEMPERATURE_PARAMS.sMaxDays, 'Smax ← sMaxDays');
+  assert.equal(TEMPERATURE_DEFAULTS.alpha, DEFAULT_TEMPERATURE_PARAMS.readAlpha, 'alpha ← readAlpha');
+  assert.equal(TEMPERATURE_DEFAULTS.g, DEFAULT_TEMPERATURE_PARAMS.consolidateGain, 'g ← consolidateGain');
+  assert.equal(TEMPERATURE_DEFAULTS.heatWindowHours, DEFAULT_TEMPERATURE_PARAMS.readDedupHours, 'heatWindowHours ← readDedupHours');
+  assert.equal(TEMPERATURE_DEFAULTS.minCooldownDays, DEFAULT_TEMPERATURE_PARAMS.minCooldownDays, 'minCooldownDays ← minCooldownDays');
+  assert.equal(TEMPERATURE_DEFAULTS.cooldownT, DEFAULT_TEMPERATURE_PARAMS.coolThreshold, 'cooldownT ← coolThreshold');
+  assert.equal(TEMPERATURE_DEFAULTS.restoreT, DEFAULT_TEMPERATURE_PARAMS.restoreThreshold, 'restoreT ← restoreThreshold');
+  // 不在 12 项里的公式内在常量保持原值（非用户可调）
+  assert.equal(TEMPERATURE_DEFAULTS.seedFallbackT, 50);
+  assert.equal(TEMPERATURE_DEFAULTS.coldT, 10);
+});
+
+test('批次 4 源码断言：映射键一律经 toFormulaParams 派生，禁数字字面量（12/24/85/30/180/0.35/25/50 全拦）', () => {
+  const source = readFileSync(new URL('../../src/forgetting/topic-temperature.mjs', import.meta.url), 'utf8');
+  // 去注释后断言（注释里的数字属说明性内容，不算「定义」）
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map((line) => line.replace(/\/\/.*$/, ''))
+    .join('\n');
+  // 正向（评审 R1）：默认值必须经唯一映射函数构造（评审 R2 落地后逐键手写映射
+  // 已删除，正向断言随之收敛为「构造必须出现」；回退字面量的拦截由下方反向
+  // 断言承担——旧值 12 与新值 24 都拦，任一回退必红）。
+  assert.ok(
+    /toFormulaParams\s*\(\s*DEFAULT_TEMPERATURE_PARAMS\s*\)/.test(code),
+    'TEMPERATURE_DEFAULTS / INTERNAL_PARAM_DEFAULTS 必须经 toFormulaParams(DEFAULT_TEMPERATURE_PARAMS) 构造',
+  );
+  // 钉死 updated 保底的消费表达式（评审 R11：宽松的 /params\.updatedFloor/ 会被
+  // normalizeParams 的区间守卫满足，改成局部常量 Math.max(T, FLOOR) 也拦不住）。
+  assert.ok(
+    /record\.temperature\s*=\s*Math\.max\(record\.temperature,\s*params\.updatedFloor\)/.test(code),
+    'updated 保底必须以 record.temperature = Math.max(record.temperature, params.updatedFloor) 形式消费',
+  );
+  // 反向：9 个映射键在去注释源码里一律不得以「键: 数字字面量」形式出现
+  //（值只能来自 toFormulaParams 的输出）。评审 R10：正则加前缀负向断言（防单字
+  // 母键 g 误伤 tag: 1 这类以 g 结尾的属性）+ 可选引号（'heatWindowHours': 24
+  // 这类带引号键写法也要拦）。
+  for (const mappedKey of ['S0', 'Smax', 'alpha', 'g', 'heatWindowHours', 'minCooldownDays', 'cooldownT', 'restoreT', 'updatedFloor']) {
+    assert.ok(
+      !new RegExp(`(?<![A-Za-z0-9_$])(?:'|")?${mappedKey}(?:'|")?\\s*:\\s*-?\\d`).test(code),
+      `映射键 ${mappedKey} 不得回写数字字面量（含带引号键写法；须由 toFormulaParams 派生）`,
+    );
+  }
+  // 公式内在常量（非 12 项映射键）保留字面量，白名单在此锁定：
+  assert.ok(/seedFallbackT:\s*50\b/.test(code), 'seedFallbackT=50 为公式内在常量（§6.3 缺 updated 回落），保留');
+  assert.ok(/coldT:\s*10\b/.test(code), 'coldT=10 为公式内在常量（R7 分级），保留');
+});
+
+test('批次 4：updated 保底读 params.updatedFloor（默认 85，可覆盖；公式层守卫 [0,100]）', () => {
+  const base = {
+    topics: [topic('a', { updated: iso(NOW_MS - 60 * DAY) })],
+    events: [event(NOW_MS, 'updated', 'a')],
+    now: NOW_MS,
+  };
+  // 基线 T=100*2^(-60/30)=25：updated 后顶到保底
+  close(evaluateTopics(base).topics[0].T, 85, '默认 updatedFloor=85');
+  close(evaluateTopics({ ...base, params: { updatedFloor: 60 } }).topics[0].T, 60, '覆盖 updatedFloor=60');
+  // 公式层守卫 [0,100]（用户层 50–100 由 params.mjs PARAM_SPECS 把关，两层口径与 S0 同款）
+  assert.throws(
+    () => evaluateTopics({ ...base, params: { updatedFloor: 101 } }),
+    (error) => error.code === 'INVALID_INPUT',
+  );
+  assert.throws(
+    () => evaluateTopics({ ...base, params: { updatedFloor: -1 } }),
+    (error) => error.code === 'INVALID_INPUT',
+  );
 });

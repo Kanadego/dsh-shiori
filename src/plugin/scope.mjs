@@ -16,6 +16,12 @@ import { realpathSync } from "node:fs";
 import { DEFAULT_CONFIG, validateConfig } from "../core/index.mjs";
 import { normalizeSemantic, defaultPluginRoots, comparableRoot } from "./config.mjs";
 import { normalizeForgetPolicy } from "../forgetting/decay.mjs";
+// 0.5 批次 4 · A 线：temperature 段的唯一源头（§11.2.6 12 项热度参数）。
+// P 侧复核复用同一套 assertKnownTemperatureKeys（未知键 fail-closed）+
+// normalizeTemperatureParams（逐项范围）+ validateTemperatureParams（交叉校验），
+// 不复制任何数字与范围规则；缺省回落即 DEFAULT_TEMPERATURE_PARAMS
+// （normalizeTemperatureParams(undefined) 的产物）。
+import { assertKnownTemperatureKeys, normalizeTemperatureParams, validateTemperatureParams } from "../forgetting/params.mjs";
 import { GLOBAL_SCOPE_ID } from "../core/topics.mjs";
 
 /** persona 为 null（无卡）时的 scopeId：global memory。 */
@@ -63,11 +69,15 @@ const isPlainRecord = (v) =>
   v !== null && typeof v === "object" && !Array.isArray(v) &&
   (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
 
-/** settings 顶层键（与冻结契约 §2 完全一致；未知键拒绝）。 */
+/** settings 顶层键（未知键拒绝）。基线 14 键与冻结契约 §2 一致；"temperature" 是
+ *  0.5 批次 4 · A 线的扩展项（§11.2.6 热度参数 12 项，唯一源头
+ *  ../forgetting/params.mjs）——经评审拍板（q-eb62768a0989320f）并入本契约，
+ *  属 0.5 批次 4 扩展，非历史 §2 原生键。 */
 const SETTINGS_KEYS = [
   "mode", "allowActive", "dataRoot", "stateRoot", "rootsSource", "ownerId",
   "defaultPersona", "sessionPersonas", "workspacePersonas",
   "budgets", "semantic", "l2", "organize", "forgetting",
+  "temperature",
 ];
 
 /** 绝对路径校验（不要求目录已存在；越界判定在 validateRoots）。 */
@@ -327,6 +337,24 @@ export function validateControllerSettings(raw) {
   const organize = validateModuleSwitch(raw.organize, "organize");
   const forgetting = validateModuleSwitch(raw.forgetting, "forgetting");
 
+  // temperature 段（0.5 批次 4 · A 线，§11.2.6 12 项热度参数）：与 semantic 同款
+  // 「Q 侧单一来源、P 侧复核」——先经 assertKnownTemperatureKeys 对段内未知键
+  // fail-closed（评审 R4：P 侧挂载复核与 config/semantic 同款口径，typo 必须拒绝
+  // 而不是被 normalizeTemperatureParams 的前向兼容「未知键忽略」静默落默认值；
+  // 两层差异见 params.mjs assertKnownTemperatureKeys 注释），再走
+  // normalizeTemperatureParams（逐项范围，绝不夹取）+ validateTemperatureParams
+  // （sMaxDays>s0Days / restoreThreshold≥coolThreshold+10 /
+  // minRestoreGraceDays≤minCooldownDays 三条交叉校验），非法值 fail-closed 且
+  // message 带键名——直构 settings 也挡得住，不只靠 config 层。
+  let temperature;
+  try {
+    assertKnownTemperatureKeys(raw.temperature);
+    temperature = normalizeTemperatureParams(raw.temperature);
+    validateTemperatureParams(temperature);
+  } catch (error) {
+    fail("INVALID_INPUT", `settings.temperature invalid: ${error instanceof Error ? error.message : String(error)}`, {});
+  }
+
   return Object.freeze({
     mode,
     allowActive,
@@ -342,6 +370,7 @@ export function validateControllerSettings(raw) {
     l2: Object.freeze(l2),
     organize: Object.freeze(organize),
     forgetting: Object.freeze(forgetting),
+    temperature,
   });
 }
 
