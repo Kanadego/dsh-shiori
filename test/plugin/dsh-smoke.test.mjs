@@ -181,7 +181,9 @@ import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 export async function createShioriPluginController(ctx, settings) {
   const state = { started: 0, stopped: 0, mode: settings.mode, dataRoot: settings.dataRoot };
-  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
+  // 桩的 management 方法清单同为 CONTRACT_METHODS 镜像（与下方 STUB_PROTOCOL 同步维护；
+  // 0.5 批次 4 C 线 wire 11→14：destroyData 之后依次追加 onboardingPreview/Apply/Mark）。
+  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"];
   const management = Object.fromEntries(methods.map((method) => [
     method,
     async () => ({ mode: state.mode, method, synthetic: true, started: state.started, stopped: state.stopped }),
@@ -210,6 +212,8 @@ export async function createShioriPluginController(ctx, settings) {
 
 const STUB_PROTOCOL = `// SYNTHETIC TEST STUB — slot Q single-slot smoke verification ONLY (never shipped).
 // Mirrors the frozen CONTRACTS §6 wire for mountShioriRpc wiring.
+// 本桩是 wire 契约的镜像，不是独立实现的自由：方法清单须与 src/plugin/client-rpc.mjs
+// 的 CONTRACT_METHODS 逐项同步（同序同字），否则 mountShioriRpc 的挂载闸会当场拒绝。
 export const MANAGEMENT_METHODS = {
   getStatus: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
   getMemoryView: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
@@ -222,6 +226,9 @@ export const MANAGEMENT_METHODS = {
   executePlan: { inputSchema: { type: "object", required: ["planId", "planDigest", "operationId", "confirmed"] }, outputSchema: { type: "object" } },
   getTimeline: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
   destroyData: { inputSchema: { type: "object", required: ["confirm"] }, outputSchema: { type: "object" } },
+  onboardingPreview: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
+  onboardingApply: { inputSchema: { type: "object", required: ["proposal", "hash", "operationId", "confirmed"] }, outputSchema: { type: "object" } },
+  onboardingMark: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
 };
 const ALLOWED = {
   getStatus: [], getMemoryView: [], getGraph: [], listCandidates: [],
@@ -232,6 +239,9 @@ const ALLOWED = {
   executePlan: ["planId", "planDigest", "operationId", "confirmed"],
   getTimeline: ["offset", "limit"],
   destroyData: ["confirm"],
+  onboardingPreview: ["proposal"],
+  onboardingApply: ["proposal", "hash", "operationId", "confirmed"],
+  onboardingMark: ["dismiss", "restart", "hash"],
 };
 export function validateManagementPayload(name, payload) {
   const fail = (message) => { const e = new Error(message); e.code = "INVALID_INPUT"; throw e; };

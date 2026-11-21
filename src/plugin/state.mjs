@@ -669,9 +669,172 @@ export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
     },
   };
 
+  // ------------------------------------------------------------------
+  // 0.5 批次 4 · C 线：整理向导标记位（<stateRoot>/onboarding.json，scope 无关）
+  //
+  // 形状：{ version, dismissedAt?, completedAt?, proposalHash? }。「以后再说」
+  // 写 dismissedAt 后不再触发；面板「重新开始」清 dismissedAt；向导应用成功
+  // 写 completedAt + proposalHash。与 queueStore 同款 createLedger 地基：
+  // 无变更不落盘（读-判-写 + 字节比较，节流/幂等），原子替换 + fsync。
+  //
+  // 诊断不阻塞（§11.2.7：写盘失败只诊断不阻塞）：本 store 的方法绝不抛——
+  // 读失败（缺失/损坏/版本不识别）返回 {flag: null, error: 摘要}，向导按
+  // 「无标记位」降级（最坏结果是卡片重新出现一次）；写失败返回
+  // {ok: false, error: 摘要}，调用方把摘要透传进 diagnostics，不陪葬主流程。
+  // ------------------------------------------------------------------
+
+  const ONBOARDING_FLAG_VERSION = 1;
+
+  const onboardingLedger = createLedger({
+    file: path.join(stateRoot, "onboarding.json"),
+    empty: () => ({ version: ONBOARDING_FLAG_VERSION }),
+    lockRoot: stateRoot,
+  });
+
+  /** 有界错误摘要（只供诊断展示，不要求还原完整错误）。 */
+  function onboardingErrorSummary(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.length > 200 ? `${message.slice(0, 199)}…` : message;
+  }
+
+  /** 形状校验：version 只认 1；时间戳/摘要字段必须是非空字符串或缺省。 */
+  function validateOnboardingFlag(flag) {
+    if (flag === null || typeof flag !== "object" || Array.isArray(flag)) return null;
+    if (flag.version !== ONBOARDING_FLAG_VERSION) return null;
+    for (const field of ["dismissedAt", "completedAt", "proposalHash"]) {
+      const value = flag[field];
+      if (value !== undefined && value !== null && (typeof value !== "string" || value.length === 0)) {
+        return null;
+      }
+    }
+    return {
+      version: ONBOARDING_FLAG_VERSION,
+      dismissedAt: typeof flag.dismissedAt === "string" ? flag.dismissedAt : null,
+      completedAt: typeof flag.completedAt === "string" ? flag.completedAt : null,
+      proposalHash: typeof flag.proposalHash === "string" ? flag.proposalHash : null,
+    };
+  }
+
+  const onboardingStore = {
+    /**
+     * 读标记位。缺失/损坏/版本不识别一律 {flag: null, error?}——error 为有界
+     * 摘要（损坏与版本不识别时）。缺失文件返回归一化空标记
+     * {version, dismissedAt:null, completedAt:null, proposalHash:null}（createLedger
+     * 空模板，行为即「无标记位」）；损坏/版本不识别时 flag 才为 null。绝不抛、绝不写盘。
+     */
+    async read() {
+      try {
+        const state = await onboardingLedger.read();
+        const flag = validateOnboardingFlag(state);
+        if (flag !== null) return { flag, error: null };
+        return {
+          flag: null,
+          error: `onboarding.json 形状或版本不识别（期望 version=${ONBOARDING_FLAG_VERSION}），按无标记位降级`,
+        };
+      } catch (error) {
+        // createLedger.read 只在 JSON 损坏时抛（缺失返回空模板）；按无标记降级。
+        return { flag: null, error: onboardingErrorSummary(error) };
+      }
+    },
+
+    /**
+     * 坏 JSON 自愈（R6②/P2-5）：损坏的 onboarding.json 会让读路径降级（向导
+     * 反复出现）而写路径永久失败、UI 又可能丢 warning——写动作遇 INVALID_STATE
+     * （JSON 损坏）时把坏文件改名 .corrupt-<ts> 备份后按空账本重试一次。
+     * 备份时间戳用注入时钟 nowDate()（测试可固定，使命中 rename 失败分支可
+     * 确定性构造）。仅自愈「账本损坏」；IO 故障（权限/磁盘）与「备份 rename
+     * 失败」（评审二轮 R1，P1）都原样抛出——调用方必须产出 {ok:false, error}
+     * 让 UI 看见「没写成」，绝不吞成成功。
+     */
+    async mutateWithHeal(mutateFn) {
+      try {
+        await onboardingLedger.mutate(mutateFn);
+        return { healed: false };
+      } catch (error) {
+        if (error?.code !== "INVALID_STATE") throw error;
+        const corruptFile = `${path.join(stateRoot, "onboarding.json")}.corrupt-${nowDate().getTime()}`;
+        try {
+          await fsp.rename(path.join(stateRoot, "onboarding.json"), corruptFile);
+        } catch (renameError) {
+          const annotated = new Error(
+            `onboarding.json 损坏自愈失败（备份 rename 失败：${onboardingErrorSummary(renameError)}）；原错误：${onboardingErrorSummary(error)}`,
+          );
+          annotated.code = error.code;
+          throw annotated;
+        }
+        await onboardingLedger.mutate(mutateFn);
+        return { healed: true, corruptFile: path.basename(corruptFile) };
+      }
+    },
+
+    /**
+     * 「以后再说」：写 dismissedAt。保留 completedAt 审计；proposalHash 仅在
+     * 未完成时写入（R9③/P2-8：完成后 dismiss 不得覆盖完成时的提案 hash 审计）。
+     * 幂等：重复 dismiss 刷新 dismissedAt（最后搁置时刻为准）；无变更不落盘。
+     */
+    async dismiss(nowIso, proposalHash = null) {
+      try {
+        const heal = await this.mutateWithHeal((state) => {
+          state.version = ONBOARDING_FLAG_VERSION;
+          state.dismissedAt = nowIso;
+          if (proposalHash !== null && proposalHash !== undefined
+            && (state.completedAt === undefined || state.completedAt === null)) {
+            state.proposalHash = proposalHash;
+          }
+          return state;
+        });
+        return { ok: true, error: null, ...(heal.healed ? { healed: true, healedDetail: heal.corruptFile } : {}) };
+      } catch (error) {
+        return { ok: false, error: onboardingErrorSummary(error) };
+      }
+    },
+
+    /**
+     * 「重新开始」：清 dismissedAt（completedAt/proposalHash 不动——已完成
+     * 的审计痕迹不被重开抹掉）。幂等：本就无 dismissedAt 时无变更不落盘。
+     * 坏 JSON 自愈同 dismiss（mutateWithHeal）。
+     */
+    async restart() {
+      try {
+        const heal = await this.mutateWithHeal((state) => {
+          delete state.dismissedAt;
+          return state;
+        });
+        return { ok: true, error: null, ...(heal.healed ? { healed: true, healedDetail: heal.corruptFile } : {}) };
+      } catch (error) {
+        return { ok: false, error: onboardingErrorSummary(error) };
+      }
+    },
+
+    /**
+     * 向导应用成功：写 completedAt + proposalHash 并清 dismissedAt（完成态
+     * 覆盖搁置态）。幂等：重复应用刷新 completedAt（最后应用时刻为准）。
+     * 坏 JSON 自愈同 dismiss（mutateWithHeal）。
+     */
+    async complete(nowIso, proposalHash) {
+      try {
+        const heal = await this.mutateWithHeal((state) => {
+          state.version = ONBOARDING_FLAG_VERSION;
+          state.completedAt = nowIso;
+          state.proposalHash = typeof proposalHash === "string" ? proposalHash : null;
+          delete state.dismissedAt;
+          return state;
+        });
+        return { ok: true, error: null, ...(heal.healed ? { healed: true, healedDetail: heal.corruptFile } : {}) };
+      } catch (error) {
+        return { ok: false, error: onboardingErrorSummary(error) };
+      }
+    },
+
+    /** 诊断视图（原始账本内容；只读）。 */
+    async diagnostics() {
+      return onboardingLedger.read();
+    },
+  };
+
   function diagnostics() {
     return { kind: "state-store", stateRoot };
   }
 
-  return { toolOpStore, l2Store, planStore, queueStore, projectionStore, analyzeOpStore, waterlineStore, readWaterline: readWaterlineFor, diagnostics };
+  return { toolOpStore, l2Store, planStore, queueStore, onboardingStore, projectionStore, analyzeOpStore, waterlineStore, readWaterline: readWaterlineFor, diagnostics };
 }

@@ -64,16 +64,16 @@ function loadClientModule() {
 // bundle：形状、wire、CSS 一致性、安全约束
 // ---------------------------------------------------------------------------
 
-test("bundle：ModuleLoader 注册、导出 apply/inject、11 端点 wire 冻结（10 + destroyData）", async () => {
+test("bundle：ModuleLoader 注册、导出 apply/inject、14 端点 wire 冻结（11 + 整理向导三方法）", async () => {
   const mod = loadClientModule();
   assert.deepEqual(Object.keys(mod).sort(), ["TYPERT_REMOTE", "apply", "ensureLosslessJson", "inject"]);
   assert.deepEqual(mod.inject, ["remote", "slots", "configForms"]);
   assert.equal(mod.TYPERT_REMOTE.package, "dsh-shiori");
 
-  const expected = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
+  const expected = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"];
   const endpoints = Object.keys(mod.TYPERT_REMOTE.methods).sort();
   assert.deepEqual(endpoints, [...expected].map((m) => `shiori/${m}`).sort());
-  assert.equal(mod.TYPERT_REMOTE.descriptors.length, 11);
+  assert.equal(mod.TYPERT_REMOTE.descriptors.length, 14);
 
   for (const descriptor of mod.TYPERT_REMOTE.descriptors) {
     assert.equal(descriptor.invocation.kind, "direct");
@@ -228,6 +228,9 @@ export const MANAGEMENT_METHODS = {
   executePlan: { inputSchema: { type: "object", required: ["planId", "planDigest", "operationId", "confirmed"] }, outputSchema: { type: "object" } },
   getTimeline: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
   destroyData: { inputSchema: { type: "object", required: ["confirm"] }, outputSchema: { type: "object" } },
+  onboardingPreview: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
+  onboardingApply: { inputSchema: { type: "object", required: ["proposal", "hash", "operationId", "confirmed"] }, outputSchema: { type: "object" } },
+  onboardingMark: { inputSchema: { type: "object" }, outputSchema: { type: "object" } },
 };
 const ALLOWED = {
   getStatus: [], getMemoryView: [], getGraph: [], listCandidates: [],
@@ -238,6 +241,9 @@ const ALLOWED = {
   executePlan: ["planId", "planDigest", "operationId", "confirmed"],
   getTimeline: ["offset", "limit"],
   destroyData: ["confirm"],
+  onboardingPreview: ["proposal"],
+  onboardingApply: ["proposal", "hash", "operationId", "confirmed"],
+  onboardingMark: ["dismiss", "restart", "hash"],
 };
 export function validateManagementPayload(name, payload) {
   if (!Object.prototype.hasOwnProperty.call(ALLOWED, name)) { const e = new Error("unknown method"); e.code = "INVALID_INPUT"; throw e; }
@@ -254,7 +260,7 @@ export async function createShioriPluginController(ctx, settings) {
   globalThis.__shioriQLastSettings = settings;
   const state = { created: true, started: 0, stopped: 0, settings };
   const management = {};
-  for (const method of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"]) {
+  for (const method of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"]) {
     management[method] = async (trustedContext, payload) => ({ method, trusted: { source: trustedContext.source, principal: trustedContext.principal.kind, sessionId: trustedContext.session && trustedContext.session.id, hasAgent: Boolean(trustedContext.agent), signalLike: Boolean(trustedContext.signal) }, payload });
   }
   return {
@@ -329,7 +335,7 @@ async function callAs(ctx, service, method, { principal = "owner", session = { i
 test("mountShioriRpc：真实 TypertRemoteService 挂载 + Remote 标记 + owner 授权 + trustedContext", async () => {
   const ctx = fakeCtx();
   const management = {};
-  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"]) {
+  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"]) {
     management[m] = async (trusted, payload) => ({ ok: true, method: m, trusted, payload });
   }
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
@@ -338,9 +344,9 @@ test("mountShioriRpc：真实 TypertRemoteService 挂载 + Remote 标记 + owner
 
   // 真实 Remote 标记（Gateway source-mode 发现路径）
   const markers = remoteMethods(service);
-  assert.equal(markers.length, 11);
+  assert.equal(markers.length, 14);
   assert.deepEqual(markers.map((m) => m.exportName ?? m.method).sort(),
-    ["analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView", "getStatus", "getTimeline", "listCandidates", "previewPlan", "reviewCandidate"].sort());
+    ["analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView", "getStatus", "getTimeline", "listCandidates", "onboardingApply", "onboardingMark", "onboardingPreview", "previewPlan", "reviewCandidate"].sort());
 
   const out = await callAs(ctx, service, "getStatus");
   assert.equal(out.method, "getStatus");
@@ -357,7 +363,7 @@ test("授权：非 owner / 无 invocation / 非宿主 session 一律拒绝", asy
   const ctx = fakeCtx();
   const noop = async () => ({});
   const management = Object.fromEntries(
-    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"].map((m) => [m, noop]),
+    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"].map((m) => [m, noop]),
   );
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const service = ctx.get("shiori.panel");
@@ -372,7 +378,7 @@ test("code 透传：management 抛 INVALID_INPUT/REVISION_CONFLICT 时 RemoteErr
   const ctx = fakeCtx();
   const boom = (code) => async () => { const e = new Error("biz fail"); e.code = code; throw e; };
   const ok = async () => ({});
-  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
+  const methods = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"];
   const management = Object.fromEntries(methods.map((m) => [m, m === "reviewCandidate" ? boom("REVISION_CONFLICT") : ok]));
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const service = ctx.get("shiori.panel");
@@ -397,7 +403,7 @@ test("stop：禁新 → 排空在途；幂等；diagnostics 如实", async () =>
   const slow = async () => { await gate; return { slow: true }; };
   const ok = async () => ({});
   const management = Object.fromEntries(
-    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"].map((m) => [m, m === "getGraph" ? slow : ok]),
+    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"].map((m) => [m, m === "getGraph" ? slow : ok]),
   );
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const service = ctx.get("shiori.panel");
@@ -418,14 +424,14 @@ test("stop：禁新 → 排空在途；幂等；diagnostics 如实", async () =>
   assert.equal(diagnostics.namespace, "shiori");
   assert.equal(diagnostics.transport, "typert-gateway");
   assert.equal(diagnostics.ownerOnly, true);
-  assert.equal(diagnostics.methods.length, 11);
+  assert.equal(diagnostics.methods.length, 14);
 });
 
 test("diagnostics：宿主 typert 缺席时声明 UI unsupported（仅工具模式）", async () => {
   const ctx = fakeCtx({ typert: false });
   const ok = async () => ({});
   const management = Object.fromEntries(
-    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"].map((m) => [m, ok]),
+    ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"].map((m) => [m, ok]),
   );
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
   const diagnostics = rpc.diagnostics();
@@ -436,7 +442,7 @@ test("diagnostics：宿主 typert 缺席时声明 UI unsupported（仅工具模�
 
 test("wire 契约校验：P protocol 方法集不一致或 management 缺方法时拒绝挂载", async () => {
   const ok = async () => ({});
-  const full = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
+  const full = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"];
   await assert.rejects(
     () => mountShioriRpc(fakeCtx(), { getStatus: ok }, {}),
     /management is missing methods/,
@@ -451,12 +457,15 @@ test("wire 契约校验：P protocol 方法集不一致或 management 缺方法�
   );
 });
 
-test("wire 11 方法（0.4 S6 destroyData）：真实 protocol 第 11 位、schema 闭合、CONTRACT_METHODS 逐字一致", async () => {
+test("wire 14 方法（0.4 S6 destroyData + 0.5 批次 4 整理向导）：真实 protocol 11..14 位、schema 闭合、CONTRACT_METHODS 逐字一致", async () => {
   // 真实 P protocol（零依赖纯 JSON 模块，synthetic 环境可直接 import）
   const protocol = await import(pathToFileURL(join(WORKQ, "src", "plugin", "protocol.mjs")).href);
   const names = Object.keys(protocol.MANAGEMENT_METHODS);
-  assert.equal(names.length, 11, "0.4 S6 起 wire 冻结为 11 个方法（10 + destroyData）");
+  assert.equal(names.length, 14, "0.4 S6 起 wire 冻结为 11 个方法；0.5 批次 4 C 线整理向导扩展为 14（+onboardingPreview/Apply/Mark）");
   assert.equal(names[10], "destroyData", "destroyData 是 MANAGEMENT_METHODS 第 11 位");
+  assert.equal(names[11], "onboardingPreview", "onboardingPreview 是 MANAGEMENT_METHODS 第 12 位");
+  assert.equal(names[12], "onboardingApply", "onboardingApply 是 MANAGEMENT_METHODS 第 13 位");
+  assert.equal(names[13], "onboardingMark", "onboardingMark 是 MANAGEMENT_METHODS 第 14 位");
   const schema = protocol.MANAGEMENT_METHODS.destroyData;
   // 输入闭合：{ confirm: string }，required + additionalProperties:false
   assert.deepEqual(schema.inputSchema.properties, { confirm: { type: "string" } });
@@ -482,17 +491,45 @@ test("wire 11 方法（0.4 S6 destroyData）：真实 protocol 第 11 位、sche
   );
   // CONTRACT_METHODS（client-rpc 冻结清单）与 MANAGEMENT_METHODS 逐字一致：
   // 用真实 protocol 走挂载闸——缺 destroyData 的 management 被点名拒绝，
-  // 全 11 方法挂载通过（不一致时 mountShioriRpc 的 methodSetMismatch 会先炸）。
+  // 全 14 方法挂载通过（不一致时 mountShioriRpc 的 methodSetMismatch 会先炸）。
   const { mountShioriRpc } = await import(pathToFileURL(join(WORKQ, "src", "plugin", "client-rpc.mjs")).href);
   const noop = async () => ({});
-  const eleven = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
+  const fourteen = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"];
   await assert.rejects(
-    () => mountShioriRpc(fakeCtx(), Object.fromEntries(eleven.filter((m) => m !== "destroyData").map((m) => [m, noop])), {}),
+    () => mountShioriRpc(fakeCtx(), Object.fromEntries(fourteen.filter((m) => m !== "destroyData").map((m) => [m, noop])), {}),
     /management is missing methods: destroyData/,
   );
-  const rpc = await mountShioriRpc(fakeCtx(), Object.fromEntries(eleven.map((m) => [m, noop])), {});
-  assert.deepEqual(rpc.diagnostics().methods, eleven);
+  const rpc = await mountShioriRpc(fakeCtx(), Object.fromEntries(fourteen.map((m) => [m, noop])), {});
+  assert.deepEqual(rpc.diagnostics().methods, fourteen);
   await rpc.stop();
+});
+
+test("wire 14 方法（0.5 批次 4 整理向导增项）：三新方法 schema 闭合（input/output 都在、additionalProperties 显式 false）", async () => {
+  const protocol = await import(pathToFileURL(join(WORKQ, "src", "plugin", "protocol.mjs")).href);
+  for (const name of ["onboardingPreview", "onboardingApply", "onboardingMark"]) {
+    const schema = protocol.MANAGEMENT_METHODS[name];
+    assert.ok(schema, "missing method schema: " + name);
+    assert.ok(schema.inputSchema, name + " inputSchema 在");
+    assert.ok(schema.outputSchema, name + " outputSchema 在");
+    // inputSchema 闭合：oneOf 分支逐支断言，或单分支直接断言
+    const inputs = schema.inputSchema.oneOf ?? [schema.inputSchema];
+    for (const branch of inputs) {
+      assert.equal(branch.additionalProperties, false, name + " input 分支 additionalProperties 显式 false");
+      assert.equal(branch.type, "object", name + " input 分支是 object");
+    }
+    assert.equal(schema.outputSchema.additionalProperties, false, name + " output additionalProperties 显式 false");
+    assert.ok(Array.isArray(schema.outputSchema.required) && schema.outputSchema.required.length > 0, name + " output required 非空");
+  }
+  // apply 硬闸：confirmed 必须恰好 enum [true]（false / 缺失在 wire 层即拒）
+  const applyConfirmed = protocol.MANAGEMENT_METHODS.onboardingApply.inputSchema.properties.confirmed;
+  assert.deepEqual(applyConfirmed, { enum: [true] });
+  assert.throws(
+    () => protocol.validateManagementPayload("onboardingApply", { proposal: { groups: [{ key: "a", title: "A", members: ["t"], defaultRetention: "standing" }] }, hash: "a".repeat(64), operationId: "op", confirmed: false }),
+    (e) => e.code === "INVALID_INPUT",
+  );
+  // mark 双分支互斥：空 payload / 双键都拒
+  assert.throws(() => protocol.validateManagementPayload("onboardingMark", {}), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => protocol.validateManagementPayload("onboardingMark", { dismiss: true, restart: true }), (e) => e.code === "INVALID_INPUT");
 });
 
 // ---------------------------------------------------------------------------
@@ -588,7 +625,7 @@ const { Context: RealCordisContext } = cordisModule;
 function realCordisFixture(managementOverrides = {}) {
   const recorded = { signals: [], payloads: [], sessions: [] };
   const management = {};
-  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"]) {
+  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"]) {
     management[m] = async (trusted, payload) => {
       recorded.signals.push(trusted.signal);
       recorded.payloads.push(payload);
@@ -605,7 +642,7 @@ async function callViaCordisReceiver(ctx, method, { session = { id: "sess-real" 
   return Reflect.apply(Reflect.get(service, method), service, [session, payload, signal]);
 }
 
-test("R2 回归：真实 Cordis receiver 下九个方法全部可用，trustedContext 经 this.ctx 取得", async () => {
+test("R2 回归：真实 Cordis receiver 下全部 14 个方法可用（0.5 批次 4 契约扩展），trustedContext 经 this.ctx 取得", async () => {
   const ctx = new RealCordisContext();
   const { management } = realCordisFixture();
   const rpc = await mountShioriRpc(ctx, management, { mode: "shadow", dataRoot: null, stateRoot: null });
@@ -619,8 +656,10 @@ test("R2 回归：真实 Cordis receiver 下九个方法全部可用，trustedCo
     previewPlan: { kind: "organize" },
     executePlan: { planId: "p1", planDigest: "d1", operationId: "o1", confirmed: true },
     destroyData: { confirm: "x" },
+    onboardingApply: { proposal: { groups: [{ key: "a", title: "A", members: ["t1"], defaultRetention: "standing" }] }, hash: "a".repeat(64), operationId: "o1", confirmed: true },
+    onboardingMark: { dismiss: true },
   };
-  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"]) {
+  for (const m of ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"]) {
     const out = await callViaCordisReceiver(callContext, m, { payload: samplePayloads[m] ?? {}, signal });
     assert.equal(out.method, m, `method ${m} must pass the real Cordis receiver`);
     assert.equal(out.source, "panel-rpc");
@@ -1426,8 +1465,25 @@ test("Q 返工回归：真实 P 槽 getStatus DTO（diagnostics 为对象）渲�
   const dto = realPStatusDto();
   const calls = [];
   const dsh = {
+    // 0.5 批次 4 · C 线（评审批改）：状态页挂载后会自动探测一次向导状态
+    //（§11.2.7 首启引导：卡片必须首屏自动出现，不能等用户点按钮），所以桩按
+    // 方法分派——getStatus 回真实 DTO；onboardingPreview 回符合 protocol
+    // outputSchema 的最小合法载荷（状态模式：needed=false / reason=grouped，
+    // preview=null；绝不能返 dto 或 undefined，否则渲染路径测不到真东西）。
     call: async (method, sessionId, payload) => {
       calls.push({ method, sessionId, payload });
+      if (method === "onboardingPreview") {
+        return {
+          scope: "local",
+          needed: false,
+          reason: "grouped",
+          markedKind: null,
+          counts: { topics: 0, groups: 1, historical: 0, proposed: 0 },
+          flag: { version: 1, dismissedAt: null, completedAt: null, proposalHash: null },
+          proposal: null,
+          preview: null,
+        };
+      }
       assert.equal(method, "getStatus");
       return dto;
     },
@@ -1443,8 +1499,13 @@ test("Q 返工回归：真实 P 槽 getStatus DTO（diagnostics 为对象）渲�
   await flush();
   host.runEffects.v = false;
 
+  // effect 按注册顺序执行（load 先于 loadOnboarding），states[0] 仍是 getStatus 的回填。
   assert.equal(host.states[0], dto, "status state filled from successful getStatus");
-  assert.deepEqual(calls.map((c) => c.method), ["getStatus"], "exactly one getStatus RPC");
+  // 0.5 批次 4 · C 线（评审批改）：原断言守「状态页只发一次 getStatus」，向导
+  // 探测加入后按方法过滤保住同一件事——getStatus 恰一次；向导探测 ≤1（防将来
+  // 退化成每帧一次）。
+  assert.equal(calls.filter((c) => c.method === "getStatus").length, 1, "exactly one getStatus RPC");
+  assert.ok(calls.filter((c) => c.method === "onboardingPreview").length <= 1, "onboarding state probe at most once");
 
   let threw = null;
   try { tree = renderStatus(); } catch (error) { threw = error; }
@@ -2629,7 +2690,7 @@ function wireRoundTrip(error) {
   return JSON.parse(JSON.stringify(envelope)); // gateway → JSON over the wire
 }
 
-const RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
+const RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"];
 const NOOP_MANAGEMENT = () => Object.fromEntries(RPC_METHODS.map((m) => [m, async () => ({})]));
 const REVIEW_PAYLOAD = { candidateId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", decision: "reviewed", expectedQueueRevision: 5, operationId: "op-1" };
 

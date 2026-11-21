@@ -67,10 +67,11 @@ async function setup(t) {
 
 // ── protocol（纯 JSON 层）────────────────────────────────────
 
-test("protocol：11 个方法全覆盖（10 + destroyData，0.4 S6）；闭包拒绝未知键；queueRevision/planDigest/operationId 规则", () => {
+test("protocol：14 个方法全覆盖（11 + 0.5 批次 4 C 线整理向导扩展：onboardingPreview/Apply/Mark）；闭包拒绝未知键；queueRevision/planDigest/operationId 规则", () => {
   assert.deepEqual([...MANAGEMENT_METHOD_NAMES].sort(), [
     "analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView",
-    "getStatus", "getTimeline", "listCandidates", "previewPlan", "reviewCandidate",
+    "getStatus", "getTimeline", "listCandidates", "onboardingApply", "onboardingMark",
+    "onboardingPreview", "previewPlan", "reviewCandidate",
   ].sort());
   for (const name of MANAGEMENT_METHOD_NAMES) {
     assert.ok(MANAGEMENT_METHODS[name].inputSchema);
@@ -2247,10 +2248,12 @@ test("S7 protocol：getGraph 输入新增可选 level/cluster；非法 level 被
       `应拒绝：${JSON.stringify(bad)}`,
     );
   }
-  // wire 方法清单：S6 并入后为 11（destroyData 第 11 位）；S7 只给 getGraph 加可选字段。
+  // wire 方法清单：S6 并入后为 11（destroyData 第 11 位）；0.5 批次 4 C 线整理向导扩展 14
+  //（onboardingPreview/Apply/Mark 追加在 destroyData 之后）。
   assert.deepEqual([...MANAGEMENT_METHOD_NAMES].sort(), [
     "analyze", "destroyData", "executePlan", "executeTool", "getGraph", "getMemoryView",
-    "getStatus", "getTimeline", "listCandidates", "previewPlan", "reviewCandidate",
+    "getStatus", "getTimeline", "listCandidates", "onboardingApply", "onboardingMark",
+    "onboardingPreview", "previewPlan", "reviewCandidate",
   ].sort());
 
   // degree 出线（#224c65）：输出契约必须先声明——getGraphNodeItem 是

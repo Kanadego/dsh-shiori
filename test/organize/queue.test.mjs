@@ -1233,3 +1233,53 @@ test('digestPlan/validatePlanShape：接受 archive-topic 形状；形状反例�
     candidate, records, proposal: { kind: 'archive-topic' },
   }));
 });
+
+// ---------------------------------------------------------------------------
+// 0.5 批次 4 · C 线追加：整理向导 proposalHash 交叉验证
+//
+// onboarding.mjs（同槽位新模块）的 proposalHash 用与本文件 digest2 同公式的
+// 稳定序列化（键递归排序、数组保序）+ sha256。这里用本文件独立实现的
+// canonical/stable2/digest2 对同一提案重算哈希并交叉比对（与既有 digest 交叉
+// 验证同口径）；内容变化时两套实现同变（哈希不再相等），防止一边漂移。
+// ---------------------------------------------------------------------------
+
+test('0.5 批次 4 C 线追加：proposalHash 与本文件独立 canonical/digest2 交叉一致；内容变化两套实现同变', async () => {
+  const { proposalHash } = await import('../../src/organize/onboarding.mjs');
+  const proposal = {
+    groups: [
+      { key: 'comfy', title: 'Comfy', members: ['c2', 'c1'], defaultRetention: 'historical', overrides: { c2: 'standing' } },
+      { key: 'shiori', title: 'Shiori', members: ['s1'], defaultRetention: 'standing' },
+    ],
+    ungrouped: ['m1'],
+  };
+  // 独立规范化：组按 key 序、成员去重升序、overrides 键序稳定（空 overrides 丢弃）。
+  const canonical = {
+    groups: [...proposal.groups]
+      .sort((a, b) => (a.key < b.key ? -1 : 1))
+      .map((g) => {
+        const overrides = g.overrides ?? {};
+        const keys = Object.keys(overrides).sort();
+        return {
+          key: g.key,
+          title: g.title,
+          members: [...new Set(g.members)].sort(),
+          defaultRetention: g.defaultRetention,
+          ...(keys.length > 0 ? { overrides: Object.fromEntries(keys.map((k) => [k, overrides[k]])) } : {}),
+        };
+      }),
+    ungrouped: [...new Set(proposal.ungrouped)].sort(),
+  };
+  const expected = digest2({ version: 1, groups: canonical.groups, ungrouped: canonical.ungrouped });
+  assert.equal(proposalHash(proposal), expected, '两套稳定序列化实现同哈希');
+  // 排列无关：组/成员顺序打乱后仍同哈希。
+  const shuffled = {
+    groups: [proposal.groups[1], proposal.groups[0]],
+    ungrouped: proposal.ungrouped,
+  };
+  shuffled.groups[0] = { ...shuffled.groups[0], members: [...shuffled.groups[0].members].reverse() };
+  assert.equal(proposalHash(shuffled), expected, '排列无关同哈希');
+  // 内容变化：两套实现同变。
+  const mutated = structuredClone(proposal);
+  mutated.groups[0].defaultRetention = 'standing';
+  assert.notEqual(proposalHash(mutated), expected, '档位变化 → 哈希变');
+});

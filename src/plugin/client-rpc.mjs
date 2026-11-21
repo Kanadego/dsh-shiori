@@ -42,13 +42,17 @@ export const RPC_SERVICE_KEY = "shiori.panel";
 
 // 冻结契约的方法清单（CONTRACTS §6）。若 P 的 MANAGEMENT_METHODS 与之不一致，
 // 挂载时立刻失败并指出差异——契约问题上报 owner，不静默兼容。
-const CONTRACT_METHODS = Object.freeze([
+// 0.5 批次 4 · C 线契约扩展：11 → 14（整理向导三方法，评审拍板独立方法、
+// previewPlan/executePlan 不动；顺序与 protocol.MANAGEMENT_METHODS 同序同字）。
+export const CONTRACT_METHODS = Object.freeze([
   "getStatus", "getMemoryView", "getGraph", "executeTool",
   "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan",
   "getTimeline", "destroyData",
+  "onboardingPreview", "onboardingApply", "onboardingMark",
 ]);
 
-function methodSetMismatch(actual, expected) {
+/** 方法名集合差异摘要（missing/unexpected；controller 的 DRAINED 断言复用）。 */
+export function methodSetMismatch(actual, expected) {
   const left = new Set(actual);
   const right = new Set(expected);
   const missing = [...right].filter((name) => !left.has(name));
@@ -258,6 +262,20 @@ class ShioriPanelService extends TypertRemoteService {
     return dispatchShioriCall(this, "destroyData", session, payload, signal);
   }
 
+  // 0.5 批次 4 · C 线：整理向导三方法（wire 12/13/14 契约扩展；独立方法、
+  // previewPlan/executePlan 不动——评审拍板见子任务问答）。
+  onboardingPreview(session, payload, signal) {
+    return dispatchShioriCall(this, "onboardingPreview", session, payload, signal);
+  }
+
+  onboardingApply(session, payload, signal) {
+    return dispatchShioriCall(this, "onboardingApply", session, payload, signal);
+  }
+
+  onboardingMark(session, payload, signal) {
+    return dispatchShioriCall(this, "onboardingMark", session, payload, signal);
+  }
+
   async stop() {
     return stopShioriPanelService(this);
   }
@@ -267,7 +285,8 @@ class ShioriPanelService extends TypertRemoteService {
   }
 }
 
-// 模块加载即打 Remote 标记：Gateway 由此发现全部端点（11 个：原 10 + destroyData）。
+// 模块加载即打 Remote 标记：Gateway 由此发现全部端点（14 个：原 10 + destroyData
+// + 0.5 批次 4 C 线整理向导三方法 onboardingPreview/Apply/Mark）。
 for (const method of CONTRACT_METHODS) applyRemoteMarker(ShioriPanelService, method);
 
 /**

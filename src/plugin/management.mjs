@@ -24,13 +24,22 @@ import {
   createCandidateQueue, buildDraft as buildOrganizeDraft, buildArchiveTopicPlan,
   buildForgetArchiveDiff, listQueue,
 } from "../organize/queue.mjs";
+import {
+  needsOnboarding as needsOnboardingPure,
+  proposeGroups as proposeGroupsPure,
+  proposalHash as computeProposalHash,
+  validateProposal as validateOnboardingProposal,
+  assertProposalCoversTopics,
+} from "../organize/onboarding.mjs";
 import { digestPlan as organizeDigestPlan, createOrganizerExecutor } from "../organize/executor.mjs";
 import { analyzeForgetting } from "../forgetting/decay.mjs";
 import { createForgetExecutor } from "../forgetting/executor.mjs";
+import { renderL1 } from "../core/render.mjs";
 import { validateManagementPayload } from "./protocol.mjs";
 import { coreBudgetsOf } from "./config.mjs";
 import { createTimelineReader } from "../timeline/index.mjs";
 import { purgeDataRoot, PurgeSafetyError } from "../storage/purge.mjs";
+import { readGroups } from "../storage/groups.mjs";
 import { pinScope, sessionEvidenceFromRpc, rejectIdentityFields } from "./scope.mjs";
 
 const MAIN_SESSION_ACTOR = "main-session";
@@ -256,6 +265,192 @@ export function createManagement(deps) {
       return createCandidateQueue({ scopeId });
     }
     return createCandidateQueue({ scopeId, snapshot });
+  }
+
+  // ── 0.5 批次 4 · C 线：整理向导（onboardingPreview/Apply/Mark 共用）────────
+  //
+  // 评审拍板（问答 q-1d92bbf96c2eb618）：独立三方法，previewPlan/executePlan
+  // 不动；写通道唯一 = service.mutate 单事务（组清单 + topic 元数据），不碰
+  // executor / 不新建旁路存储。预览恒零写入（只读 listTopics/groups/core 视图
+  // + renderL1 纯函数现算），应用前绝不自动执行。
+  //
+  // 授权语义（照 executePlan 评估，评审要求显式交代不做静默省略）：executePlan
+  // 的 registerGrant 存在是因为执行器是多步异步过程（多次 authorize 回调、
+  // 重试与 merge 退休窗口、signal 断连撤销）。onboardingApply 的唯一写是
+  // service.mutate 的一次原子 store 事务（journal + staging + 原子替换，失败
+  // 整体回滚）——不存在「授权已给、执行跨多个可撤销窗口」的形态，grant 注册
+  // 无可守护的中间态；等价保障 = 调用前 signal.aborted 前置核验（B-abort 同款）
+  // + mutate 自身事务性 + hash 内容绑定。trustedContext 仍由 Q 层 owner 校验。
+
+  /** 组清单读取（读路径绝不写盘；缺失=未初始化 → 空清单 + revision null）。 */
+  async function readGroupsOrEmpty(scopeId) {
+    try {
+      const { revision, data } = await readGroups({ dataRoot: settings.dataRoot, scopeId });
+      return { revision, groups: data.groups };
+    } catch (error) {
+      if (error?.code === "NOT_FOUND") return { revision: null, groups: [] };
+      throw error;
+    }
+  }
+
+  /** 向导作用人群：当前 scope 可见 topic 的未归档行（归档=冷内容，不进向导）。 */
+  async function onboardingTopicsFor(scopeId, agent) {
+    const resources = await resourcesFor(scopeId, agent);
+    const rows = await resources.service.listTopics();
+    const unarchived = (Array.isArray(rows) ? rows : []).filter((row) => row?.archived !== true);
+    return { resources, unarchived };
+  }
+
+  /** 提案生效后的每 topic 有效 retention：override > 组默认；未归组 topic 不在表内。 */
+  function effectiveRetentionMap(canonical) {
+    const byTopic = new Map();
+    for (const group of canonical.groups) {
+      for (const member of group.members) {
+        const override = group.overrides !== undefined ? group.overrides[member] : undefined;
+        byTopic.set(member, {
+          retention: override ?? group.defaultRetention,
+          source: override !== undefined ? "override" : "group",
+        });
+      }
+    }
+    return byTopic;
+  }
+
+  /** 稳定序列化（diff 展示用；与 organize 槽位 stable 同公式：键排序、数组保序）。 */
+  function stableForDiff(value) {
+    return JSON.stringify(value, (key, v) => {
+      if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+        return Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]]));
+      }
+      return v;
+    });
+  }
+
+  /**
+   * 预览装配（纯只读，零写入）：组目录投影（renderL1 现算「目标组布局」）、
+   * historical 清单（组默认或 override 生效者）、冷却候选（同集合平铺）、
+   * 展示 diff（groups.json 整表：当前清单 → 现有清单 + 新组；逐 topic 元数据）。
+   *
+   * R4（评审 P2-2）：生产 L1 渲染（service readCoreView）不传 groups——组行
+   * 尚未接入生产 L1。投影改为「既有组（含 0 成员、带原 summary）+ 提案组」的
+   * 组目录视图，客户端文案如实标注「目标组布局（0.5 B 线组目录，尚未接入 L1）」，
+   * 不再冒称「应用后 L1」；成员口径与 group_manage list 的组行计数一致
+   * （主组、未归档；memory_read 组目录含任意挂载与 archived，是另一口径）。
+   */
+  function buildOnboardingPreview(canonical, unarchived, currentGroups, coreText) {
+    const effective = effectiveRetentionMap(canonical);
+    const groupByMember = new Map();
+    for (const group of canonical.groups) {
+      for (const member of group.members) groupByMember.set(member, group.key);
+    }
+    const rowByKey = new Map(unarchived.map((row) => [row.key, row]));
+    // 假想 topic 行：挂组 + 生效 retention（renderL1 校验完整 topic 形状，
+    // 逐字沿用 listTopics 行的 key/title/summary/scopeId/revision/updated）。
+    const hypothetical = unarchived.map((row) => {
+      const groupKey = groupByMember.get(row.key);
+      const nextGroup = groupKey !== undefined ? [groupKey] : (Array.isArray(row.group) ? row.group : []);
+      return {
+        ...row,
+        group: nextGroup,
+        retention: effective.get(row.key)?.retention ?? row.retention,
+      };
+    });
+    // 假想组投影（renderL1 groups 形状）：members 只带 key/summary/pinned/archived。
+    // 既有组先入投影（R4：0 成员也要保留行，summary 用原值；成员按主组挂载
+    // row.group[0] === key 解析——与面板「组行计数只认主组」同口径），提案组
+    // 追加其后；按 key 去重（既有组优先）——完成态对旧提案重复预览时提案组
+    // 已在清单里，重复行会让 renderGroupLines 拒绝整个渲染。
+    const groupsProjection = [];
+    const seenProjectionKeys = new Set();
+    for (const entry of currentGroups) {
+      if (seenProjectionKeys.has(entry.key)) continue;
+      seenProjectionKeys.add(entry.key);
+      groupsProjection.push({
+        key: entry.key,
+        title: entry.title,
+        summary: entry.summary ?? "",
+        members: unarchived
+          .filter((row) => Array.isArray(row.group) && row.group[0] === entry.key)
+          .map((row) => ({
+            key: row.key,
+            summary: row.summary ?? "",
+            pinned: row.pinned === true,
+            archived: false,
+          })),
+      });
+    }
+    for (const group of canonical.groups) {
+      if (seenProjectionKeys.has(group.key)) continue;
+      seenProjectionKeys.add(group.key);
+      groupsProjection.push({
+        key: group.key,
+        title: group.title,
+        summary: "",
+        members: group.members.map((member) => {
+          const row = rowByKey.get(member);
+          return {
+            key: member,
+            summary: row?.summary ?? "",
+            pinned: row?.pinned === true,
+            archived: false,
+          };
+        }),
+      });
+    }
+    const l1Preview = renderL1({ coreText, topics: hypothetical, groups: groupsProjection }).text;
+
+    // historical / 冷却候选：生效 retention = historical 的 topic（key 码点序）。
+    const historical = unarchived
+      .filter((row) => effective.get(row.key)?.retention === "historical")
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+      .map((row) => ({ key: row.key, title: row.title, source: effective.get(row.key).source }));
+    const coolingCandidates = historical.map((row) => ({ key: row.key, title: row.title }));
+
+    // 展示 diff：groups.json 整表（现有条目 → 现有条目 + 新组）+ 逐 topic 元数据。
+    // 新组条目与 apply 同形状（order 按 canonical 序 10/20/30；summary 空）。
+    const diff = [];
+    const topicChanges = [];
+    for (const group of canonical.groups) {
+      for (const member of group.members) {
+        const row = rowByKey.get(member);
+        const override = group.overrides !== undefined ? group.overrides[member] : undefined;
+        const before = { group: Array.isArray(row?.group) ? row.group : [], retention: row?.retention ?? "standing" };
+        const after = {
+          group: [group.key],
+          retention: override !== undefined ? override : (row?.retention ?? "standing"),
+        };
+        if (override === undefined && group.defaultRetention === "historical") {
+          // 组默认 historical 走组条目策略（resolveRetention），topic 文件不重复落；
+          // diff 如实标注生效值来自组策略。
+          after.retentionVia = `group:${group.key}`;
+        }
+        topicChanges.push({ path: `topic:${member}`, oldText: stableForDiff(before), newText: stableForDiff(after) });
+      }
+    }
+    diff.push({
+      path: "groups.json",
+      oldText: stableForDiff(currentGroups),
+      newText: stableForDiff([...currentGroups, ...canonical.groups.map((group, index) => ({
+        key: group.key,
+        title: group.title,
+        summary: "",
+        order: (index + 1) * 10,
+        ...(group.defaultRetention === "historical" ? { retention: "historical" } : {}),
+      }))]),
+    });
+    for (const entry of topicChanges) diff.push(entry);
+
+    const mountedTopics = topicChanges.length;
+    const historicalCount = historical.length;
+    return {
+      hash: computeProposalHash(canonical),
+      diff,
+      changedItems: canonical.groups.length + mountedTopics,
+      summary: `向导应用：新建 ${canonical.groups.length} 个组、挂载 ${mountedTopics} 个 topic、${historicalCount} 条标 historical（进冷却候选）`,
+      l1Preview,
+      historical,
+      coolingCandidates,
+    };
   }
 
   // ── F4 时间线（数据层在 src/timeline；本门面只固定可信 root 与 scope）──────
@@ -1204,6 +1399,241 @@ export function createManagement(deps) {
         }
       }
       return result;
+    },
+
+    /**
+     * 0.5 批次 4 · C 线（wire 12）：整理向导状态 + 提案预览。两种模式零写入：
+     * - 无参（状态模式）：needsOnboarding 五态判定 + 纯规则提案（proposeGroups）
+     *   + 标记位回显；未触发时 proposal 为 null。
+     * - {proposal}（预览模式）：按用户编辑后的提案出「目标组布局投影 /
+     *   historical 清单 / 冷却候选 / 展示 diff」——只读 listTopics/groups/
+     *   core 视图 + renderL1 纯函数，不落 planStore、不碰标记位、不写盘。
+     * 向导人群恒为未归档 topic（归档=冷内容，不参与聚类与挂载）。
+     */
+    async onboardingPreview(trustedContext, payload) {
+      const p = payload ?? {};
+      validateManagementPayload("onboardingPreview", p);
+      requireActiveDataAccess("onboardingPreview");
+      const scope = await scopeFromTrustedContext(trustedContext);
+      const { resources, unarchived } = await onboardingTopicsFor(scope.scopeId, sessionEvidenceFromRpc(trustedContext).agent);
+      const groupsRead = await readGroupsOrEmpty(scope.scopeId);
+      const flagRead = await state.onboardingStore.read();
+      const diagnosticsOut = { groupsRevision: groupsRead.revision };
+      if (flagRead.error !== null) diagnosticsOut.flagError = flagRead.error;
+
+      const verdict = needsOnboardingPure({
+        topics: unarchived,
+        groups: groupsRead.groups,
+        onboarding: flagRead.flag,
+      });
+
+      if (p.proposal !== undefined) {
+        // 预览模式：成员完整性与 overrides 深层校验 fail-closed（对照组 snapshot
+        // 是本次现读的未归档行——topic 集合与提案不符即 INVALID_INPUT，面板刷新重提）。
+        const canonical = validateOnboardingProposal(p.proposal);
+        assertProposalCoversTopics(canonical, unarchived);
+        const coreView = await resources.service.readCoreView();
+        return {
+          scope: scope.scopeId,
+          needed: verdict.needed,
+          reason: verdict.reason,
+          markedKind: verdict.markedKind,
+          counts: {
+            topics: unarchived.length,
+            groups: groupsRead.groups.length,
+            historical: unarchived.filter((row) => row.retention === "historical").length,
+            proposed: 0,
+          },
+          flag: flagRead.flag,
+          proposal: null,
+          preview: buildOnboardingPreview(canonical, unarchived, groupsRead.groups, coreView.body),
+          diagnostics: diagnosticsOut,
+        };
+      }
+
+      // 状态模式：纯规则提案（仅 needed 时）；takenKeys 预置既有组 key——提案
+      // key 恒不与既有组撞名（R5①：面板改不了 key，撞名即死路，提议源头规避）；
+      // 哈希供面板在「以后再说」时随 onboardingMark 回传，与标记位比对。
+      const proposed = verdict.needed ? proposeGroupsPure(unarchived, { takenKeys: groupsRead.groups.map((g) => g.key) }) : [];
+      return {
+        scope: scope.scopeId,
+        needed: verdict.needed,
+        reason: verdict.reason,
+        markedKind: verdict.markedKind,
+        counts: {
+          topics: unarchived.length,
+          groups: groupsRead.groups.length,
+          historical: unarchived.filter((row) => row.retention === "historical").length,
+          proposed: proposed.length,
+        },
+        flag: flagRead.flag,
+        proposal: proposed.length > 0
+          ? { hash: computeProposalHash({ groups: proposed, ungrouped: [] }), groups: proposed, ungrouped: [] }
+          : null,
+        preview: null,
+        diagnostics: diagnosticsOut,
+      };
+    },
+
+    /**
+     * 0.5 批次 4 · C 线（wire 13）：确认应用。硬闸（评审细化口径）：
+     * confirmed 显式 true（schema）→ 服务端重算 proposalHash 与 payload.hash
+     * 绑定（不符 REVISION_CONFLICT）→ 已 completed 拒（INVALID_STATE，一次性）
+     * → signal.aborted 前置核验 → service.mutate 单事务（组清单 CAS + topic
+     * 元数据；operationId 幂等由 store journal 层承担）→ completedAt 写盘
+     * （失败只诊断不阻塞，重试同 operationId 由 mutate 幂等收尾）。
+     */
+    async onboardingApply(trustedContext, payload) {
+      validateManagementPayload("onboardingApply", payload);
+      requireConfigured();
+      requireStarted();
+      requireActive("onboardingApply");
+      assertHostWritable("onboardingApply");
+      const scope = await scopeFromTrustedContext(trustedContext);
+      if (trustedContext.signal?.aborted === true) {
+        fail("AUTHORIZATION_REQUIRED", "onboardingApply cancelled before execution", { scopeId: scope.scopeId });
+      }
+      const { resources, unarchived } = await onboardingTopicsFor(scope.scopeId, sessionEvidenceFromRpc(trustedContext).agent);
+      const canonical = validateOnboardingProposal(payload.proposal);
+      assertProposalCoversTopics(canonical, unarchived);
+      const recomputedHash = computeProposalHash(canonical);
+      if (recomputedHash !== payload.hash) {
+        fail("REVISION_CONFLICT", "hash does not match the proposal content (approval must bind content)", {
+          expectedHash: recomputedHash,
+        });
+      }
+      const flagRead = await state.onboardingStore.read();
+      if (flagRead.flag?.completedAt) {
+        fail("INVALID_STATE", `onboarding wizard already completed at ${flagRead.flag.completedAt}（一次性；如需重整请用面板分组管理或重新初始化 stateRoot）`, {
+          completedAt: flagRead.flag.completedAt,
+        });
+      }
+
+      const groupsRead = await readGroupsOrEmpty(scope.scopeId);
+      // R9②/P2-8②：应用前复核 needsOnboarding 门槛，守住「≥5 且首启」语义——
+      // 手造 proposal 经 RPC 对 3 个 topic 的 scope 建组在这里被拒（面板卡片本
+      // 就只在 needed 时出现，这是服务端硬闸）。完成态已在上方一次性硬闸拦下，
+      // dismissed 需先「重新开始」，grouped/has-historical 说明用户已自己动手。
+      const verdict = needsOnboardingPure({
+        topics: unarchived,
+        groups: groupsRead.groups,
+        onboarding: flagRead.flag,
+      });
+      if (verdict.needed !== true) {
+        fail("INVALID_STATE", `onboarding wizard is not applicable now (reason=${verdict.reason}${verdict.markedKind ? `/${verdict.markedKind}` : ""})；应用只对「未归组、无 historical、topic≥5 且未标记」的 scope 开放`, {
+          reason: verdict.reason,
+          markedKind: verdict.markedKind,
+        });
+      }
+      // 新组条目：key 碰撞 fail-closed（R5①：提案侧已用 takenKeys 规避既有
+      // 组 key，此处是并发/手造提案的兜底硬闸——文案给用户可执行出路）；order
+      // 按规范化 key 序 10/20/30…（确定性）；summary 空串（面板可后改）；组默认
+      // historical 写进组条目 retention（resolveRetention：topic 显式值覆盖组默认）。
+      const existingKeys = new Set(groupsRead.groups.map((g) => g.key));
+      const newEntries = canonical.groups.map((group, index) => {
+        if (existingKeys.has(group.key)) {
+          fail("INVALID_INPUT", `组 key "${group.key}" 已存在于组清单（请在向导里跳过该组，或到分组管理里处理同名组后重试）`, {
+            key: group.key,
+            known: [...existingKeys].sort(),
+          });
+        }
+        const entry = { key: group.key, title: group.title, summary: "", order: (index + 1) * 10 };
+        if (group.defaultRetention === "historical") entry.retention = "historical";
+        return entry;
+      });
+      const nextGroups = [...groupsRead.groups, ...newEntries];
+
+      // topic changes：仅组成员（ungrouped 保持现状不动）；group 挂载必写；
+      // retention 仅 override 显式写（组默认走组条目策略，topic 文件不重复落
+      // standing——避免组策略后续调整时 topic 显式值反而盖不住的矛盾）。
+      const rowByKey = new Map(unarchived.map((row) => [row.key, row]));
+      const changes = [];
+      for (const group of canonical.groups) {
+        for (const member of group.members) {
+          const row = rowByKey.get(member);
+          const topicMeta = { group: [group.key] };
+          const override = group.overrides !== undefined ? group.overrides[member] : undefined;
+          if (override !== undefined) topicMeta.retention = override;
+          changes.push({
+            kind: "topic",
+            key: member,
+            expectedRevision: row.revision,
+            text: row.body ?? "",
+            topic: topicMeta,
+          });
+        }
+      }
+      const mutateResult = await resources.service.mutate({
+        operationId: payload.operationId,
+        changes,
+        groups: { expectedRevision: groupsRead.revision, groups: nextGroups },
+      });
+
+      // 应用成功 → completedAt + proposalHash。写盘失败只诊断不阻塞（§11.2.7）：
+      // 数据已落地；重试同 operationId 时 mutate journal 幂等返回原回执，completedAt
+      // 由该次重试补写——warning 如实说明，不把成功伪装成失败。
+      const completedAt = nowIso();
+      const flagResult = await state.onboardingStore.complete(completedAt, recomputedHash);
+      const historicalCount = canonical.groups.reduce((n, group) => {
+        for (const member of group.members) {
+          const override = group.overrides !== undefined ? group.overrides[member] : undefined;
+          if ((override ?? group.defaultRetention) === "historical") n += 1;
+        }
+        return n;
+      }, 0);
+      const out = {
+        applied: true,
+        operationId: payload.operationId,
+        hash: recomputedHash,
+        createdGroups: newEntries.length,
+        mountedTopics: changes.length,
+        historicalCount,
+        result: { changes: mutateResult?.changes ?? [] },
+        completedAt,
+      };
+      if (flagResult.ok !== true) {
+        // R4（评审二轮）：文案只陈述事实，不承诺 UI 做不到的事——应用后卡片
+        // 收起（grouped），面板没有「重试同一请求」的入口；completedAt 缺失的
+        // 后果（一次性闸门以此为准）如实说明即可。
+        out.warning = `组与 retention 已写入；onboarding.json 写盘失败（${flagResult.error}）——completedAt 未记录，向导完成标记缺失（不影响已写入的数据）`;
+      } else if (flagResult.healed === true) {
+        out.warning = `检测到 onboarding.json 损坏，已备份为 ${flagResult.healedDetail} 并重建标记位（completedAt 已写入）`;
+      }
+      return out;
+    },
+
+    /**
+     * 0.5 批次 4 · C 线（wire 14）：向导标记位维护。「以后再说」写 dismissedAt
+     * （可选携带当前提案 hash 供预览与标记位比对）；「重新开始」清 dismissedAt。
+     * 只触 stateRoot/onboarding.json（scope 无关），不要求 started；写盘失败
+     * 只诊断不阻塞（warning 出有界摘要）。
+     */
+    async onboardingMark(trustedContext, payload) {
+      validateManagementPayload("onboardingMark", payload);
+      requireConfigured();
+      assertHostWritable("onboardingMark");
+      // healed（R6②/P2-5）：坏 JSON 自愈成功也如实出 warning（备份文件名），
+      // 不把「悄悄重建」伪装成无事发生。
+      if (payload.dismiss === true) {
+        const markResult = await state.onboardingStore.dismiss(nowIso(), payload.hash ?? null);
+        const flagRead = await state.onboardingStore.read();
+        return {
+          action: "dismiss",
+          flag: flagRead.flag,
+          warning: markResult.ok !== true
+            ? `dismissedAt 写盘失败（下次仍会提示）：${markResult.error}`
+            : (markResult.healed === true ? `检测到 onboarding.json 损坏，已备份为 ${markResult.healedDetail} 并重建标记位` : null),
+        };
+      }
+      const restartResult = await state.onboardingStore.restart();
+      const flagRead = await state.onboardingStore.read();
+      return {
+        action: "restart",
+        flag: flagRead.flag,
+        warning: restartResult.ok !== true
+          ? `dismissedAt 清除失败（向导保持隐藏态，可重试）：${restartResult.error}`
+          : (restartResult.healed === true ? `检测到 onboarding.json 损坏，已备份为 ${restartResult.healedDetail} 并重建标记位` : null),
+      };
     },
   };
 

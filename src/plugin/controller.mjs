@@ -78,6 +78,7 @@ import { coreBudgetsOf, probeRootsWritable } from "./config.mjs";
 import { createStateStore } from "./state.mjs";
 import { createDshBindings, detectCompletePromptSections, detectCompleteSectionsForScope } from "./bindings.mjs";
 import { createManagement } from "./management.mjs";
+import { CONTRACT_METHODS, methodSetMismatch } from "./client-rpc.mjs";
 import { registerShioriTypert, readOptionalCordisService } from "./typert-descriptors.mjs";
 import {
   validateControllerSettings, pinScope, sessionEvidenceFromExec,
@@ -1789,11 +1790,24 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   // M4-drain：management 数据方法全部纳入在途排空——stop 等待收场（带上限），
   // 不得在 store 关闭后让在途 RPC 撞 INVALID_STATE。getStatus 为纯内存投影，
   // 不占在途。
+  // 0.5 批次 4 · C 线：契约扩展 11 → 14（+ 整理向导 onboardingPreview/Apply/Mark；
+  // 评审拍板独立三方法，previewPlan/executePlan 不动）。
   const DRAINED_MANAGEMENT_METHODS = [
     "getMemoryView", "getGraph", "listCandidates", "analyze",
     "reviewCandidate", "previewPlan", "executePlan", "executeTool", "getTimeline",
     "destroyData",
+    "onboardingPreview", "onboardingApply", "onboardingMark",
   ];
+  // 三处清单逐字一致断言（评审要求，错位即启动失败）：CONTRACT_METHODS（Q 挂载
+  // 闸已断言它与 protocol.MANAGEMENT_METHODS 集合一致）去掉纯内存 getStatus 后
+  // 必须与 DRAINED 逐字同集合——新增管理方法漏进任何一处都在这里显式炸出。
+  const drainedMismatch = methodSetMismatch(
+    DRAINED_MANAGEMENT_METHODS,
+    CONTRACT_METHODS.filter((name) => name !== "getStatus"),
+  );
+  if (drainedMismatch) {
+    throw new Error(`shiori management drain list out of sync with the frozen wire contract: ${drainedMismatch}`);
+  }
   const management = { ...managementFacade };
   for (const name of DRAINED_MANAGEMENT_METHODS) {
     const method = managementFacade[name];

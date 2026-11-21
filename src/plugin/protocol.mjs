@@ -287,6 +287,163 @@ const getGraphClusterHeader = {
 };
 
 // ─────────────────────────────────────────────────────────────
+// 0.5 批次 4 · C 线：整理向导（首启引导 + 纯规则候选组）
+//
+// wire 11 → 14 的契约扩展（评审拍板：独立三方法，不动 previewPlan/executePlan；
+// 见子任务问答 q-1d92bbf96c2eb618）。语义：
+// - onboardingPreview：状态 + 规则提案（无参，零写入）/ 用户编辑后的提案预览
+//   （带 proposal，零写入——L1 投影 / historical 清单 / 冷却候选 / diff）；
+// - onboardingApply：确认应用。confirmed 必须显式 true；hash 与服务端重算的
+//   proposalHash 绑定（不符 REVISION_CONFLICT）；已 completed 拒（INVALID_STATE，
+//   一次性）；写入走 service.mutate 单事务（组清单 + topic 元数据）；
+// - onboardingMark：「以后再说」（dismissedAt）/「重新开始」（清 dismissedAt）。
+//
+// 提案形状的深层校验（成员不重不漏、overrides 键 ⊆ 组成员、值级枚举）由
+// src/organize/onboarding.mjs 的 validateProposal / assertProposalCoversTopics
+// 在 management 层 fail-closed 执行；wire 层的 overrides 放行未知键——本文件的
+// DSH 子集校验器不支持 additionalProperties 值约束（同 executeTool.args 口径），
+// 不把实现层校验伪装进 schema。
+// ─────────────────────────────────────────────────────────────
+
+// 向导提案的组条目（onboardingPreview 输入 / 输出、onboardingApply 输入共用）。
+const onboardingProposalGroupItem = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    key: nonEmptyString,
+    title: nonEmptyString,
+    members: { type: "array", minItems: 1, items: nonEmptyString },
+    defaultRetention: { enum: ["standing", "historical"] },
+    // 逐条 retention 调整（可选）：键 = topic key，值 = retention 枚举；键/值级
+    // 校验在 validateProposal（见上注：wire 层放行未知键，不复制实现层校验）。
+    overrides: { type: "object", additionalProperties: true },
+  },
+  required: ["key", "title", "members", "defaultRetention"],
+};
+
+// 向导提案整体（用户确认/编辑后的形态；groups 1..6 的数量与成员完整性同样
+// 由 validateProposal 执行，wire 只约束形状）。
+const onboardingProposalShape = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    groups: { type: "array", minItems: 1, maxItems: 6, items: onboardingProposalGroupItem },
+    ungrouped: { type: "array", items: nonEmptyString },
+  },
+  required: ["groups"],
+};
+
+// stateRoot/onboarding.json 标记位的 wire 形状（读取侧归一化后出线；损坏/
+// 版本不识别时整块为 null，诊断摘要进 diagnostics）。
+const onboardingFlagShape = {
+  oneOf: [
+    { type: "null" },
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        version: { type: "integer" },
+        dismissedAt: { oneOf: [nonEmptyString, { type: "null" }] },
+        completedAt: { oneOf: [nonEmptyString, { type: "null" }] },
+        proposalHash: { oneOf: [nonEmptyString, { type: "null" }] },
+      },
+      required: ["version", "dismissedAt", "completedAt", "proposalHash"],
+    },
+  ],
+};
+
+// onboardingPreview 的输出（状态模式与预览模式同形状：预览模式 proposal/preview
+// 非空、状态模式 preview 恒 null；proposal 在不需要触发或聚类无产出时为 null）。
+const onboardingStatusShape = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    scope: nonEmptyString,
+    needed: { type: "boolean" },
+    reason: { enum: ["marked", "grouped", "has-historical", "too-few-topics", "needed"] },
+    markedKind: { oneOf: [{ enum: ["completed", "dismissed"] }, { type: "null" }] },
+    counts: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        topics: { type: "integer", minimum: 0 },
+        groups: { type: "integer", minimum: 0 },
+        historical: { type: "integer", minimum: 0 },
+        proposed: { type: "integer", minimum: 0 },
+      },
+      required: ["topics", "groups", "historical", "proposed"],
+    },
+    flag: onboardingFlagShape,
+    proposal: {
+      oneOf: [
+        { type: "null" },
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            hash: planDigest,
+            groups: { type: "array", items: onboardingProposalGroupItem },
+            ungrouped: { type: "array", items: nonEmptyString },
+          },
+          required: ["hash", "groups", "ungrouped"],
+        },
+      ],
+    },
+    preview: {
+      oneOf: [
+        { type: "null" },
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            hash: planDigest,
+            diff: { type: "array", items: diffEntry },
+            changedItems: { type: "integer", minimum: 0 },
+            summary: { type: "string" },
+            // 目标组布局投影（renderL1 纯函数现算，零写入；生产 L1 渲染尚
+            // 不传 groups，客户端文案如实标注，见 0.5 批次 4 评审二轮 R2）。
+            l1Preview: { type: "string" },
+            // 将被标 historical 的 topic（组默认或显式 override 生效者）。
+            historical: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  key: nonEmptyString,
+                  title: nonEmptyString,
+                  source: { enum: ["group", "override"] },
+                },
+                required: ["key", "title", "source"],
+              },
+            },
+            // 冷却候选 = historical 生效清单（温度引擎的候选人群，同集合另给
+            // 一份平铺 key/title，面板两段文案直接渲染）。
+            coolingCandidates: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  key: nonEmptyString,
+                  title: nonEmptyString,
+                },
+                required: ["key", "title"],
+              },
+            },
+          },
+          required: ["hash", "diff", "changedItems", "summary", "l1Preview", "historical", "coolingCandidates"],
+        },
+      ],
+    },
+    // 降级/诊断摘要（additionalProperties:true 块，同 getStatus.diagnostics 口径）：
+    // flagError（onboarding.json 损坏/版本不识别的有界摘要）等。无异常不出键。
+    diagnostics: { type: "object", additionalProperties: true },
+  },
+  required: ["scope", "needed", "reason", "markedKind", "counts", "flag", "proposal", "preview"],
+};
+
+// ─────────────────────────────────────────────────────────────
 // MANAGEMENT_METHODS：方法名 → {inputSchema, outputSchema}
 // ─────────────────────────────────────────────────────────────
 
@@ -688,6 +845,105 @@ export const MANAGEMENT_METHODS = Object.freeze({
         dataRoot: nonEmptyString,
       },
       required: ["deleted", "files", "bytes", "dataRoot"],
+    },
+  },
+
+  // 0.5 批次 4 · C 线整理向导（wire 12/13/14；契约扩展见本文件向导段注）。
+  // 状态 + 规则提案（无参）或编辑后提案预览（带 proposal）；两种模式零写入。
+  onboardingPreview: {
+    inputSchema: {
+      oneOf: [
+        {
+          // 状态模式：needsOnboarding 五态 + 规则提案 + 标记位回显。
+          type: "object",
+          additionalProperties: false,
+          properties: {},
+        },
+        {
+          // 预览模式：按用户编辑后的提案出预览（成员完整性/overrides 在
+          // management 层经 validateProposal + assertProposalCoversTopics 校验）。
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            proposal: onboardingProposalShape,
+          },
+          required: ["proposal"],
+        },
+      ],
+    },
+    outputSchema: onboardingStatusShape,
+  },
+
+  // 确认应用：confirmed 显式 true + hash 内容绑定 + operationId 幂等（service
+  // mutate journal 层）；已 completed 拒（一次性，管理层硬闸）。
+  onboardingApply: {
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        proposal: onboardingProposalShape,
+        hash: planDigest,
+        operationId,
+        confirmed: { enum: [true] },
+      },
+      required: ["proposal", "hash", "operationId", "confirmed"],
+    },
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        applied: { type: "boolean" },
+        operationId,
+        hash: planDigest,
+        createdGroups: { type: "integer", minimum: 0 },
+        mountedTopics: { type: "integer", minimum: 0 },
+        historicalCount: { type: "integer", minimum: 0 },
+        // service.mutate 回执摘录（store 提交协议原样片段，含 changes/groups 条目）。
+        result: { type: "object", additionalProperties: true },
+        completedAt: nonEmptyString,
+        // 标记位写盘失败时的有界诊断摘要（数据已落地、completedAt 未写——
+        // 重试同一 operationId 由 mutate journal 幂等收尾）；无异常不出键。
+        warning: { type: "string" },
+      },
+      required: ["applied", "operationId", "hash", "createdGroups", "mountedTopics", "historicalCount", "result", "completedAt"],
+    },
+  },
+
+  // 「以后再说」（写 dismissedAt，可选携带当前提案 hash 供预览与标记位比对）/
+  // 「重新开始」（清 dismissedAt）。写盘失败只诊断不阻塞：warning 出摘要。
+  onboardingMark: {
+    inputSchema: {
+      oneOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            dismiss: { enum: [true] },
+            hash: planDigest,
+          },
+          required: ["dismiss"],
+        },
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            restart: { enum: [true] },
+          },
+          required: ["restart"],
+        },
+      ],
+    },
+    outputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        action: { enum: ["dismiss", "restart"] },
+        // 写后标记位（读回的归一化形状；损坏降级时为 null）。
+        flag: onboardingFlagShape,
+        // 写盘失败的诊断摘要；成功为 null。
+        warning: { oneOf: [{ type: "string" }, { type: "null" }] },
+      },
+      required: ["action", "flag", "warning"],
     },
   },
 });

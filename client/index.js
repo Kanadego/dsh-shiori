@@ -474,7 +474,9 @@ window.__ModuleLoader__.load({
     };
 
     // ── 冻结 wire 定义（namespace shiori；参数 session→wire sessionId + payload） ──
-    var RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData"];
+    // 0.5 批次 4 · C 线：契约扩展 11 → 14（整理向导 onboardingPreview/Apply/Mark；
+    // 输出权威在服务端 P protocol，客户端按原样 JSON 透传渲染）。
+    var RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark"];
     function sessionCodec() {
       return {
         mode: "strict",
@@ -1351,6 +1353,40 @@ window.__ModuleLoader__.load({
       var enableErrorState = useState(null);
       var enableError = enableErrorState[0];
       var setEnableError = enableErrorState[1];
+      // ── 0.5 批次 4 · C 线：整理向导（首启引导 + 纯规则候选组）────────────────
+      // 新 state 一律追加在既有 state 之后（老测试 states 下标不变）。
+      // ob：null=未载入 | {loading,error,data}——onboardingPreview 状态模式 DTO
+      //（needed/reason/markedKind/counts/flag/proposal 由服务端五态判定给出）。
+      var obState = useState(null);
+      var ob = obState[0];
+      var setOb = obState[1];
+      // 向导草稿：null=未编辑 | {groups:[{key,title,members,defaultRetention,
+      // overrides,skipped}]}——由规则提案深拷贝；改名/合并/跳过/逐条 retention
+      // 全部就地改草稿，预览与应用都以草稿构建 payload。
+      var obDraftState = useState(null);
+      var obDraft = obDraftState[0];
+      var setObDraft = obDraftState[1];
+      // 预览结果：null | {loading,error,data}——预览模式 DTO（preview 块含
+      // l1Preview / historical / coolingCandidates / diff / hash）。
+      var obPreviewState = useState(null);
+      var obPreview = obPreviewState[0];
+      var setObPreview = obPreviewState[1];
+      // 应用二次确认（就地展开确认行，不弹窗）与忙/错。
+      var obConfirmState = useState(false);
+      var obConfirm = obConfirmState[0];
+      var setObConfirm = obConfirmState[1];
+      var obBusyState = useState(false);
+      var obBusy = obBusyState[0];
+      var setObBusy = obBusyState[1];
+      var obErrorState = useState(null);
+      var obError = obErrorState[0];
+      var setObError = obErrorState[1];
+      // 服务端降级告警（R8/P2-7）：apply/mark 的标记位写盘失败会随回执出 warning
+      //（数据已落地/或 dismissedAt 未写），必须渲染出来并注明可重试，否则用户
+      // 只看到「点了没反应」。
+      var obWarningState = useState(null);
+      var obWarning = obWarningState[0];
+      var setObWarning = obWarningState[1];
       // P1-1（重建轮询串会话）：当前 sessionId 的镜像 ref——渲染体同步，轮询每轮
       // 与发起时的 sid 比对。旧实现比对创建闭包里的 props.sessionId，props 对象
       // 不随重渲染更新，切换会话后比对恒等、轮询永不停止。pollAliveRef 由挂载
@@ -1375,6 +1411,230 @@ window.__ModuleLoader__.load({
         }
       };
       useEffect(function () { load(); }, [props.sessionId]);
+      // ── 0.5 批次 4 · C 线：整理向导取数与动作 ─────────────────────────────
+      // 触发口径在服务端（needsOnboarding 五态）：面板只按 needed / dismissed
+      // 决定卡片形态，不做本地推断。取数失败不占状态页版面（shadow / 未启动等
+      // 场景服务端返回 UNSUPPORTED 属预期——向导是增量引导，不出错提示框）。
+      var loadOnboarding = async function () {
+        var origin = tabGuard.mark();
+        setOb({ loading: true, error: null, data: null });
+        try {
+          var result = await props.dsh.call("onboardingPreview", props.sessionId, {});
+          if (tabGuard.isStale(origin)) return; // 会话已切换，丢弃旧响应
+          setOb({ loading: false, error: null, data: result });
+          setObDraft(obDraftOf(result && result.proposal ? result.proposal : null));
+          setObPreview(null);
+          setObConfirm(false);
+          // 注意：这里不清 obWarning——apply/mark 动作内部的刷新（loadOnboarding）
+          // 必须保留刚从回执里取出的降级告警，否则 warning 永远渲染不出来
+          //（R8/P2-7 的教训）。清空只发生在各动作入口。
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setOb({ loading: false, error: e, data: null });
+        }
+      };
+      useEffect(function () { loadOnboarding(); }, [props.sessionId]);
+      // R5（评审二轮）：切会话清降级告警——A 会话的自愈/写失败告警不得串味到
+      // B 会话（动作内刷新仍保留告警：清空只挂会话变化）。
+      useEffect(function () { setObWarning(null); }, [props.sessionId]);
+      // 规则提案 → 可编辑草稿（深拷贝；overrides 克隆为普通对象；skipped=false）。
+      var obDraftOf = function (proposal) {
+        if (!proposal || !Array.isArray(proposal.groups) || proposal.groups.length === 0) return null;
+        return {
+          groups: proposal.groups.map(function (g) {
+            return {
+              key: String(g.key),
+              title: String(g.title),
+              members: Array.isArray(g.members) ? g.members.slice() : [],
+              defaultRetention: g.defaultRetention === "historical" ? "historical" : "standing",
+              overrides: Object.assign({}, g.overrides || {}),
+              skipped: false,
+            };
+          }),
+          ungrouped: Array.isArray(proposal.ungrouped) ? proposal.ungrouped.slice() : [],
+        };
+      };
+      // 草稿 → 提案 payload：跳过组的成员并入 ungrouped；一个有效组都不剩时
+      // 返回 null（预览/应用按钮禁用 + 提示）。
+      var obPayloadOf = function (draft) {
+        if (!draft) return null;
+        var groups = [];
+        var ungrouped = (draft.ungrouped || []).slice();
+        (draft.groups || []).forEach(function (g) {
+          if (g.skipped) {
+            ungrouped = ungrouped.concat(g.members);
+            return;
+          }
+          groups.push({
+            key: String(g.key),
+            title: String(g.title),
+            members: g.members.slice(),
+            defaultRetention: g.defaultRetention,
+            overrides: Object.assign({}, g.overrides || {}),
+          });
+        });
+        if (groups.length === 0) return null;
+        return { groups: groups, ungrouped: ungrouped };
+      };
+      // R2/P1：草稿一经编辑，旧预览立即作废（obPreview 存的 hash 绑定的是
+      // 预览时的草稿内容；编辑后继续用旧 hash 应用必然 REVISION_CONFLICT，
+      // 「请先生成预览」守卫也因 obPreview 未清而永不触发）。三个编辑器统一
+      // 走 invalidatePreview：清预览与确认行，按钮文案回到「生成预览」。
+      var invalidatePreview = function () {
+        setObPreview(null);
+        setObConfirm(false);
+      };
+      // 就地改草稿：组字段（title/defaultRetention/skipped）。
+      var obSetGroupField = function (index, field, value) {
+        setObDraft(function (prev) {
+          if (!prev) return prev;
+          var groups = prev.groups.map(function (g, i) {
+            if (i !== index) return g;
+            var next = Object.assign({}, g);
+            next[field] = value;
+            return next;
+          });
+          return Object.assign({}, prev, { groups: groups });
+        });
+        invalidatePreview();
+      };
+      // 就地改草稿：逐条 retention override（"" = 清除，回跟随组默认）。
+      var obSetMemberOverride = function (groupIndex, member, value) {
+        setObDraft(function (prev) {
+          if (!prev) return prev;
+          var groups = prev.groups.map(function (g, i) {
+            if (i !== groupIndex) return g;
+            var next = Object.assign({}, g, { overrides: Object.assign({}, g.overrides || {}) });
+            if (value === "") delete next.overrides[member];
+            else next.overrides[member] = value;
+            return next;
+          });
+          return Object.assign({}, prev, { groups: groups });
+        });
+        invalidatePreview();
+      };
+      // 合并：把第 index 组并入第 index-1 组（成员与 overrides 随迁，组消失）。
+      var obMergeUp = function (index) {
+        setObDraft(function (prev) {
+          if (!prev || index <= 0 || index >= prev.groups.length) return prev;
+          var groups = prev.groups.map(function (g) {
+            return Object.assign({}, g, { members: g.members.slice(), overrides: Object.assign({}, g.overrides || {}) });
+          });
+          var target = groups[index - 1];
+          var source = groups[index];
+          source.members.forEach(function (m) {
+            if (target.members.indexOf(m) === -1) target.members.push(m);
+            if (source.overrides[m] !== undefined) target.overrides[m] = source.overrides[m];
+          });
+          groups.splice(index, 1);
+          return Object.assign({}, prev, { groups: groups });
+        });
+        invalidatePreview();
+      };
+      // 预览（零写入）：按当前草稿出「目标组布局投影 / historical / 冷却候选」预览。
+      var obPreviewRun = async function () {
+        var payload = obPayloadOf(obDraft);
+        if (payload === null) {
+          setObError("全部候选组都被跳过：至少保留一个组才能预览 / 应用。");
+          return;
+        }
+        var origin = tabGuard.mark();
+        setObBusy(true);
+        setObError(null);
+        setObPreview({ loading: true, error: null, data: null });
+        try {
+          var result = await props.dsh.call("onboardingPreview", props.sessionId, { proposal: payload });
+          if (tabGuard.isStale(origin)) return;
+          setObPreview({ loading: false, error: null, data: result });
+          setObConfirm(false);
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setObPreview({ loading: false, error: null, data: null });
+          setObError(e);
+        } finally {
+          setObBusy(false);
+        }
+      };
+      // 应用（二次确认后调用；服务端 hash 绑定 + confirmed:true + operationId 幂等）。
+      // R8/P2-7：回执 warning（标记位写盘失败等降级）必须渲染并注明可重试。
+      var obApplyRun = async function () {
+        var payload = obPayloadOf(obDraft);
+        var previewData = obPreview !== null && obPreview.data ? obPreview.data : null;
+        if (payload === null || previewData === null || !previewData.preview) {
+          setObError("请先生成预览，再确认应用。");
+          return;
+        }
+        var origin = tabGuard.mark();
+        setObBusy(true);
+        setObError(null);
+        setObWarning(null);
+        try {
+          var receipt = await props.dsh.call("onboardingApply", props.sessionId, {
+            proposal: payload,
+            hash: previewData.preview.hash,
+            operationId: newId(),
+            confirmed: true,
+          });
+          if (tabGuard.isStale(origin)) return;
+          setObPreview(null);
+          setObConfirm(false);
+          await loadOnboarding(); // 标记位与五态刷新（completedAt 生效 → 卡片收起）
+          await load(); // 占用/状态一并刷新
+          // warning 在刷新之后置位：loadOnboarding 不清 warning，保证渲染。
+          // R4（评审二轮）：逐字渲染服务端 warning，不加一刀切后缀——healed 与
+          // 写失败语义不同、文案在服务端按语义分支，客户端承诺做不到的事只会
+          // 误导（如「重试同一操作」在卡片收起后没有入口）。
+          if (receipt && receipt.warning) {
+            setObWarning(String(receipt.warning));
+          }
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setObError(e);
+        } finally {
+          setObBusy(false);
+        }
+      };
+      // 「以后再说」：写 dismissedAt（带当前提案 hash 供标记位比对），卡片收起。
+      var obDismiss = async function () {
+        var hash = ob !== null && ob.data && ob.data.proposal ? ob.data.proposal.hash : null;
+        var origin = tabGuard.mark();
+        setObBusy(true);
+        setObError(null);
+        setObWarning(null);
+        try {
+          var receipt = await props.dsh.call("onboardingMark", props.sessionId, hash ? { dismiss: true, hash: hash } : { dismiss: true });
+          if (tabGuard.isStale(origin)) return;
+          await loadOnboarding();
+          if (receipt && receipt.warning) {
+            setObWarning(String(receipt.warning));
+          }
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setObError(e);
+        } finally {
+          setObBusy(false);
+        }
+      };
+      // 「重新开始」：清 dismissedAt（completedAt 不动），向导恢复可触发态。
+      var obRestart = async function () {
+        var origin = tabGuard.mark();
+        setObBusy(true);
+        setObError(null);
+        setObWarning(null);
+        try {
+          var receipt = await props.dsh.call("onboardingMark", props.sessionId, { restart: true });
+          if (tabGuard.isStale(origin)) return;
+          await loadOnboarding();
+          if (receipt && receipt.warning) {
+            setObWarning(String(receipt.warning));
+          }
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setObError(e);
+        } finally {
+          setObBusy(false);
+        }
+      };
       var semantic = status && status.diagnostics && typeof status.diagnostics === "object" && !Array.isArray(status.diagnostics)
         ? (status.diagnostics.semantic && typeof status.diagnostics.semantic === "object" ? status.diagnostics.semantic : null)
         : null;
@@ -1759,6 +2019,134 @@ window.__ModuleLoader__.load({
           setDestroyBusy(false);
         }
       };
+      // ── 0.5 批次 4 · C 线：整理向导卡片（状态页；不弹窗、不打断）────────────
+      // 形态：needed → 提案编辑（改名/合并/跳过/组默认与逐条 retention）+ 预览
+      // + 二次确认应用；dismissed → 折叠提示 + 重新开始；其余五态（completed /
+      // grouped / has-historical / too-few-topics）与取数失败、shadow UNSUPPORTED
+      // 一律不渲染。
+      var renderObGroup = function (g, index) {
+        var memberRows = g.members.map(function (m) {
+          var override = Object.prototype.hasOwnProperty.call(g.overrides, m) ? g.overrides[m] : "";
+          return h("div", { key: m, className: "dshi_row" },
+            h("span", { className: "dshi_mono" }, m),
+            h("select", {
+              className: "dshi_select",
+              "data-role": "onboarding-member-retention",
+              value: override,
+              disabled: obBusy,
+              onChange: function (event) { obSetMemberOverride(index, m, event.target.value); }
+            },
+              h("option", { value: "" }, "跟随组默认"),
+              h("option", { value: "standing" }, "standing（常驻）"),
+              h("option", { value: "historical" }, "historical（历史档）")));
+        });
+        return h("div", { key: g.key, className: "dshi_item", "data-role": "onboarding-group" },
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_mono" }, g.key),
+            h("input", {
+              className: "dshi_input",
+              "data-role": "onboarding-group-title",
+              value: g.title,
+              disabled: obBusy,
+              onChange: function (event) { obSetGroupField(index, "title", event.target.value); }
+            }),
+            h("select", {
+              className: "dshi_select",
+              "data-role": "onboarding-group-retention",
+              value: g.defaultRetention,
+              disabled: obBusy,
+              onChange: function (event) { obSetGroupField(index, "defaultRetention", event.target.value); }
+            },
+              h("option", { value: "standing" }, "组默认 standing（常驻）"),
+              h("option", { value: "historical" }, "组默认 historical（历史档）")),
+            h("span", { style: { flex: 1 } }),
+            index > 0 ? h("button", {
+              className: "dshi_btn", disabled: obBusy, title: "把该组全部成员并入上一组，本组取消",
+              onClick: function () { obMergeUp(index); }
+            }, "并入上一组") : null,
+            h("button", {
+              className: "dshi_btn" + (g.skipped ? " dshi_btnDanger" : ""), disabled: obBusy,
+              "data-role": "onboarding-group-skip",
+              onClick: function () { obSetGroupField(index, "skipped", !g.skipped); }
+            }, g.skipped ? "已跳过（恢复）" : "跳过")),
+          g.skipped ? h("div", { className: "dshi_hint" },
+            "该组已跳过：" + g.members.length + " 个成员（" + g.members.join("、") + "）将保持未分组。")
+            : h("div", { className: "dshi_items" }, memberRows));
+      };
+      var renderObPreview = function (pv, payload) {
+        return h("div", { className: "dshi_items", "data-role": "onboarding-preview" },
+          h("div", { className: "dshi_item dshi_mono" }, pv.summary),
+          // R4/P2-2：生产 L1 渲染（readCoreView）尚不传 groups——这里给的是
+          // 组目录投影（既有组 + 提案组），如实标注，不冒称「应用后 L1」。
+          h("div", { className: "dshi_hint" }, "目标组布局（0.5 B 线组目录，尚未接入 L1 渲染；应用后组目录即此形状，未写入）："),
+          h("pre", { className: "dshi_pre" }, pv.l1Preview),
+          h("div", { className: "dshi_hint" },
+            "将标 historical（进冷却候选）" + pv.historical.length + " 条："
+            + (pv.historical.length > 0 ? pv.historical.map(function (row) { return row.key; }).join("、") : "无")),
+          h("div", { className: "dshi_hint" }, "变更 " + pv.changedItems + " 项（groups.json + 各 topic 元数据），diff 见控制台/原始信息。"),
+          obConfirm ? h("div", { className: "dshi_migration", "data-role": "onboarding-confirm" },
+            h("div", { className: "dshi_cardTitle" }, "确认应用"),
+            h("div", { className: "dshi_hint" },
+              "将新建 " + payload.groups.length + " 个组、把 " + payload.groups.reduce(function (n, g) { return n + g.members.length; }, 0)
+              + " 个 topic 挂入分组，其中 " + pv.historical.length + " 条将按 historical 处理（进冷却候选）。确认后执行写入，本向导一次性。"),
+            h("div", { className: "dshi_row" },
+              h("button", {
+                className: "dshi_btn dshi_btnDanger", disabled: obBusy, "data-role": "onboarding-apply-confirm",
+                onClick: function () { obApplyRun(); }
+              }, obBusy ? "应用中…" : "确认应用"),
+              h("button", { className: "dshi_btn", disabled: obBusy, onClick: function () { setObConfirm(false); } }, "取消")))
+            : h("div", { className: "dshi_row" },
+              h("button", {
+                className: "dshi_btn dshi_btnPrimary", disabled: obBusy, "data-role": "onboarding-apply-open",
+                onClick: function () { setObConfirm(true); }
+              }, "应用…")));
+      };
+      var renderOnboardingCard = function () {
+        if (ob === null || ob.loading) return null;
+        if (ob.error !== null) return null; // 取数失败不占版面（见 loadOnboarding 注）
+        var data = ob.data;
+        if (!data || typeof data !== "object") return null;
+        // 已搁置：折叠卡 + 重新开始（completedAt 不受影响，分好组后自然不再触发）。
+        if (data.reason === "marked" && data.markedKind === "dismissed") {
+          return h("div", { className: "dshi_card", "data-role": "onboarding-card-dismissed" },
+            h("div", { className: "dshi_row" },
+              h("span", { className: "dshi_cardTitle" }, "首启整理向导"),
+              h("span", { className: "dshi_badge dshi_badgeDim" }, "已搁置")),
+            h("div", { className: "dshi_hint" },
+              "「以后再说」已记录，向导不再自动提示。点「重新开始」可再次进入；分好组或标过 historical 后不会再触发。"),
+            h("div", { className: "dshi_row" },
+              h("button", {
+                className: "dshi_btn", disabled: obBusy, "data-role": "onboarding-restart",
+                onClick: function () { obRestart(); }
+              }, obBusy ? "处理中…" : "重新开始"),
+              data.flag && data.flag.dismissedAt ? h("span", { className: "dshi_hint dshi_mono" }, "dismissedAt " + String(data.flag.dismissedAt)) : null));
+        }
+        if (data.needed !== true || data.proposal === null || data.proposal === undefined) return null;
+        var draft = obDraft;
+        if (draft === null) return null;
+        var payload = obPayloadOf(draft);
+        var pv = obPreview !== null && obPreview.data && obPreview.data.preview ? obPreview.data.preview : null;
+        var pvLoading = obPreview !== null && obPreview.loading === true;
+        return h("div", { className: "dshi_card", "data-role": "onboarding-card" },
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_cardTitle" }, "首启整理向导"),
+            h("span", { className: "dshi_badge dshi_badgeWarn" }, "建议分组"),
+            h("span", { className: "dshi_hint" }, "当前 " + data.counts.topics + " 个未归档专题、尚未分组。")),
+          h("div", { className: "dshi_hint" },
+            "下面是按标题 / 摘要关键词聚出的候选组（纯规则，不写任何数据）：可改名、并入上一组、整组跳过；每组选默认保留档位（standing=常驻进 L1 索引，historical=历史档、之后由温度引擎自动冷却），组内条目可单独调整。预览确认前零写入。"),
+          obError ? ErrorBox(obError) : null,
+          h("div", { className: "dshi_items" }, draft.groups.map(renderObGroup)),
+          h("div", { className: "dshi_row" },
+            h("button", {
+              className: "dshi_btn dshi_btnPrimary", disabled: obBusy || pvLoading || payload === null,
+              "data-role": "onboarding-preview-run",
+              onClick: function () { obPreviewRun(); }
+            }, pvLoading ? "预览生成中…" : (pv ? "重新生成预览" : "生成预览")),
+            h("button", { className: "dshi_btn", disabled: obBusy, "data-role": "onboarding-dismiss", onClick: function () { obDismiss(); } }, "以后再说"),
+            payload === null ? h("span", { className: "dshi_hint" }, "全部组已跳过：至少保留一组才能预览 / 应用。") : null),
+          pvLoading ? h("div", { className: "dshi_loading" }, "预览生成中…") : null,
+          pv ? renderObPreview(pv, payload) : null);
+      };
       return h("div", { className: "dshi_card" },
         h("div", { className: "dshi_row" },
           h("span", { className: "dshi_cardTitle" }, "运行状态"),
@@ -1841,6 +2229,12 @@ window.__ModuleLoader__.load({
               occupancyText(occupancy.l0Chars, occupancy.l0Budget) + " · 人设卡正文已用 / 上限"),
             Bar("记忆核心占用（L1）", occupancy.l1Chars, occupancy.l1HardCap,
               occupancyText(occupancy.l1Chars, occupancy.l1HardCap) + " · 记忆核心正文已用 / 硬上限")),
+          // 0.5 批次 4 · C 线：整理向导提示卡（needed 时出编辑/预览卡，dismissed
+          // 时出「已搁置 + 重新开始」折叠卡；其余五态返回 null 不渲染）。
+          renderOnboardingCard(),
+          // R8/P2-7：服务端降级告警（标记位写盘失败等）渲染在向导区域外层——
+          // 不随卡片形态切换丢失，不藏不吞，注明可重试。
+          obWarning ? h("div", { className: "dshi_hint", "data-role": "onboarding-warning" }, "⚠ " + obWarning) : null,
           capabilities ? h("div", { className: "dshi_card" },
             h("div", { className: "dshi_cardTitle" }, "已启用的能力"),
             h("div", { className: "dshi_row" }, Object.keys(capabilities).map(function (key) {
