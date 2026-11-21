@@ -2110,6 +2110,7 @@ window.__ModuleLoader__.load({
       };
       var renderObPreview = function (pv, payload) {
         return h("div", { className: "dshi_items", "data-role": "onboarding-preview" },
+          h("div", { className: "dshi_hint", "data-role": "onboarding-preview-scope" }, "只按未归档专题提议分组（向导不为归档专题建组或挂载；归档不摘除已有挂载）。"),
           h("div", { className: "dshi_item dshi_mono" }, pv.summary),
           // R4/P2-2：生产 L1 渲染（readCoreView）尚不传 groups——这里给的是
           // 组目录投影（既有组 + 提案组），如实标注，不冒称「应用后 L1」。
@@ -5024,7 +5025,7 @@ window.__ModuleLoader__.load({
               groups !== null && !groups.loading && !groups.error && sortedGroups.length > 0
                 ? h("span", { className: "dshi_hint" }, "共 " + sortedGroups.length + " 个组")
                 : null),
-            h("div", { className: "dshi_hint" }, "组是 topic 的归类标签（挂在 topic front-matter 的 group 字段，agent 侧 group_manage 工具同源）。这里建组、改名、改摘要、调序、删组；删非空组必须先给成员选一个迁移目标组。"),
+            h("div", { className: "dshi_hint" }, "组是 topic 的归类标签（挂在 topic front-matter 的 group 字段，agent 侧 group_manage 工具同源）。这里建组、改名、改摘要、调序、删组；删非空组必须先给成员选一个迁移目标组。组行的 topic 计数含已归档专题（按主组计，多组挂载只在主组计一次）。"),
             groupError ? ErrorBox(groupError) : null,
             groups === null ? h("div", { className: "dshi_hint" }, "点「载入 / 刷新组」列出当前 scope 的组。") : null,
             groups !== null && groups.loading ? h("div", { className: "dshi_loading" }, "组清单加载中…") : null,

@@ -492,8 +492,9 @@ export function createManagement(deps) {
    * R4（评审 P2-2）：生产 L1 渲染（service readCoreView）不传 groups——组行
    * 尚未接入生产 L1。投影改为「既有组（含 0 成员、带原 summary）+ 提案组」的
    * 组目录视图，客户端文案如实标注「目标组布局（0.5 B 线组目录，尚未接入 L1）」，
-   * 不再冒称「应用后 L1」；成员口径与 group_manage list 的组行计数一致
-   * （主组、未归档；memory_read 组目录含任意挂载与 archived，是另一口径）。
+   * 不再冒称「应用后 L1」；向导人群=未归档专题（成员归属按提案组），与
+   * group_manage list 的组行计数不是同一口径——list 是主组（t.group[0]）计数、
+   * 含已归档专题；memory_read 组目录又是另一口径（任意挂载位置 + 含归档）。
    */
   function buildOnboardingPreview(canonical, unarchived, currentGroups, coreText) {
     const effective = effectiveRetentionMap(canonical);
@@ -1566,7 +1567,7 @@ export function createManagement(deps) {
      * - {proposal}（预览模式）：按用户编辑后的提案出「目标组布局投影 /
      *   historical 清单 / 冷却候选 / 展示 diff」——只读 listTopics/groups/
      *   core 视图 + renderL1 纯函数，不落 planStore、不碰标记位、不写盘。
-     * 向导人群恒为未归档 topic（归档=冷内容，不参与聚类与挂载）。
+     * 向导人群恒为未归档 topic（向导不为归档专题建组或挂载；归档不摘除已有挂载）。
      */
     async onboardingPreview(trustedContext, payload) {
       const p = payload ?? {};
