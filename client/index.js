@@ -2826,9 +2826,23 @@ window.__ModuleLoader__.load({
         var edge = rawEdges[j];
         var from = String(edge.from ?? edge.source ?? edge.a ?? "");
         var to = String(edge.to ?? edge.target ?? edge.b ?? "");
-        if (from && to) edges.push({ from: from, to: to, rel: edge.rel ?? edge.kind });
+        if (from && to) edges.push({
+          from: from,
+          to: to,
+          rel: edge.rel ?? edge.kind,
+          // 5D 跨簇边约定（与 5C 对齐）：level 2 保留指向簇外的边时，随边带端点
+          // 所属簇 key（服务端字段未就绪前客户端按此约定兼容；缺省 null → 外部
+          // 端点只画静态小标记、不带跳转）。snake_case 别名一并容忍。
+          fromCluster: edgeClusterRefOf(edge.fromCluster ?? edge.from_cluster),
+          toCluster: edgeClusterRefOf(edge.toCluster ?? edge.to_cluster),
+        });
       }
       return { nodes: nodes, edges: edges };
+    }
+
+    // 边的端点簇引用归一（5D 跨簇边约定）：非空字符串才有效，其余一律 null。
+    function edgeClusterRefOf(value) {
+      return typeof value === "string" && value !== "" ? value : null;
     }
 
     // getGraph 的节点 → { id: title }。候选页只拿到 64 位 hex id，
@@ -3330,6 +3344,23 @@ window.__ModuleLoader__.load({
     function clusterStrokeOf(key) {
       return key === "__unclustered__" ? NEUTRAL_FILL : CLUSTER_PALETTE[clusterIndexOf(String(key))];
     }
+    // 5D 跨簇边：外部端点标记位置——从簇内端点沿「远离画布中心」方向推出固定
+    // 距离并钳在画布内（确定性、无迭代、无随机）。
+    function externalMarkerPos(internal) {
+      var dx = internal.x - GRAPH_VIEW_W / 2;
+      var dy = internal.y - GRAPH_VIEW_H / 2;
+      var len = Math.sqrt(dx * dx + dy * dy) || 1;
+      var dist = 44;
+      return {
+        x: Math.max(14, Math.min(GRAPH_VIEW_W - 14, internal.x + (dx / len) * dist)),
+        y: Math.max(14, Math.min(GRAPH_VIEW_H - 14, internal.y + (dy / len) * dist))
+      };
+    }
+    // 外部端点标记的簇名可见文本（截断）；完整名进 <title> / aria-label。
+    function shortClusterLabel(key) {
+      var text = String(key ?? "");
+      return text.length > 12 ? text.slice(0, 10) + "…" : text;
+    }
 
     function GraphTab(props) {
       var state = useState(null);
@@ -3656,11 +3687,52 @@ window.__ModuleLoader__.load({
               normalized.edges.map(function (edge, index) {
                 var from = layout[edge.from];
                 var to = layout[edge.to];
-                if (!from || !to) return null;
+                if (!from && !to) return null; // 两端都不在本簇节点集：不属于本视图
                 // hover 高亮：高亮集 = 悬停节点 + 直接邻居；两端都在集内的边保持原样，
                 // 其余淡出（内联 opacity + 过渡，reviewer q-1ba8addcbcd85a30）。
                 var inHighlight = function (id) { return id === hoverId || Boolean(adjacency[hoverId] && adjacency[hoverId][id]); };
                 var dimmed = Boolean(hoverId && !(inHighlight(edge.from) && inHighlight(edge.to)));
+                if (!from || !to) {
+                  // 5D 跨簇边：一端不在本簇节点集 → 不再静默丢弃，线画到外部端点
+                  // 小标记；带端点簇信息（5C 约定 edges 带外部端点信息）时可点击/
+                  // 回车跳到对应簇，缺信息时只画静态标记。
+                  var externalCluster = from ? edge.toCluster : edge.fromCluster;
+                  var internal = from || to;
+                  var marker = externalMarkerPos(internal);
+                  var markerColor = externalCluster !== null ? clusterStrokeOf(externalCluster) : NEUTRAL_FILL;
+                  var markerTitle = externalCluster !== null ? "跳转到簇 " + externalCluster : "指向簇外的卡片";
+                  return h("g", { key: "e" + index },
+                    h("line", {
+                      className: "dshi_edge",
+                      x1: internal.x, y1: internal.y, x2: marker.x, y2: marker.y,
+                      style: { opacity: dimmed ? 0.25 : 1, transition: "opacity .15s" }
+                    }),
+                    h("g", {
+                      className: "dshi_graphNode",
+                      tabIndex: 0,
+                      role: "button",
+                      "aria-label": markerTitle,
+                      style: { opacity: dimmed ? 0.25 : 1, transition: "opacity .15s", cursor: externalCluster !== null ? "pointer" : "default" },
+                      onPointerUp: externalCluster !== null
+                        ? function () { enterCluster({ key: externalCluster, label: externalCluster }); }
+                        : undefined,
+                      onKeyDown: externalCluster !== null
+                        ? function (event) {
+                            if (!event) return;
+                            if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+                            if (typeof event.preventDefault === "function") event.preventDefault();
+                            enterCluster({ key: externalCluster, label: externalCluster });
+                          }
+                        : undefined,
+                    },
+                      h("circle", {
+                        cx: marker.x, cy: marker.y, r: 5,
+                        style: { fill: "transparent", stroke: markerColor, strokeWidth: 1.75, strokeDasharray: "3 2" }
+                      }),
+                      h("text", { className: "dshi_nodeLabel", x: marker.x, y: marker.y + 14, textAnchor: "middle" },
+                        h("title", null, markerTitle),
+                        externalCluster !== null ? shortClusterLabel(externalCluster) : "簇外")));
+                }
                 return h("line", {
                   key: "e" + index,
                   className: "dshi_edge",
@@ -7211,6 +7283,17 @@ window.__ModuleLoader__.load({
         loadSessions(false);
       }, []);
 
+      // 5D：聊天侧消息按钮的跳转总线接手（可选增强：props.jump 缺席时静默跳过）。
+      // 收到 push 即走同一套 jumpFromTimeline（切页 + focusTarget），跳转唯一事实
+      // 来源不变；setHandler 是覆盖语义（stub 不比较 deps，effect 重跑不叠加监听），
+      // dispose 由 harness/React effect 清理链接管。放在首帧列表 effect 之后：
+      // 合成测试约定 effects[0] = 首帧列表 effect（bootPanel 只跳过它）。
+      useEffect(function () {
+        var jump = props.jump;
+        if (!jump || typeof jump.setHandler !== "function") return;
+        return jump.setHandler(function (type, id) { jumpFromTimeline(type, id); });
+      }, [props.jump]);
+
       // 手动选择 / 刷新后的单会话探测：会话级失败进缓存并阻断该会话的数据请求，
       // 其他错误不缓存、不吞（回退旧行为，由对应 tab 的 ErrorBox 显示）。
       useEffect(function () {
@@ -7812,100 +7895,345 @@ var personaScopeTarget = personaScopeExplicit
                   tab === "timeline" && (modeStatus === null || mode === "active") ? h(TimelineTab, { key: sessionId, dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, onJump: jumpFromTimeline }) : null));
     }
 
-    // ── F2 消息底部按钮（conversation.chat.assistant-actions 插槽）──────────
+    // ── F2 消息底部按钮（conversation.chat.assistant-actions 插槽，5D 重做）──
     // 参考 @deepseek-ai/dsh-client-ui-message-feedback（0.2.1-rc.4）的注册形态：
     // ctx.slots.inject(name, () => ctx.slots.register({name, id, order, inject}, Component))。
-    // 宿主只给插槽组件传 assistant 消息的 messageId，而闪回附件是独立 context
-    // 消息（其 source 带 deliveryId/sparkIds），从客户端无法建立 messageId →
-    // deliveryId 的精确关联——因此**如实降级**为「本会话最近一次投递（限
-    // 10 分钟内）」，UI 明确标注近似关联，绝不假装精确到具体消息。
+    // 关联精度（0.5-5D，§11.5 第 1 条）：5C 约定 getGraph 的 deliveries[] 投影
+    // sourceMessageId（与 recordPending 同源，字段名已定死）。匹配口径分两类：
+    //   ① 投递记录带 sourceMessageId（新记录）→ 只与宿主给的 assistant 消息 id
+    //      （props.messageId）精确匹配——同一次投递只出现在它来源的那条消息下，
+    //      不再在会话所有消息下重复出现；
+    //   ② 投递记录不带 sourceMessageId（旧记录，5C 未合并/历史账本），或宿主没给
+    //      messageId（无法精确归因）→ 回落「本会话最近一次投递（限 10 分钟内）」
+    //      的近似口径，浮层如实标注，绝不假装精确到具体消息。
+    // 两类并存时精确命中优先。
     var DELIVERY_RECENCY_MS = 10 * 60 * 1000;
-    var FLASHBACK_SOURCE_TEXT = { seed: "种子", related: "一跳关联" };
-    // 从 getGraph DTO 里挑「当前会话 + 10 分钟窗口内」最近的一条投递。
-    function latestFlashbackDelivery(graph, sessionId, nowMs) {
+    var FLASHBACK_SOURCE_TEXT = { seed: "种子", related: "一跳关联", semantic: "语义补位" };
+    // 匹配「当前这条 assistant 消息」的投递：新记录按 sourceMessageId 精确匹配，
+    // 旧记录按 10 分钟窗口回落；精确命中优先于窗口近似。
+    function flashbackDeliveryFor(graph, sessionId, nowMs, messageId) {
       var deliveries = graph && Array.isArray(graph.deliveries) ? graph.deliveries : [];
-      var best = null;
-      var bestAt = NaN;
+      var precise = null;
+      var preciseAt = NaN;
+      var windowed = null;
+      var windowedAt = NaN;
       for (var i = 0; i < deliveries.length; i++) {
         var entry = deliveries[i];
         if (!entry || typeof entry !== "object") continue;
         if (entry.sessionId !== sessionId) continue;
         var at = typeof entry.at === "string" ? Date.parse(entry.at) : NaN;
+        var attributable = typeof entry.sourceMessageId === "string" && entry.sourceMessageId !== ""
+          && typeof messageId === "string" && messageId !== "";
+        if (attributable) {
+          // 新记录：只认来源消息；别的消息不显示它（同一次投递不再重复出现）。
+          if (entry.sourceMessageId !== messageId) continue;
+          if (precise === null || (Number.isFinite(at) && (!Number.isFinite(preciseAt) || at > preciseAt))) {
+            precise = entry;
+            preciseAt = Number.isFinite(at) ? at : preciseAt;
+          }
+          continue;
+        }
+        // 旧记录 / 无法归因：10 分钟窗口近似（窗口外不显示；时钟偏移按绝对值判）。
         if (!Number.isFinite(at)) continue;
         if (nowMs - at > DELIVERY_RECENCY_MS || at - nowMs > DELIVERY_RECENCY_MS) continue;
-        if (best === null || at > bestAt) { best = entry; bestAt = at; }
+        if (windowed === null || at > windowedAt) { windowed = entry; windowedAt = at; }
       }
-      return best;
+      return precise !== null ? precise : windowed;
+    }
+    // 跨组件跳转总线（最小可用）：聊天侧消息按钮把 sparkId push 进来，面板
+    // ShioriSection 用 setHandler 接住并走既有 jumpFromTimeline 链路（切图谱页
+    // 并选中节点）。单 handler 覆盖语义——重复 setHandler 只替换不叠加（合成
+    // stub 不比较 effect deps，effect 重跑不会把监听器翻倍）；无 handler 时
+    // push 是无害空转。
+    function createJumpBus() {
+      var handler = null;
+      return {
+        push: function (type, id) {
+          if (!handler) return;
+          try { handler(type, id); } catch { /* 面板侧消费出错不反噬聊天侧 */ }
+        },
+        setHandler: function (fn) {
+          handler = typeof fn === "function" ? fn : null;
+          return function () {
+            if (handler === fn) handler = null;
+          };
+        },
+      };
+    }
+    // 摘要一行：折叠空白 + 截断（浮层卡片里的「摘要一行」口径）。
+    function flashbackOneLine(text, max) {
+      var collapsed = String(text ?? "").replace(/\s+/g, " ").trim();
+      var limit = typeof max === "number" && max > 0 ? max : 60;
+      return collapsed.length > limit ? collapsed.slice(0, limit) + "…" : collapsed;
+    }
+    // 语义相似分显示：cosine 保留两位小数；非有限数不显示。
+    function flashbackScoreText(score) {
+      return typeof score === "number" && Number.isFinite(score) ? Number(score).toFixed(2) : null;
+    }
+    // F2 线稿图标：viewBox 24 / stroke currentColor / 1.75 / round，参数与侧边栏
+    // ShioriIcon 同一套（配色沿用侧边栏描边纪律）；图形取「历史/回溯」意象。
+    function FlashbackIcon(props) {
+      var size = typeof props.size === "number" && props.size > 0 ? props.size : 16;
+      return h("svg", {
+        width: size,
+        height: size,
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        strokeWidth: 1.75,
+        strokeLinecap: "round",
+        strokeLinejoin: "round",
+        "aria-hidden": true,
+        focusable: false,
+      },
+        h("path", { d: "M3 12a9 9 0 1 0 2.64-6.36L3 8" }),
+        h("path", { d: "M3 3v5h5" }),
+        h("path", { d: "M12 7v5l4 2" }));
+    }
+    // 浮层尺寸唯一事实来源。样式纪律（0.5-5D）：全部 React 内联 style，不依赖
+    // className 注入——已知缺陷正是 .dshi_fbPop 的 className 样式在该插槽里没
+    // 作用到 DOM，浮层（absolute 版本）参与布局把按钮顶到上一行；改 position:fixed
+    // + getBoundingClientRect 后彻底脱离宿主容器布局。client/shiori.css 与内嵌
+    // CSS 里的 .dshi_fb* 规则因此不再被组件引用（保留只为 CSS 等价测试两侧同步，
+    // shiori.css 不在本单白名单内）。
+    var FLASHBACK_POP_WIDTH = 320;
+    var FLASHBACK_POP_MAX_HEIGHT = 320;
+    var FLASHBACK_BTN_MIN_HEIGHT = "24px";
+    // 浮层定位：按钮右缘对齐、浮层底缘悬在按钮上方 6px——旧版
+    // bottom:calc(100% + 6px) 的 fixed 等价物；translateY(-100%) 不需要视口高度，
+    // 沙箱与真机行为一致。ref 拿不到（react stub / 旧宿主）→ 不写定位四值，
+    // 浮层停留在自然位置（布局修复不受影响：fixed 始终脱离文档流）。
+    function flashbackPopupStyle(rect) {
+      var style = {
+        position: "fixed",
+        zIndex: 60,
+        width: FLASHBACK_POP_WIDTH + "px",
+        maxHeight: FLASHBACK_POP_MAX_HEIGHT + "px",
+        overflow: "auto",
+        boxSizing: "border-box",
+        border: "1px solid var(--dsw-alias-border-l2,#dce2eb)",
+        borderRadius: "10px",
+        background: "var(--dsw-alias-bg-layer-3,#fff)",
+        color: "var(--dsw-alias-label-primary,#1f2937)",
+        boxShadow: "0 10px 28px rgba(15,23,42,.20)",
+        padding: "10px 12px",
+        display: "flex",
+        flexDirection: "column",
+        gap: "8px",
+        fontSize: "12px",
+        lineHeight: 1.6,
+        textAlign: "left",
+      };
+      if (rect && Number.isFinite(rect.right) && Number.isFinite(rect.top)) {
+        style.left = Math.max(8, rect.right - FLASHBACK_POP_WIDTH) + "px";
+        style.top = (rect.top - 6) + "px";
+        style.transform = "translateY(-100%)";
+      }
+      return style;
     }
     function FlashbackActions(props) {
       var openState = useState(false);
       var open = openState[0];
       var setOpen = openState[1];
-      var resultState = useState(undefined); // undefined=未拉取；{delivery, nodes, error}=已拉取
+      var resultState = useState(undefined); // undefined=未拉取；{delivery, matchedPrecise, nodes, error}=已拉取
       var result = resultState[0];
       var setResult = resultState[1];
       var busyState = useState(false);
       var busy = busyState[0];
+      var rectState = useState(null); // 开合时按钮的 getBoundingClientRect 快照（浮层 fixed 定位）
+      var rect = rectState[0];
+      var feedbackDoneState = useState(null); // sparkId → "used"|"notused"；已反馈置灰防重复
+      var feedbackDone = feedbackDoneState[0];
+      var anchorRef = useRef(null);           // 挂按钮元素；真机由 React 接线，stub/沙箱由 harness 接线
+      var loadedSessionRef = useRef(null);    // 已拉过 getGraph 的会话 id（防 effect 重跑重复拉取）
       var load = async function () {
         var dsh = props.dsh;
         var sessionId = typeof props.shioriSessionId === "string" ? props.shioriSessionId : "";
         if (!dsh || typeof dsh.call !== "function" || sessionId === "") {
-          setResult({ delivery: null, nodes: [], error: "无法确定当前会话，闪回关联不可用。" });
+          setResult({ delivery: null, matchedPrecise: false, nodes: [], error: "无法确定当前会话，闪回关联不可用。" });
           return;
         }
         busyState[1](true);
         try {
           var graph = await dsh.call("getGraph", sessionId, {});
+          var entry = flashbackDeliveryFor(
+            graph,
+            sessionId,
+            Date.now(),
+            typeof props.messageId === "string" && props.messageId !== "" ? props.messageId : null);
           setResult({
-            delivery: latestFlashbackDelivery(graph, sessionId, Date.now()),
+            delivery: entry,
+            // 匹配口径快照（review R2）：「精确关联」必须同时满足——宿主给了
+            // messageId，且命中的投递就是它来源的那条（sourceMessageId === messageId）。
+            // 宿主缺 messageId 时即使命中带 sourceMessageId 的记录，也是窗口回落，
+            // 只能标近似口径，不许误标「已精确关联」。
+            matchedPrecise: Boolean(entry
+              && typeof entry.sourceMessageId === "string" && entry.sourceMessageId !== ""
+              && typeof props.messageId === "string" && props.messageId !== ""
+              && entry.sourceMessageId === props.messageId),
             nodes: graph && Array.isArray(graph.nodes) ? graph.nodes : [],
             error: null,
           });
         } catch (error) {
-          setResult({ delivery: null, nodes: [], error: "闪回数据拉取失败：" + String((error && error.code) || (error && error.message) || error) });
+          setResult({ delivery: null, matchedPrecise: false, nodes: [], error: "闪回数据拉取失败：" + String((error && error.code) || (error && error.message) || error) });
         } finally {
           busyState[1](false);
         }
       };
-      var toggle = function () {
+      // 5D：挂载即拉一次 getGraph——徽标 N 与「无投递不占位」都要在未展开时知道
+      // 本轮投递；会话切换（deps 变化）重跑。失败也记为已拉，不无限重试。
+      useEffect(function () {
+        var sid = typeof props.shioriSessionId === "string" ? props.shioriSessionId : "";
+        if (loadedSessionRef.current === sid) return;
+        loadedSessionRef.current = sid;
+        load();
+      }, [props.shioriSessionId]);
+      // 量按钮：事件拿得到（真机 onClick）用 currentTarget，拿不到（沙箱 click）
+      // 退回 ref；两路都没有 → null（浮层用自然位置）。
+      var measureAnchor = function (event) {
+        var el = event && event.currentTarget;
+        if (!el || typeof el.getBoundingClientRect !== "function") el = anchorRef.current;
+        if (el && typeof el.getBoundingClientRect === "function") {
+          var box = el.getBoundingClientRect();
+          if (box && Number.isFinite(box.top) && Number.isFinite(box.right)) return box;
+        }
+        return null;
+      };
+      var toggle = function (event) {
         var next = !open;
+        rectState[1](measureAnchor(event));
         setOpen(next);
         if (next && result === undefined) load();
       };
-      var titleOf = function (sparkId) {
+      var nodeOf = function (sparkId) {
         var nodes = (result && result.nodes) || [];
         for (var i = 0; i < nodes.length; i++) {
-          if (nodes[i] && nodes[i].id === sparkId) {
-            return typeof nodes[i].title === "string" && nodes[i].title !== "" ? nodes[i].title : sparkId;
-          }
+          if (nodes[i] && nodes[i].id === sparkId) return nodes[i];
         }
+        return null;
+      };
+      var titleOf = function (sparkId) {
+        var node = nodeOf(sparkId);
+        if (node && typeof node.title === "string" && node.title !== "") return node.title;
         return sparkId;
+      };
+      // 有用/没用 → executeTool 调 spark_feedback（used:true/false）。sourceEventId
+      // 带上投递 id（服务端幂等键口径）；本地记一次防手滑重复反馈。
+      var sendFeedback = async function (sparkId, deliveryId, used) {
+        if (feedbackDone && feedbackDone[sparkId]) return;
+        var dsh = props.dsh;
+        var sessionId = typeof props.shioriSessionId === "string" ? props.shioriSessionId : "";
+        if (!dsh || typeof dsh.call !== "function" || sparkId === "" || sessionId === "") return;
+        try {
+          var args = { id: sparkId, used: used === true };
+          if (deliveryId) args.sourceEventId = deliveryId;
+          await dsh.call("executeTool", sessionId, { name: "spark_feedback", args: args });
+          var next = assign({}, feedbackDone || {});
+          next[sparkId] = used === true ? "used" : "notused";
+          feedbackDoneState[1](next);
+        } catch { /* 反馈失败不打断浮层；按钮保持可点可重试 */ }
+      };
+      // 点卡片标题 → 跳图谱节点：复用面板既有 jumpFromTimeline 链路（jump 总线，
+      // ShioriSection 订阅后切图谱页并选中节点）；总线缺席时静默跳过。
+      var jumpToSpark = function (sparkId) {
+        var jump = props.jump;
+        if (!jump || typeof jump.push !== "function") return;
+        if (typeof sparkId !== "string" || sparkId === "") return;
+        jump.push("spark", sparkId);
       };
       var delivery = result ? result.delivery : null;
       var cards = delivery && Array.isArray(delivery.cards) ? delivery.cards : [];
-      return h("div", { className: "dshi_fbWrap" },
-        h("button", { className: "dshi_btn", onClick: toggle }, "闪回命中"),
-        open ? h("div", { className: "dshi_fbPop" },
-          h("div", { className: "dshi_fbMeta" },
-            "最近一次投递（10 分钟内）· 按会话近似关联，无法精确到单条消息"),
+      // 徽标 N 与底部汇总共用口径：N = 本轮投递卡数；触发词命中 = seed/related，
+      // 语义补位 = semantic（5C 语义命中约定值），其余来源不计入两个分桶。
+      var badgeCount = delivery ? cards.length : null;
+      var triggerHits = 0;
+      var semanticHits = 0;
+      for (var i = 0; i < cards.length; i++) {
+        var cardSource = cards[i] && cards[i].source;
+        if (cardSource === "seed" || cardSource === "related") triggerHits += 1;
+        else if (cardSource === "semantic") semanticHits += 1;
+      }
+      var matchedPrecise = Boolean(result && result.matchedPrecise);
+      // 「无投递不占位」守卫（0.5-5D 拍板：不显示灰度图标）：已拉取、确认无投递、
+      // 且浮层关闭 → 整个动作位不渲染。拉取失败（result.error）不算「确认无投递」，
+      // 保留按钮让用户能重开浮层看错误。
+      if (result !== undefined && !result.error && delivery === null && !open) return null;
+      return h("div", { style: { display: "inline-flex", alignItems: "center" } },
+        // 浮层挂在按钮前面（position:fixed 不参与布局，DOM 顺序不影响视觉）；
+        // 顺序如此只为让合成布局模型的 offsetTop 断言对「浮层参与布局」敏感。
+        open ? h("div", { style: flashbackPopupStyle(rect), role: "dialog", "aria-label": "闪回投递详情" },
+          h("div", { style: { fontSize: "10px", color: "var(--dsw-alias-label-tertiary,#8b93a1)", wordBreak: "break-word" } },
+            matchedPrecise
+              ? "已精确关联本轮回复（sourceMessageId）"
+              : "最近一次投递（10 分钟内）· 按会话近似关联，无法精确到单条消息"),
           result === undefined || busy
-            ? h("div", { className: "dshi_fbMeta" }, "加载中…")
+            ? h("div", { style: { fontSize: "10px", color: "var(--dsw-alias-label-tertiary,#8b93a1)" } }, "加载中…")
             : result.error
-              ? h("div", { className: "dshi_fbMeta" }, result.error)
+              ? h("div", { style: { fontSize: "10px", color: "var(--dsw-alias-label-tertiary,#8b93a1)" } }, result.error)
               : delivery === null
-                ? h("div", { className: "dshi_fbMeta" }, "最近 10 分钟内本会话没有投递记录。")
+                ? h("div", { style: { fontSize: "10px", color: "var(--dsw-alias-label-tertiary,#8b93a1)" } }, "最近 10 分钟内本会话没有投递记录。")
                 : cards.length === 0
-                  ? h("div", { className: "dshi_fbMeta" }, "该次投递没有携带卡片。")
+                  ? h("div", { style: { fontSize: "10px", color: "var(--dsw-alias-label-tertiary,#8b93a1)" } }, "该次投递没有携带卡片。")
                   : cards.map(function (card, index) {
-                      var source = card && card.source;
+                      var sparkId = card && typeof card.sparkId === "string" ? card.sparkId : "";
                       var trigger = card && typeof card.trigger === "string" && card.trigger !== "" ? card.trigger : null;
-                      return h("div", { key: (card && card.sparkId) || String(index), className: "dshi_fbItem" },
-                        h("div", null, card && typeof card.sparkId === "string" ? titleOf(card.sparkId) : "未知卡片"),
-                        h("div", { className: "dshi_fbMeta" },
+                      var source = card ? card.source : null;
+                      var scoreText = flashbackScoreText(card && card.score);
+                      var summaryText = sparkId !== "" ? (function () {
+                        var node = nodeOf(sparkId);
+                        return node && typeof node.summary === "string" ? flashbackOneLine(node.summary) : "";
+                      })() : "";
+                      var doneMark = feedbackDone && feedbackDone[sparkId];
+                      var deliveryId = delivery && typeof delivery.deliveryId === "string" ? delivery.deliveryId : "";
+                      return h("div", { key: sparkId || String(index), style: { display: "flex", flexDirection: "column", gap: "2px", borderBottom: "1px dashed var(--dsw-alias-border-l2,#dce2eb)", paddingBottom: "6px" } },
+                        h("div", {
+                          role: "button",
+                          tabIndex: 0,
+                          "aria-label": "查看图谱节点：" + titleOf(sparkId),
+                          style: { cursor: "pointer", fontWeight: 600, fontSize: "12px", color: "var(--dsw-alias-label-primary,#1f2937)" },
+                          onClick: function () { jumpToSpark(sparkId); },
+                          onKeyDown: function (event) {
+                            if (!event) return;
+                            if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+                            if (typeof event.preventDefault === "function") event.preventDefault();
+                            jumpToSpark(sparkId);
+                          },
+                        }, sparkId !== "" ? titleOf(sparkId) : "未知卡片"),
+                        summaryText !== "" ? h("div", { style: { fontSize: "11px", color: "var(--dsw-alias-label-secondary,#6b7280)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, summaryText) : null,
+                        h("div", { style: { fontSize: "10px", color: "var(--dsw-alias-label-tertiary,#8b93a1)", wordBreak: "break-word" } },
                           "命中触发词：" + (trigger ?? "未记录")
-                          + " · 来源：" + (FLASHBACK_SOURCE_TEXT[source] || "未记录")));
-                    }))
-          : null);
+                          + " · 来源：" + (FLASHBACK_SOURCE_TEXT[source] || "未记录")
+                          + (scoreText !== null ? " · 语义分 " + scoreText : "")),
+                        h("div", { style: { display: "flex", gap: "6px", marginTop: "4px" } },
+                          h("button", {
+                            style: { font: "inherit", fontSize: "11px", padding: "1px 8px", borderRadius: "6px", border: "1px solid var(--dsw-alias-border-l2,#dce2eb)", background: "var(--dsw-alias-bg-layer-3,#fff)", color: "var(--dsw-alias-label-secondary,#6b7280)", cursor: doneMark ? "default" : "pointer", minHeight: FLASHBACK_BTN_MIN_HEIGHT },
+                            disabled: Boolean(doneMark),
+                            onClick: function () { sendFeedback(sparkId, deliveryId, true); },
+                          }, doneMark === "used" ? "已反馈有用" : "有用"),
+                          h("button", {
+                            style: { font: "inherit", fontSize: "11px", padding: "1px 8px", borderRadius: "6px", border: "1px solid var(--dsw-alias-border-l2,#dce2eb)", background: "var(--dsw-alias-bg-layer-3,#fff)", color: "var(--dsw-alias-label-secondary,#6b7280)", cursor: doneMark ? "default" : "pointer", minHeight: FLASHBACK_BTN_MIN_HEIGHT },
+                            disabled: Boolean(doneMark),
+                            onClick: function () { sendFeedback(sparkId, deliveryId, false); },
+                          }, doneMark === "notused" ? "已反馈没用" : "没用")));
+                    }).concat([
+                      h("div", { key: "fb-summary", style: { fontSize: "10px", color: "var(--dsw-alias-label-tertiary,#8b93a1)", borderTop: "1px solid var(--dsw-alias-border-l2,#dce2eb)", paddingTop: "6px" } },
+                        "本轮 " + cards.length + " 张 / 触发词命中 " + triggerHits + " / 语义补位 " + semanticHits),
+                    ]))
+          : null,
+        h("button", {
+          ref: anchorRef,
+          onClick: toggle,
+          "aria-label": "闪回" + (badgeCount !== null ? " " + badgeCount : ""),
+          title: matchedPrecise ? "已精确关联本轮回复" : "本会话最近一次投递（10 分钟内近似关联）",
+          style: { minHeight: FLASHBACK_BTN_MIN_HEIGHT, display: "inline-flex", alignItems: "center", gap: "4px", font: "inherit", fontSize: "12px", padding: "2px 8px", borderRadius: "8px", border: "1px solid var(--dsw-alias-border-l2,#dce2eb)", background: "var(--dsw-alias-bg-layer-3,#fff)", color: "var(--dsw-alias-label-secondary,#6b7280)", cursor: "pointer" },
+        },
+          h(FlashbackIcon, { size: 16 }),
+          // 文案「闪回」必须是按钮的直接字符串子节点（ui-flashbacks 既有 findButton
+          // 按「直接子节点 join 后 includes」定位按钮；嵌套 span 会让它找不到）。
+          "闪回",
+          badgeCount !== null
+            ? h("span", { style: { fontSize: "10px", lineHeight: "14px", padding: "0 5px", borderRadius: "999px", border: "1px solid var(--dsw-alias-border-l2,#dce2eb)", background: "var(--dsw-alias-bg-layer-2,#eef1f5)", color: "var(--dsw-alias-label-secondary,#6b7280)" } }, String(badgeCount))
+            : null));
     }
 
     // S2 侧边栏「记忆」图标：sidebar.panellist 槽位渲染，size 由宿主下发（默认 20，
@@ -7939,6 +8267,15 @@ var personaScopeTarget = personaScopeExplicit
     async function apply(ctx) {
       var disposers = [];
       var api = buildApi(ctx);
+      // 5D：跨组件跳转总线（可选入口，U8 shioriNotify 同款纪律）：聊天侧消息按钮
+      // （FlashbackActions）push sparkId，面板（ShioriSection）订阅后走既有
+      // jumpFromTimeline 链路。真机 ctx 只读时赋值会抛——可选便利入口，静默跳过。
+      var jumpBus = createJumpBus();
+      try {
+        if (!ctx.shioriJump) {
+          ctx.shioriJump = { push: jumpBus.push, setHandler: jumpBus.setHandler };
+        }
+      } catch { /* 只读 ctx：这是可选入口，静默跳过 */ }
       // U8 可复用通知入口（需求 b/c 的「通过 ctx 传下去」形态）：后续页面/宿主
       // 可经 ctx.shioriNotify 调 toast 三态与需重启组合提示；dispose 供卸载清理。
       // 只增不改，不覆盖宿主已有字段。
@@ -7973,7 +8310,7 @@ var personaScopeTarget = personaScopeExplicit
               return { shioriSessionId: typeof sessionId === "string" ? sessionId : "" };
             },
           }, function (slotProps) {
-            return h(FlashbackActions, assign({ dsh: api }, slotProps || {}));
+            return h(FlashbackActions, assign({ dsh: api, jump: jumpBus }, slotProps || {}));
           });
         });
         if (typeof flashbackDisposer === "function") disposers.push(flashbackDisposer);
@@ -8017,7 +8354,7 @@ var personaScopeTarget = personaScopeExplicit
       try {
         slotDisposer = ctx.slots.inject("plugins.bundle.config", function () {
           return ctx.slots.register({ name: "plugins.bundle.config", key: "dsh-shiori" }, function (props) {
-            return h(ShioriSection, assign({ dsh: api }, props));
+            return h(ShioriSection, assign({ dsh: api, jump: jumpBus }, props));
           });
         });
       } catch (error) {

@@ -509,7 +509,10 @@ test("F2 按钮：窗口内无本会话投递 → 明确提示；点按钮发起
   host.cursor.v = 0;
   const props = { dsh, shioriSessionId: "session-A", messageId: "m-1" };
   const tree = vnode.type(props);
-  const button = findButton(tree, "闪回命中");
+  // 0.5-5D 规格连带（唯一放行的既有断言改动）：按钮文案从「闪回命中」改为
+  // 「闪回 N」——未拉取到 N 前按钮先以「闪回」占位（线稿图标 + 文案），命中后
+  // 徽标显示 N；「命中」一词从按钮上消失（§11.5 第 5 条）。
+  const button = findButton(tree, "闪回");
   assert.ok(button, "按钮存在");
   button.props.onClick();
   assert.equal(host.states[0], true, "点击展开");

@@ -249,6 +249,44 @@ function makeFakeTimers() {
 }
 
 // ── fake document（被 client 的 ensureStyle / toast / visibilitychange 用到的子集）─
+//
+// 5D 合成布局模型（SYNTHETIC，非真实排版引擎）：只为「开合前后按钮 offsetTop
+// 不变」这条回归断言提供最小可判别口径，规则两条——
+//   * offsetHeight：自身计 1，文本子节点各计 1，in-flow 元素子节点递归求和；
+//   * offsetTop：同一父容器内、排在本元素之前的 in-flow 兄弟高度之和；
+//   * 子元素 style.position === "fixed" 按「脱离布局」计 0 贡献——这正是 5D
+//     修复的核心。注意：absolute/缺失样式在本模型里按「参与布局」计，与 CSS
+//     规范不同——理由是真机实测缺陷正是「absolute 版本浮层在该插槽里参与了
+//     布局（className 样式没作用到插槽 DOM），把按钮顶到上一行」，模型按实测
+//     缺陷建模，使「改回 absolute / 改用 className」的变异自测必然变红。
+function flowChildHeight(child) {
+  if (child.nodeType === 3) return 1;
+  if (child.nodeType !== 1) return 0;
+  if (child.style && child.style.position === "fixed") return 0; // 脱离布局
+  return flowHeightOf(child);
+}
+function flowHeightOf(el) {
+  // fragment 占位（renderVNodeToDom 对 null/boolean/数组的降级产物）按透明容器计：
+  // 高度 = 子项之和，不按自身计 1——「open ? 弹层 : null」的 null 分支不该占布局。
+  if (String(el.tagName || "").toUpperCase() === "FRAGMENT") {
+    let height = 0;
+    for (const child of el.children) height += flowChildHeight(child);
+    return height;
+  }
+  let height = 1;
+  for (const child of el.children) height += flowChildHeight(child);
+  return height;
+}
+function flowTopOf(el) {
+  const parent = el.parentNode;
+  if (!parent) return 0;
+  let top = 0;
+  for (const child of parent.children) {
+    if (child === el) break;
+    top += flowChildHeight(child);
+  }
+  return top;
+}
 function makeElement(tagName) {
   return {
     nodeType: 1,
@@ -260,6 +298,15 @@ function makeElement(tagName) {
     style: {},
     _text: "",
     parentNode: null,
+    // 可控锚点矩形（getBoundingClientRect 桩）：默认视口原点零矩形，用例可写
+    // el._rect 覆盖（真实浏览器由布局引擎决定；沙箱由用例钉值）。
+    _rect: null,
+    getBoundingClientRect() {
+      return Object.assign({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }, this._rect || {});
+    },
+    // 5D 合成布局模型：offsetTop / offsetHeight 按 flowHeightOf / flowTopOf 现算。
+    get offsetHeight() { return flowHeightOf(this); },
+    get offsetTop() { return flowTopOf(this); },
     appendChild(child) { if (child == null) return child; child.parentNode = this; this.children.push(child); return child; },
     removeChild(child) { const i = this.children.indexOf(child); if (i >= 0) { this.children.splice(i, 1); child.parentNode = null; } return child; },
     setAttribute(name, value) {
@@ -269,7 +316,7 @@ function makeElement(tagName) {
     },
     getAttribute(name) {
       if (name === "id") return this.id || null;
-      if (name === "class" || name === "className") return this.className || null;
+      else if (name === "class" || name === "className") return this.className || null;
       return this.attributes[name] ?? null;
     },
     addEventListener() {},
@@ -371,6 +418,18 @@ function renderVNodeToDom(vnode, doc) {
     const value = p[key];
     if (key === "className") el.className = String(value);
     else if (key === "children") { /* children 走 children 参数 */ }
+    else if (key === "style" && value && typeof value === "object") {
+      // 5D：style 对象落到 el.style（此前进 attributes 变 "[object Object]"）。
+      // 合成布局模型（flowHeightOf/flowTopOf）按 el.style.position 判「脱离布局」，
+      // 不落 style 对象模型就失效；同时更贴近真实 DOM 语义。
+      Object.assign(el.style, value);
+    }
+    else if (key === "ref" && value && typeof value === "object") {
+      // 5D：ref 接线（真实 React 语义）。此前 ref 被当 attribute 序列化丢弃，
+      // 组件里 ref.current 永远 null；接线后 FlashbackActions 才能拿到按钮元素
+      // 调 getBoundingClientRect 做浮层 fixed 定位。
+      value.current = el;
+    }
     else if (/^on[A-Z]/.test(key) && typeof value === "function") el[key.toLowerCase()] = value;
     else el.setAttribute(key, value);
   }
@@ -426,29 +485,29 @@ export function createUiHarness(options = {}) {
     const zod = await ensureZod();
     const mod = sharedRegistrations[0].factory((n) => (n === "react" ? host.react : zod));
     let renderSlot = null;
+    // 5D：捕获全部插槽注册（name → {meta, render}），供 mountSlot 挂非面板插槽
+    //（如 conversation.chat.assistant-actions 的消息按钮）；renderSlot 语义不变
+    //（同一插槽上下文里最后一次 register 获胜 = 面板插槽收尾）。
+    const registered = {};
     await mod.apply({
       remote: { $mount: async () => () => {} },
       slots: {
         inject: (name, fn) => fn(),
-        register: (meta, render) => { renderSlot = render; return () => {}; },
+        register: (meta, render) => {
+          registered[meta.name] = { meta, render };
+          renderSlot = render;
+          return () => {};
+        },
       },
     });
     const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
-    return { mod, renderSlot, sectionVNode };
+    return { mod, renderSlot, sectionVNode, registered };
   }
 
-  async function mount(mountProps = {}) {
-    await install();
-    // mount 默认安装可控定时器（R1）：restore/unmount 会统一卸载并还原。
-    fakeTimers.install();
-    const host = makeStatefulReact();
-    host.runEffects.v = true; // 真实渲染循环：effect 驱动数据加载（getMemoryView 等）
-    const { sectionVNode } = await applyPanel(host);
-
-    const dsh = mountProps.dsh ?? { call: async () => ({}) };
-    const sectionProps = { dsh, ...(mountProps.slotProps || {}) };
-    const prefill = mountProps.prefillStates;
-
+  // 共享渲染循环（mount / mountSlot 复用）：renderOnce() 由调用方执行组件函数并
+  // 返回落 DOM 的 vnode，循环负责光标复位（必须在组件函数执行前）、click/find/
+  // change 交互、flush（effect → 微任务排空 → 真实重渲染路径）与 unmount 清理。
+  function makeRenderLoop(host, renderOnce) {
     let dom = null;
 
     function resetCursors() {
@@ -457,26 +516,16 @@ export function createUiHarness(options = {}) {
       host.effectCursor.v = 0;
     }
 
-    function renderSection() {
+    function render() {
       resetCursors();
-      if (prefill) {
-        host.states.length = 0;
-        for (const v of prefill) host.states.push(v);
-      } else {
-        host.states.length = Math.max(host.states.length, PANEL_STATES);
-        if (!(0 in host.states) || host.states[0] === undefined) host.states[0] = mountProps.tab ?? "status";
-        if (!(1 in host.states) || host.states[1] === undefined) host.states[1] = "session-A";
-        if (!(2 in host.states) || host.states[2] === undefined) host.states[2] = "";
-        if (!(3 in host.states) || host.states[3] === undefined) host.states[3] = null;
-        if (!(4 in host.states) || host.states[4] === undefined) host.states[4] = mountProps.modeStatus ?? { mode: "active" };
-      }
-      const vnode = sectionVNode.type(sectionProps);
-      dom = renderVNodeToDom(vnode, globalThis.document);
+      dom = renderOnce();
       return dom;
     }
-
-    function render() { return renderSection(); }
-    function rerender() { return renderSection(); }
+    function rerender() {
+      resetCursors();
+      dom = renderOnce();
+      return dom;
+    }
     function text() { return collectDomText(dom); }
     function html() { return serializeDom(dom); }
 
@@ -493,7 +542,7 @@ export function createUiHarness(options = {}) {
     // 0.5 批次 4 B 线：表单交互钩子（不改渲染链，只在已渲染树上定位/拨动元素）。
     // 只处理单属性选择器（与 matchesSelector 能力一致），多属性请分步 find。
     function find(selector) {
-      return dom ? findFirst(dom, (el) => matchesSelector(el, selector)) : null;
+      return dom ? findFirst(dom, (e) => matchesSelector(e, selector)) : null;
     }
 
     function findAll(selector) {
@@ -512,6 +561,11 @@ export function createUiHarness(options = {}) {
     function textOf(selector) {
       const el = find(selector);
       return el ? collectDomText(el) : "";
+    }
+
+    // 5D：取单个已定位元素的文本（按文本挑按钮时配 findAll 用）。
+    function textOfEl(el) {
+      return collectDomText(el);
     }
 
     async function flush(rounds = 20) {
@@ -539,7 +593,67 @@ export function createUiHarness(options = {}) {
       dom = null;
     }
 
-    return { render, rerender, unmount, text, html, click, flush, host, find, findAll, change, textOf };
+    return { render, rerender, unmount, text, html, click, flush, host, find, findAll, change, textOf, textOfEl };
+  }
+
+  async function mount(mountProps = {}) {
+    await install();
+    // mount 默认安装可控定时器（R1）：restore/unmount 会统一卸载并还原。
+    fakeTimers.install();
+    const host = makeStatefulReact();
+    host.runEffects.v = true; // 真实渲染循环：effect 驱动数据加载（getMemoryView 等）
+    const { sectionVNode } = await applyPanel(host);
+
+    const dsh = mountProps.dsh ?? { call: async () => ({}) };
+    const sectionProps = { dsh, ...(mountProps.slotProps || {}) };
+    const prefill = mountProps.prefillStates;
+
+    function renderOnce() {
+      if (prefill) {
+        host.states.length = 0;
+        for (const v of prefill) host.states.push(v);
+      } else {
+        host.states.length = Math.max(host.states.length, PANEL_STATES);
+        if (!(0 in host.states) || host.states[0] === undefined) host.states[0] = mountProps.tab ?? "status";
+        if (!(1 in host.states) || host.states[1] === undefined) host.states[1] = "session-A";
+        if (!(2 in host.states) || host.states[2] === undefined) host.states[2] = "";
+        if (!(3 in host.states) || host.states[3] === undefined) host.states[3] = null;
+        if (!(4 in host.states) || host.states[4] === undefined) host.states[4] = mountProps.modeStatus ?? { mode: "active" };
+      }
+      return renderVNodeToDom(sectionVNode.type(sectionProps), globalThis.document);
+    }
+    return makeRenderLoop(host, renderOnce);
+  }
+
+  // 5D：按插槽名挂载非面板组件（如 conversation.chat.assistant-actions 的
+  // FlashbackActions），复用 mount 的真实重渲染循环（effect → flush → 状态变更 →
+  // 组件函数重执行 → DOM 更新）。props 优先级：显式 slotProps > meta.inject 注入
+  //（injectArg 触发）> dsh；prefillStates 与 mount 同款（每次渲染重置 states）。
+  async function mountSlot(slotName, mountProps = {}) {
+    await install();
+    fakeTimers.install();
+    const host = makeStatefulReact();
+    host.runEffects.v = true;
+    const { registered } = await applyPanel(host);
+    const comp = registered[slotName];
+    if (!comp) throw new Error("mountSlot: slot not registered: " + slotName);
+    const dsh = mountProps.dsh ?? { call: async () => ({}) };
+    const injected = typeof comp.meta.inject === "function" && mountProps.injectArg !== undefined
+      ? (comp.meta.inject(mountProps.injectArg) || {})
+      : {};
+    const slotProps = { dsh, ...injected, ...(mountProps.slotProps || {}) };
+    const prefill = mountProps.prefillStates;
+    function renderOnce() {
+      if (Array.isArray(prefill)) {
+        host.states.length = 0;
+        for (const v of prefill) host.states.push(v);
+      }
+      // comp.render(slotProps) 返回组件 vnode；renderVNodeToDom 遇 function 类型
+      // 会执行组件函数本体（光标已在 makeRenderLoop.render 里复位）。
+      return renderVNodeToDom(comp.render(slotProps), globalThis.document);
+    }
+    const loop = makeRenderLoop(host, renderOnce);
+    return { ...loop, comp, slotProps };
   }
 
   return {
@@ -548,6 +662,7 @@ export function createUiHarness(options = {}) {
     flattenVNode, collectText, findButtons, findTextarea,
     applyPanel,
     mount,
+    mountSlot,
     get registrations() { return sharedRegistrations; },
     get document() { return globalThis.document; },
     timers: fakeTimers,
