@@ -3,6 +3,10 @@ import path from 'node:path';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { validateConfig, validateKey, renderL1, evaluateMutation } from '../core/index.mjs';
+// 0.5 批次 2 A 线：保留策略枚举与默认值引 core/topics.mjs 唯一权威（不复制常量）。
+import {
+  RETENTION_VALUES, ARCHIVE_ORIGIN_VALUES, DEFAULT_RETENTION, DEFAULT_ARCHIVE_ORIGIN,
+} from '../core/topics.mjs';
 import { createFileStore } from '../storage/index.mjs';
 import { isCanonicalIso, isIsoDateOrTimestamp } from '../storage/fsutil.mjs';
 
@@ -89,9 +93,12 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
       // 靠它继承现有归档标记（undefined 在 JSON 编码时省略 = 未归档）。
       // S3：group/pinned 同样进 token meta——append/rewrite 缺省继承原组与钉住
       // 标记（append 不改组；改组必须显式给 group）。
+      // 0.5 A 线：retention/archiveOrigin 同款进 token meta——append/rewrite 缺省
+      // 继承现有保留策略，rewrite 不得静默丢掉用户手改的字段（数据损失防线）。
       meta: kind === 'topic' ? {
         title: item.title, summary: item.summary, updated: item.updated,
         archivedAt: item.archivedAt, group: item.group ?? [], pinned: item.pinned ?? false,
+        retention: item.retention, archiveOrigin: item.archiveOrigin,
       } : null });
   }
   function parseToken(value, kind, key) {
@@ -125,6 +132,14 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
       if (t.meta.pinned !== undefined && typeof t.meta.pinned !== 'boolean') {
         fail('INVALID_INPUT', 'token metadata pinned must be a boolean when present');
       }
+      // 0.5 A 线：retention/archiveOrigin 可选（旧版 token 无此字段，按缺省继承）；
+      // 有值时必须是合法枚举成员（不许静默纠正）。
+      if (t.meta.retention !== undefined && !RETENTION_VALUES.includes(t.meta.retention)) {
+        fail('INVALID_INPUT', 'token metadata retention must be "standing" or "historical" when present');
+      }
+      if (t.meta.archiveOrigin !== undefined && !ARCHIVE_ORIGIN_VALUES.includes(t.meta.archiveOrigin)) {
+        fail('INVALID_INPUT', 'token metadata archiveOrigin must be "manual" or "auto-inactive" when present');
+      }
     }
     return t;
   }
@@ -150,7 +165,15 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
         // S3：group/pinned 也参与「源未变」判定——读后被第三方改组/改钉住，
         // 陈旧 token 一律冲突（数组按 JSON 序列化比较，顺序敏感与主组语义一致）。
         || JSON.stringify(item.group ?? []) !== JSON.stringify(t.meta.group ?? [])
-        || (item.pinned ?? false) !== (t.meta.pinned ?? false))) {
+        || (item.pinned ?? false) !== (t.meta.pinned ?? false)
+        // 0.5 A 线：retention/archiveOrigin 同样参与「源未变」判定——读后被第三方
+        // 改保留策略（含阶段 C 的 auto 冷却写 archiveOrigin）时陈旧 token 冲突，
+        // 防 append 继承链把旧值回写（数据倒退）。两侧按缺省值兜底：store 读路径
+        // 恒注入默认值，而旧版本 token 可能没有这两个 meta 键——用 ?? 默认值比较
+        // 让旧 token 对「未显式设置」的文件照常重放，同时保留对「已显式设置值」
+        // 的篡改/陈旧检测（历史字段被改过仍必冲突）。
+        || (item.retention ?? DEFAULT_RETENTION) !== (t.meta.retention ?? DEFAULT_RETENTION)
+        || (item.archiveOrigin ?? DEFAULT_ARCHIVE_ORIGIN) !== (t.meta.archiveOrigin ?? DEFAULT_ARCHIVE_ORIGIN))) {
         fail('REVISION_CONFLICT', 'topic metadata does not match revision token');
       }
       const target = scope === activeScopeId ? revision : null;
@@ -180,7 +203,11 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
     return store.withLock(async () => {
       const s = await store.snapshot();
       const item = await store.readTopic(key);
-      return { ...item, revision: tokenFor('topic', item, s.generation, timestamp()) };
+      return { ...item,
+        // 0.5 A 线：保留策略两字段透出（store 读路径已补缺省值，?? 只兜旧快照形状）。
+        retention: item.retention ?? DEFAULT_RETENTION,
+        archiveOrigin: item.archiveOrigin ?? DEFAULT_ARCHIVE_ORIGIN,
+        revision: tokenFor('topic', item, s.generation, timestamp()) };
     });
   }
   async function listTopics() {
@@ -188,8 +215,12 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
       const s = await store.snapshot(); const at = timestamp();
       // 归档标记供面板第二批接线（L3 页归档徽章/排序）使用：
       // archived 布尔 + 原始 archivedAt（缺省 = 未归档，字段省略）。
+      // 0.5 A 线：retention/archiveOrigin 透出（B 线 memory_read 组目录按成员
+      // 目录消费 retention 字段；store 读路径已补缺省值，?? 只兜旧快照形状）。
       return s.topics.map(item => ({ ...item,
         archived: typeof item.archivedAt === 'string' && item.archivedAt.length > 0,
+        retention: item.retention ?? DEFAULT_RETENTION,
+        archiveOrigin: item.archiveOrigin ?? DEFAULT_ARCHIVE_ORIGIN,
         revision: tokenFor('topic', item, s.generation, at) }));
     });
   }
@@ -259,9 +290,10 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
       const base = { kind: c.kind, expectedRevision: token ? token.targetRevision : c.expectedRevision };
       if (c.kind === 'core') return { ...base, text: text(c.text, 'core text') };
       record(c.topic, 'topic metadata'); noScope(c.topic);
-      // S3：topic metadata 白名单扩 group/pinned（0.4 分组接线）。
-      if (Object.keys(c.topic).some(k => !['title', 'summary', 'updated', 'archivedAt', 'group', 'pinned'].includes(k))) {
-        fail('INVALID_INPUT', 'topic metadata accepts title/summary/updated/archivedAt/group/pinned only');
+      // S3：topic metadata 白名单扩 group/pinned（0.4 分组接线）；0.5 A 线再扩
+      // retention/archiveOrigin（保留策略）。
+      if (Object.keys(c.topic).some(k => !['title', 'summary', 'updated', 'archivedAt', 'group', 'pinned', 'retention', 'archiveOrigin'].includes(k))) {
+        fail('INVALID_INPUT', 'topic metadata accepts title/summary/updated/archivedAt/group/pinned/retention/archiveOrigin only');
       }
       // S3 形状校验：group 必须是非空字符串数组（null/undefined = 继承/清空语义
       // 见下方归一化）；pinned 必须是布尔。组 key 是否存在于 groups.json 由
@@ -272,6 +304,17 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
       }
       if (c.topic.pinned !== undefined && c.topic.pinned !== null && typeof c.topic.pinned !== 'boolean') {
         fail('INVALID_INPUT', 'topic.pinned must be a boolean when present');
+      }
+      // 0.5 A 线形状校验：retention/archiveOrigin 必须是合法枚举成员
+      // （undefined/null = 继承/清除语义见下方归一化；非法值 INVALID_INPUT，
+      // 不许静默纠正）。
+      if (c.topic.retention !== undefined && c.topic.retention !== null
+        && (typeof c.topic.retention !== 'string' || !RETENTION_VALUES.includes(c.topic.retention))) {
+        fail('INVALID_INPUT', 'topic.retention must be "standing" or "historical" when present');
+      }
+      if (c.topic.archiveOrigin !== undefined && c.topic.archiveOrigin !== null
+        && (typeof c.topic.archiveOrigin !== 'string' || !ARCHIVE_ORIGIN_VALUES.includes(c.topic.archiveOrigin))) {
+        fail('INVALID_INPUT', 'topic.archiveOrigin must be "manual" or "auto-inactive" when present');
       }
       // archivedAt：undefined/null 合法；字符串必须是规范 UTC ISO 串（A1/P2-1）。
       if (c.topic.archivedAt !== undefined && c.topic.archivedAt !== null) {
@@ -311,6 +354,15 @@ export async function createShioriService({ root, activeScopeId, config = {}, pe
           : c.topic.group === null ? [] : c.topic.group,
         pinned: c.topic.pinned === undefined ? (token?.meta.pinned ?? false)
           : c.topic.pinned === null ? false : c.topic.pinned,
+        // 0.5 A 线继承语义（与 archivedAt/group/pinned 同款）：payload 未带 → 继承
+        // token 里的现有值（append/rewrite 不许静默改保留策略、不得丢用户手改字段；
+        // 创建时无 token → 缺省 standing / manual，磁盘省略整行）；显式 null →
+        // 清除（'' 哨兵，存储层序列化省略整行 = 磁盘回到缺省口径）；合法枚举 →
+        // 原样写入。
+        retention: c.topic.retention === undefined ? token?.meta.retention
+          : c.topic.retention === null ? '' : c.topic.retention,
+        archiveOrigin: c.topic.archiveOrigin === undefined ? token?.meta.archiveOrigin
+          : c.topic.archiveOrigin === null ? '' : c.topic.archiveOrigin,
       } };
     });
     const generations = new Set(tokens.map(t => t.generation));

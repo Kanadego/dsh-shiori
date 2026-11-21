@@ -155,3 +155,97 @@ describe('archivedAt 归档标记（可选字段）', () => {
     assert.equal(parsed.meta.archivedAt, '2026-11-07T08:30:00.000Z');
   });
 });
+
+describe('0.5 A 线：retention / archiveOrigin 保留策略字段', () => {
+  it('非默认值序列化输出枚举行，往返保留（round-trip）', () => {
+    const meta = { ...META, retention: 'historical', archiveOrigin: 'auto-inactive' };
+    const buf = serializeTopicFile(meta, 'body');
+    const text = buf.toString('utf8');
+    assert.match(text, /^retention: "historical"$/m);
+    assert.match(text, /^archiveOrigin: "auto-inactive"$/m);
+    const parsed = parseTopicFile(buf);
+    assert.equal(parsed.retention, 'historical');
+    assert.equal(parsed.archiveOrigin, 'auto-inactive');
+    // 新字段不混入 meta 字符串记录（与 group/pinned 同款一等字段口径）
+    assert.equal(parsed.meta.retention, undefined);
+    assert.equal(parsed.meta.archiveOrigin, undefined);
+    // 行位置在 archivedAt 之后、group 之前（写入顺序稳定）
+    const order = text.split('\n').map((l) => l.split(':')[0]);
+    assert.ok(order.indexOf('archivedAt') < order.indexOf('archiveOrigin'));
+    assert.ok(order.indexOf('archiveOrigin') < order.indexOf('retention'));
+  });
+
+  it('缺省值/undefined/null/空串整行省略（老文件形状零变化），读取补默认值', () => {
+    const variants = [
+      META,
+      { ...META, retention: undefined, archiveOrigin: undefined },
+      { ...META, retention: null, archiveOrigin: null },
+      { ...META, retention: 'standing', archiveOrigin: 'manual' },
+      { ...META, retention: '', archiveOrigin: '' },
+    ];
+    for (const [i, meta] of variants.entries()) {
+      const text = serializeTopicFile(meta, 'body').toString('utf8');
+      assert.doesNotMatch(text, /^retention:/m, `variant ${i}: 默认/清除整行省略`);
+      assert.doesNotMatch(text, /^archiveOrigin:/m, `variant ${i}: 默认/清除整行省略`);
+      const parsed = parseTopicFile(Buffer.from(text, 'utf8'));
+      assert.equal(parsed.retention, 'standing', `variant ${i}: 缺省读取补 standing`);
+      assert.equal(parsed.archiveOrigin, 'manual', `variant ${i}: 缺省读取补 manual`);
+    }
+  });
+
+  it('旧文件（手工构造无新字段）读取补默认值且 meta 不被注入；已有 archivedAt 无来源 → manual', () => {
+    const legacyText = [
+      '---',
+      'key: "legacy"',
+      'title: "老专题"',
+      'summary: "老摘要"',
+      'updated: "2026-10-24T00:00:00.000Z"',
+      'scopeId: "amber"',
+      'archivedAt: "2026-11-07T00:00:00.000Z"',
+      '---',
+      '老正文',
+    ].join('\n');
+    const parsed = parseTopicFile(Buffer.from(legacyText, 'utf8'));
+    assert.equal(parsed.retention, 'standing');
+    assert.equal(parsed.archiveOrigin, 'manual', '已有 archivedAt 但无来源 → 人工归档');
+    // plain 标量也接受（与 archivedAt 磁盘口径一致）
+    const plainText = legacyText.replace('scopeId: "amber"', 'scopeId: "amber"\nretention: historical\narchiveOrigin: auto-inactive');
+    const plain = parseTopicFile(Buffer.from(plainText, 'utf8'));
+    assert.equal(plain.retention, 'historical');
+    assert.equal(plain.archiveOrigin, 'auto-inactive');
+  });
+
+  it('非法枚举：写入侧 INVALID_INPUT（含类型错），磁盘侧 INVALID_STATE，不静默纠正', () => {
+    // 写入侧
+    for (const bad of ['bogus', 'FROZEN', '', 42, true, null]) {
+      // null/'' 为缺省/清除哨兵整行省略，只有其余非法值抛错
+      if (bad === null || bad === '') continue;
+      assert.throws(() => serializeTopicFile({ ...META, retention: bad }, 'b'),
+        (e) => e.code === 'INVALID_INPUT' && /retention/.test(e.message), `retention=${String(bad)}`);
+      assert.throws(() => serializeTopicFile({ ...META, archiveOrigin: bad }, 'b'),
+        (e) => e.code === 'INVALID_INPUT' && /archiveOrigin/.test(e.message), `archiveOrigin=${String(bad)}`);
+    }
+    // 磁盘侧（已落盘的非法数据 = INVALID_STATE）
+    const base = '---\nkey: "a"\ntitle: "t"\nsummary: "s"\nupdated: "u"\nscopeId: "g"\n';
+    assert.throws(() => parseTopicFile(Buffer.from(`${base}retention: "bogus"\n---\nb`, 'utf8')),
+      (e) => e.code === 'INVALID_STATE' && /retention/.test(e.message));
+    assert.throws(() => parseTopicFile(Buffer.from(`${base}archiveOrigin: nope\n---\nb`, 'utf8')),
+      (e) => e.code === 'INVALID_STATE' && /archiveOrigin/.test(e.message));
+  });
+
+  it('字段重复 → INVALID_STATE（与既有重复口径一致）', () => {
+    const text = '---\nkey: "a"\ntitle: "t"\nsummary: "s"\nupdated: "u"\nscopeId: "g"\n'
+      + 'retention: "standing"\nretention: "historical"\n---\nb';
+    assert.throws(() => parseTopicFile(Buffer.from(text, 'utf8')), (e) => e.code === 'INVALID_STATE');
+  });
+
+  it('旧文件字节零变化：无新字段的序列化输出与 0.4 版本逐字节一致', () => {
+    // 老形状（不带新字段）序列化输出必须与既有口径完全一致（无 archiveOrigin/retention 行）
+    const text = serializeTopicFile(META, '第一行\r\n第二行\n').toString('utf8');
+    assert.equal(text, '---\nkey: "alpha"\ntitle: "标题 ✨"\nsummary: "摘"要"带引号"\n'
+      .replace('summary: "摘"要"带引号"', `summary: ${JSON.stringify('摘"要"带引号')}`)
+      + 'updated: "2026-10-24T12:00:00.000Z"\nscopeId: "amber"\n---\n第一行\r\n第二行\n');
+    assert.doesNotMatch(text, /^archiveOrigin:/m);
+    assert.doesNotMatch(text, /^retention:/m);
+  });
+});

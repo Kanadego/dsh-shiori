@@ -53,6 +53,9 @@ import {
   assertGroupsExist, GROUPS_VERSION, validateGroupsData, serializeGroupsFile, parseGroupsFile,
 } from '../core/groups.mjs';
 import { readGroups } from './groups.mjs';
+// 0.5 批次 2 A 线：retention/archiveOrigin 枚举与默认值以 core/topics.mjs 为唯一
+// 权威（storage → core 单向依赖，与 groups 同向；frontmatter.mjs 已同款引用）。
+import { RETENTION_VALUES, ARCHIVE_ORIGIN_VALUES } from '../core/topics.mjs';
 
 const FAULT_POINTS = new Set(['prepare', 'backup', 'first-rename', 'renames', 'marker']);
 
@@ -295,8 +298,9 @@ class FileStore {
           );
         }
         // S3：group/pinned 是一等可选字段（parseTopicFile 缺省补 [] / false），
+        // 0.5 A 线：retention/archiveOrigin 同款缺省读取（standing / manual），
         // 不回写磁盘——老文件 front-matter 原样保留。
-        const { meta, body, group, pinned } = parsed;
+        const { meta, body, group, pinned, retention, archiveOrigin } = parsed;
         if (meta.key !== key) {
           shadow.push({ file, reason: `front-matter key "${meta.key}" 与文件名 "${key}" 不一致，已跳过` });
           continue;
@@ -318,6 +322,8 @@ class FileStore {
         byKey.set(key, {
           key, title: meta.title, summary: meta.summary, scopeId,
           revision, updated: meta.updated, body, group, pinned,
+          // 0.5 A 线：保留策略两字段随解析结果透传（缺省即 standing / manual）
+          retention, archiveOrigin,
           ...(isCanonicalIso(meta.archivedAt) ? { archivedAt: meta.archivedAt } : {}),
         });
       }
@@ -375,10 +381,12 @@ class FileStore {
         }
         // 归档标记读取降级（P2-2/A2）：手改的垃圾串按「未归档」处理，不照收。
         // S3：group/pinned 随解析结果返回（缺省 [] / false，不回写磁盘）。
+        // 0.5 A 线：retention/archiveOrigin 同款（缺省 standing / manual）。
         return {
           key, title: meta.title, summary: meta.summary, scopeId,
           revision: sha256Buffer(raw), updated: meta.updated, body,
           group: parsed.group, pinned: parsed.pinned,
+          retention: parsed.retention, archiveOrigin: parsed.archiveOrigin,
           ...(isCanonicalIso(meta.archivedAt) ? { archivedAt: meta.archivedAt } : {}),
         };
       }
@@ -678,8 +686,11 @@ class FileStore {
           updated: meta ? meta.updated : null,
           body: parsed.hasFrontMatter ? parsed.body : e.buffer.toString('utf8'),
           // S3：候选快照同样携带 group/pinned（与扫描视图同形状，快照不丢字段）。
+          // 0.5 A 线：retention/archiveOrigin 同款透传。
           group: parsed.group,
           pinned: parsed.pinned,
+          retention: parsed.retention,
+          archiveOrigin: parsed.archiveOrigin,
           ...(meta?.archivedAt ? { archivedAt: meta.archivedAt } : {}),
         });
       }
@@ -836,7 +847,8 @@ class FileStore {
     const t = change.topic;
     // S3（0.4 防静默丢字段）：topic 对象出现未识别键一律 INVALID_INPUT 并列出
     // 键名。此前未识别键被静默忽略——group/pinned 接线前正是这样丢数据的。
-    const allowedTopicKeys = ['key', 'title', 'summary', 'updated', 'scopeId', 'archivedAt', 'body', 'extra', 'group', 'pinned'];
+    // 0.5 A 线：白名单扩 retention/archiveOrigin（写路径继承，防 rewrite 丢字段）。
+    const allowedTopicKeys = ['key', 'title', 'summary', 'updated', 'scopeId', 'archivedAt', 'body', 'extra', 'group', 'pinned', 'retention', 'archiveOrigin'];
     const unknownKeys = Object.keys(t).filter((k) => !allowedTopicKeys.includes(k));
     if (unknownKeys.length > 0) {
       throw invalidInput(
@@ -882,6 +894,22 @@ class FileStore {
         throw invalidInput(`changes[${index}].topic.pinned 必须是布尔值（缺省 false）`, { got: t.pinned });
       }
       meta.pinned = t.pinned;
+    }
+    // 0.5 A 线保留策略：retention/archiveOrigin 与 archivedAt 同款继承语义——
+    // undefined = 继承（service 层已从 token meta 补齐）；'' = 清除（序列化层
+    // 空值省略整行，磁盘回到缺省口径）；非空字符串必须是合法枚举（校验在
+    // #validateTopicMeta，此处只做类型把关并放进 meta）。
+    if (t.retention !== undefined) {
+      if (typeof t.retention !== 'string') {
+        throw invalidInput(`changes[${index}].topic.retention 必须是字符串枚举标量（'' = 清除为缺省）`, { got: t.retention });
+      }
+      meta.retention = t.retention;
+    }
+    if (t.archiveOrigin !== undefined) {
+      if (typeof t.archiveOrigin !== 'string') {
+        throw invalidInput(`changes[${index}].topic.archiveOrigin 必须是字符串枚举标量（'' = 清除为缺省）`, { got: t.archiveOrigin });
+      }
+      meta.archiveOrigin = t.archiveOrigin;
     }
     this.#validateTopicMeta(index, key, meta, t);
     let extra;
@@ -970,6 +998,19 @@ class FileStore {
         && !isCanonicalIso(meta.archivedAt)) {
       throw invalidInput(`${where} 的 archivedAt 必须是规范 UTC ISO 8601 时间串`
         + `（如 "2026-11-07T00:00:00.000Z"），收到: "${meta.archivedAt.slice(0, 60)}"`);
+    }
+    // 0.5 A 线保留策略：非空时必须是合法枚举成员（'' = 清除为缺省，允许）。
+    // 覆盖结构化 topic 与裸 text（front-matter 自带字段）两条写路径；
+    // 枚举常量引 core/topics.mjs 唯一权威，不许静默纠正。
+    for (const [field, values] of [
+      ['retention', RETENTION_VALUES],
+      ['archiveOrigin', ARCHIVE_ORIGIN_VALUES],
+    ]) {
+      if (meta[field] !== undefined && meta[field] !== ''
+          && !values.includes(meta[field])) {
+        throw invalidInput(`${where} 的 ${field} 必须是 ${values.map((v) => `"${v}"`).join(' | ')} 之一`
+          + `（'' = 清除为缺省），收到: "${String(meta[field]).slice(0, 60)}"`);
+      }
     }
     if (meta.key !== key) {
       throw invalidInput(`${where} front-matter key 与 change.key 不一致`, { metaKey: meta.key, key });

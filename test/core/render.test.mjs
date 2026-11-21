@@ -301,3 +301,284 @@ test("archivedAt 非法形状（空串/非字符串/含换行）显式拒绝", (
   assertRejected({ coreText: "x", topics: [makeTopic({ archivedAt: 7 })], }, /archivedAt/);
   assertRejected({ coreText: "x", topics: [makeTopic({ archivedAt: "a\nb" })], }, /archivedAt/);
 });
+
+// ---------- 0.5 批次 2 A 线：renderL1 组布局（input.groups 可选输入） ----------
+
+function makeGroup(overrides = {}) {
+  return {
+    key: "dev",
+    title: "开发与配置",
+    summary: "",
+    pinned: false,
+    members: [],
+    ...overrides,
+  };
+}
+
+test("A-0.5 金样：独立 topic + 组摘要（带摘要）+ pinned 成员 + 冷钩子四类各≥1，逐字稳定", () => {
+  const result = renderL1({
+    coreText: "## 铁律\n正文",
+    topics: [
+      makeTopic({ key: "standalone", scopeId: "amber", summary: "独立活跃专题" }),
+      makeTopic({ key: "gone", scopeId: "amber", summary: "冷专题", archivedAt: "2026-11-07T00:00:00.000Z" }),
+    ],
+    groups: [
+      makeGroup({
+        key: "dev",
+        title: "开发与配置",
+        summary: "工具与脚本",
+        members: [
+          { key: "member-hot", title: "热成员", summary: "钉住的热成员", pinned: true, archived: false },
+          { key: "member-warm", title: "普通成员", summary: "不钉住", pinned: false, archived: false },
+          { key: "member-cold", title: "冷成员", summary: "钉住但已归档", pinned: true, archived: true },
+        ],
+      }),
+      makeGroup({
+        key: "old",
+        title: "全冷组",
+        summary: "这组全归档了",
+        members: [
+          { key: "cold-1", summary: "冷", archived: true },
+          { key: "cold-2", summary: "也冷", archived: true },
+        ],
+      }),
+    ],
+  });
+  const expected = [
+    "## 主题记忆索引 / Topic memory index",
+    "- standalone [amber] — 独立活跃专题",
+    "- group:dev — 开发与配置（3 名成员） — 工具与脚本",
+    "  - member-hot — 钉住的热成员",
+    "- group:old — 全冷组（2 篇冷专题，memory_search 可查）",
+    "另有 1 篇冷专题，memory_search 可查",
+  ].join("\n");
+  assert.equal(result.indexText, expected);
+  assert.equal(result.text, "## 铁律\n正文\n\n" + expected);
+  // 归档成员（含 pinned 归档）不列行——冷内容不上索引
+  assert.ok(!result.text.includes("member-cold"));
+  assert.ok(!result.text.includes("冷成员"));
+  // chars/bytes 口径不变（完整渲染计数）
+  assert.equal(result.chars, result.text.length);
+  assert.equal(result.bytes, Buffer.byteLength(result.text, "utf8"));
+});
+
+test("A-0.5 金样：组摘要无摘要时省略尾部，pinned 空摘要照渲染（与专题条目同规）", () => {
+  const result = renderL1({
+    coreText: "",
+    topics: [],
+    groups: [
+      makeGroup({
+        key: "g",
+        title: "空摘要组",
+        summary: "",
+        members: [{ key: "m", title: "成员", summary: "", pinned: true, archived: false }],
+      }),
+    ],
+  });
+  assert.equal(result.indexText, [
+    "## 主题记忆索引 / Topic memory index",
+    "- group:g — 空摘要组（1 名成员）",
+    "  - m — ",
+  ].join("\n"));
+});
+
+test("A-0.5：groups 缺省 / undefined / 空数组时输出与旧版逐字节一致（回归零变化）", () => {
+  const topics = [
+    makeTopic({ key: "b", summary: "B" }),
+    makeTopic({ key: "a", summary: "A" }),
+    makeTopic({ key: "cold", summary: "冷", archivedAt: "2026-11-07T00:00:00.000Z" }),
+  ];
+  const legacy = renderL1({ coreText: "core", topics });
+  assert.equal(renderL1({ coreText: "core", topics, groups: [] }).text, legacy.text);
+  assert.equal(renderL1({ coreText: "core", topics, groups: [] }).bytes, legacy.bytes);
+  assert.deepEqual(renderL1({ coreText: "core", topics, groups: [] }).indexText, legacy.indexText);
+  // groups 键完全不存在（旧签名调用方）
+  const withoutKey = { coreText: "core", topics };
+  assert.equal(renderL1(withoutKey).text, legacy.text);
+  // 空 core + 只有归档专题：钩子行位置不变（末尾）
+  const hookOnly = renderL1({ coreText: "", topics: [makeTopic({ key: "c", archivedAt: "2026-11-08T00:00:00.000Z" })] });
+  assert.equal(
+    renderL1({ coreText: "", topics: [makeTopic({ key: "c", archivedAt: "2026-11-08T00:00:00.000Z" })], groups: [] }).indexText,
+    hookOnly.indexText,
+  );
+});
+
+test("A-0.5 顺序硬约束：topics/groups/members 全部打乱输入顺序 → 输出逐字节一致", () => {
+  const topics = [
+    makeTopic({ key: "beta", scopeId: "amber", summary: "B" }),
+    makeTopic({ key: "alpha", scopeId: "amber", summary: "A" }),
+    makeTopic({ key: "mid", scopeId: "global", summary: "M" }),
+    makeTopic({ key: "cold", scopeId: "amber", summary: "冷", archivedAt: "2026-11-07T00:00:00.000Z" }),
+  ];
+  const groups = [
+    makeGroup({
+      key: "zeta",
+      title: "Z组",
+      summary: "最后",
+      members: [
+        { key: "m2", summary: "成员2", pinned: true, archived: false },
+        { key: "m1", summary: "成员1", pinned: true, archived: false },
+        { key: "m3", summary: "不钉", pinned: false, archived: false },
+      ],
+    }),
+    makeGroup({
+      key: "alpha-g",
+      title: "A组",
+      summary: "第一",
+      members: [
+        { key: "p1", summary: "钉住", pinned: true, archived: false },
+        { key: "p2", summary: "也钉住", pinned: true, archived: false },
+      ],
+    }),
+    makeGroup({
+      key: "coldg",
+      title: "冷组",
+      members: [
+        { key: "c2", summary: "冷2", archived: true },
+        { key: "c1", summary: "冷1", archived: true },
+      ],
+    }),
+  ];
+  const first = renderL1({ coreText: "core text", topics, groups });
+  // 倒序 + 多组洗牌（多轮不同排列），每组内部成员也乱序
+  const shuffles = [
+    [...topics].reverse(),
+    [topics[2], topics[0], topics[3], topics[1]],
+    [topics[3], topics[1], topics[2], topics[0]],
+  ];
+  const groupShuffles = [
+    [...groups].reverse(),
+    [groups[2], groups[0], groups[1]],
+    [groups[1], groups[2], groups[0]],
+  ];
+  for (let i = 0; i < shuffles.length; i++) {
+    const again = renderL1({
+      coreText: "core text",
+      topics: shuffles[i],
+      groups: groupShuffles[i].map((g) => ({ ...g, members: [...g.members].reverse() })),
+    });
+    assert.equal(again.text, first.text, `第 ${i} 轮打乱后输出必须逐字节一致`);
+    assert.equal(again.indexText, first.indexText);
+    assert.equal(again.bytes, first.bytes);
+  }
+  // 组内成员行同样按 key 字典序（m1 < m2），与输入顺序无关
+  assert.ok(first.text.indexOf("  - m1 — 成员1") < first.text.indexOf("  - m2 — 成员2"));
+  // 组行按 key 字典序：alpha-g < coldg < zeta；独立 topic 行先于全部组行
+  const lines = first.indexText.split("\n");
+  assert.equal(lines[1], "- alpha [amber] — A");
+  assert.equal(lines[2], "- beta [amber] — B");
+  assert.equal(lines[3], "- mid [global] — M");
+  assert.equal(lines[4], "- group:alpha-g — A组（2 名成员） — 第一");
+  assert.equal(lines[5], "  - p1 — 钉住");
+  assert.equal(lines[6], "  - p2 — 也钉住");
+  assert.equal(lines[7], "- group:coldg — 冷组（2 篇冷专题，memory_search 可查）");
+});
+
+test("A-0.5：组条目 order/retention 等未知字段容忍透传，不参与排序（顺序仍按 key）", () => {
+  const result = renderL1({
+    coreText: "",
+    topics: [],
+    groups: [
+      makeGroup({ key: "b", title: "B组", order: 10, retention: "historical", extra: "随便" }),
+      makeGroup({ key: "a", title: "A组", order: 99 }),
+    ],
+  });
+  const lines = result.indexText.split("\n").slice(1);
+  assert.deepEqual(lines, ["- group:a — A组（0 名成员）", "- group:b — B组（0 名成员）"]);
+});
+
+test("A-0.5：只有组没有 topic 时索引照常出现（标题 + 组行），无 topic 无归档无组仍无索引", () => {
+  const onlyGroups = renderL1({
+    coreText: "core",
+    topics: [],
+    groups: [makeGroup({ key: "g", title: "组", members: [] })],
+  });
+  assert.ok(onlyGroups.text.startsWith("core\n\n## 主题记忆索引"));
+  const empty = renderL1({ coreText: "core", topics: [], groups: [] });
+  assert.equal(empty.text, "core");
+  assert.equal(empty.indexText, "");
+});
+
+test("A-0.5：部分归档的组仍走活跃组摘要行，全局归档钩子行保持在索引末尾", () => {
+  const result = renderL1({
+    coreText: "",
+    topics: [makeTopic({ key: "gone", summary: "冷", archivedAt: "2026-11-07T00:00:00.000Z" })],
+    groups: [
+      makeGroup({
+        key: "mixed",
+        title: "混合组",
+        members: [
+          { key: "hot", summary: "热", archived: false },
+          { key: "cold", summary: "冷", archived: true },
+        ],
+      }),
+    ],
+  });
+  const lines = result.indexText.split("\n").slice(1);
+  assert.deepEqual(lines, [
+    "- group:mixed — 混合组（2 名成员）",
+    "另有 1 篇冷专题，memory_search 可查",
+  ]);
+  // 部分归档组没有组级冷钩子（归档成员可发现性由全局钩子承担）
+  assert.ok(!result.text.includes("- group:mixed — 混合组（2 篇冷专题"));
+});
+
+test("A-0.5：groups 形状违规全部 INVALID_INPUT（非数组/孔/缺 key/缺 title/重复组 key/成员缺 key/成员重复/换行摘要/坏布尔/坏 key）", () => {
+  assert.throws(() => renderL1({ coreText: "x", topics: [], groups: "no" }),
+    (e) => e.code === "INVALID_INPUT" && /groups must be an array/.test(e.message));
+  assert.throws(() => renderL1({ coreText: "x", topics: [], groups: [null] }),
+    (e) => e.code === "INVALID_INPUT" && /groups\[0\] must be a plain object/.test(e.message));
+  assert.throws(() => renderL1({ coreText: "x", topics: [], groups: [(() => { const g = makeGroup(); delete g.key; return g; })()] }),
+    (e) => e.code === "INVALID_INPUT" && /missing required property "key"/.test(e.message));
+  assert.throws(() => renderL1({ coreText: "x", topics: [], groups: [makeGroup({ key: undefined })] }),
+    (e) => e.code === "INVALID_INPUT" && /key must be a non-empty string/.test(e.message));
+  assert.throws(() => renderL1({ coreText: "x", topics: [], groups: [makeGroup({ title: "" })] }),
+    (e) => e.code === "INVALID_INPUT" && /title must be a non-empty string/.test(e.message));
+  assert.throws(() => renderL1({ coreText: "x", topics: [], groups: [makeGroup(), makeGroup()] }),
+    (e) => e.code === "INVALID_INPUT" && /duplicate group key "dev"/.test(e.message));
+  assert.throws(() => renderL1({
+    coreText: "x", topics: [],
+    groups: [makeGroup({ members: [{ summary: "缺 key" }] })],
+  }), (e) => e.code === "INVALID_INPUT" && /members\[0\] is missing required property "key"/.test(e.message));
+  assert.throws(() => renderL1({
+    coreText: "x", topics: [],
+    groups: [makeGroup({ members: [{ key: "m" }, { key: "m" }] })],
+  }), (e) => e.code === "INVALID_INPUT" && /duplicate member key "m"/.test(e.message));
+  assert.throws(() => renderL1({
+    coreText: "x", topics: [],
+    groups: [makeGroup({ summary: "a\nb" })],
+  }), (e) => e.code === "INVALID_INPUT" && /summary must not contain line breaks/.test(e.message));
+  assert.throws(() => renderL1({
+    coreText: "x", topics: [],
+    groups: [makeGroup({ members: [{ key: "m", summary: "a\nb" }] })],
+  }), (e) => e.code === "INVALID_INPUT" && /summary must not contain line breaks/.test(e.message));
+  assert.throws(() => renderL1({
+    coreText: "x", topics: [],
+    groups: [makeGroup({ pinned: "yes" })],
+  }), (e) => e.code === "INVALID_INPUT" && /pinned must be a boolean/.test(e.message));
+  assert.throws(() => renderL1({
+    coreText: "x", topics: [],
+    groups: [makeGroup({ members: [{ key: "m", archived: 1 }] })],
+  }), (e) => e.code === "INVALID_INPUT" && /archived must be a boolean/.test(e.message));
+  assert.throws(() => renderL1({
+    coreText: "x", topics: [],
+    groups: [makeGroup({ key: "bad/key" })],
+  }), (e) => e.code === "INVALID_INPUT" && /forbidden filename character/.test(e.message));
+  // 未知键仍拒绝（renderL1 input 顶层），组/成员条目内部未知键容忍
+  assert.throws(() => renderL1({ coreText: "x", topics: [], groups: [], extra: 1 }),
+    (e) => e.code === "INVALID_INPUT" && /unknown property "extra"/.test(e.message));
+  // members 非数组
+  assert.throws(() => renderL1({ coreText: "x", topics: [], groups: [makeGroup({ members: "no" })] }),
+    (e) => e.code === "INVALID_INPUT" && /members must be an array/.test(e.message));
+});
+
+test("A-0.5：超预算大组摘要照渲染（本函数不做预算裁决，口径与旧版一致）", () => {
+  const big = "x".repeat(20000);
+  const result = renderL1({
+    coreText: "",
+    topics: [],
+    groups: [makeGroup({ key: "big", title: "大组", summary: big })],
+  });
+  assert.equal(result.chars, result.text.length);
+  assert.ok(result.text.includes(big));
+});

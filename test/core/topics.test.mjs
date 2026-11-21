@@ -399,3 +399,97 @@ test("S3: L1 渲染结果与 0.3.1 完全一致（group/pinned 不参与渲染�
   assert.equal(withIt.chars, without.chars);
   assert.deepEqual(withIt.indexText, without.indexText);
 });
+
+// ---------- 0.5 批次 2 A 线：retention / archiveOrigin 保留策略字段 ----------
+
+test("A-0.5: retention/archiveOrigin 合法枚举值通过校验并原样透传", () => {
+  const result = selectVisibleTopics({
+    activeScopeId: "amber",
+    topics: [
+      makeTopic({ key: "hist", scopeId: "amber", retention: "historical" }),
+      makeTopic({ key: "auto", scopeId: "amber", archiveOrigin: "auto-inactive" }),
+      makeTopic({ key: "both", scopeId: "amber", retention: "standing", archiveOrigin: "manual" }),
+    ],
+  });
+  assert.equal(result.length, 3);
+  assert.equal(result.find((t) => t.key === "hist").retention, "historical");
+  assert.equal(result.find((t) => t.key === "auto").archiveOrigin, "auto-inactive");
+  assert.equal(result.find((t) => t.key === "both").retention, "standing");
+});
+
+test("A-0.5: 老数据没有 retention/archiveOrigin 字段时行为不变，校验层不注入默认值", () => {
+  // 与 S3 group/pinned 同规：核心校验层只验形状，不注入、不回写；
+  // 缺省值注入由 frontmatter 读取侧承担（frontmatter.test.mjs 覆盖）。
+  const result = selectVisibleTopics({
+    activeScopeId: "amber",
+    topics: [makeTopic({ key: "legacy", scopeId: "amber" })],
+  });
+  assert.equal(result[0].retention, undefined);
+  assert.equal(result[0].archiveOrigin, undefined);
+});
+
+test("A-0.5: retention 非法值一律 INVALID_INPUT（含 null 与类型错），不许静默纠正", () => {
+  const cases = ["bogus", "STANDING", "", 42, true, null];
+  for (const bad of cases) {
+    assertRejected(
+      { activeScopeId: "amber", topics: [makeTopic({ key: "bad", scopeId: "amber", retention: bad })] },
+      /retention must be one of/,
+    );
+  }
+});
+
+test("A-0.5: archiveOrigin 非法值一律 INVALID_INPUT（含 null 与类型错），不许静默纠正", () => {
+  const cases = ["bogus", "MANUAL", "", 7, false, null];
+  for (const bad of cases) {
+    assertRejected(
+      { activeScopeId: "amber", topics: [makeTopic({ key: "bad", scopeId: "amber", archiveOrigin: bad })] },
+      /archiveOrigin must be one of/,
+    );
+  }
+});
+
+test("A-0.5: renderL1 拒绝非法保留策略值（核心校验共用）", () => {
+  assert.throws(
+    () => renderL1({ coreText: "x", topics: [makeTopic({ key: "bad", scopeId: "amber", retention: "frozen" })] }),
+    (error) => error.code === "INVALID_INPUT" && /retention must be one of/.test(error.message),
+  );
+  assert.throws(
+    () => renderL1({ coreText: "x", topics: [makeTopic({ key: "bad", scopeId: "amber", archiveOrigin: "auto" })] }),
+    (error) => error.code === "INVALID_INPUT" && /archiveOrigin must be one of/.test(error.message),
+  );
+});
+
+test("A-0.5: resolveRetention 组默认值 + topic 显式值覆盖组 + 双缺省回 standing", () => {
+  // topic 显式值覆盖组策略
+  assert.equal(resolveRetention({ retention: "standing" }, { retention: "historical" }), "standing");
+  assert.equal(resolveRetention({ retention: "historical" }, { retention: "standing" }), "historical");
+  // topic 缺省 → 组策略生效（组默认值语义）
+  assert.equal(resolveRetention({}, { retention: "historical" }), "historical");
+  // 双缺省 → standing
+  assert.equal(resolveRetention({}, {}), "standing");
+  assert.equal(resolveRetention({}, undefined), "standing");
+  assert.equal(resolveRetention(undefined, undefined), "standing");
+  // 组条目缺 retention 键（老清单形状）→ 回 standing
+  assert.equal(resolveRetention({}, { key: "dev", title: "T", summary: "", order: 10 }), "standing");
+  // null 组条目容忍（调用方未取到组时的形状）
+  assert.equal(resolveRetention({}, null), "standing");
+});
+
+test("A-0.5: resolveRetention 组策略非法值拒绝（INVALID_INPUT），topic 非法值同样拒绝", () => {
+  assert.throws(
+    () => resolveRetention({}, { retention: "bogus" }),
+    (error) => error.code === "INVALID_INPUT" && /group retention policy must be one of/.test(error.message),
+  );
+  assert.throws(
+    () => resolveRetention({}, { retention: 42 }),
+    (error) => error.code === "INVALID_INPUT" && /group retention policy must be one of/.test(error.message),
+  );
+  // topic 显式值非法不被组策略掩盖
+  assert.throws(
+    () => resolveRetention({ retention: "nope" }, { retention: "historical" }),
+    (error) => error.code === "INVALID_INPUT" && /topic retention must be one of/.test(error.message),
+  );
+});
+
+// 本段补充导入（ESM 顶层 import 提升生效；不改动上方既有 import 区，保持既有行零改动）
+import { resolveRetention } from "../../src/core/topics.mjs";

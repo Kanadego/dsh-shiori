@@ -582,3 +582,76 @@ test("P1#7：core/groups.mjs 源码零 storage 导入（纯逻辑层不触 stora
     }
   }
 });
+
+// ---------- 0.5 批次 2 A 线：组级 retention 策略（groups.json 可选字段） ----------
+
+test("A-0.5: validateGroupEntry 组级 retention 合法值保留进归一化结果，缺省不带该键", () => {
+  const withPolicy = validateGroupEntry(
+    { key: "dev", title: "开发", summary: "", order: 10, retention: "historical" },
+    "g[0]",
+  );
+  assert.equal(withPolicy.retention, "historical");
+  // 其余四字段原样
+  assert.equal(withPolicy.key, "dev");
+  assert.equal(withPolicy.order, 10);
+
+  const withoutPolicy = validateGroupEntry(
+    { key: "dev", title: "开发", summary: "", order: 10 },
+    "g[0]",
+  );
+  assert.equal("retention" in withoutPolicy, false, "缺省时归一化结果不带 retention 键（老清单字节形状不变）");
+
+  // 未知键仍被忽略（容错口径不变）
+  const unknown = validateGroupEntry(
+    { key: "dev", title: "开发", summary: "", order: 10, temperature: "cold", memo: "x" },
+    "g[0]",
+  );
+  assert.equal("temperature" in unknown, false);
+  assert.equal("memo" in unknown, false);
+});
+
+test("A-0.5: 组级 retention 非法值拒绝（INVALID_INPUT），不许静默纠正", () => {
+  for (const bad of ["bogus", "STANDING", "", 42, true, null]) {
+    // null 与 undefined 同义（缺省），不算非法
+    if (bad === null) continue;
+    assert.throws(
+      () => validateGroupEntry({ key: "dev", title: "T", summary: "", order: 1, retention: bad }, "g[0]"),
+      (error) => error.code === "INVALID_INPUT" && /retention/.test(error.message),
+      `retention=${String(bad)}`,
+    );
+  }
+});
+
+test("A-0.5: 组级 retention 随清单序列化/解析往返保留（round-trip）", () => {
+  const data = {
+    version: GROUPS_VERSION,
+    groups: [
+      { key: "dev", title: "开发", summary: "", order: 10, retention: "historical" },
+      { key: "general", title: "通用", summary: "", order: 20 },
+    ],
+  };
+  const raw = serializeGroupsFile(data);
+  const text = raw.toString("utf8");
+  assert.match(text, /"retention": "historical"/, "组级策略落盘 JSON");
+  const parsed = parseGroupsFile(raw, "groups.json(test)");
+  assert.equal(parsed.groups[0].retention, "historical");
+  assert.equal("retention" in parsed.groups[1], false);
+  // 再序列化逐字节稳定（幂等）
+  assert.equal(serializeGroupsFile(parsed).toString("utf8"), text);
+});
+
+test("A-0.5: 无 retention 的老清单序列化输出与 0.4 版本字节一致", () => {
+  const data = {
+    version: GROUPS_VERSION,
+    groups: [{ key: "dev", title: "开发", summary: "", order: 10 }],
+  };
+  const text = serializeGroupsFile(data).toString("utf8");
+  assert.equal(text, `${JSON.stringify({
+    version: 1,
+    groups: [{ key: "dev", title: "开发", summary: "", order: 10 }],
+  }, null, 2)}\n`);
+  assert.ok(!text.includes("retention"));
+});
+
+// 本段补充导入（ESM 顶层 import 提升生效；不改动上方既有 import 区，便于 review 对照）
+import { serializeGroupsFile, parseGroupsFile } from "../../src/core/groups.mjs";

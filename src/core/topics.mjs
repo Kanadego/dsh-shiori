@@ -10,12 +10,14 @@
 // - 输出按 key 的 UTF-16 码元序稳定排序，绝不依赖系统 locale。
 //
 // Topic 形状：{key,title,summary,scopeId,revision,updated,body?,archivedAt?,
-//              group?,pinned?}。
+//              group?,pinned?,retention?,archiveOrigin?}。
 // body 之外的字段全部必填；summary ≤60 UTF-16 且不得含换行（会破坏索引行结构）；
 // group/pinned 为 0.4 S3 新增可选分组元数据（缺省读取补 [] / false，不回写磁盘，
-// 老文件行为不变）；允许未知字段以保持数据前向兼容（Topic 是数据记录，不是控制接口）。
+// 老文件行为不变）；retention/archiveOrigin 为 0.5 批次 2 A 线新增可选保留策略
+// 元数据（缺省读取补 standing / manual，不回写磁盘）；允许未知字段以保持数据
+// 前向兼容（Topic 是数据记录，不是控制接口）。
 
-import { fail, describe, requireObject, requireExactKeys } from "./errors.mjs";
+import { fail, describe, show, requireObject, requireExactKeys } from "./errors.mjs";
 import { validateKey } from "./keys.mjs";
 
 // DESIGN §10 目录布局 scopes/global/ 即共享作用域，因此字面量 "global"
@@ -28,7 +30,57 @@ export const SUMMARY_MAX_CHARS = 60;
 // 超出不拒绝（软约束，只提示），调用方用 groupSoftLimitWarning 取提示文案。
 export const GROUP_SOFT_LIMIT = 3;
 
+// 0.5 批次 2 A 线（0.5-DEV-PLAN §5 阶段 A.1）：保留策略字段。
+// retention：数据保留档位——standing = 常驻（进 L1 索引的正常活跃专题），
+// historical = 历史档（温度引擎后续自动冷却的候选人群，本模块只管形状）。
+// archiveOrigin：归档来源——manual = 人工归档，auto-inactive = 自动冷却归档
+// （阶段 C 落地）；已有 archivedAt 但没有来源的旧文件按 manual 读（缺省即人工）。
+// 两个枚举深度冻结：调用方引同一份常量，杜绝副本漂移。
+export const RETENTION_VALUES = Object.freeze(["standing", "historical"]);
+export const ARCHIVE_ORIGIN_VALUES = Object.freeze(["manual", "auto-inactive"]);
+export const DEFAULT_RETENTION = "standing";
+export const DEFAULT_ARCHIVE_ORIGIN = "manual";
+
 const MAX_SCOPE_ID_CHARS = 128;
+
+/** retention 枚举校验：合法返回原值，非法 fail("INVALID_INPUT")，不静默纠正。 */
+export function validateRetention(value, where = "retention") {
+  if (!RETENTION_VALUES.includes(value)) {
+    fail(
+      "INVALID_INPUT",
+      `${where} must be one of ${RETENTION_VALUES.map((v) => JSON.stringify(v)).join(" | ")}, got ${show(value)}`,
+    );
+  }
+  return value;
+}
+
+/** archiveOrigin 枚举校验：合法返回原值，非法 fail("INVALID_INPUT")，不静默纠正。 */
+export function validateArchiveOrigin(value, where = "archiveOrigin") {
+  if (!ARCHIVE_ORIGIN_VALUES.includes(value)) {
+    fail(
+      "INVALID_INPUT",
+      `${where} must be one of ${ARCHIVE_ORIGIN_VALUES.map((v) => JSON.stringify(v)).join(" | ")}, got ${show(value)}`,
+    );
+  }
+  return value;
+}
+
+/**
+ * 生效 retention 解析（0.5 批次 2 A 线）：topic 显式值覆盖组级默认值，
+ * 两者都缺省 = standing。
+ * - groupEntry 是 groups.json 的组条目（归一化或原始形状均可，未知字段不在此
+ *   消费——保持组清单的未知键容错口径）；带 retention 策略时按枚举校验，
+ *   非法策略值 fail("INVALID_INPUT")，绝不静默回退默认。
+ * - topic 显式值缺省/无 topic 时返回组策略（无则 standing）；
+ *   topic 显式值非法同样拒绝（数据错误不该被组策略掩盖）。
+ */
+export function resolveRetention(topic, groupEntry) {
+  const policy =
+    groupEntry === undefined || groupEntry === null ? undefined : groupEntry.retention;
+  if (policy !== undefined) validateRetention(policy, "group retention policy");
+  if (topic?.retention !== undefined) return validateRetention(topic.retention, "topic retention");
+  return policy ?? DEFAULT_RETENTION;
+}
 
 /** group 超软上限时的提示文案；未超上限或无 group 字段返回 null。 */
 export function groupSoftLimitWarning(topic) {
@@ -147,6 +199,15 @@ export function validateTopic(topic, where) {
   }
   if (topic.pinned !== undefined && typeof topic.pinned !== "boolean") {
     fail("INVALID_INPUT", `${where}: pinned must be a boolean when present`);
+  }
+  // 保留策略字段（0.5 批次 2 A 线，可选）：缺省 = standing / manual（读取侧由
+  // frontmatter 补默认值，本模块只校验形状，不注入、不回写磁盘）；非法枚举值
+  // 一律 INVALID_INPUT（不许静默纠正）。老数据没有这两个字段，行为不变。
+  if (topic.retention !== undefined) {
+    validateRetention(topic.retention, `${where}: retention`);
+  }
+  if (topic.archiveOrigin !== undefined) {
+    validateArchiveOrigin(topic.archiveOrigin, `${where}: archiveOrigin`);
   }
   return topic;
 }

@@ -30,6 +30,7 @@
 // 两侧实例形状一致，调用方按 code 判定的行为不变。
 
 import { validateKey } from './keys.mjs';
+import { RETENTION_VALUES } from './topics.mjs';
 
 /** groups.json 结构版本（0.4 S3 只认 1）。 */
 export const GROUPS_VERSION = 1;
@@ -134,7 +135,11 @@ export function validateGroupKey(key, where = 'group key') {
 /**
  * 校验单个组条目（groups.json 元素 / create 参数）。
  * 必填：key/title/summary/order（与文档 §S3.2 结构一致）；未知字段读取时容忍
- * （前向兼容），归一化时丢弃——清单重写后文件里只保留契约四字段。
+ * （前向兼容），归一化时丢弃——清单重写后文件里保留契约四字段 + 可选 retention。
+ * 0.5 批次 2 A 线（阶段 A.1）：可选组级 retention 策略（组默认值，topic 显式值
+ * 覆盖组，解析在 core/topics.mjs 的 resolveRetention）——出现时必须是合法枚举
+ * 成员，非法值 INVALID_INPUT（不许静默纠正）；缺省时归一化结果不带该键
+ * （老清单文件字节形状不变）。
  */
 export function validateGroupEntry(entry, where) {
   if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
@@ -158,7 +163,14 @@ export function validateGroupEntry(entry, where) {
   if (hasLoneSurrogate(entry.title) || hasLoneSurrogate(entry.summary)) {
     throw invalidState(`${where} 含孤立代理码元，无法无损写入`);
   }
-  return { key: entry.key, title: entry.title, summary: entry.summary, order: entry.order };
+  const normalized = { key: entry.key, title: entry.title, summary: entry.summary, order: entry.order };
+  if (entry.retention !== undefined) {
+    if (!RETENTION_VALUES.includes(entry.retention)) {
+      throw invalidInput(`${where}.retention 必须是 ${RETENTION_VALUES.map((v) => `"${v}"`).join(' | ')} 之一，得到 ${typeof entry.retention === 'string' ? `"${entry.retention.slice(0, 60)}"` : String(entry.retention)}`);
+    }
+    normalized.retention = entry.retention;
+  }
+  return normalized;
 }
 
 /**

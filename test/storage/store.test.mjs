@@ -293,3 +293,193 @@ describe('S3 组清单初始化与提交协同', () => {
     assert.deepEqual(reread.groups.map((g) => g.key).sort(), ['general']);
   });
 });
+
+// ---------- 0.5 批次 2 A 线：retention / archiveOrigin 读写接线 ----------
+
+describe('0.5 A 线：retention/archiveOrigin 读传播与写路径', () => {
+  it('结构化写路径：retention/archiveOrigin 落盘 front-matter，读回强类型枚举', async (t) => {
+    const { root, store } = await makeStore(t);
+    await store.commit({
+      operationId: 'a05-write', expectedGeneration: 0,
+      changes: [{
+        kind: 'topic', key: 'hist-x', expectedRevision: null,
+        topic: topicObject({ retention: 'historical', archiveOrigin: 'auto-inactive' }),
+      }],
+    });
+    const raw = await fsp.readFile(path.join(root, 'scopes', 'amber', 'topics', 'hist-x.md'), 'utf8');
+    assert.match(raw, /^retention: "historical"$/m);
+    assert.match(raw, /^archiveOrigin: "auto-inactive"$/m);
+    const topic = await store.readTopic('hist-x');
+    assert.equal(topic.retention, 'historical');
+    assert.equal(topic.archiveOrigin, 'auto-inactive');
+    const listed = (await store.listTopics()).find((x) => x.key === 'hist-x');
+    assert.equal(listed.retention, 'historical');
+    assert.equal(listed.archiveOrigin, 'auto-inactive');
+    const snap = (await store.snapshot()).topics.find((x) => x.key === 'hist-x');
+    assert.equal(snap.retention, 'historical');
+  });
+
+  it('缺省值不落盘（standing/manual/空串整行省略），读取补默认值', async (t) => {
+    const { root, store } = await makeStore(t);
+    for (const [i, extra] of [{}, { retention: 'standing', archiveOrigin: 'manual' },
+      { retention: '', archiveOrigin: '' }].entries()) {
+      const key = `plain-${i}`;
+      await store.commit({
+        operationId: `a05-default-${i}`,
+        ...(i === 0 ? { expectedGeneration: 0 } : {}),
+        changes: [{ kind: 'topic', key, expectedRevision: null, topic: topicObject(extra) }],
+      });
+      const raw = await fsp.readFile(path.join(root, 'scopes', 'amber', 'topics', `${key}.md`), 'utf8');
+      assert.doesNotMatch(raw, /^retention:/m, `variant ${i}`);
+      assert.doesNotMatch(raw, /^archiveOrigin:/m, `variant ${i}`);
+      const topic = await store.readTopic(key);
+      assert.equal(topic.retention, 'standing', `variant ${i}`);
+      assert.equal(topic.archiveOrigin, 'manual', `variant ${i}`);
+    }
+  });
+
+  it('旧文件不重写：读路径补默认值，mtime 与字节双零变化', async (t) => {
+    const { root, store } = await makeStore(t);
+    const file = path.join(root, 'scopes', 'amber', 'topics', 'legacy-a05.md');
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    const rawText = [
+      '---',
+      'key: "legacy-a05"',
+      'title: "老专题"',
+      'summary: "老摘要"',
+      'updated: "2026-10-24T00:00:00.000Z"',
+      'scopeId: "amber"',
+      '---',
+      '老正文',
+      '',
+    ].join('\n');
+    await fsp.writeFile(file, Buffer.from(rawText, 'utf8'));
+    const beforeBytes = await fsp.readFile(file);
+    const beforeSha = sha256(beforeBytes);
+    const beforeStat = await fsp.stat(file);
+
+    const topic = await store.readTopic('legacy-a05');
+    assert.equal(topic.retention, 'standing', '旧文件缺省读 standing');
+    assert.equal(topic.archiveOrigin, 'manual', '旧文件缺省读 manual');
+    const listed = (await store.listTopics()).find((x) => x.key === 'legacy-a05');
+    assert.equal(listed.retention, 'standing');
+    const snap = (await store.snapshot()).topics.find((x) => x.key === 'legacy-a05');
+    assert.equal(snap.retention, 'standing');
+
+    // 留出 mtime 粒度窗口后再读一轮（Windows mtime 精度足够，但显式等待证明不是碰巧）
+    await new Promise((r) => setTimeout(r, 50));
+    await store.readTopic('legacy-a05');
+    await store.listTopics();
+
+    const afterBytes = await fsp.readFile(file);
+    assert.equal(sha256(afterBytes), beforeSha, '读路径绝不写盘：字节零变化');
+    const afterStat = await fsp.stat(file);
+    assert.equal(afterStat.mtimeMs, beforeStat.mtimeMs, '读路径绝不写盘：mtime 不变');
+  });
+
+  it('手改磁盘文件带 retention → 读路径照收（含非法枚举 INVALID_STATE 拒绝）', async (t) => {
+    const { root, store } = await makeStore(t);
+    const file = path.join(root, 'scopes', 'amber', 'topics', 'hand.md');
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    const rawText = [
+      '---',
+      'key: "hand"',
+      'title: "手改"',
+      'summary: "手改摘要"',
+      'updated: "2026-10-24T00:00:00.000Z"',
+      'scopeId: "amber"',
+      'retention: "historical"',
+      '---',
+      '正文',
+    ].join('\n');
+    await fsp.writeFile(file, Buffer.from(rawText, 'utf8'));
+    const topic = await store.readTopic('hand');
+    assert.equal(topic.retention, 'historical');
+
+    const badText = rawText.replace('retention: "historical"', 'retention: "bogus"');
+    await fsp.writeFile(file, Buffer.from(badText, 'utf8'));
+    await assert.rejects(() => store.readTopic('hand'),
+      (err) => err.code === 'INVALID_STATE' && /retention/.test(err.message));
+    // 扫描级读取（listTopics/snapshot）对坏文件走影子报告降级（既有口径：不炸全局），
+    // 坏文件被跳过、不出现在列表中，影子报告记录原因。
+    const listed = await store.listTopics();
+    assert.equal(listed.find((x) => x.key === 'hand'), undefined, '坏文件不进列表');
+    const report = await store.legacyReport();
+    assert.ok(report.shadow.some((s) => s.file.endsWith('hand.md') && /retention/.test(s.reason)),
+      '影子报告记录 front-matter 解析失败原因');
+  });
+
+  it('裸 text 路径：front-matter 携带合法枚举可写，非法枚举 INVALID_INPUT', async (t) => {
+    const { store } = await makeStore(t);
+    const rawText = [
+      '---',
+      'key: "t-raw"',
+      'title: "文本路径"',
+      'summary: "裸 text"',
+      'updated: "2026-10-24T00:00:00.000Z"',
+      'scopeId: "amber"',
+      'retention: "historical"',
+      'archiveOrigin: "auto-inactive"',
+      '---',
+      '正文',
+    ].join('\n');
+    await store.commit({
+      operationId: 'a05-raw-ok', expectedGeneration: 0,
+      changes: [{ kind: 'topic', key: 't-raw', expectedRevision: null, text: rawText }],
+    });
+    const topic = await store.readTopic('t-raw');
+    assert.equal(topic.retention, 'historical');
+    assert.equal(topic.archiveOrigin, 'auto-inactive');
+
+    await assert.rejects(() => store.commit({
+      operationId: 'a05-raw-bad',
+      changes: [{
+        kind: 'topic', key: 't-raw2', expectedRevision: null,
+        text: rawText.replace('t-raw', 't-raw2').replace('retention: "historical"', 'retention: "nope"'),
+      }],
+    }), (err) => {
+      // 裸 text 的 front-matter 先经 parseTopicFile（磁盘形态文档）——非法枚举
+      // 在解析层即 INVALID_STATE 拒绝，先于 #validateTopicMeta 的写入侧校验。
+      assert.equal(err.code, 'INVALID_STATE');
+      assert.match(err.message, /retention/);
+      return true;
+    });
+  });
+
+  it('retention/archiveOrigin 不再是未识别字段；其他未识别键照旧拒绝', async (t) => {
+    const { store } = await makeStore(t);
+    await store.commit({
+      operationId: 'a05-allowed', expectedGeneration: 0,
+      changes: [{
+        kind: 'topic', key: 't-ok', expectedRevision: null,
+        topic: topicObject({ retention: 'historical', archiveOrigin: 'manual' }),
+      }],
+    });
+    await assert.rejects(() => store.commit({
+      operationId: 'a05-still-unknown',
+      changes: [{
+        kind: 'topic', key: 't-bad', expectedRevision: null,
+        topic: topicObject({ temperature: 'cold' }),
+      }],
+    }), (err) => {
+      assert.equal(err.code, 'INVALID_INPUT');
+      assert.match(err.message, /"temperature"/);
+      return true;
+    });
+  });
+
+  it('retention 非布尔/非枚举形状（数字）→ INVALID_INPUT 类型把关', async (t) => {
+    const { store } = await makeStore(t);
+    await assert.rejects(() => store.commit({
+      operationId: 'a05-type', expectedGeneration: 0,
+      changes: [{
+        kind: 'topic', key: 't-num', expectedRevision: null,
+        topic: topicObject({ retention: 42 }),
+      }],
+    }), (err) => {
+      assert.equal(err.code, 'INVALID_INPUT');
+      assert.match(err.message, /retention 必须是字符串枚举标量/);
+      return true;
+    });
+  });
+});
