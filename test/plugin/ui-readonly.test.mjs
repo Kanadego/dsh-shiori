@@ -3,88 +3,37 @@
 // client/index.js（fake window.__ModuleLoader__ + 有状态 react stub + 真实宿主
 // zod），组件函数真执行（SYNTHETIC，非浏览器实机）。黄条数据源为
 // getStatus.diagnostics.readonly（guard.status()，src/plugin/management.mjs 注入）。
+// 装配（react stub / vnode 工具 / 挂载链）已抽到 ui-harness.mjs，断言逐字保留。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join, dirname } from "node:path";
-import { pathToFileURL, fileURLToPath } from "node:url";
-import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
+
+import { createUiHarness, PANEL_STATES, realSetTimeout, realClearTimeout } from "./ui-harness.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKQ = join(HERE, "..", "..");
-const NPM_GLOBAL = process.env.DSH_NPM_GLOBAL
-  ?? join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "npm", "node_modules");
-const HOST_MODULES = process.env.DSH_HOST_MODULES ?? join(NPM_GLOBAL, "@deepseek-ai", "dsh", "node_modules");
+const CLIENT_SRC = join(WORKQ, "client", "index.js");
 
-const zod = await import(`file:///${HOST_MODULES}/zod/index.js`);
+const harness = createUiHarness({ clientSource: CLIENT_SRC });
+await harness.install();
 
-const registrations = [];
-globalThis.window = { __ModuleLoader__: { load: (registration) => registrations.push(registration) } };
-await import(pathToFileURL(join(WORKQ, "client", "index.js")).href);
+const { makeStatefulReact, flattenVNode, collectText, findButtons, findTextarea, applyPanel, registrations } = harness;
+const zod = await harness.ensureZod();
 
 // 真实 setTimeout：异步 flush 必须走真实定时器（假定时器用例内 globalThis.setTimeout
-// 已被替换，用它会永远挂起；与 ui-shell 同法在模块加载期捕获）。
-const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+// 已被替换，用它会永远挂起；真引用取自 harness 模块级捕获）。
 const flush = (ms = 20) => new Promise((resolve) => realSetTimeout(resolve, ms));
-
-// ---------------------------------------------------------------------------
-// harness
-// ---------------------------------------------------------------------------
-
-function makeStatefulReact() {
-  const states = [];
-  const effects = [];
-  const cursor = { v: 0 };
-  const runEffects = { v: false };
-  const react = {
-    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
-    Fragment: "fragment",
-    useState: (initial) => {
-      const i = cursor.v++;
-      if (!(i in states)) states[i] = typeof initial === "function" ? initial() : initial;
-      return [states[i], (v) => { states[i] = typeof v === "function" ? v(states[i]) : v; }];
-    },
-    useEffect: (fn) => { if (runEffects.v) effects.push(fn); },
-    useMemo: (fn) => fn(),
-    useRef: () => ({ current: null }),
-  };
-  return { react, states, effects, cursor, runEffects };
-}
-
-function flattenVNode(node, out = []) {
-  if (Array.isArray(node)) { for (const child of node) flattenVNode(child, out); return out; }
-  if (!node || typeof node !== "object") return out;
-  out.push(node);
-  if (node.children) flattenVNode(node.children, out);
-  return out;
-}
-
-function collectText(node, out = []) {
-  if (Array.isArray(node)) { for (const child of node) collectText(child, out); return out.join(""); }
-  if (node === null || node === undefined || typeof node === "boolean") return out.join("");
-  if (typeof node !== "object") { out.push(String(node)); return out.join(""); }
-  if (node.children) collectText(node.children, out);
-  return out.join("");
-}
 
 // 面板自身 useState 个数（tab/sessionId/manual/sessions/modeStatus/availability/
 // probeTick/workspaces/workspaceId）；本文件不往面板加 useState，老测试的
 // PANEL_STATES=9 布局不变。
-const PANEL_STATES = 9;
 
 // 面板级渲染（黄条在 sticky 壳条内）：states[0..8] 预置，modeStatus 由参数给定。
 async function mountSection(modeStatus) {
   const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  let renderSlot = null;
-  await mod.apply({
-    remote: { $mount: async () => () => {} },
-    slots: {
-      inject: (name, fn) => fn(),
-      register: (meta, render) => { renderSlot = render; return () => {}; },
-    },
-  });
-  const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
+  const { sectionVNode } = await applyPanel(host);
   const render = (nextModeStatus, dsh) => {
     host.states.length = Math.max(host.states.length, PANEL_STATES);
     host.states[0] = "status";
@@ -115,11 +64,6 @@ function hhmmOf(ms) {
 
 function bannerOf(tree) {
   return flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "readonly-banner") || null;
-}
-
-function findButtons(tree, label) {
-  return flattenVNode(tree)
-    .filter((n) => n.type === "button" && collectText(n) === label);
 }
 
 // ---------------------------------------------------------------------------
@@ -178,13 +122,7 @@ const MEMORY_VIEW = {
 
 async function mountMemoryTab() {
   const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  let renderSlot = null;
-  await mod.apply({
-    remote: { $mount: async () => () => {} },
-    slots: { inject: (name, fn) => fn(), register: (meta, render) => { renderSlot = render; return () => {}; } },
-  });
-  const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
+  const { sectionVNode } = await applyPanel(host);
   host.states.length = 0;
   host.states.push("memory", "session-A", "", null, { mode: "active" });
   host.cursor.v = 0;
@@ -219,13 +157,7 @@ const QUEUE_DTO = { queueRevision: 3, items: [], plans: [] };
 
 async function mountCandidatesTab() {
   const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  let renderSlot = null;
-  await mod.apply({
-    remote: { $mount: async () => () => {} },
-    slots: { inject: (name, fn) => fn(), register: (meta, render) => { renderSlot = render; return () => {}; } },
-  });
-  const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
+  const { sectionVNode } = await applyPanel(host);
   host.states.length = 0;
   host.states.push("candidates", "session-A", "", null, { mode: "active" });
   host.cursor.v = 0;
@@ -264,7 +196,6 @@ test("F7 置灰：只读态候选页「分析遗忘候选」按钮禁用（与�
 // ---------------------------------------------------------------------------
 
 // 可控假定时器（照 ui-shell 同法；只在轮询用例内安装，finally 还原）。
-const realClearTimeout = globalThis.clearTimeout.bind(globalThis);
 function installFakeTimers() {
   const state = { now: 0, timers: [] };
   globalThis.setTimeout = (fn, ms) => {
@@ -316,13 +247,7 @@ test("F7 轮询：只读态期间周期刷新 getStatus；getStatus 回 writable
     };
     const host = makeStatefulReact();
     host.runEffects.v = true; // 面板级 effect 全部收集并手动运行
-    const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-    let renderSlot = null;
-    await mod.apply({
-      remote: { $mount: async () => () => {} },
-      slots: { inject: (name, fn) => fn(), register: (meta, render) => { renderSlot = render; return () => {}; } },
-    });
-    const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
+    const { sectionVNode } = await applyPanel(host);
     host.states.length = 0;
     host.states.push("status", "session-A", "", null, modeStatusDto(readonlyStatus({ pid: 4321, startedAt })));
     host.cursor.v = 0;

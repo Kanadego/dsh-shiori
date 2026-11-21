@@ -1,72 +1,30 @@
 // U4 记忆 L0/L1 页：预览（markdown 安全子集）/ 编辑 / 保存冲突 / 空状态。
 // 证据级别如实标注：client/index.js 的 MemoryTab 真实执行（fake window.__ModuleLoader__
 // + 有状态 react stub + 真实宿主 zod），synthetic host ctx，非浏览器实机。
-// harness 与 test/plugin/client.test.mjs 同法：经真实 slot 渲染函数定位 MemoryTab
-// 组件 vnode，再以显式 dsh 独立调用组件函数（stub hooks 有状态，可交互后重渲染）。
+// 装配（react stub / vnode 工具 / 挂载链）已抽到 ui-harness.mjs，断言逐字保留。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { fileURLToPath } from "node:url";
+
+import { createUiHarness, PANEL_STATES } from "./ui-harness.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKQ = join(HERE, "..", "..");
+const CLIENT_SRC = join(WORKQ, "client", "index.js");
 const TMP_ROOT = mkdtempSync(join(tmpdir(), "shiori-u4-memory-"));
-const NPM_GLOBAL = process.env.DSH_NPM_GLOBAL
-  ?? join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "npm", "node_modules");
-const HOST_MODULES = process.env.DSH_HOST_MODULES ?? join(NPM_GLOBAL, "@deepseek-ai", "dsh", "node_modules");
 
 test.after(() => {
   rmSync(TMP_ROOT, { recursive: true, force: true });
 });
 
-const zod = await import(`file:///${HOST_MODULES}/zod/index.js`);
+const harness = createUiHarness({ clientSource: CLIENT_SRC });
+await harness.install();
 
-const registrations = [];
-globalThis.window = { __ModuleLoader__: { load: (registration) => registrations.push(registration) } };
-await import(pathToFileURL(join(WORKQ, "client", "index.js")).href);
-
-// ---------------------------------------------------------------------------
-// harness（与 client.test.mjs 的 makeStatefulReact / flattenVNode / collectText 同构）
-// ---------------------------------------------------------------------------
-
-function makeStatefulReact() {
-  const states = [];
-  const effects = [];
-  const cursor = { v: 0 };
-  const runEffects = { v: false };
-  const react = {
-    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
-    Fragment: "fragment",
-    useState: (initial) => {
-      const i = cursor.v++;
-      if (!(i in states)) states[i] = typeof initial === "function" ? initial() : initial;
-      return [states[i], (v) => { states[i] = typeof v === "function" ? v(states[i]) : v; }];
-    },
-    useEffect: (fn) => { if (runEffects.v) effects.push(fn); },
-    useMemo: (fn) => fn(),
-    useRef: () => ({ current: null }),
-  };
-  return { react, states, effects, cursor, runEffects };
-}
-
-function flattenVNode(node, out = []) {
-  if (Array.isArray(node)) { for (const child of node) flattenVNode(child, out); return out; }
-  if (!node || typeof node !== "object") return out;
-  out.push(node);
-  if (node.children) flattenVNode(node.children, out);
-  return out;
-}
-
-function collectText(node, out = []) {
-  if (Array.isArray(node)) { for (const child of node) collectText(child, out); return out.join(""); }
-  if (node === null || node === undefined || typeof node === "boolean") return out.join("");
-  if (typeof node !== "object") { out.push(String(node)); return out.join(""); }
-  if (node.children) collectText(node.children, out);
-  return out.join("");
-}
+const { makeStatefulReact, flattenVNode, collectText, findButtons, findTextarea, applyPanel } = harness;
 
 async function flush(rounds = 20) {
   for (let i = 0; i < rounds; i++) await Promise.resolve();
@@ -76,22 +34,12 @@ async function flush(rounds = 20) {
 
 // 面板自身 useState 个数（tab/sessionId/manual/sessions/modeStatus/availability/
 // probeTick/workspaces/workspaceId），MemoryTab 的 state 从该下标起。
-const PANEL_STATES = 9;
 
-// 定位 MemoryTab 并返回 render(dsh)：每次调用独立渲染一次 MemoryTab
+// 定位 MemoryTab 并返回 render(dsh, view)：每次调用独立渲染一次 MemoryTab
 // （cursor 归位到面板 state 之后，states[9] 承载 view）。
 async function mountMemoryTab() {
   const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  let renderSlot = null;
-  await mod.apply({
-    remote: { $mount: async () => () => {} },
-    slots: {
-      inject: (name, fn) => fn(),
-      register: (meta, render) => { renderSlot = render; return () => {}; },
-    },
-  });
-  const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
+  const { sectionVNode } = await applyPanel(host);
   // ShioriSection useState 顺序：tab / sessionId / manual / sessions / modeStatus。
   // runEffects 保持 false：不发任何 RPC，view 由测试直接预置。
   host.states.length = 0;
@@ -107,15 +55,6 @@ async function mountMemoryTab() {
     host.cursor.v = PANEL_STATES;
     return memoryTab.type({ dsh, sessionId: "session-A" });
   };
-}
-
-function findButtons(tree, label) {
-  return flattenVNode(tree)
-    .filter((n) => n.type === "button" && flattenVNode(n).some((c) => typeof c !== "object" || c === null ? String(c) === label : collectText(c) === label));
-}
-
-function findTextarea(tree) {
-  return flattenVNode(tree).find((n) => n.type === "textarea");
 }
 
 function memoryViewDto(l0Text, l1Fields) {
