@@ -64,31 +64,24 @@ function loadClientModule() {
 // bundle：形状、wire、CSS 一致性、安全约束
 // ---------------------------------------------------------------------------
 
-test("bundle：ModuleLoader 注册、导出 apply/inject、wire 冻结（评审拍板临时收窄：bundle 17 端点 ⊆ wire 21 全集，差集恰为 auto 四方法；5B 恢复全集）", async () => {
+test("bundle：ModuleLoader 注册、导出 apply/inject、wire 冻结（0.5 批次 5 · B 线：bundle == wire 21 全集，auto 四方法已接线）", async () => {
   const mod = loadClientModule();
   assert.deepEqual(Object.keys(mod).sort(), ["TYPERT_REMOTE", "apply", "ensureLosslessJson", "inject"]);
   assert.deepEqual(mod.inject, ["remote", "slots", "configForms"]);
   assert.equal(mod.TYPERT_REMOTE.package, "dsh-shiori");
 
-  // wire 全集（服务端 21 个；规格连带：wire 17→21，0.5 批次 5 A 线 auto 四方法并入）。
+  // wire 全集（服务端 21 个；0.5 批次 5 A 线并入 auto 四方法，B 线客户端镜像扩展）。
   const expected = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"];
   const endpoints = Object.keys(mod.TYPERT_REMOTE.methods).sort();
-  // 冻结语义按评审拍板（问答 q-e952e44db399e0fd）临时收窄为「bundle 端点 ⊆ wire 全集，
-  // 且差集恰好 = auto 四方法」：客户端 RPC_METHODS 镜像扩展与面板接线归 0.5 批次 5B
-  //（面板待执行变更与撤销入口），不在 5A 范围；5B 落地时把本用例恢复为
-  //「bundle == wire 全集」——这条差集断言就是留给 5B 的绊线。不许动 client/index.js。
-  const bundleEndpointKeys = new Set(endpoints);
-  const missingFromBundle = expected
-    .filter((m) => !bundleEndpointKeys.has(`shiori/${m}`))
-    .map((m) => `shiori/${m}`)
-    .sort();
+  // 5B 落地：恢复「bundle == wire 全集」断言（此前 5A 期间按评审拍板临时收窄为
+  // 差集恰为 auto 四方法——那条绊线已随 RPC_METHODS 扩到 21 而拆除）。
   assert.deepEqual(
-    missingFromBundle,
-    ["shiori/applyAutoChanges", "shiori/getAutoStatus", "shiori/runAutoEvaluation", "shiori/undoAutoRun"],
-    "bundle 与 wire 的差集必须恰好是 auto 四方法（5B 接线后恢复全集断言）",
+    endpoints,
+    expected.map((m) => `shiori/${m}`).sort(),
+    "bundle 端点必须与 wire 21 全集一一对应（不多不少）",
   );
-  // bundle 侧端点数仍是 17（5B 扩 RPC_METHODS 后改 21）。
-  assert.equal(mod.TYPERT_REMOTE.descriptors.length, 17);
+  // bundle 侧端点数随 5B 扩 RPC_METHODS 恢复为 21。
+  assert.equal(mod.TYPERT_REMOTE.descriptors.length, 21);
   // bundle 已知端点必须全部仍属于 wire 全集（客户端不得自行发明端点）。
   for (const endpoint of endpoints) {
     assert.ok(expected.includes(endpoint.slice("shiori/".length)), endpoint + " 必须在 wire 全集内");

@@ -483,7 +483,10 @@ window.__ModuleLoader__.load({
     // 0.5 批次 4 · C 线：契约扩展 11 → 14（整理向导 onboardingPreview/Apply/Mark；
     // 输出权威在服务端 P protocol，客户端按原样 JSON 透传渲染）。
     // 0.5 批次 4 · B 线：契约扩展 14 → 17（热度参数三方法，追加在 onboardingMark 之后）。
-    var RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange"];
+    // 0.5 批次 5 · B 线：契约扩展 17 → 21（auto 待执行变更四方法 getAutoStatus /
+    // runAutoEvaluation / applyAutoChanges / undoAutoRun，追加在 recordTemperatureChange
+    // 之后；面板接线见 StatusTab 的 auto 卡，业务权威在服务端 forgetting/auto.mjs）。
+    var RPC_METHODS = ["getStatus", "getMemoryView", "getGraph", "executeTool", "listCandidates", "analyze", "reviewCandidate", "previewPlan", "executePlan", "getTimeline", "destroyData", "onboardingPreview", "onboardingApply", "onboardingMark", "getTemperatureSettings", "simulateTemperature", "recordTemperatureChange", "getAutoStatus", "runAutoEvaluation", "applyAutoChanges", "undoAutoRun"];
     function sessionCodec() {
       return {
         mode: "strict",
@@ -1088,6 +1091,66 @@ window.__ModuleLoader__.load({
       if (value === undefined || value === null) return "—";
       if (typeof value === "object") return stableStringify(value);
       return String(value);
+    }
+
+    // ── 0.5 批次 5 · B 线：状态页 auto 卡的展示口径 ─────────────────────────
+    // 与 forgetting/auto.mjs 的 getAutoStatus / runAutoEvaluation DTO 字段一一
+    // 对应；全部纯函数，只做格式化，不触碰数据、不做本地业务推断（权威在服务端）。
+    var AUTO_MODES = ["off", "suggest", "auto"];
+    var AUTO_MODE_LABELS = { off: "关闭", suggest: "建议", auto: "自动" };
+    function autoModeText(mode) {
+      if (mode === "off") return "关闭（只记账，不评估）";
+      if (mode === "suggest") return "建议（评估出清单，不自动执行）";
+      if (mode === "auto") return "自动（评估后自动执行，可一键撤销）";
+      if (mode === undefined || mode === null || mode === "") return "未知";
+      return String(mode);
+    }
+    function autoTimeText(iso) {
+      if (typeof iso !== "string" || iso === "") return null;
+      var ms = Date.parse(iso);
+      if (!Number.isFinite(ms)) return String(iso);
+      return new Date(ms).toISOString().replace("T", " ").slice(0, 19);
+    }
+    function autoEvaluatedByText(by) {
+      if (by === "manual") return "手动（面板 / 命令行）";
+      if (by === "human-turn") return "人类轮自动触发";
+      if (by === "soft-watermark") return "软水位触发";
+      return by ? String(by) : null;
+    }
+    function autoNextTriggerText(nextTrigger) {
+      if (!nextTrigger || typeof nextTrigger !== "object") return "未知";
+      var dueAt = autoTimeText(nextTrigger.dueAt);
+      var hours = typeof nextTrigger.hoursRemaining === "number" ? nextTrigger.hoursRemaining : null;
+      if (dueAt !== null) {
+        return "下次评估窗口 " + dueAt + (hours !== null ? "（约 " + hours + " 小时后）" : "");
+      }
+      if (nextTrigger.softWatermarkArmed === true) return "软水位已就绪：下次人类轮即评估";
+      return "等待触发窗口（自动评估只在人类轮进行）";
+    }
+    function autoTriggerText(trigger) {
+      if (trigger === "manual") return "手动";
+      if (trigger === "human-turn") return "人类轮";
+      if (trigger === "soft-watermark") return "软水位";
+      return trigger ? String(trigger) : "—";
+    }
+    function autoFuseReasonsText(fuse) {
+      if (!fuse || !Array.isArray(fuse.reasons) || fuse.reasons.length === 0) return "";
+      return fuse.reasons.map(function (reason) {
+        var code = reason && reason.code ? String(reason.code) : "";
+        var detail = reason && reason.detail ? String(reason.detail) : "";
+        return (code !== "" ? "[" + code + "] " : "") + detail;
+      }).join("；");
+    }
+    function autoOpKindText(kind) {
+      if (kind === "archive-topic") return "归档";
+      if (kind === "unarchive-topic") return "恢复";
+      return kind ? String(kind) : "—";
+    }
+    function autoOpStatusText(status) {
+      if (status === "applied") return "已执行";
+      if (status === "skipped") return "已跳过";
+      if (status === "failed") return "失败";
+      return status ? String(status) : "—";
     }
 
     // ── S2-2：人设卡下拉的数据与选项工具 ────────────────────────────────────
@@ -1862,6 +1925,161 @@ window.__ModuleLoader__.load({
         })();
         return function () { cancelled = true; };
       }, [props.sessionId]);
+      // ── 0.5 批次 5 · B 线：状态页「记忆整理」auto 卡（新 state 追加在既有 state
+      // 之后，老测试 states 下标不变）。数据：getAutoStatus（模式 / 上次评估 /
+      // 下次触发 / 熔断 / 最近 run）；动作三件套：立即评估（runAutoEvaluation，
+      // 只读回放 + 记账评估锚）、执行本轮（applyAutoChanges，仅 mode=auto，
+      // 服务端重新评估后逐条执行、operationId 幂等）、一键撤销（undoAutoRun，
+      // 按 runId 回滚该轮变更，重复撤销幂等）。取数失败整卡静默隐藏（shadow /
+      // 未启动 / 遗忘模块未开启属预期，与冷热分布卡同口径）。
+      var autoStatusState = useState(null); // null | {loading,error,data}
+      var autoStatus = autoStatusState[0];
+      var setAutoStatus = autoStatusState[1];
+      var autoEvalState = useState(null); // null | {loading,error,data}
+      var autoEval = autoEvalState[0];
+      var setAutoEval = autoEvalState[1];
+      var autoApplyState = useState(null); // null | {busy,error,data}
+      var autoApply = autoApplyState[0];
+      var setAutoApply = autoApplyState[1];
+      var autoUndoState = useState(null); // null | {busy,runId,error,data}
+      var autoUndo = autoUndoState[0];
+      var setAutoUndo = autoUndoState[1];
+      var autoModeBusyState = useState(false);
+      var autoModeBusy = autoModeBusyState[0];
+      var setAutoModeBusy = autoModeBusyState[1];
+      var autoModeErrorState = useState(null);
+      var autoModeError = autoModeErrorState[0];
+      var setAutoModeError = autoModeErrorState[1];
+      // 刚写入但服务端尚未回读到的模式（宿主热提交前 getAutoStatus 仍回旧值）：
+      // 渲染「已写入配置；服务端尚未生效」提示，服务端回读到即清空。
+      var autoModePendingState = useState(null);
+      var autoModePending = autoModePendingState[0];
+      var setAutoModePending = autoModePendingState[1];
+      var autoConfirmState = useState(false); // 「执行本轮」的就地二次确认行
+      var autoConfirm = autoConfirmState[0];
+      var setAutoConfirm = autoConfirmState[1];
+      var loadAutoStatus = async function () {
+        var origin = tabGuard.mark();
+        setAutoStatus({ loading: true, error: null, data: null });
+        try {
+          var result = await props.dsh.call("getAutoStatus", props.sessionId, {});
+          if (tabGuard.isStale(origin)) return null; // 会话已切换，丢弃旧响应
+          setAutoStatus({ loading: false, error: null, data: result });
+          // 服务端已回读到刚写入的模式 → pending 提示收口（含手动「刷新」路径，
+          // 不只挂在 setAutoMode 里：刷新按钮也要能清掉 pending）。
+          setAutoModePending(function (prev) {
+            return prev !== null && result && result.mode === prev ? null : prev;
+          });
+          return result;
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return null;
+          setAutoStatus({ loading: false, error: e, data: null });
+          return null;
+        }
+      };
+      useEffect(function () { loadAutoStatus(); }, [props.sessionId]);
+      // R5 同款：切会话清一次性反馈（pending 提示 / 模式错误），不串味到别的会话。
+      useEffect(function () { setAutoModePending(null); setAutoModeError(null); }, [props.sessionId]);
+      // 三档模式开关：写宿主配置 forgetting.autoMode（configForms，与启用卡 /
+      // 模型目录同一条 CAS 通道）。写后核对快照确已生效，再刷新 getAutoStatus——
+      // 行值永远以服务端回包为准；服务端尚未热提交时以 pending 提示如实说明。
+      var setAutoMode = async function (mode) {
+        var scope = readConfigScope();
+        if (!scope || typeof scope.mutate !== "function") {
+          setAutoModeError({ code: "shiori/ui-unsupported", message: "设置命名空间不可用（configForms 缺席），无法在面板里切换模式；请在宿主插件配置页设置 forgetting.autoMode。" });
+          return;
+        }
+        var origin = tabGuard.mark();
+        setAutoModeBusy(true);
+        setAutoModeError(null);
+        try {
+          var attempt = function () {
+            var snap = scope.getSnapshot();
+            if (!snap || snap.status !== "ready" || !snap.value || typeof snap.value !== "object" || snap.revision === undefined || snap.revision === null) {
+              var bad = new Error("设置快照不可用（status=" + String(snap && snap.status) + "）。");
+              bad.code = "shiori/ui-scope";
+              throw bad;
+            }
+            return scope.mutate([{ op: "set", path: ["forgetting", "autoMode"], value: mode }], snap.revision);
+          };
+          await casMutate(attempt, "shiori/ui-auto-mode-conflict", function (ctx) {
+            return "设置刚被其他窗口修改（revision 冲突），已重试一次仍未成功；请再点一次。"
+              + (ctx.lastMessage !== "" ? "（最近错误：" + ctx.lastMessage + "）" : "");
+          }, true, { readRevision: function () { return scopeRevisionOf(scope); } });
+          if (tabGuard.isStale(origin)) return;
+          // 快照回读确认（与服务端温度保存同口径）：写不进快照绝不报成功。
+          var nextSnapshot = scope.getSnapshot();
+          var appliedValue = nextSnapshot && nextSnapshot.status === "ready" && nextSnapshot.value
+            && nextSnapshot.value.forgetting && typeof nextSnapshot.value.forgetting === "object"
+            ? nextSnapshot.value.forgetting.autoMode : undefined;
+          if (appliedValue !== mode) {
+            setAutoModeError({ code: "shiori/ui-scope", message: "写入未确认生效——请重新打开本页核对当前模式。" });
+            return;
+          }
+          // 刷新并按「新回包」判定（不能读渲染闭包里的 autoStatus——那是动作
+          // 发起时的旧值）：服务端已回读到 → toast 收口；尚未回读 → pending 提示。
+          var fresh = await loadAutoStatus();
+          if (fresh !== null && fresh.mode === mode) {
+            shioriToast("ok", "记忆整理模式已保存（" + AUTO_MODE_LABELS[mode] + "）");
+          } else if (fresh !== null) {
+            setAutoModePending(mode); // 服务端尚未热提交：提示行如实说明
+          }
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setAutoModeError({ code: (e && e.code) || "shiori/ui-auto-mode", message: "模式切换失败：" + ((e && e.message) || String(e)) + causeNoteOf(e) });
+        } finally {
+          setAutoModeBusy(false);
+        }
+      };
+      // 立即评估（只读回放；off 会被服务端拒绝——按钮禁用是前端预判，拒绝兜底照常展示）。
+      // 新评估取代旧结论：清上一轮执行回执与确认行。
+      var runAutoEval = async function () {
+        var origin = tabGuard.mark();
+        setAutoEval({ loading: true, error: null, data: null });
+        setAutoApply({ busy: false, error: null, data: null });
+        setAutoConfirm(false);
+        try {
+          var result = await props.dsh.call("runAutoEvaluation", props.sessionId, {});
+          if (tabGuard.isStale(origin)) return;
+          setAutoEval({ loading: false, error: null, data: result });
+          await loadAutoStatus(); // 成功评估已记账锚：上次评估 / 下次触发随之刷新
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setAutoEval({ loading: false, error: e, data: null });
+        }
+      };
+      // 执行本轮（仅 mode=auto）：服务端重新评估后逐条执行（CAS + operationId），
+      // 每轮 ≤ maxOpsPerRun；熔断时服务端拒绝。二次确认后就地展开——执行写的是
+      // 真实归档 / 恢复（可撤销），不是预览。
+      var applyAutoRun = async function () {
+        var origin = tabGuard.mark();
+        setAutoApply({ busy: true, error: null, data: null });
+        try {
+          var receipt = await props.dsh.call("applyAutoChanges", props.sessionId, { operationId: newId() });
+          if (tabGuard.isStale(origin)) return;
+          setAutoApply({ busy: false, error: null, data: receipt });
+          setAutoConfirm(false);
+          await loadAutoStatus(); // lastRuns / 熔断统计已刷新
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setAutoApply({ busy: false, error: e, data: null });
+          setAutoConfirm(false);
+        }
+      };
+      // 一键撤销：按 runId 回滚该轮全部变更（重复撤销幂等，回放首次结论不碰盘）。
+      var undoAutoRunById = async function (runId) {
+        var origin = tabGuard.mark();
+        setAutoUndo({ busy: true, runId: runId, error: null, data: null });
+        try {
+          var receipt = await props.dsh.call("undoAutoRun", props.sessionId, { runId: runId });
+          if (tabGuard.isStale(origin)) return;
+          setAutoUndo({ busy: false, runId: runId, error: null, data: receipt });
+          await loadAutoStatus(); // lastRuns 的 undoneAt 已刷新
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setAutoUndo({ busy: false, runId: runId, error: e, data: null });
+        }
+      };
       // 显示口径：本地快照优先（点击后的即时反馈），否则回落服务端诊断——
       // 关闭面板再打开，任务仍在跑（服务端单飞不随面板走）。
       var serverDownload = semantic && typeof semantic.download === "object" && semantic.download !== null
@@ -2183,6 +2401,221 @@ window.__ModuleLoader__.load({
           pvLoading ? h("div", { className: "dshi_loading" }, "预览生成中…") : null,
           pv ? renderObPreview(pv, payload) : null);
       };
+      // ── 0.5 批次 5 · B 线：状态页「记忆整理（auto）」卡的渲染层 ─────────────
+      // 派生口径全部就地计算（每次渲染重算，不缓存）：autoData=getAutoStatus 回包；
+      // 评估清单 / 计划来自 runAutoEvaluation 回包。动作按钮的禁用条件是前端预判
+      //（服务端仍权威把关：off 评估拒绝、suggest 执行拒绝、熔断执行拒绝、
+      // 只读宿主拒绝写路径）——禁用只为少一次注定失败的往返，不替服务端拍板。
+      var autoData = autoStatus !== null && autoStatus.error === null && autoStatus.data
+        && typeof autoStatus.data === "object" ? autoStatus.data : null;
+      var autoModeValue = autoData !== null && typeof autoData.mode === "string" ? autoData.mode : null;
+      var autoFuse = autoData !== null && autoData.fuse && typeof autoData.fuse === "object" ? autoData.fuse : null;
+      var autoModeWritable = (function () {
+        var scope = readConfigScope();
+        return !!(scope && typeof scope.mutate === "function");
+      })();
+      var autoEvalData = autoEval !== null && autoEval.data && typeof autoEval.data === "object" ? autoEval.data : null;
+      var autoEvalCandidates = autoEvalData !== null && Array.isArray(autoEvalData.candidates) ? autoEvalData.candidates : [];
+      var autoEvalPlan = autoEvalData !== null && autoEvalData.plan && typeof autoEvalData.plan === "object" ? autoEvalData.plan : null;
+      var autoEvalLoading = autoEval !== null && autoEval.loading === true;
+      var autoApplyBusy = autoApply !== null && autoApply.busy === true;
+      var autoApplyData = autoApply !== null && autoApply.data && typeof autoApply.data === "object" ? autoApply.data : null;
+      var autoUndoBusy = autoUndo !== null && autoUndo.busy === true;
+      var autoUndoData = autoUndo !== null && autoUndo.data && typeof autoUndo.data === "object" ? autoUndo.data : null;
+      var autoLastRuns = autoData !== null && Array.isArray(autoData.lastRuns) ? autoData.lastRuns : [];
+      var autoApplyAllowed = autoModeValue === "auto" && (autoFuse === null || autoFuse.fused !== true);
+      var renderAutoCandidateRow = function (candidate, index) {
+        var tierText = candidate && candidate.tier ? String(candidate.tier) : "—";
+        var tText = candidate && typeof candidate.T === "number" ? String(candidate.T) : "—";
+        var ageText = candidate && typeof candidate.ageDays === "number" ? String(candidate.ageDays) : "—";
+        var titleText = candidate && candidate.title ? String(candidate.title) : "";
+        return h("div", { key: (candidate && candidate.key ? String(candidate.key) : "idx-" + index) + ":" + index, className: "dshi_item", "data-role": "auto-candidate" },
+          h("span", { className: "dshi_badge" }, autoOpKindText(candidate && candidate.operationKind) + "候选"),
+          h("span", null, String((candidate && candidate.key) || "—") + (titleText !== "" ? "（" + titleText + "）" : "")),
+          h("span", { className: "dshi_hint" },
+            "T=" + tText + " · tier=" + tierText + " · ageDays=" + ageText
+            + " · 理由：" + String((candidate && candidate.reason) || "—")));
+      };
+      var renderAutoApplyOpRow = function (op, index) {
+        return h("div", { key: (op && op.key ? String(op.key) : "idx-" + index) + ":" + index, className: "dshi_item", "data-role": "auto-apply-op" },
+          h("span", { className: "dshi_badge" }, autoOpKindText(op && op.operationKind)),
+          h("span", null, String((op && op.key) || "—")),
+          h("span", { className: "dshi_hint" },
+            autoOpStatusText(op && op.status) + " · " + String((op && op.reason) || "—")
+            + (op && op.status === "failed" && op.error ? " · " + String(op.error) : "")));
+      };
+      var renderAutoRunRow = function (run, index) {
+        var runId = run && run.runId ? String(run.runId) : "";
+        var atText = autoTimeText(run && run.at) || "—";
+        var appliedCount = run && typeof run.applied === "number" ? run.applied : 0;
+        var undoneAtText = run && typeof run.undoneAt === "string" && run.undoneAt !== ""
+          ? (autoTimeText(run.undoneAt) || run.undoneAt) : null;
+        return h("div", { key: runId !== "" ? runId : "run-" + index, className: "dshi_item", "data-role": "auto-run-row" },
+          h("span", { className: "dshi_mono" }, runId !== "" ? runId : "—"),
+          h("span", { className: "dshi_hint" },
+            atText + " · " + autoTriggerText(run && run.trigger) + " · 已执行 " + String(appliedCount) + " 条"),
+          undoneAtText !== null
+            ? h("span", { className: "dshi_hint" }, "已撤销 " + String(undoneAtText))
+            : h("button", {
+                className: "dshi_btn dshi_btnDanger",
+                "data-role": "auto-undo",
+                disabled: autoUndoBusy,
+                onClick: function () { if (runId !== "") undoAutoRunById(runId); }
+              }, autoUndoBusy && autoUndo !== null && autoUndo.runId === runId ? "撤销中…" : "一键撤销"));
+      };
+      var renderAutoCard = function () {
+        if (autoStatus === null || autoStatus.loading) return null;
+        if (autoStatus.error !== null) return null; // shadow/未启动/模块关：整卡静默（与冷热分布卡同口径）
+        if (autoData === null) return null;
+        var fuseFused = autoFuse !== null && autoFuse.fused === true;
+        var fuseText = fuseFused
+          ? "已熔断（本轮不出任何可执行候选）"
+          : (autoFuse !== null && autoFuse.statsValid === true ? "正常" : "观察期（只挡冷却，不挡恢复）");
+        var fuseReasons = autoFuseReasonsText(autoFuse);
+        var params = autoData.params && typeof autoData.params === "object" ? autoData.params : {};
+        var paramNames = ["maxOpsPerRun", "evaluateEveryHours", "coolThreshold", "restoreThreshold", "minCooldownDays", "minRestoreGraceDays"];
+        var paramTexts = [];
+        for (var pi = 0; pi < paramNames.length; pi += 1) {
+          if (params[paramNames[pi]] !== undefined && params[paramNames[pi]] !== null) {
+            paramTexts.push(paramNames[pi] + "=" + String(params[paramNames[pi]]));
+          }
+        }
+        var planCounts = autoEvalPlan !== null && autoEvalPlan.counts && typeof autoEvalPlan.counts === "object"
+          ? autoEvalPlan.counts : null;
+        var lastEvaluatedText = autoData.lastEvaluatedAt
+          ? (autoTimeText(autoData.lastEvaluatedAt)
+            + (autoEvaluatedByText(autoData.lastEvaluatedBy) ? "（" + autoEvaluatedByText(autoData.lastEvaluatedBy) + "）" : ""))
+          : null;
+        return h("div", { className: "dshi_card", "data-role": "auto-card" },
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_cardTitle" }, "记忆整理（自动冷却 / 恢复）"),
+            h("span", {
+              className: "dshi_badge" + (fuseFused ? " dshi_badgeWarn" : ""),
+              "data-role": "auto-fuse-badge"
+            }, fuseFused ? "熔断" : (autoFuse !== null && autoFuse.statsValid === true ? "统计健康" : "观察期"))),
+          // 三档模式开关（off / suggest / auto）：写宿主配置 forgetting.autoMode；
+          // 行值永远以 getAutoStatus 回包为准（服务端现读）。
+          h("div", { className: "dshi_row", "data-role": "auto-mode-row" },
+            h("span", { className: "dshi_hint", style: { minWidth: 132 } }, "模式"),
+            h("span", null, autoModeText(autoModeValue)),
+            AUTO_MODES.map(function (mode) {
+              return h("button", {
+                key: mode,
+                className: "dshi_btn" + (autoModeValue === mode ? " dshi_btnPrimary" : ""),
+                "data-role": "auto-mode-" + mode,
+                disabled: autoModeBusy || !autoModeWritable || autoData.enabled === false,
+                title: autoModeWritable && autoData.enabled !== false
+                  ? undefined
+                  : (autoData.enabled === false
+                    ? "遗忘归档模块未开启：先在宿主插件配置页开启 forgetting.enabled"
+                    : "设置命名空间不可用（configForms 缺席）：请在宿主插件配置页设置 forgetting.autoMode"),
+                onClick: function () { setAutoMode(mode); }
+              }, AUTO_MODE_LABELS[mode] + (autoModeValue === mode ? "（当前）" : ""));
+            })),
+          autoData.enabled === false ? h("div", { className: "dshi_hint" }, "遗忘归档模块未开启（forgetting.enabled=false）：先在宿主插件配置页开启后再使用 auto。") : null,
+          !autoModeWritable ? h("div", { className: "dshi_hint" }, "设置命名空间不可用（configForms 缺席）：无法在此切换模式；请在宿主插件配置页设置 forgetting.autoMode。") : null,
+          autoModePending !== null && autoModeValue !== autoModePending
+            ? h("div", { className: "dshi_hint", "data-role": "auto-mode-pending" },
+                "已写入配置（forgetting.autoMode=" + autoModePending + "）；服务端当前仍是 "
+                + String(autoModeValue === null ? "未知" : autoModeValue)
+                + "——等宿主把新配置交给插件后点「刷新」即可生效。")
+            : null,
+          autoModeError ? ErrorBox(autoModeError) : null,
+          h("div", { className: "dshi_items" },
+            statusRow("上次评估", lastEvaluatedText !== null ? lastEvaluatedText : "尚未评估（本轮评估成功后开始记录）"),
+            statusRow("下次触发条件", autoNextTriggerText(autoData.nextTrigger), "自动评估只在人类轮进行；「立即评估」不受限"),
+            statusRow("熔断状态", fuseText),
+            paramTexts.length > 0 ? statusRow("auto 参数", paramTexts.join(" · "), "12 项热度参数中与 auto 相关的六项（改参数去「记忆预算」页）") : null),
+          fuseReasons !== "" ? h("div", { className: "dshi_hint", "data-role": "auto-fuse-reasons" }, "熔断判定明细：" + fuseReasons) : null,
+          autoData.storeError ? h("div", { className: "dshi_warn", "data-role": "auto-store-error" }, "⚠ auto 记账存储异常（按无记账降级）：" + String(autoData.storeError)) : null,
+          h("div", { className: "dshi_row" },
+            h("button", {
+              className: "dshi_btn dshi_btnPrimary",
+              "data-role": "auto-evaluate",
+              disabled: autoEvalLoading || autoData.enabled === false || autoModeValue === "off",
+              title: autoModeValue === "off" ? "mode=off 只记账不评估：先切到「建议」或「自动」" : undefined,
+              onClick: function () { runAutoEval(); }
+            }, autoEvalLoading ? "评估中…" : (autoEvalData !== null ? "重新评估" : "立即评估")),
+            h("button", {
+              className: "dshi_btn",
+              "data-role": "auto-apply",
+              disabled: autoApplyBusy || !autoApplyAllowed || autoData.enabled === false,
+              title: !autoApplyAllowed && autoModeValue !== "auto"
+                ? "仅 mode=auto 可执行：先切到「自动」（suggest 只出清单，off 只记账）"
+                : (fuseFused ? "已熔断：本轮不出任何可执行候选" : undefined),
+              onClick: function () { setAutoConfirm(true); }
+            }, autoApplyBusy ? "执行中…" : "执行本轮"),
+            h("button", { className: "dshi_btn", "data-role": "auto-refresh", onClick: function () { loadAutoStatus(); } }, "刷新"),
+            autoModeValue === "suggest" ? h("span", { className: "dshi_hint" }, "建议模式只出清单：确认候选合理后切「自动」再执行。") : null),
+          autoConfirm ? h("div", { className: "dshi_confirm", "data-role": "auto-confirm" },
+            h("div", null, "将执行一轮自动冷却 / 恢复：服务端会重新评估并逐条执行候选（每轮 ≤ "
+              + String(params.maxOpsPerRun !== undefined ? params.maxOpsPerRun : "maxOpsPerRun")
+              + " 条，归档 / 恢复均可撤销）。这不是预览——确认后数据立即变化。"),
+            h("div", { className: "dshi_row" },
+              h("button", {
+                className: "dshi_btn dshi_btnDanger", "data-role": "auto-apply-confirm",
+                disabled: autoApplyBusy, onClick: function () { applyAutoRun(); }
+              }, autoApplyBusy ? "执行中…" : "确认执行"),
+              h("button", {
+                className: "dshi_btn", disabled: autoApplyBusy,
+                "data-role": "auto-apply-cancel", onClick: function () { setAutoConfirm(false); }
+              }, "取消"))) : null,
+          autoEval ? ErrorBox(autoEval.error) : null,
+          autoEvalData !== null ? (function () {
+            var replay = autoEvalData.replay && typeof autoEvalData.replay === "object" ? autoEvalData.replay : {};
+            return h("div", { className: "dshi_items", "data-role": "auto-eval-result" },
+              h("div", { className: "dshi_item" },
+                "评估时间 " + (autoTimeText(autoEvalData.evaluatedAt) || "—")
+                + " · 触发 " + autoTriggerText(autoEvalData.trigger)
+                + (autoEvalData.fused === true ? " · 已熔断：本轮无候选" : "")),
+              h("div", { className: "dshi_item dshi_hint" },
+                "回放规模：topics " + String(replay.topics !== undefined ? replay.topics : "—")
+                + " · groups " + String(replay.groups !== undefined ? replay.groups : "—")
+                + " · alarms " + String(replay.alarms !== undefined ? replay.alarms : "—")),
+              autoEvalCandidates.length === 0
+                ? h("div", { className: "dshi_item dshi_hint" }, autoEvalData.fused === true ? "熔断中：本轮不出候选。" : "本轮无候选（全部专题都在阈内）。")
+                : autoEvalCandidates.map(renderAutoCandidateRow),
+              autoEvalPlan !== null && planCounts !== null
+                ? h("div", { className: "dshi_item dshi_hint", "data-role": "auto-plan-counts" },
+                    "本轮计划：冷却 " + String(planCounts.cool !== undefined ? planCounts.cool : 0)
+                    + " + 恢复 " + String(planCounts.restore !== undefined ? planCounts.restore : 0)
+                    + " = 共 " + String(planCounts.total !== undefined ? planCounts.total : 0)
+                    + " 条（每轮上限 " + String(params.maxOpsPerRun !== undefined ? params.maxOpsPerRun : "—") + "）"
+                    + (autoEvalPlan.truncated === true ? "（已截断：超出上限的候选本轮不执行）" : ""))
+                : null);
+          })() : null,
+          autoApply ? ErrorBox(autoApply.error) : null,
+          autoApplyData !== null ? (function () {
+            var appliedCount2 = typeof autoApplyData.applied === "number" ? autoApplyData.applied : 0;
+            var skippedCount = typeof autoApplyData.skipped === "number" ? autoApplyData.skipped : 0;
+            var failedCount = typeof autoApplyData.failed === "number" ? autoApplyData.failed : 0;
+            var opsList = Array.isArray(autoApplyData.ops) ? autoApplyData.ops : [];
+            var groupRestore = Array.isArray(autoApplyData.groupRestore) ? autoApplyData.groupRestore : [];
+            return h("div", { className: "dshi_items", "data-role": "auto-apply-result" },
+              h("div", { className: "dshi_item" },
+                (autoApplyData.replay === true ? "重复提交：回放首次执行结果（未二次执行）。" : "执行完成。")
+                + " 已执行 " + String(appliedCount2) + " · 跳过 " + String(skippedCount) + " · 失败 " + String(failedCount)
+                + (autoApplyData.truncated === true ? "（截断）" : "")
+                + (autoApplyData.runId ? " · runId " + String(autoApplyData.runId) : "")),
+              opsList.map(renderAutoApplyOpRow),
+              groupRestore.length > 0 ? h("div", { className: "dshi_item dshi_hint" }, "连组恢复 " + String(groupRestore.length) + " 条（只恢复组导航，不连坐成员）。") : null,
+              appliedCount2 > 0 ? h("div", { className: "dshi_item dshi_hint" }, "可在下方「最近执行记录」对本次执行一键撤销。") : null);
+          })() : null,
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_hint" }, "最近执行记录（最多 5 条；执行本轮才落 run，评估不落）")),
+          autoLastRuns.length === 0
+            ? h("div", { className: "dshi_hint", "data-role": "auto-runs-empty" }, "还没有执行记录。")
+            : h("div", { className: "dshi_items", "data-role": "auto-runs" }, autoLastRuns.map(renderAutoRunRow)),
+          autoUndo ? ErrorBox(autoUndo.error) : null,
+          autoUndoData !== null ? h("div", { className: "dshi_items", "data-role": "auto-undo-result" },
+            h("div", { className: "dshi_item" },
+              (autoUndoData.replay === true ? "重复撤销：回放首次结论（未改动数据）。" : "撤销完成。")
+              + " 回滚 " + String(typeof autoUndoData.reverted === "number" ? autoUndoData.reverted : 0)
+              + " · 已是撤销态 " + String(typeof autoUndoData.alreadyUndone === "number" ? autoUndoData.alreadyUndone : 0)
+              + " · 跳过 " + String(typeof autoUndoData.skipped === "number" ? autoUndoData.skipped : 0)
+              + " · 失败 " + String(typeof autoUndoData.failed === "number" ? autoUndoData.failed : 0)
+              + (autoUndoData.runId ? " · runId " + String(autoUndoData.runId) : ""))) : null);
+      };
       return h("div", { className: "dshi_card" },
         h("div", { className: "dshi_row" },
           h("span", { className: "dshi_cardTitle" }, "运行状态"),
@@ -2397,18 +2830,15 @@ window.__ModuleLoader__.load({
                     : null)
               : null)
             : null,
-          // 0.5 批次 4 · B 线：冷热分布（simulateTemperature base.tiers）+ 上次评估
-          // / 下次触发条件。上次评估在批次 5 之前不存在真实数据——如实写「尚未
-          // 评估」，不编假时间；下次触发按 evaluateEveryHours 从当前时间推算。
+          // 0.5 批次 4 · B 线：冷热分布（simulateTemperature base.tiers）。
+          // 0.5 批次 5 · B 线：上次评估 / 下次触发 / 熔断改由下方 auto 卡用
+          // getAutoStatus 真实数据展示——原先的「尚未评估」占位行与
+          // evaluateEveryHours 本地推算已随之移除（推算口径被服务端权威的
+          // nextTrigger 取代，不再维护第二套推断逻辑）。
           tempStatus && tempStatus.error === null && tempStatus.settings ? (function () {
             var settingsDto = tempStatus.settings;
-            var tempParams = settingsDto.current && typeof settingsDto.current === "object" ? settingsDto.current : {};
             var tiers = tempStatus.sim && tempStatus.sim.base && tempStatus.sim.base.tiers
               && typeof tempStatus.sim.base.tiers === "object" ? tempStatus.sim.base.tiers : null;
-            var everyHours = typeof tempParams.evaluateEveryHours === "number" ? tempParams.evaluateEveryHours : null;
-            var nextAt = everyHours !== null
-              ? new Date(Date.now() + everyHours * 3600000).toISOString().replace("T", " ").slice(0, 19)
-              : null;
             return h("div", { className: "dshi_card", "data-role": "temperature-status-card" },
               h("div", { className: "dshi_row" },
                 h("span", { className: "dshi_cardTitle" }, "冷热分布")),
@@ -2420,12 +2850,12 @@ window.__ModuleLoader__.load({
               h("div", { className: "dshi_hint" },
                 tiers
                   ? "按当前参数回放账本得到的分级分布（只读，不代表已归档）。"
-                  : "当前模式（shadow / 未启动）不支持回放模拟；切到 active 后可见。"),
-              statusRow("上次评估", "尚未评估（0.5 批次 5 上线后开始记录）"),
-              statusRow("下次触发条件", everyHours !== null
-                ? "距上次成功评估满 " + String(everyHours) + " 小时（按当前时间推算约 " + nextAt + "）"
-                : "未知（未取到热度参数）"));
+                  : "当前模式（shadow / 未启动）不支持回放模拟；切到 active 后可见。"));
           })() : null,
+          // 0.5 批次 5 · B 线：记忆整理 auto 卡（三档模式开关 / 立即评估清单 /
+          // 执行本轮 / 一键撤销 / 上次评估 / 下次触发 / 熔断状态）。取数失败整卡
+          // 静默隐藏（shadow / 未启动 / 遗忘模块未开启属预期，不是错误）。
+          renderAutoCard(),
           // 0.4 S6「卸载并清除数据」危险按钮：与命令行 destroy 走同一 purge
           // 模块；二次确认必须输入 dataRoot 原文（不是点两下确认），失败如实
           // 显示错误码。dataRoot 未知（diagnostics 缺席）时整卡不渲染。
