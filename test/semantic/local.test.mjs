@@ -893,3 +893,116 @@ test("P2#12a：入参校验——相对路径 / 含 .. 段拒绝（与 localMode
     (e) => e.code === "INVALID_INPUT",
   );
 });
+
+// ── R2（交叉审查补漏）：回退候选归属判定 + 空缓存不抢先命中 ─────────────────
+// 评审拍板口径（q-d7e2afe2e9414c19）：
+// ① manifest 存在且 name 明确写着别的包名 → 跳过（wrong-package）；
+// ② manifest 缺失 → 放行（no evidence = 不算「别人家的」，孤儿旧缓存维持
+//    目录形状命中口径），命中时轨迹标 missing-manifest-allowed；
+// ③ 空 .cache（readdir 零条目）对所有候选生效（含解析首候选）→ 不算命中；
+// ④ 跳过/命中的原因不吞掉：probeTrace 逐候选落轨迹，测试断言拒绝确实发生过。
+
+test("P2#12a（R2）：别人家的 .cache → 跳过并命中真正的（轨迹带 wrong-package）", () => {
+  const base = join(MIGRATION_TMP, "r2-foreign");
+  const pluginDir = join(base, "plugins", "shiori");
+  // level 0：目录形状完全对得上、.cache 里也有货，但包目录的 package.json
+  // 写着别的包名——别人家的缓存，绝不能命中（旧实现只看 existsSync 会抢先
+  // 命中它，迁移会把别的包的数据搬走）。
+  const foreignDir = join(pluginDir, "node_modules", "@huggingface", "transformers");
+  mkdirSync(join(foreignDir, ".cache", "Xenova"), { recursive: true });
+  writeFileSync(join(foreignDir, "package.json"), JSON.stringify({ name: "some-other-package" }), "utf8");
+  seedLegacyModel(join(foreignDir, ".cache"));
+  // level 1（提升位置）：真正的 transformers 包——manifest name 匹配，才有资格命中。
+  const realDir = join(base, "node_modules", "@huggingface", "transformers");
+  mkdirSync(realDir, { recursive: true });
+  writeFileSync(join(realDir, "package.json"), JSON.stringify({ name: "@huggingface/transformers" }), "utf8");
+  const realCache = join(realDir, ".cache");
+  seedLegacyModel(realCache);
+  mkdirSync(pluginDir, { recursive: true });
+  const trace = [];
+  const found = legacyPluginModelCacheDir(pluginDir, { resolvePackageRoot: () => null, probeTrace: trace });
+  assert.equal(found, realCache, "foreign-owned .cache must be skipped; walk must land on the real one");
+  // 探测轨迹：wrong-package 的拒绝确实发生过（不只看最终返回值）。
+  assert.deepEqual(trace, [
+    { candidate: join(pluginDir, "node_modules", "@huggingface", "transformers", ".cache"), source: "fallback", outcome: "skip", reason: "wrong-package" },
+    { candidate: join(base, "plugins", "node_modules", "@huggingface", "transformers", ".cache"), source: "fallback", outcome: "skip", reason: "absent" },
+    { candidate: realCache, source: "fallback", outcome: "hit", reason: "populated" },
+  ]);
+});
+
+test("P2#12a（R2）：空 .cache 不抢先命中——继续扫下一个候选并命中真正有货的（轨迹带 empty）", async () => {
+  const base = join(MIGRATION_TMP, "r2-empty-first");
+  const pluginDir = join(base, "plugins", "shiori");
+  // level 0：.cache 存在但零条目——没东西可搬，不许抢先命中（旧实现只看
+  // existsSync 会在这里直接返回，导致真正有货的旧缓存漏搬）。该候选无
+  // manifest：按拍板口径放行归属关，卡在「空」这一关上。
+  const emptyFirstCache = join(pluginDir, "node_modules", "@huggingface", "transformers", ".cache");
+  mkdirSync(emptyFirstCache, { recursive: true });
+  // level 1（提升位置）：真正有货的候选（manifest name 匹配）。
+  const realDir = join(base, "node_modules", "@huggingface", "transformers");
+  mkdirSync(realDir, { recursive: true });
+  writeFileSync(join(realDir, "package.json"), JSON.stringify({ name: "@huggingface/transformers" }), "utf8");
+  const realCache = join(realDir, ".cache");
+  seedLegacyModel(realCache);
+  mkdirSync(pluginDir, { recursive: true });
+  const trace = [];
+  const found = legacyPluginModelCacheDir(pluginDir, { resolvePackageRoot: () => null, probeTrace: trace });
+  assert.equal(found, realCache, "empty .cache must not win; walk must continue to the populated one");
+  // 探测轨迹：empty 的拒绝确实发生过。
+  assert.deepEqual(trace, [
+    { candidate: emptyFirstCache, source: "fallback", outcome: "skip", reason: "empty" },
+    { candidate: join(base, "plugins", "node_modules", "@huggingface", "transformers", ".cache"), source: "fallback", outcome: "skip", reason: "absent" },
+    { candidate: realCache, source: "fallback", outcome: "hit", reason: "populated" },
+  ]);
+  // 端到端：跳过空缓存后命中的旧缓存能正常迁移（面板同一判据可见）。
+  const targetCacheDir = join(base, "data", "models");
+  const result = await migrateLegacyModelCache({ targetCacheDir, legacyCacheDir: found });
+  assert.equal(result.status, "migrated");
+  assert.equal(
+    isLocalModelInstalled({ cacheDir: targetCacheDir, model: "Xenova/bge-small-zh-v1.5", dtype: "q8" }),
+    true,
+    "the cache found after skipping the empty one must be migratable (no re-download)",
+  );
+});
+
+test("P2#12a（R2）：无 manifest 的孤儿旧缓存放行命中（missing-manifest-allowed，评审拍板口径 A）", () => {
+  const base = join(MIGRATION_TMP, "r2-orphan");
+  const pluginDir = join(base, "plugin");
+  const orphanCache = join(pluginDir, "node_modules", "@huggingface", "transformers", ".cache");
+  seedLegacyModel(orphanCache);
+  const trace = [];
+  const found = legacyPluginModelCacheDir(pluginDir, { resolvePackageRoot: () => null, probeTrace: trace });
+  assert.equal(found, orphanCache, "orphan cache (no evidence of another package) stays hittable");
+  assert.deepEqual(trace, [
+    { candidate: orphanCache, source: "fallback", outcome: "hit", reason: "missing-manifest-allowed" },
+  ]);
+});
+
+test("P2#12a（R2）：解析命中的包根 .cache 为空 → 不算命中，继续扫回退候选（解析候选仍最优先）", () => {
+  const base = join(MIGRATION_TMP, "r2-resolved-empty");
+  // 解析命中：包根存在但 .cache 空（零条目）→ 不算命中，继续扫（评审确认：
+  // 空缓存口径对所有候选生效，含解析首候选）。
+  const resolvedRoot = join(base, "host", "node_modules", "@huggingface", "transformers");
+  const resolvedEmptyCache = join(resolvedRoot, ".cache");
+  mkdirSync(resolvedEmptyCache, { recursive: true });
+  writeFileSync(join(resolvedRoot, "package.json"), JSON.stringify({ name: "@huggingface/transformers" }), "utf8");
+  // 回退候选（提升位置）有货 → 命中它。
+  const fallbackDir = join(base, "node_modules", "@huggingface", "transformers");
+  mkdirSync(fallbackDir, { recursive: true });
+  writeFileSync(join(fallbackDir, "package.json"), JSON.stringify({ name: "@huggingface/transformers" }), "utf8");
+  const fallbackCache = join(fallbackDir, ".cache");
+  seedLegacyModel(fallbackCache);
+  const pluginDir = join(base, "plugin");
+  mkdirSync(pluginDir, { recursive: true });
+  const trace = [];
+  const found = legacyPluginModelCacheDir(pluginDir, {
+    resolvePackageRoot: () => resolvedRoot,
+    probeTrace: trace,
+  });
+  assert.equal(found, fallbackCache, "resolved-but-empty cache must not win over a populated fallback");
+  assert.deepEqual(trace, [
+    { candidate: resolvedEmptyCache, source: "resolved", outcome: "skip", reason: "empty" },
+    { candidate: join(pluginDir, "node_modules", "@huggingface", "transformers", ".cache"), source: "fallback", outcome: "skip", reason: "absent" },
+    { candidate: join(base, "node_modules", "@huggingface", "transformers", ".cache"), source: "fallback", outcome: "hit", reason: "populated" },
+  ]);
+});

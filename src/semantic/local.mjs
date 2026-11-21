@@ -614,7 +614,10 @@ export function createLocalModelDownloader({
 //     （与运行时 import 同一解析算法，穿透 junction/symlink 得到真实安装位置）；
 //   ② 解析失败（未安装 / exports 变动 / 解析 API 缺失）→ 从 pluginDir 逐级上溯
 //     探测 <dir>/node_modules/@huggingface/transformers/.cache（覆盖嵌套与各级
-//     提升布局），第一个真实存在的 .cache 胜出；
+//     提升布局）。R2（交叉审查补漏）：每个回退候选须过两道关才算命中——
+//     归属校验（包目录的 package.json 写着别人的名字 → 跳过：别人家的 .cache，
+//     搬走等于劫持别的包的数据）与「非空」（.cache 存在但 readdir 零条目 →
+//     不是命中，继续扫下一个候选，不让空缓存抢先返回造成漏搬）；
 //   ③ 全部落空 → null（迁移层按 absent 零动作处理）。
 //
 // 边界：
@@ -666,22 +669,84 @@ function resolveTransformersPackageRootDefault(pluginDir) {
 }
 
 /**
+ * R2：旧缓存候选探测分类（交叉审查补漏）。
+ * - "populated"：目录可读且有条目 → 可命中；
+ * - "empty"：存在但 readdir 零条目 → 不算命中（没东西可搬），继续扫下一个
+ *   候选，不让空缓存抢先返回造成漏搬；
+ * - "absent"：不存在 / 不是目录（ENOENT/ENOTDIR）→ 继续扫下一个候选；
+ * - "unreadable"：其它 IO 失败（EACCES 等）→ 按「存在」处理返回候选，让迁移
+ *   层的 failed + 错误摘要如实上报——探测层不许把故障静默降级成 absent
+ *   （与本模块「不把故障伪装成正常」的一贯口径一致）。
+ */
+function probeLegacyCacheKind(cacheDir) {
+  let entries;
+  try {
+    entries = readdirSync(cacheDir, { withFileTypes: true });
+  } catch (cause) {
+    if (cause?.code === "ENOENT" || cause?.code === "ENOTDIR") return "absent";
+    return "unreadable";
+  }
+  return entries.length === 0 ? "empty" : "populated";
+}
+
+/**
+ * R2：回退候选的归属判定——候选 .cache 的父级目录（即包根）里的 package.json
+ * 指向谁。三种结论：
+ * - "foreign"：manifest 存在且 name 明确写着别的包名 → 是「别人家的 .cache」，
+ *   跳过继续扫（评审拍板：只有证据确凿才拒）；
+ * - "match"：manifest 的 name 就是 @huggingface/transformers → 归属明确；
+ * - "no-evidence"：manifest 缺失 / 不可读 / 解析失败 / 无合法 name → 没有任何
+ *   证据说它属于别的包，放行——半卸载留下的孤儿旧缓存维持既有「目录形状
+ *   命中」口径（评审拍板选 A；既有嵌套/提升布局用例的夹具无 manifest，
+ *   全绿依赖此口径），避免把孤儿旧缓存漏搬。
+ * 归属判定只对回退候选生效：createRequire 解析命中的首候选，解析本身就是
+ * 归属证明，不经此检查（R1 口径：解析命中仍最优先）。
+ */
+function packageOwnershipOf(packageDir) {
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+  } catch {
+    return "no-evidence";
+  }
+  const name = manifest?.name;
+  if (typeof name !== "string" || name.length === 0) return "no-evidence";
+  return name === "@huggingface/transformers" ? "match" : "foreign";
+}
+
+/**
  * 解析 0.3.x 旧模型缓存的真实落点（R1：兼容 npm 依赖提升布局）。
  *
  * 候选顺序：① 注入点解析出的包根下的 .cache（生产 = createRequire 真实解析，
- * 穿透 junction 得到 0.3.x 实际安装位置）；② 从 pluginDir 逐级上溯（有界 8 层）
- * 探测 <dir>/node_modules/@huggingface/transformers/.cache——嵌套布局（level 0）
+ * 穿透 junction 得到 0.3.x 实际安装位置；解析即归属证明，不经回退候选的
+ * 归属判定；解析命中但 .cache 为空同样不算命中——空缓存口径对所有候选生效，
+ * 有内容的解析候选仍最优先）；② 从 pluginDir 逐级上溯（有界 8 层）探测
+ * <dir>/node_modules/@huggingface/transformers/.cache——嵌套布局（level 0）
  * 与 reviewer 所列 pluginDir/../node_modules、pluginDir/../../node_modules 等
- * 各级提升位置的超集。取第一个真实存在的 .cache；全部落空返回 null
- * （migrateLegacyModelCache 按 absent 零动作处理，绝不猜一个不存在的路径）。
+ * 各级提升位置的超集，但每个回退候选都要过两道关（R2，交叉审查补漏）：
+ * 归属判定（包目录的 package.json 明确写着别的包名 → 跳过，绝不动别人家的
+ * .cache）与「非空」（.cache 存在但 readdir 零条目 → 不是命中，继续扫下一个
+ * 候选，不让空缓存抢先返回造成漏搬）。命中第一个过两道关的候选；全部落空
+ * 返回 null（migrateLegacyModelCache 按 absent 零动作处理，绝不猜一个不存在
+ * 的路径）。
+ *
+ * R2 评审补充：跳过/命中的原因不许吞掉——probeTrace 传数组时按扫描顺序逐
+ * 候选追加探测轨迹 {candidate, source, outcome, reason}，reason 取值
+ * wrong-package（manifest 明确写着别的包名）/ empty（存在但零条目）/ absent
+ * （不存在/不是目录）/ missing-manifest-allowed（无 manifest 证据放行且有货）/
+ * populated（有货且归属明确）/ unreadable（读不了但存在，迁移层如实报 failed）；
+ * 命中即停，其后的候选不产生轨迹。缺省不收集，零行为变化。
  *
  * @param {string} pluginDir 插件目录（index.mjs 所在目录；生产 = 装插件的那个目录）。
- * @param {{resolvePackageRoot?: (pluginDir: string) => ?string}} [options]
- *   包根解析注入点（缺省 createRequire 实现；测试注入桩替换）。
- * @returns {?string} 真实存在的旧缓存目录；不存在 → null。
+ * @param {{resolvePackageRoot?: (pluginDir: string) => ?string,
+ *     probeTrace?: Array<{candidate: string, source: "resolved"|"fallback",
+ *       outcome: "hit"|"skip", reason: string}>}} [options]
+ *   包根解析注入点（缺省 createRequire 实现；测试注入桩替换）与探测轨迹收集
+ *   数组（可选；传入时逐候选追加，供测试断言「拒绝确实发生过」）。
+ * @returns {?string} 真实存在且可迁移的旧缓存目录；不存在 → null。
  * @throws {Error} code="INVALID_INPUT"：pluginDir 缺失或非非空字符串。
  */
-export function legacyPluginModelCacheDir(pluginDir, { resolvePackageRoot = resolveTransformersPackageRootDefault } = {}) {
+export function legacyPluginModelCacheDir(pluginDir, { resolvePackageRoot = resolveTransformersPackageRootDefault, probeTrace } = {}) {
   if (typeof pluginDir !== "string" || pluginDir.length === 0) {
     fail("INVALID_INPUT", `legacyPluginModelCacheDir: pluginDir must be a non-empty string, got ${String(pluginDir)}`, {
       received: pluginDir === undefined ? "absent" : String(pluginDir),
@@ -690,22 +755,53 @@ export function legacyPluginModelCacheDir(pluginDir, { resolvePackageRoot = reso
   if (resolvePackageRoot !== undefined && typeof resolvePackageRoot !== "function") {
     fail("INVALID_INPUT", "legacyPluginModelCacheDir: resolvePackageRoot must be a function when provided", {});
   }
+  if (probeTrace !== undefined && !Array.isArray(probeTrace)) {
+    fail("INVALID_INPUT", "legacyPluginModelCacheDir: probeTrace must be an array when provided", {});
+  }
+  const trace = (event) => {
+    if (probeTrace !== undefined) probeTrace.push(event);
+  };
   const candidates = [];
   const resolvedRoot = resolvePackageRoot(pluginDir);
   if (typeof resolvedRoot === "string" && resolvedRoot.length > 0) {
-    candidates.push(join(resolvedRoot, ".cache"));
+    candidates.push({ path: join(resolvedRoot, ".cache"), ownershipProven: true });
   }
   // 回退候选：从插件目录逐级上溯探测（嵌套布局与各级依赖提升位置的超集）。
   let dir = pluginDir;
   for (let hops = 0; hops < 8 && dirname(dir) !== dir; hops += 1) {
-    candidates.push(join(dir, "node_modules", "@huggingface", "transformers", ".cache"));
+    candidates.push({ path: join(dir, "node_modules", "@huggingface", "transformers", ".cache"), ownershipProven: false });
     dir = dirname(dir);
   }
   for (const candidate of candidates) {
+    const source = candidate.ownershipProven ? "resolved" : "fallback";
     try {
-      if (existsSync(candidate)) return candidate;
+      // R2：回退候选先过归属判定——package.json 明确写着别的包名 → 跳过继续扫
+      //（别人家的 .cache，搬走等于劫持别的包的数据）。解析命中的首候选不经此
+      // 检查（解析即归属证明，仍最优先）。
+      const ownership = candidate.ownershipProven ? "resolved" : packageOwnershipOf(dirname(candidate.path));
+      if (ownership === "foreign") {
+        trace({ candidate: candidate.path, source, outcome: "skip", reason: "wrong-package" });
+        continue;
+      }
+      const kind = existsSync(candidate.path) ? probeLegacyCacheKind(candidate.path) : "absent";
+      // R2：absent（不存在/不是目录）与 empty（存在但零条目）都不是命中，
+      // 继续扫下一个候选，不让空缓存抢先返回造成漏搬。
+      if (kind === "absent" || kind === "empty") {
+        trace({ candidate: candidate.path, source, outcome: "skip", reason: kind });
+        continue;
+      }
+      // populated（有货）与 unreadable（读不了）：命中并返回——迁移层会把
+      // 读不了的落点按 failed + 错误摘要如实上报，探测层不静默吞故障。
+      // 命中原因如实标注：无 manifest 证据放行的孤儿缓存标 missing-manifest-
+      // allowed（评审拍板口径 A），归属明确的标 populated，读不了的标 unreadable。
+      const hitReason = kind === "unreadable"
+        ? "unreadable"
+        : (ownership === "no-evidence" ? "missing-manifest-allowed" : "populated");
+      trace({ candidate: candidate.path, source, outcome: "hit", reason: hitReason });
+      return candidate.path;
     } catch {
-      // 探测失败（权限等）→ 换下一个候选，绝不因单点探测异常放弃整条链。
+      // 单候选探测异常（防御保留旧口径）→ 换下一个候选，绝不因单点探测
+      // 异常放弃整条链。
     }
   }
   return null;

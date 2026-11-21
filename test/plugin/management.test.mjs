@@ -2367,3 +2367,59 @@ test("getStatus.personas：inert（dataRoot 未初始化）返回 []", async (t)
   assert.equal(status.mode, "inert");
   assert.deepEqual(status.personas, []);
 });
+
+// ── R1（交叉审查补漏）：目录读取故障降级——getStatus 不陪葬，故障进诊断 ──────
+
+test("getStatus.personas：readdir 抛 EACCES → getStatus 照常返回、personas 空、diagnostics.personasError 非空且有界", async (t) => {
+  // 用注入桩让 readdir 真抛 EACCES（不是构造不存在的目录——那是 ENOENT，
+  // 行为不同）：旧实现 listPersonaNames 对非 ENOENT/ENOTDIR 错误原样上抛，
+  // 会把整个 getStatus 炸掉，controller 注入的 diagnostics.roots 等字段根本
+  // 到不了面板。修复口径：personas 降级为 [] + diagnostics.personasError
+  // 写有界错误摘要，状态照常返回。
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-personas-eacces-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const dataRoot = path.join(base, "data");
+  const stateDir = path.join(base, "state");
+  await mkdir(dataRoot, { recursive: true });
+  await mkdir(stateDir, { recursive: true });
+  const eacces = new Error(`EACCES: permission denied, scandir '${path.join(dataRoot, "persona")}'`);
+  eacces.code = "EACCES";
+  const { management } = createManagement({
+    settings: shadowSettings({ dataRoot, stateRoot: stateDir }),
+    dataRoot,
+    state: createStateStore({ stateRoot: stateDir }),
+    resourcesFor: async () => { throw new Error("not used"); },
+    isStarted: () => false,
+    generation: () => 0,
+    registerGrant: () => { throw new Error("not used"); },
+    executeToolForScope: async () => { throw new Error("not used"); },
+    readdir: async () => { throw eacces; },
+  });
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
+  const status = await management.getStatus(trusted, {});
+  assert.equal(status.mode, "shadow");
+  assert.deepEqual(status.personas, [], "读不了目录既不冒充有卡，也不让整个状态请求陪葬");
+  const digest = status.diagnostics.personasError;
+  assert.ok(typeof digest === "string" && digest.length > 0, "personasError 必须非空（故障不许静默吞掉）");
+  assert.ok(digest.includes("EACCES"), `摘要须带错误类别码，实际：${digest}`);
+  assert.ok(digest.length <= 200, `错误摘要必须有界，实际 ${digest.length} 字符`);
+  // 降级不影响其余诊断字段出线——面板可见性正是本单主题（diagnostics.roots 必须可达）。
+  assert.equal(status.diagnostics.dataRoot, dataRoot);
+  assert.equal(status.diagnostics.stateRoot, stateDir);
+  assert.equal(status.diagnostics.rootsSource.dataRoot, "explicit");
+});
+
+test("getStatus.personas：ENOENT（目录不存在）不写 personasError——正常路径 wire 形状逐字不变", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-personas-enoent-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const dataRoot = path.join(base, "data");
+  const stateDir = path.join(base, "state");
+  await mkdir(dataRoot, { recursive: true });
+  await mkdir(stateDir, { recursive: true });
+  const management = createShadowManagement({ dataRoot, stateRoot: stateDir, stateDir });
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
+  const status = await management.getStatus(trusted, {});
+  assert.deepEqual(status.personas, []);
+  assert.equal(status.diagnostics.personasError, undefined, "ENOENT 是「没有卡」，不是故障，不出 personasError 键");
+  await assert.rejects(() => stat(path.join(dataRoot, "persona")), { code: "ENOENT" }, "R1 不得顺手创建 persona 目录");
+});

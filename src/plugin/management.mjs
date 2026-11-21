@@ -49,25 +49,53 @@ function fail(code, message, details) {
 // （persona.mjs 顶部磁盘布局），name 即配置里的 persona 名/scopeId。
 const PERSONA_CARD_SUFFIX = ".md";
 
+// R1（交叉审查补漏）：diagnostics.personasError 的有界错误摘要上限。摘要只
+// 供面板诊断区定位故障类别（code + message），不要求还原完整错误，超长截断。
+const PERSONAS_ERROR_SUMMARY_MAX = 200;
+
+/** 读目录失败的有界单行摘要：「CODE: message」，超 PERSONAS_ERROR_SUMMARY_MAX 截断。 */
+function personaErrorSummary(error) {
+  const code = typeof error?.code === "string" && error.code.length > 0 ? error.code : "UNKNOWN";
+  const message = error instanceof Error && typeof error.message === "string" && error.message.length > 0
+    ? error.message
+    : String(error);
+  const raw = `${code}: ${message}`;
+  return raw.length <= PERSONAS_ERROR_SUMMARY_MAX ? raw : `${raw.slice(0, PERSONAS_ERROR_SUMMARY_MAX - 1)}…`;
+}
+
 /**
  * 人设卡清单（getStatus 的 personas 字段）：<dataRoot>/persona/*.md 的 basename
  * 去掉 .md，名字升序。纯只读——绝不创建目录、不写盘；dataRoot 未初始化（inert）
- * 或 persona 目录不存在时返回 []。其它读目录失败（如权限）照旧上抛，不把故障
- * 伪装成「没有卡」。
+ * 或 persona 目录不存在时返回 []。
+ *
+ * R1（交叉审查补漏）：其它读目录失败（EACCES 等）不再整体上抛——旧实现会让
+ * getStatus 一起失败，controller 注入的 diagnostics.roots 根本到不了面板，
+ * P1#8 的「面板可见」落空。改为返回 { names: [], error: 摘要 }，getStatus 把
+ * 有界摘要写进 diagnostics.personasError 后照常返回——故障以诊断字段如实
+ * 出线，不静默吞掉、也不把整个状态请求陪葬。ENOENT/ENOTDIR（目录不存在 /
+ * 不是目录）仍按「没有卡」处理且不写 personasError（现状口径不变）。
+ *
+ * @param {string} dataRoot 业务数据根
+ * @param {typeof import("node:fs/promises").readdir} readdirImpl 读目录实现
+ *   （生产 = node:fs/promises readdir；测试注入 EACCES 桩用）
+ * @returns {Promise<{names: string[], error: ?string}>} error null = 目录正常或不存在
  */
-async function listPersonaNames(dataRoot) {
-  if (typeof dataRoot !== "string" || dataRoot.length === 0) return [];
+async function listPersonaNames(dataRoot, readdirImpl) {
+  if (typeof dataRoot !== "string" || dataRoot.length === 0) return { names: [], error: null };
   let entries;
   try {
-    entries = await readdir(join(dataRoot, "persona"), { withFileTypes: true });
+    entries = await readdirImpl(join(dataRoot, "persona"), { withFileTypes: true });
   } catch (error) {
-    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return [];
-    throw error;
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return { names: [], error: null };
+    return { names: [], error: personaErrorSummary(error) };
   }
-  return entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith(PERSONA_CARD_SUFFIX))
-    .map((entry) => entry.name.slice(0, -PERSONA_CARD_SUFFIX.length))
-    .sort();
+  return {
+    names: entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(PERSONA_CARD_SUFFIX))
+      .map((entry) => entry.name.slice(0, -PERSONA_CARD_SUFFIX.length))
+      .sort(),
+    error: null,
+  };
 }
 
 /**
@@ -83,6 +111,9 @@ async function listPersonaNames(dataRoot) {
  * @param {(agent: object|null) => string|null} [deps.workspaceForAgent] 从宿主 agent 解析可信 workspace（只读）
  * @param {object} [deps.timelineReader] 已构造的时间线读取器（测试注入；省略则按 dataRoot 惰性创建）
  * @param {() => string} [deps.nowIso]
+ * @param {typeof import("node:fs/promises").readdir} [deps.readdir] 人设卡目录读取注入点
+ *   （缺省 node:fs/promises readdir；仅测试注入 EACCES 桩验证 R1 降级路径用，
+ *   默认行为逐字不变。controller 不传此参。）
  * @param {() => Promise<string[]>} [deps.invalidateScopeResources] scope 资源缓存失效入口
  *   （0.4 S6 中-2：仅 destroyData 使用；async——复用 controller 的 closeAllScopes，
  *   返回 Promise<string[]> 的 close 错误数组，调用方必须 await。存在性在删除之前
@@ -106,6 +137,9 @@ export function createManagement(deps) {
   for (const [name, value] of Object.entries({ settings, state, resourcesFor, isStarted, generation, registerGrant, executeToolForScope })) {
     if (value === undefined) fail("INVALID_INPUT", `createManagement requires deps.${name}`, {});
   }
+
+  // R1：人设卡目录读取实现（缺省 = 生产 readdir；测试注入桩，controller 不传）。
+  const readdirForPersonas = typeof deps.readdir === "function" ? deps.readdir : readdir;
 
   const isInert = settings.mode === "shadow" && settings.dataRoot === null && settings.stateRoot === null;
   const configured = !isInert;
@@ -269,12 +303,18 @@ export function createManagement(deps) {
      */
     async getStatus(trustedContext, payload) {
       validateManagementPayload("getStatus", payload ?? {});
+      // R1（交叉审查补漏）：personas 清单与状态解耦——persona 目录读不了
+      // （EACCES 等权限故障）不再让整个 getStatus 抛错，否则 controller 注入
+      // 的 diagnostics.roots 等诊断字段全部到不了面板。错误以有界摘要写入
+      // diagnostics.personasError（无错不出键，正常路径 wire 形状逐字不变），
+      // 状态照常返回。
+      const personaList = await listPersonaNames(settings.dataRoot, readdirForPersonas);
       const status = {
         mode: isInert ? "inert" : settings.mode,
         configured,
         // 人设卡清单（0.4 面板选卡用）：dataRoot/persona/*.md 的名字，升序；
-        // inert（dataRoot 未初始化）或目录不存在 → []。只读目录，不建目录。
-        personas: await listPersonaNames(settings.dataRoot),
+        // inert（dataRoot 未初始化）、目录不存在或目录不可读 → []。只读目录，不建目录。
+        personas: personaList.names,
         scope: null,
         occupancy: null,
         capabilities: {
@@ -310,6 +350,13 @@ export function createManagement(deps) {
           readonly: readonlyGuardStatus(),
         },
       };
+      // R1：目录读取故障在这里如实出线（有界摘要）；无错不出键——正常路径与
+      // ENOENT（目录不存在=没有卡）的返回形状逐字不变。放在 inert/shadow 提前
+      // 返回之前：shadow 挂载正是「面板只剩 getStatus 可用」的场景，降级信息
+      // 必须同样可达。
+      if (personaList.error !== null) {
+        status.diagnostics.personasError = personaList.error;
+      }
       if (isInert || !isStarted()) return status;
       const evidence = sessionEvidenceFromRpc(trustedContext);
       // shadow 下仅纯内存解析（pinScope 不触盘）；occupancy 只在 active 读数据。
