@@ -66,7 +66,9 @@ function loadClientModule() {
 
 test("bundle：ModuleLoader 注册、导出 apply/inject、wire 冻结（0.5 批次 5 · B 线：bundle == wire 21 全集，auto 四方法已接线）", async () => {
   const mod = loadClientModule();
-  assert.deepEqual(Object.keys(mod).sort(), ["TYPERT_REMOTE", "apply", "ensureLosslessJson", "inject"]);
+  // R3（0.5 债）等价替换：新增 setSessionRetryClock 导出（重试 clock 注入入口），
+  // 导出清单断言随之补入该项；其余四项与语义不变。
+  assert.deepEqual(Object.keys(mod).sort(), ["TYPERT_REMOTE", "apply", "ensureLosslessJson", "inject", "setSessionRetryClock"]);
   assert.deepEqual(mod.inject, ["remote", "slots", "configForms"]);
   assert.equal(mod.TYPERT_REMOTE.package, "dsh-shiori");
 
@@ -2244,6 +2246,135 @@ test("Q 槽健壮性 D：非会话级错误照旧进对应 tab 的 ErrorBox（�
 });
 
 // ---------------------------------------------------------------------------
+// R1（0.5 债）：错误码 →「人话 + 建议动作」共用映射（humanErrorOf 单一事实来源）。
+// 评审拍板（方案 A）：ErrorBox 与组入口（groupActionError）都走 humanErrorOf；
+// 一致性判据：同一错误（同码、同 details 形状）两处入口都不带 scene 时输出逐字
+// 相同；带 scene 时去掉前导后的「人话 + 动作主体」与无 scene 版本逐字相同。
+// 断言按全句逐字，不只断「包含某个词」。INVALID_STATE 按 details 分流：
+// reason=parameters-not-effective → 宿主热提交时序；损坏标记（损坏/不是合法
+// UTF-8/checksum/corrupt）→ 数据损坏；都没有 → 中性。未知码回退原样原文。
+// ---------------------------------------------------------------------------
+
+// R1 人话句子夹具（与 client/index.js humanErrorOf 逐字同步；改动实现时同步改这里）。
+const R1_BODY = {
+  invalidInputLead: "group_manage 拒绝了参数：",
+  invalidInputGenericLead: "输入参数被拒绝：",
+  invalidInput: "请检查填写内容与参数格式（详见「原始错误信息」），修正后重试。",
+  statePending: "服务端状态刚被修改（宿主写入尚未生效）：请稍候片刻再重试一次；反复出现请先刷新。",
+  stateCorrupt: "数据疑似损坏：请不要反复重试写操作，先备份相关文件再排查（详见「原始错误信息」）。",
+  stateNeutral: "服务端当前状态不接受这次操作：请刷新后重试；若反复出现，请携带「原始错误信息」排查。",
+  notFound: "目标不存在或已被删除/过期：请刷新列表后重试；若确需该对象，请重新创建或找回。",
+  ioError: "文件读写失败：请检查磁盘空间与文件是否被其他程序占用，然后重试（详见「原始错误信息」）。",
+  enoent: "文件或目录不存在：请确认路径是否正确、对象是否已被移动或删除，然后重试。",
+  eacces: "没有权限访问该文件/目录：请检查文件权限或改用有权限的账号，然后重试。",
+  ebusy: "文件正被其他程序占用：请关闭占用它的程序，然后重试。",
+  eStar: (code) => "系统级文件/资源错误（" + code + "）：请检查磁盘、权限与占用情况，然后重试（详见「原始错误信息」）。",
+  hostLocked: "另一实例正在写入，当前只读：写操作已停用，等对方释放后再重试。",
+};
+
+// 走真实 StatusTab：dsh.call 抛原始错误 → tab error state → ErrorBox 渲染文本。
+async function renderErrorBoxText(mod, host, renderStatus, error) {
+  const dsh = { call: async () => { throw error; } };
+  host.states.length = 0;
+  host.effects.length = 0;
+  host.runEffects.v = true;
+  renderStatus(dsh);
+  for (const effect of host.effects.splice(0)) effect();
+  await settle();
+  host.runEffects.v = false;
+  const tree = renderStatus(dsh);
+  const boxes = findErrorBoxes(tree);
+  assert.equal(boxes.length, 1, "恰好一个 ErrorBox");
+  return collectText(boxes[0]);
+}
+
+test("R1 a：ErrorBox 对原始已知码出人话主行 + 次要原文行；INVALID_STATE 两种 details 出不同文案；未知码逐字回退", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderStatus = await mountStatusPanel(mod, host);
+  const cases = [
+    // [code, message, details, 期望人话全句（null=未知码回退）, 不得串入的人话]
+    ["INVALID_STATE", "settings 刚被修改", { reason: "parameters-not-effective" }, R1_BODY.statePending, R1_BODY.stateCorrupt],
+    ["INVALID_STATE", "groups.json: 文件字节不是合法 UTF-8，拒绝静默替换", { where: "groups.json" }, R1_BODY.stateCorrupt, R1_BODY.statePending],
+    ["INVALID_STATE", "审计账本不可写：EACCES", undefined, R1_BODY.stateNeutral, R1_BODY.stateCorrupt],
+    ["NOT_FOUND", "plan no longer open", undefined, R1_BODY.notFound, null],
+    ["IO_ERROR", "groups.json: 文件系统操作失败（ENOSPC）", { ioCode: "ENOSPC" }, R1_BODY.ioError, null],
+    ["ENOENT", "persona/a.json: no such file or directory", undefined, R1_BODY.enoent, null],
+    ["EACCES", "EACCES: permission denied, scandir 'x'", undefined, R1_BODY.eacces, null],
+    ["EBUSY", "resource busy or locked", undefined, R1_BODY.ebusy, null],
+    ["E_ISDIR", "path is a directory", undefined, R1_BODY.eStar("E_ISDIR"), null],
+    // rework R1-host-locked：HOST_LOCKED 分支必须有用例钉住（交叉变异 G：删掉该分支
+    // 曾 130/130 全绿——映射写了却没判据等于死代码）。
+    ["HOST_LOCKED", "another Shiori instance holds the write lock", undefined, R1_BODY.hostLocked, null],
+    ["weird/custom-code", "boom", undefined, null, null],
+  ];
+  for (const [code, message, details, human, forbid] of cases) {
+    const error = Object.assign(new Error(message), { code });
+    if (details !== undefined) error.details = details;
+    const boxText = await renderErrorBoxText(mod, host, renderStatus, error);
+    const raw = "[" + code + "] " + message;
+    if (human !== null) {
+      assert.ok(boxText.includes(human), code + ": 人话主行渲染（全句逐字）");
+      assert.ok(boxText.includes(raw), code + ": 原文行以次要样式保留（[code] message 仍可见）");
+    } else {
+      assert.equal(boxText, raw, code + ": 未知码回退——只渲染原样 code + message，不加前缀不加人话");
+    }
+    if (forbid !== null) assert.ok(!boxText.includes(forbid), code + ": 不串其他 details 分支的文案");
+  }
+});
+
+test("R1 b（评审判据）：同码同 details 经两处入口渲染一致——无 scene 全句逐字相同；组入口 INVALID_INPUT 前导恰为「group_manage 拒绝了参数：」且主体逐字相同", async () => {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  const renderStatus = await mountStatusPanel(mod, host);
+  const renderCandidates = await mountCandidates(mod, host);
+  const cases = [
+    // [code, message, details, 期望人话主体（全句）]
+    ["INVALID_INPUT", "rejected: list", undefined, R1_BODY.invalidInput],
+    ["INVALID_STATE", "settings 刚被修改", { reason: "parameters-not-effective" }, R1_BODY.statePending],
+    ["INVALID_STATE", "groups.json: 文件字节不是合法 UTF-8，拒绝静默替换", { where: "groups.json" }, R1_BODY.stateCorrupt],
+    ["NOT_FOUND", "plan no longer open", undefined, R1_BODY.notFound],
+    ["EACCES", "EACCES: permission denied", undefined, R1_BODY.eacces],
+    ["HOST_LOCKED", "another Shiori instance holds the write lock", undefined, R1_BODY.hostLocked],
+  ];
+  for (const [code, message, details, body] of cases) {
+    const error = Object.assign(new Error(message), { code });
+    if (details !== undefined) error.details = details;
+    // 入口 1：ErrorBox（无 scene，原始错误）。
+    const statusText = await renderErrorBoxText(mod, host, renderStatus, error);
+    // 入口 2：组入口（scene="group_manage"）——group_manage list 失败 → 组卡 ErrorBox。
+    const dsh2 = {
+      call: async (method, session, payload) => {
+        if (method === "listCandidates") return { queueRevision: 0, items: [], plans: [] };
+        if (method === "executeTool" && payload && payload.name === "group_manage") throw error;
+        return {};
+      },
+    };
+    host.states.length = 0;
+    host.states.push({ queueRevision: 0, items: [], plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
+    let tree = renderCandidates(dsh2, "session-A");
+    findButton(tree, "载入 / 刷新组").props.onClick();
+    await flush();
+    tree = renderCandidates(dsh2, "session-A");
+    const groupText = collectText(tree);
+    if (code === "INVALID_INPUT") {
+      // 带 scene：组入口全句 = scene 前导 + 主体；ErrorBox 全句 = 通用前导 + 主体。
+      // 去掉前导后的主体逐字相同（两处 includes 同一个 body 全句）。
+      assert.ok(groupText.includes(R1_BODY.invalidInputLead + body), "组入口以「group_manage 拒绝了参数：」前导开头 + 主体（全句逐字）");
+      assert.ok(groupText.includes("rejected: list"), "原始错误仍进折叠 details（ui-groups:210 同口径）");
+      assert.ok(statusText.includes(R1_BODY.invalidInputGenericLead + body), "ErrorBox 无 scene 版本 = 通用前导 + 主体（全句逐字）");
+      assert.ok(!groupText.includes(R1_BODY.invalidInputGenericLead), "组入口不带通用前导");
+      assert.ok(!statusText.includes(R1_BODY.invalidInputLead), "ErrorBox 不带组 scene 前导");
+    } else {
+      // 无 scene 前导的码：两处入口渲染同一条人话全句（逐字相同）。
+      assert.ok(statusText.includes(body), "ErrorBox 渲染人话全句");
+      assert.ok(groupText.includes(body), "组入口渲染同一条人话全句（逐字相同）");
+      assert.ok(groupText.includes("[" + code + "]"), "组入口 code 仍可见");
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
 // R7 回归（owner 实机 3082，DSH 0.2.1-rc.2）：ShioriSection 首帧拉 session 列表
 // 瞬时失败（远端 session 命名空间未就绪 / session.list 一次抖动）曾永久退化成手填
 // 输入框，「刷新」也救不回来。现在：最多 3 次尝试（300ms / 900ms 递进），成功（数组，
@@ -2251,17 +2382,37 @@ test("Q 槽健壮性 D：非会话级错误照旧进对应 tab 的 ErrorBox（�
 // 全部经真实 client/index.js + mountPanel/bootPanel helpers，无假实现。
 // ---------------------------------------------------------------------------
 
-async function waitMs(ms) {
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitFor(predicate, timeoutMs = 2500) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    if (predicate()) return true;
-    await waitMs(25);
-  }
-  return false;
+// R3（0.5 债）：会话列表重试的假时钟（只经 mod.setSessionRetryClock 注入，
+// 不装全局——settle() 的微任务排空仍走真实定时器，互不影响）。
+// 语义对齐 ui-harness 的可控定时器：advance(ms) 把 now 推进 ms，按到期时间升序
+// 触发回调；回调内新排且落在本窗口内的定时器同轮也跑（重入）；clearTimeout 摘除；
+// now / pendingCount 供断言节奏与「成功后无遗留定时器」。
+function makeRetryClock() {
+  let now = 0;
+  let seq = 0;
+  let timers = [];
+  const clock = {
+    now: () => now,
+    setTimeout: (fn, ms) => { const t = { id: ++seq, fn, at: now + (ms || 0) }; timers.push(t); return t; },
+    clearTimeout: (t) => { timers = timers.filter((x) => x !== t); },
+    pendingCount: () => timers.length,
+    async advance(ms) {
+      const target = now + ms;
+      for (;;) {
+        timers.sort((a, b) => a.at - b.at || a.id - b.id);
+        const idx = timers.findIndex((t) => t.at <= target);
+        if (idx < 0) break;
+        const t = timers.splice(idx, 1)[0];
+        now = t.at;
+        t.fn();
+        // 每次触发后走真实宏任务：重试链是多级微任务（resolve → await listSessions →
+        // 排下一段定时器），单个 Promise.resolve() 排不干，会漏掉窗口内的重入定时器。
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      now = target;
+    },
+  };
+  return clock;
 }
 
 // 用当前 states 重画面板（不重跑 effect，避免误触发挂载期 effect）。
@@ -2290,17 +2441,20 @@ test("R7 回归 a：列表第一次返回 null、第二次返回数组 → 自�
       },
     },
   };
-  const { host, sectionVNode, cleanup } = await mountPanel(services);
+  const { host, mod, sectionVNode, cleanup } = await mountPanel(services);
+  const clock = makeRetryClock();
+  assert.equal(mod.setSessionRetryClock(clock), true, "R3：假时钟注入生效");
   let tree = await bootPanel(host, sectionVNode);
   assert.equal(listCalls, 1, "首帧只拉一次，失败后进入 300ms 重试等待");
   assert.equal(host.states[3], undefined, "重试期间 sessions 保持 undefined（首帧未出结果）");
   assert.ok(!collectText(tree).includes("宿主 session 列表不可用"), "首帧未出结果不显示不可用提示");
 
-  assert.equal(await waitFor(() => listCalls >= 2), true, "自动重试第二次尝试");
+  await clock.advance(300); // 等价替换 waitFor 真等待：直接推进到第一段重试点
   await settle();
   tree = repaint(host, sectionVNode);
 
   assert.equal(listCalls, 2, "第二次成功即停止重试");
+  assert.equal(clock.pendingCount(), 0, "R3：成功后不再排重试定时器");
   assert.equal(host.states[1], "s1", "成功后立刻 probeCandidates 选中可用会话");
   assert.deepEqual(probed, ["s1"], "只探测一次");
   const select = flattenVNode(tree).find((n) => n.type === "select");
@@ -2312,6 +2466,7 @@ test("R7 回归 a：列表第一次返回 null、第二次返回数组 → 自�
   // S2-3 后选择器区同时挂「工作区默认卡」的手填兜底 input（当前 status 无 personas），
   // 所以「手填输入框消失」按会话输入框（placeholder=session id）判定。
   assert.equal(flattenVNode(tree).find((n) => n.type === "input" && n.props.placeholder === "session id"), undefined, "手填输入框消失");
+  mod.setSessionRetryClock(null); // R3：恢复真实现，避免假时钟泄给同进程后续用例
   await cleanup();
 });
 
@@ -2333,14 +2488,18 @@ test("R7 回归 b：连续 3 次返回 null → 手填输入框 + 提示；点�
       },
     },
   };
-  const { host, sectionVNode, cleanup } = await mountPanel(services);
+  const { host, mod, sectionVNode, cleanup } = await mountPanel(services);
+  const clock = makeRetryClock();
+  assert.equal(mod.setSessionRetryClock(clock), true, "R3：假时钟注入生效");
   await bootPanel(host, sectionVNode);
 
-  assert.equal(await waitFor(() => listCalls >= 3), true, "3 次尝试（300ms + 900ms 间隔）全部执行");
+  await clock.advance(1200); // 等价替换 waitFor 真等待：一次推进跨过 300ms + 900ms 两段重试点
   await settle();
   let tree = repaint(host, sectionVNode);
 
+  assert.equal(listCalls >= 3, true, "3 次尝试（300ms + 900ms 间隔）全部执行");
   assert.equal(listCalls, 3, "最多 3 次尝试，不无限重试");
+  assert.equal(clock.pendingCount(), 0, "R3：三次失败耗尽后无遗留重试定时器");
   assert.equal(host.states[3], null, "3 次都失败 → sessions=null（旧兜底）");
   assert.ok(flattenVNode(tree).find((n) => n.type === "input"), "出现手填 session id 输入框");
   let text = collectText(tree);
@@ -2366,7 +2525,54 @@ test("R7 回归 b：连续 3 次返回 null → 手填输入框 + 提示；点�
   assert.ok(select, "刷新成功后从手填输入框变回 <select>");
   assert.equal(select.props.value, "s1");
   assert.ok(!collectText(tree).includes("宿主 session 列表不可用"), "恢复后不再显示不可用提示");
+  mod.setSessionRetryClock(null); // R3：恢复真实现
   await cleanup();
+});
+
+// R3（0.5 债）新增：假时钟节奏钉子——未到重试点不重试、推进到点才重试、
+// 成功后不再排新定时器。与 a/b 的「结果」断言互补，这条钉「节奏」本身：
+// 变异（换回真 setTimeout 或调小常量）会让本用例红。
+test("R7 回归 a2（R3 假时钟）：未到重试点不重试、到点才重试、成功后无遗留定时器", async () => {
+  let listCalls = 0;
+  const services = {
+    "remote.session": {
+      list: async () => {
+        listCalls += 1;
+        return listCalls === 1
+          ? null
+          : { ok: true, value: { items: [{ sessionId: "s1", title: "会话一" }] } };
+      },
+    },
+    "remote.shiori": {
+      getStatus: async () => ({ ok: true, value: { mode: "active", configured: true } }),
+    },
+  };
+  const { host, mod, sectionVNode, cleanup } = await mountPanel(services);
+  const clock = makeRetryClock();
+  // rework R3-clock-shape：形状不全的 clock 必须被拒绝且不生效（判据写进了实现，
+  // 交叉变异 H 曾把它弱化成 if(!next) 而全绿——零用例）。两条拒绝断言 + 随后注入
+  // 正常假时钟仍生效；本用例后续的真实推进流程（advance 后 listCalls 递增）本身
+  // 就是「弱对象未替换当前时钟」的证明——弱 clock 缺 setTimeout 会让重试链抛错、
+  // 「推进到 300ms 才第二次尝试」必红。
+  assert.equal(mod.setSessionRetryClock({ now: () => 0 }), false, "缺 setTimeout/clearTimeout 的 clock 被拒绝");
+  assert.equal(mod.setSessionRetryClock({ setTimeout() {}, clearTimeout() {} }), false, "缺 now 的 clock 被拒绝");
+  assert.equal(mod.setSessionRetryClock(clock), true, "拒绝后正常假时钟仍可注入生效");
+  try {
+    await bootPanel(host, sectionVNode);
+    assert.equal(listCalls, 1, "首帧一次失败后进入 300ms 重试等待");
+    await clock.advance(299);
+    await settle();
+    assert.equal(listCalls, 1, "未到 300ms 重试点不重试");
+    assert.equal(clock.pendingCount(), 1, "重试定时器仍挂起（未被提前触发）");
+    await clock.advance(1);
+    await settle();
+    assert.equal(listCalls, 2, "推进到 300ms 重试点才第二次尝试");
+    assert.equal(clock.pendingCount(), 0, "成功后不再排重试定时器");
+    assert.equal(host.states[1], "s1", "成功后照常 probeCandidates 选中可用会话");
+  } finally {
+    mod.setSessionRetryClock(null); // 恢复真实现，避免假时钟泄给同进程后续用例
+    await cleanup();
+  }
 });
 
 test("R7 回归 c：已有列表时点「刷新」不重新 listSessions（只重探候选）", async () => {
@@ -2840,7 +3046,8 @@ test("债1① E2E：真 management + 真 mountShioriRpc，参数未生效时 wir
       generation: () => 1,
       registerGrant: () => ({}),
       executeToolForScope: async () => ({}),
-      nowIso: () => "2026-11-22T00:00:00.000Z",
+      // 0.5 债 S3 注入面收口：时钟注入改走 testSeam 测试缝（生产构造不得传）。
+      testSeam: { nowIso: () => "2026-11-22T00:00:00.000Z" },
     });
     const ctx = fakeCtx();
     const rpc = await mountShioriRpc(ctx, management, { mode: "active", dataRoot, stateRoot });

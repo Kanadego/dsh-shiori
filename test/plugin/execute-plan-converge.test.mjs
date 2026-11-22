@@ -139,7 +139,8 @@ test("B1 注入：收敛抛错时回执仍按 executed 成功返回（applied=fa
       return grant;
     },
     executeToolForScope: async () => { throw new Error("not used"); },
-    nowIso,
+    // 0.5 债 S3 注入面收口：时钟注入改走 testSeam 测试缝（生产构造不得传）。
+    testSeam: { nowIso },
   });
   const trusted = { session: { id: "s-convfail" }, source: "panel-rpc" };
 

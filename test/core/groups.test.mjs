@@ -18,11 +18,13 @@ import {
   defaultGroupsTemplate,
   validateGroupKey,
   validateGroupEntry,
+  validateGroupEntryShared,
   validateGroupsData,
   assertGroupsExist,
   migrateGroupArray,
   planGroupMigration,
 } from "../../src/core/groups.mjs";
+import { renderL1 } from "../../src/core/render.mjs";
 import {
   readGroups,
   ensureGroupsFile,
@@ -238,11 +240,13 @@ test("writeGroups 形状校验：坏 key/缺字段/重复 key 拒绝且不落盘
   const root = await makeRoot();
   try {
     const cases = [
-      { groups: [{ title: "T", summary: "", order: 1 }], pattern: /缺少必填字段 "key"/ },
-      { groups: [{ key: "dev", title: "", summary: "", order: 1 }], pattern: /title 必须是非空字符串/ },
-      { groups: [{ key: "dev", title: "T", summary: 5, order: 1 }], pattern: /summary 必须是字符串/ },
-      { groups: [{ key: "dev", title: "T", summary: "", order: "10" }], pattern: /order 必须是有限数字/ },
-      { groups: [{ key: "bad<key", title: "T", summary: "", order: 1 }], pattern: /不符合 key 规范/ },
+      // 0.5 债收口 R2：key/title/summary 共享规则走 validateGroupEntryShared
+      // 单一实现，报错措辞与渲染侧（core/render.mjs）同族（validateTopic 风格）。
+      { groups: [{ title: "T", summary: "", order: 1 }], pattern: /is missing required property "key"/ },
+      { groups: [{ key: "dev", title: "", summary: "", order: 1 }], pattern: /title must be a non-empty string/ },
+      { groups: [{ key: "dev", title: "T", summary: 5, order: 1 }], pattern: /summary must be a string when present/ },
+      { groups: [{ key: "dev", title: "T", summary: "", order: "10" }], pattern: /order must be a finite number/ },
+      { groups: [{ key: "bad<key", title: "T", summary: "", order: 1 }], pattern: /forbidden filename character/ },
       {
         groups: [
           { key: "dev", title: "A", summary: "", order: 1 },
@@ -290,6 +294,115 @@ test("validateGroupKey / validateGroupEntry / validateGroupsData / assertGroupsE
   assert.throws(
     () => assertGroupsExist(data, ["dev", "ghost"]),
     (e) => assertCode(e, "INVALID_INPUT", /"ghost" 不存在，请先建组/),
+  );
+});
+
+// ---------- 0.5 债收口 R2：组条目校验单一契约 ----------
+
+test("R2 债收口：validateGroupEntry 单一契约——groups.mjs 记录层与 renderL1 渲染层对照", () => {
+  // 契约对照表：同一组条目形状喂给两个入口。共享字段（plain record / key /
+  // title / summary 类型与换行禁令）走 validateGroupEntryShared 单一实现，
+  // 接受/拒绝、错误码与报错措辞必须逐条一致；层内字段按各自口径：
+  // order/retention 只属于记录层（渲染层容忍透传），pinned/members 只属于
+  // 渲染层强校验（记录层当作未知字段容忍丢弃）。
+  const recordSide = (entry) => validateGroupEntry(entry, "g[0]");
+  const renderSide = (entry) => renderL1({ coreText: "", topics: [], groups: [entry] });
+
+  // 共享字段一致接受：归一化结果同形（渲染层 summary 缺省补 ''）
+  assert.deepEqual(
+    recordSide({ key: "dev", title: "T", summary: "s", order: 1 }),
+    { key: "dev", title: "T", summary: "s", order: 1 },
+  );
+  assert.deepEqual(
+    validateGroupEntry({ key: "dev", title: "T", summary: "", order: 1, members: [{ key: "m" }], pinned: true }, "g[0]"),
+    { key: "dev", title: "T", summary: "", order: 1 },
+  );
+  renderSide({ key: "dev", title: "T" }); // 渲染层 summary 缺省合法（补 ''）
+
+  // R2-extra-field（review-rework）：中性「多余字段」双入口对照——未知字段
+  // 两侧容忍：记录层归一化丢弃（extra 不进结果），渲染层透传不抛。把
+  // 「未知字段容忍但丢弃」的前向兼容承诺钉死在两侧，不靠 members/pinned
+  // 这类层内一等字段间接体现。
+  assert.deepEqual(
+    recordSide({ key: "dev", title: "T", summary: "", order: 1, extra: "x" }),
+    { key: "dev", title: "T", summary: "", order: 1 },
+  );
+  renderSide({ key: "dev", title: "T", summary: "", order: 1, extra: "x" });
+
+  // 共享字段一致拒绝：错误码（INVALID_INPUT）与措辞逐条对照
+  const sharedViolations = [
+    { entry: { title: "T", summary: "", order: 1 }, pattern: /is missing required property "key"/ },
+    { entry: { key: "", title: "T", summary: "", order: 1 }, pattern: /key must be a non-empty string/ },
+    { entry: { key: "bad<key", title: "T", summary: "", order: 1 }, pattern: /forbidden filename character/ },
+    // R2-key-len（review-rework）：key 超长——validateKey 的长度上限（keys.mjs
+    // MAX_KEY_CHARS=128）对两侧入口同时可达，129 字符必拒
+    { entry: { key: "k".repeat(129), title: "T", summary: "", order: 1 }, pattern: /at most 128/ },
+    { entry: { key: "dev", summary: "", order: 1 }, pattern: /is missing required property "title"/ },
+    { entry: { key: "dev", title: "", summary: "", order: 1 }, pattern: /title must be a non-empty string/ },
+    { entry: { key: "dev", title: "T", summary: 5, order: 1 }, pattern: /summary must be a string when present/ },
+    { entry: { key: "dev", title: "T", summary: "a\nb", order: 1 }, pattern: /summary must not contain line breaks/ },
+    { entry: { key: "dev", title: "T", summary: "a\rb", order: 1 }, pattern: /summary must not contain line breaks/ },
+    { entry: null, pattern: /must be a plain object/ },
+    { entry: [1], pattern: /must be a plain object/ },
+  ];
+  for (const { entry, pattern } of sharedViolations) {
+    assert.throws(
+      () => recordSide(entry),
+      (e) => e.code === "INVALID_INPUT" && pattern.test(e.message),
+      `记录层未按契约拒绝: ${JSON.stringify(entry)}`,
+    );
+    assert.throws(
+      () => renderSide(entry),
+      (e) => e.code === "INVALID_INPUT" && pattern.test(e.message),
+      `渲染层未按契约拒绝: ${JSON.stringify(entry)}`,
+    );
+  }
+
+  // 记录层必填是层内规则：渲染层允许缺省的 summary/order，记录层缺失必拒
+  assert.throws(
+    () => recordSide({ key: "dev", title: "T", order: 1 }),
+    (e) => e.code === "INVALID_INPUT" && /is missing required property "summary"/.test(e.message),
+  );
+  assert.throws(
+    () => recordSide({ key: "dev", title: "T", summary: "" }),
+    (e) => e.code === "INVALID_INPUT" && /is missing required property "order"/.test(e.message),
+  );
+  renderSide({ key: "dev", title: "T" }); // 渲染层无 order 概念，合法
+
+  // members 非数组（R2 变异锚点）：记录层=未知字段容忍丢弃（前向兼容），
+  // 渲染层=一等输入强校验 INVALID_INPUT。任一侧把这条处理改成直接抛错/
+  // 改码/放行，本对照用例必红。
+  assert.deepEqual(
+    validateGroupEntry({ key: "dev", title: "T", summary: "", order: 1, members: "no" }, "g[0]"),
+    { key: "dev", title: "T", summary: "", order: 1 },
+  );
+  assert.throws(
+    () => renderSide({ key: "dev", title: "T", summary: "", members: "no" }),
+    (e) => e.code === "INVALID_INPUT" && /members must be an array/.test(e.message),
+  );
+
+  // pinned 非布尔：与 members 同一条层内分界线
+  assert.deepEqual(
+    validateGroupEntry({ key: "dev", title: "T", summary: "", order: 1, pinned: "yes" }, "g[0]"),
+    { key: "dev", title: "T", summary: "", order: 1 },
+  );
+  assert.throws(
+    () => renderSide({ key: "dev", title: "T", summary: "", pinned: "yes" }),
+    (e) => e.code === "INVALID_INPUT" && /pinned must be a boolean/.test(e.message),
+  );
+});
+
+test("R2 债收口：validateGroupEntryShared 直连契约（plain record / 换行禁令对写入侧生效）", () => {
+  // 直连共享实现的最小形状：返回归一化共享字段，summary 缺省补 ''
+  assert.deepEqual(
+    validateGroupEntryShared({ key: "dev", title: "T" }, "g[0]"),
+    { key: "dev", title: "T", summary: "" },
+  );
+  // 写入侧换行禁令（此前记录层放行含换行摘要、渲染侧拒绝的漂移实证）：
+  // 经 validateGroupsData → parseGroupsFile 读路径应得 INVALID_STATE
+  assert.throws(
+    () => validateGroupsData({ version: 1, groups: [{ key: "dev", title: "T", summary: "a\nb", order: 1 }] }),
+    (e) => e.code === "INVALID_INPUT" && /summary must not contain line breaks/.test(e.message),
   );
 });
 

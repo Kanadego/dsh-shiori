@@ -31,6 +31,7 @@
 
 import { validateKey } from './keys.mjs';
 import { RETENTION_VALUES } from './topics.mjs';
+import { describe, isPlainRecord } from './errors.mjs';
 
 /** groups.json 结构版本（0.4 S3 只认 1）。 */
 export const GROUPS_VERSION = 1;
@@ -133,37 +134,81 @@ export function validateGroupKey(key, where = 'group key') {
 }
 
 /**
+ * 组条目共享契约（0.5 债收口 R2，唯一实现）：core/groups.mjs 与 core/render.mjs
+ * 的 validateGroupEntry 曾是同名不同契约的两份实现——共享字段规则各自漂移，
+ * 写入侧放行的数据（如含换行的 summary）会被渲染侧拒绝。本函数收口共享字段：
+ * plain record 判定（与 errors.mjs requireObject 同语义同措辞）、key/title
+ * 必须是自有属性且非空、key 规范（keys.mjs）、summary 出现时必须是字符串且
+ * 不得含换行（索引行结构不变量，与 validateTopic 同族同措辞）。
+ * 两个入口在此之上叠加各自的层内字段：
+ * - core/groups.mjs validateGroupEntry（groups.json 记录）：summary/order 记录层
+ *   必填、孤立代理码元（INVALID_STATE）、retention 枚举。
+ * - core/render.mjs validateGroupEntry（renderL1 groups 输入）：summary 缺省补
+ *   ''，pinned/members 形状。
+ * members/pinned 在记录层是未知字段（容忍丢弃，前向兼容），在渲染层是一等
+ * 输入（强校验）——层内分歧在 test/core/groups.test.mjs 的契约对照用例钉死。
+ * 返回归一化共享字段 {key, title, summary}（summary 缺省补 ''）。
+ * 错误经本地 codedError 抛出（INVALID_INPUT，StorageError 形状）。
+ */
+export function validateGroupEntryShared(entry, where) {
+  if (!isPlainRecord(entry)) {
+    throw invalidInput(`${where} must be a plain object, got ${describe(entry)}`);
+  }
+  if (!Object.prototype.hasOwnProperty.call(entry, 'key')) {
+    throw invalidInput(`${where} is missing required property "key"`);
+  }
+  if (typeof entry.key !== 'string' || entry.key.length === 0) {
+    throw invalidInput(`${where}: key must be a non-empty string`);
+  }
+  try {
+    validateKey(entry.key);
+  } catch (error) {
+    throw invalidInput(`${where}: ${error.message}`);
+  }
+  if (!Object.prototype.hasOwnProperty.call(entry, 'title')) {
+    throw invalidInput(`${where} is missing required property "title"`);
+  }
+  if (typeof entry.title !== 'string' || entry.title.length === 0) {
+    throw invalidInput(`${where}: title must be a non-empty string`);
+  }
+  if (entry.summary !== undefined && typeof entry.summary !== 'string') {
+    throw invalidInput(`${where}: summary must be a string when present`);
+  }
+  const summary = entry.summary ?? '';
+  // 索引行结构不变量：组摘要进单行索引，换行会破坏行结构（与 topic summary 同规）
+  if (summary.includes('\n') || summary.includes('\r')) {
+    throw invalidInput(`${where}: summary must not contain line breaks`);
+  }
+  return { key: entry.key, title: entry.title, summary };
+}
+
+/**
  * 校验单个组条目（groups.json 元素 / create 参数）。
  * 必填：key/title/summary/order（与文档 §S3.2 结构一致）；未知字段读取时容忍
  * （前向兼容），归一化时丢弃——清单重写后文件里保留契约四字段 + 可选 retention。
+ * 0.5 债收口 R2：key/title/summary 共享规则走 validateGroupEntryShared 单一
+ * 实现（换行禁令由此对写入侧生效——此前写入侧放行含换行摘要、渲染侧拒绝，
+ * 是两份同名契约漂移的实证）；本函数只叠加记录层字段：summary/order 必填、
+ * order 有限数字、孤立代理码元（INVALID_STATE）、retention 枚举。
  * 0.5 批次 2 A 线（阶段 A.1）：可选组级 retention 策略（组默认值，topic 显式值
  * 覆盖组，解析在 core/topics.mjs 的 resolveRetention）——出现时必须是合法枚举
  * 成员，非法值 INVALID_INPUT（不许静默纠正）；缺省时归一化结果不带该键
  * （老清单文件字节形状不变）。
  */
 export function validateGroupEntry(entry, where) {
-  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
-    throw invalidInput(`${where} 必须是对象`);
-  }
-  for (const field of ['key', 'title', 'summary', 'order']) {
+  const shared = validateGroupEntryShared(entry, where);
+  for (const field of ['summary', 'order']) {
     if (!Object.prototype.hasOwnProperty.call(entry, field)) {
-      throw invalidInput(`${where} 缺少必填字段 "${field}"`);
+      throw invalidInput(`${where} is missing required property "${field}"`);
     }
   }
-  validateGroupKey(entry.key, `${where}.key`);
-  if (typeof entry.title !== 'string' || entry.title.length === 0) {
-    throw invalidInput(`${where}.title 必须是非空字符串`);
-  }
-  if (typeof entry.summary !== 'string') {
-    throw invalidInput(`${where}.summary 必须是字符串`);
-  }
   if (typeof entry.order !== 'number' || !Number.isFinite(entry.order)) {
-    throw invalidInput(`${where}.order 必须是有限数字`);
+    throw invalidInput(`${where}: order must be a finite number`);
   }
-  if (hasLoneSurrogate(entry.title) || hasLoneSurrogate(entry.summary)) {
+  if (hasLoneSurrogate(shared.title) || hasLoneSurrogate(shared.summary)) {
     throw invalidState(`${where} 含孤立代理码元，无法无损写入`);
   }
-  const normalized = { key: entry.key, title: entry.title, summary: entry.summary, order: entry.order };
+  const normalized = { key: shared.key, title: shared.title, summary: shared.summary, order: entry.order };
   if (entry.retention !== undefined) {
     if (!RETENTION_VALUES.includes(entry.retention)) {
       throw invalidInput(`${where}.retention 必须是 ${RETENTION_VALUES.map((v) => `"${v}"`).join(' | ')} 之一，得到 ${typeof entry.retention === 'string' ? `"${entry.retention.slice(0, 60)}"` : String(entry.retention)}`);

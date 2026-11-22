@@ -2301,7 +2301,9 @@ test("R4②（0.5 批次 3）：diagnostics.roots 与 personasError 在面板 ge
   const controller = await createShioriPluginController(
     fakeCtx(),
     activeSettings({ ...roots, dataRoot }),
-    { bindings, personasReaddir: async () => { throw eacces; } },
+    // 0.5 债 S3 注入面收口：EACCES 桩改走 dependencies.testSeam 测试缝
+    // （生产构造不得传；旧顶层 personasReaddir 注入已收口）。
+    { bindings, testSeam: { readdir: async () => { throw eacces; } } },
   );
   // 故障并存：根不可写（降级） + 人设卡目录读不了（EACCES）。getStatus 不得
   // 因后者整抛，否则 controller 注入的 diagnostics.roots 到不了面板。
@@ -2700,4 +2702,49 @@ test("pre-step auto 调度：L1 超软水位武装 → 人类轮顺带触发 sof
     "软水位武装后人类轮顺带触发的评估以 soft-watermark 记账");
   assert.equal(status.lastRuns[0].trigger, "soft-watermark",
     "最近一轮 run 的 trigger 为 soft-watermark");
+});
+
+// ── 0.5 债 S3 · R4 守卫：生产构造签名不得携带注入参数 ─────────────────────────
+// 静态断言两层互补（评审 [R4-guard-gap] 打回后补强）：
+// ① fn.length——对格式化、注释改写、换行风格完全鲁棒（源码扫描会被 JSDoc/
+//    注释里的参数名与代码风格变动误伤）；直接编码不变式「生产构造只收
+//    (ctx, rawSettings, dependencies)」，dependencies 缺省参数不计入 length，
+//    故基线为 2。局限（如实口径）：length 只数到第一个带缺省值的参数为止——
+//    在缺省参数之前插入无缺省参数（如 (ctx, rawSettings, personasReaddir,
+//    dependencies = {})）length 2→3 本断言必红；但尾部追加（dependencies
+//    = {} 之后再塞 personasReaddir，带不带缺省值均然）不改 length，由下面
+//    ② 的参数表断言负责覆盖。
+// ② 参数表源码断言——对 toString() 取第一个 "(" 到**按括号配平**找到的匹配
+//    ")" 之间的参数串（不用 indexOf(")")：缺省值里可能含括号），把连续空白
+//    压成单空格后逐字 equal。任何位置参数回塞——带不带缺省值、追加在尾部
+//    还是插在中部——都改变参数串，必红。
+// 属性级盲区（两层断言都管不到）：以可选「属性」形式塞回 dependencies 顶层
+// 的注入不改签名，该路径由 controller.mjs 内 testSeam 的源码注释（该入口仅供
+// 测试注入，生产构造不得传）与评审把守。
+function createShioriPluginControllerParamList() {
+  const src = createShioriPluginController.toString();
+  const open = src.indexOf("(");
+  if (open < 0) throw new Error("R4 守卫：createShioriPluginController.toString() 中找不到参数表起点 \"(\"");
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "(") depth += 1;
+    else if (src[i] === ")") {
+      depth -= 1;
+      if (depth === 0) return src.slice(open + 1, i).replace(/\s+/g, " ").trim();
+    }
+  }
+  throw new Error("R4 守卫：createShioriPluginController.toString() 参数表括号不配平");
+}
+
+test("债S3 R4 守卫：createShioriPluginController 生产签名为 (ctx, rawSettings, dependencies)（fn.length === 2），测试注入一律走 dependencies.testSeam", () => {
+  assert.equal(createShioriPluginController.length, 2,
+    "createShioriPluginController 生产签名被改动：出现新的位置参数（疑似把测试注入塞回签名）。"
+    + "注入必须走 dependencies.testSeam 测试缝对象（该入口仅供测试注入，生产构造不得传）。");
+  // 评审 [R4-guard-gap]：fn.length 只数到第一个缺省参数为止，尾部追加（如
+  // dependencies = {} 之后再塞 personasReaddir，带不带缺省值均然）不触发
+  // 上面的断言，由参数表逐字断言兜底。
+  assert.equal(createShioriPluginControllerParamList(), "ctx, rawSettings, dependencies = {}",
+    "createShioriPluginController 生产参数表被改动：签名新增了参数（疑似把测试注入"
+    + "塞回签名，含带缺省值的尾部追加）。注入必须走 dependencies.testSeam 测试缝"
+    + "对象（该入口仅供测试注入，生产构造不得传）。");
 });

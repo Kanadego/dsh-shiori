@@ -91,6 +91,9 @@ test("P1#8：dataRoot 不可写 → start 降级挂载（不抛、degraded:true�
   assert.equal(result.roots[0].path, data.root);
   assert.equal(result.roots[0].code, "ENOTDIR");
   assert.ok(result.roots[0].reason.length > 0);
+  // 宿主边界观察（R3 债收口口径）：registeredTools 是桩对 registerTool 调用的
+  // 接收记录（宿主侧唯一观察点），只用于确认注册确实到达宿主边界；降级行为
+  // 本身的断言走外部观察面（management.executeTool，见下方用例）。
   assert.equal(bindings.registeredTools.length, 19, "stub must have observed 19 registerTool calls"); // 规格连带：工具面 17→19
 
   // started 不宣称：getStatus 保持纯内存投影（面板可见诊断，不撞 scope 资源）。
@@ -99,7 +102,7 @@ test("P1#8：dataRoot 不可写 → start 降级挂载（不抛、degraded:true�
   await controller.stop(); // 降级态 stop 必须干净收场（disposeAll 桩不抛）
 });
 
-test("P1#8：降级态工具执行一律 UNSUPPORTED（写/读同口径，details.roots 带诊断）", async () => {
+test("P1#8：降级态工具执行一律 UNSUPPORTED（面板 executeTool 外部面，details.roots 带诊断）", async () => {
   const data = blockedRoot("tool-data-blocker");
   const stateRoot = join(TMP_ROOT, "tool-state-ok", "shiori-state");
   const bindings = stubBindingsFactory();
@@ -110,14 +113,19 @@ test("P1#8：降级态工具执行一律 UNSUPPORTED（写/读同口径，detail
   );
   await controller.start();
 
-  const exec = { agent: { session: { id: "session-degraded" } } };
+  // R3 债收口：降级态的可观察保证改走外部观察面断言——面板 RPC
+  // management.executeTool 在降级态先于 started/mode 判定返回 UNSUPPORTED，
+  // 不读 bindings 内部即可观察「工具已注册但 started=false」的用户可见行为。
+  // 错误码变异（UNSUPPORTED 改成任何别的码）时本断言必红。
   for (const name of ["memory_append", "core_write", "soul_read", "spark_graph"]) {
-    const def = bindings.registeredTools.find((d) => d.name === name);
-    assert.ok(def, `tool ${name} must be registered`);
     await assert.rejects(
-      () => def.execute({}, exec),
+      () => controller.management.executeTool(null, { name, args: {} }),
       (error) => {
-        assert.equal(error.code, "UNSUPPORTED", `${name} must fail UNSUPPORTED in degraded mount`);
+        assert.equal(
+          error.code,
+          "UNSUPPORTED",
+          `${name} must fail UNSUPPORTED via management.executeTool in degraded mount`,
+        );
         assert.ok(
           String(error.message).includes("not writable"),
           `${name} message must explain the degraded read-only mount`,
@@ -129,6 +137,41 @@ test("P1#8：降级态工具执行一律 UNSUPPORTED（写/读同口径，detail
       },
     );
   }
+  await controller.stop();
+});
+
+test("P1#8：宿主工具面契约——降级态宿主 def 执行同口径 UNSUPPORTED（与面板路径两道闸）", async () => {
+  const data = blockedRoot("host-data-blocker");
+  const stateRoot = join(TMP_ROOT, "host-state-ok", "shiori-state");
+  const bindings = stubBindingsFactory();
+  const controller = await createShioriPluginController(
+    {},
+    degradedSettings({ dataRoot: data.root, stateRoot }),
+    { bindings: bindings.factory, createState: () => ({}) },
+  );
+  await controller.start();
+
+  // R3-split（review-rework）：宿主 def 的降级闸覆盖从降级用例拆出单列。
+  // stub 捕获的 registeredTools = 宿主 registerTool 接线，是宿主工具面这一侧
+  // 的唯一观察点，不是生产内部对象；本层覆盖不许删——它是宿主 execute 闸口
+  // 唯一的红灯来源（交叉审查变异3：改宿主闸错误码只有这条断言变红）。
+  const exec = { agent: { session: { id: "session-degraded" } } };
+  const def = bindings.registeredTools.find((d) => d.name === "memory_append");
+  assert.ok(def, "host tool surface must have received memory_append");
+  await assert.rejects(
+    () => def.execute({}, exec),
+    (error) => {
+      assert.equal(error.code, "UNSUPPORTED", "host tool path must fail UNSUPPORTED in degraded mount");
+      assert.ok(
+        String(error.message).includes("not writable"),
+        "host path message must explain the degraded read-only mount",
+      );
+      assert.ok(Array.isArray(error.details?.roots), "host path details.roots must carry diagnostics");
+      assert.equal(error.details.roots[0].root, "dataRoot");
+      assert.equal(error.details.roots[0].path, data.root);
+      return true;
+    },
+  );
   await controller.stop();
 });
 

@@ -523,6 +523,87 @@ test("A-0.5：部分归档的组仍走活跃组摘要行，全局归档钩子行
   assert.ok(!result.text.includes("- group:mixed — 混合组（2 篇冷专题"));
 });
 
+// ---------- 0.5 债收口 R1：topic 行与组内 member 行同 key 去重 ----------
+
+test("A-0.5 R1 债收口：同 key 已有 topic 行时不再输出成员行（topic 行为准），组照常渲染其它成员", () => {
+  const result = renderL1({
+    coreText: "",
+    topics: [
+      makeTopic({ key: "shared", scopeId: "amber", summary: "topic 行摘要" }),
+      makeTopic({ key: "solo", scopeId: "amber", summary: "独立专题" }),
+    ],
+    groups: [
+      makeGroup({
+        key: "dev",
+        title: "开发与配置",
+        members: [
+          { key: "shared", summary: "成员行摘要", pinned: true, archived: false },
+          { key: "other", summary: "其它成员", pinned: true, archived: false },
+          { key: "plain", summary: "不钉成员", pinned: false, archived: false },
+        ],
+      }),
+    ],
+  });
+  const lines = result.indexText.split("\n");
+  assert.deepEqual(lines, [
+    "## 主题记忆索引 / Topic memory index",
+    "- shared [amber] — topic 行摘要",
+    "- solo [amber] — 独立专题",
+    "- group:dev — 开发与配置（3 名成员）",
+    "  - other — 其它成员",
+  ]);
+  // 成员行形态不得出现；该 key 在 L1 只出现一次（topic 行）
+  assert.ok(!result.text.includes("  - shared"), "同 key 成员行必须被去重");
+  assert.equal(result.text.split("- shared").length - 1, 1, "同 key 在 L1 只出现一次");
+  // 组行「N 名成员」是数据真相：去重只影响行，不改计数
+  assert.ok(result.text.includes("- group:dev — 开发与配置（3 名成员）"));
+});
+
+test("A-0.5 R1 债收口：指向已归档或不存在 topic 的成员行照常输出（无 topic 行可冲突，口径不变）", () => {
+  const result = renderL1({
+    coreText: "",
+    topics: [
+      makeTopic({ key: "gone", scopeId: "amber", summary: "冷专题", archivedAt: "2026-11-07T00:00:00.000Z" }),
+    ],
+    groups: [
+      makeGroup({
+        key: "dev",
+        title: "开发与配置",
+        members: [
+          { key: "ghost", summary: "指向不存在 topic 的成员", pinned: true, archived: false },
+          { key: "gone", summary: "指向已归档 topic 的成员", pinned: true, archived: false },
+        ],
+      }),
+    ],
+  });
+  const lines = result.indexText.split("\n");
+  assert.deepEqual(lines, [
+    "## 主题记忆索引 / Topic memory index",
+    "- group:dev — 开发与配置（2 名成员）",
+    "  - ghost — 指向不存在 topic 的成员",
+    "  - gone — 指向已归档 topic 的成员",
+    "另有 1 篇冷专题，memory_search 可查",
+  ]);
+});
+
+test("A-0.5 R1 债收口：同 key 兼属多组且已有 topic 行时，任何一组都不再输出成员行", () => {
+  const result = renderL1({
+    coreText: "",
+    topics: [makeTopic({ key: "dup", scopeId: "global", summary: "topic 行" })],
+    groups: [
+      makeGroup({ key: "a", title: "A组", members: [{ key: "dup", summary: "A 组成员", pinned: true, archived: false }] }),
+      makeGroup({ key: "b", title: "B组", members: [{ key: "dup", summary: "B 组成员", pinned: true, archived: false }] }),
+    ],
+  });
+  const lines = result.indexText.split("\n");
+  assert.deepEqual(lines, [
+    "## 主题记忆索引 / Topic memory index",
+    "- dup [global] — topic 行",
+    "- group:a — A组（1 名成员）",
+    "- group:b — B组（1 名成员）",
+  ]);
+});
+
 test("A-0.5：groups 形状违规全部 INVALID_INPUT（非数组/孔/缺 key/缺 title/重复组 key/成员缺 key/成员重复/换行摘要/坏布尔/坏 key）", () => {
   assert.throws(() => renderL1({ coreText: "x", topics: [], groups: "no" }),
     (e) => e.code === "INVALID_INPUT" && /groups must be an array/.test(e.message));

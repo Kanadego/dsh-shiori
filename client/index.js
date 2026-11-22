@@ -861,13 +861,94 @@ window.__ModuleLoader__.load({
       return true;
     }
 
+    // ── R1（0.5 债）：全面板共用的错误→「人话 + 建议动作」映射（单一事实来源）────
+    // ErrorBox 与 groupActionError（组入口）都必须走这里；调用点不许再写文案分支。
+    // scene（可选，如 "group_manage"）只决定前导短语的拼法，映射表唯一：同一错误
+    // （同码、同 details 形状）不带 scene 时输出逐字相同；带 scene 时去掉前导后的
+    // 「人话 + 动作主体」与无 scene 版本逐字相同。未知码回退原样 code + message，
+    // 不吞不猜。
+    // INVALID_STATE 按 details 分流（判据来自服务端既有口径）：
+    //   details.reason === "parameters-not-effective" → 宿主热提交时序（稍候重试有用）；
+    //   message / details 自由文本带损坏标记（损坏 / 不是合法 UTF-8 / checksum /
+    //   corrupt）→ 数据损坏（groups/journal/fsutil 的损坏类 INVALID_STATE 文案均带
+    //   这些字样），此时不得诱导用户反复重试写操作；
+    //   两者都没有 → 中性措辞。
+    function invalidStateCorruptionOf(raw, details) {
+      var haystack = String(raw || "");
+      if (details && typeof details === "object") {
+        var extra = [];
+        if (details.error !== undefined && details.error !== null) extra.push(String(details.error));
+        if (details.reason !== undefined && details.reason !== null) extra.push(String(details.reason));
+        if (details.problem !== undefined && details.problem !== null) extra.push(String(details.problem));
+        if (extra.length > 0) haystack += " " + extra.join(" ");
+      }
+      return /损坏|不是合法 UTF-8|checksum|corrupt/i.test(haystack);
+    }
+    function humanErrorOf(error, scene) {
+      var code = error && error.code ? String(error.code) : "";
+      var raw = (error && error.message) || String(error);
+      var details = error && error.details && typeof error.details === "object" && error.details !== null ? error.details : null;
+      var lead = "";
+      var body = null;
+      if (code === "INVALID_INPUT") {
+        lead = scene ? scene + " 拒绝了参数：" : "输入参数被拒绝：";
+        body = "请检查填写内容与参数格式（详见「原始错误信息」），修正后重试。";
+      } else if (code === "INVALID_STATE") {
+        if (details && String(details.reason || "") === "parameters-not-effective") {
+          body = "服务端状态刚被修改（宿主写入尚未生效）：请稍候片刻再重试一次；反复出现请先刷新。";
+        } else if (invalidStateCorruptionOf(raw, details)) {
+          body = "数据疑似损坏：请不要反复重试写操作，先备份相关文件再排查（详见「原始错误信息」）。";
+        } else {
+          body = "服务端当前状态不接受这次操作：请刷新后重试；若反复出现，请携带「原始错误信息」排查。";
+        }
+      } else if (code === "NOT_FOUND") {
+        body = "目标不存在或已被删除/过期：请刷新列表后重试；若确需该对象，请重新创建或找回。";
+      } else if (code === "IO_ERROR") {
+        body = "文件读写失败：请检查磁盘空间与文件是否被其他程序占用，然后重试（详见「原始错误信息」）。";
+      } else if (code === "ENOENT") {
+        body = "文件或目录不存在：请确认路径是否正确、对象是否已被移动或删除，然后重试。";
+      } else if (code === "EACCES") {
+        body = "没有权限访问该文件/目录：请检查文件权限或改用有权限的账号，然后重试。";
+      } else if (code === "EBUSY") {
+        body = "文件正被其他程序占用：请关闭占用它的程序，然后重试。";
+      } else if (/^E_[A-Z0-9_]*$/.test(code)) {
+        body = "系统级文件/资源错误（" + code + "）：请检查磁盘、权限与占用情况，然后重试（详见「原始错误信息」）。";
+      } else if (code === "HOST_LOCKED") {
+        body = "另一实例正在写入，当前只读：写操作已停用，等对方释放后再重试。";
+      }
+      if (body === null) {
+        return { known: false, code: code, lead: "", message: raw, detail: raw };
+      }
+      return { known: true, code: code, lead: lead, message: lead + body, detail: raw };
+    }
+
     function ErrorBox(error) {
       if (!error) return null;
       // U5：人话提示在盒子正文；服务端原始错误收进默认折叠的 details（排查用），
       // 不再把原始大红字直接顶出来。detail 由 candidateActionError 等映射层携带。
       var detail = error.detail !== undefined && error.detail !== null ? String(error.detail) : null;
+      // R1（0.5 债）：未经上游映射层加工的原始错误（无 detail）经共用 humanErrorOf
+      // 出「人话 + 建议动作」主行（人话在前）；原文行以次要样式（弱化色小字）随行
+      // 保留——code 与原始 message 永远可见，便于排查。已带 detail 的错误是上游
+      // 映射层的产出，保持既有渲染（[code] 人话 + 折叠原文）不动。未知码回退原样
+      // code + message，不加前缀、不加人话。
+      var rawText = (error.code ? "[" + error.code + "] " : "") + (error.message || String(error));
+      var headline;
+      var rawLine = null;
+      if (detail === null) {
+        var mapped = humanErrorOf(error);
+        if (mapped.known) {
+          headline = mapped.message;
+          rawLine = h("div", { style: { fontSize: "11px", color: "var(--dsw-alias-label-tertiary,#8b93a1)" } }, rawText);
+        } else {
+          headline = rawText;
+        }
+      } else {
+        headline = rawText;
+      }
       return h("div", { className: "dshi_error" },
-        (error.code ? "[" + error.code + "] " : "") + (error.message || String(error)),
+        headline,
+        rawLine,
         detail ? h("details", { className: "dshi_details" },
           h("summary", { className: "dshi_hint" }, "原始错误信息"),
           h("pre", { className: "dshi_pre" }, detail)) : null);
@@ -4981,20 +5062,11 @@ window.__ModuleLoader__.load({
         });
       };
       // ── S3.4 分组管理：组清单取数与 CRUD（全部走 group_manage 工具，不新开后端）──
-      // 组操作错误的人话映射（保留原 code 与原始 message 进 ErrorBox 的折叠 details）。
+      // 组操作错误的人话映射：R1（0.5 债）起走全面板共用的 humanErrorOf（单一事实
+      // 来源），本入口只传 scene="group_manage"——INVALID_INPUT 的场景前导
+      // 「group_manage 拒绝了参数：」收在共用函数内；调用点不再写任何文案分支。
       var groupActionError = function (error) {
-        var code = error && error.code ? String(error.code) : "";
-        var detail = (error && error.message) || String(error);
-        if (code === "INVALID_STATE") {
-          return { code: code, message: "服务端拒绝了这次组操作：组内可能还有 topic，或组清单已被并发修改。请「刷新组」后重试；删非空组请走迁移确认。", detail: detail };
-        }
-        if (code === "INVALID_INPUT") {
-          return { code: code, message: "group_manage 拒绝了参数：组 key / 标题可能不合规范，或组 key 已存在（详见「原始错误信息」）。", detail: detail };
-        }
-        if (code === "HOST_LOCKED") {
-          return { code: code, message: "另一实例正在写入，当前只读：组写操作已停用，恢复后重试。", detail: detail };
-        }
-        return { code: code || "UNKNOWN", message: "组操作失败：" + detail, detail: detail };
+        return humanErrorOf(error, "group_manage");
       };
       var callGroupManage = function (args) {
         return props.dsh.call("executeTool", props.sessionId, { name: "group_manage", args: args });
@@ -7477,8 +7549,30 @@ window.__ModuleLoader__.load({
     // 空数组也是一次明确的成功回答（宿主说“没有会话”），不能当失败继续重试。
     var SESSION_LIST_ATTEMPTS = 3;
     var SESSION_LIST_RETRY_DELAYS = [300, 900];
+    // R3（0.5 债）：重试等待的 clock 依赖可注入（now / setTimeout / clearTimeout），
+    // 默认真实现。测试注入假时钟推进时间验证重试节奏（到点才重试 / 未到点不重试 /
+    // 成功后不再重试），不再依赖真等待；等待常量 [300, 900] 不变，不许靠调小时间「变快」。
+    // clearTimeout 当前无取消路径消费（重试循环严格串行，无提前退出），随 clock
+    // 面对齐全局 timer API 全量注入，供取消语义扩展时直接取用。
+    var SESSION_RETRY_REAL_CLOCK = {
+      now: function () { return Date.now(); },
+      setTimeout: function (fn, ms) { return setTimeout(fn, ms); },
+      clearTimeout: function (id) { return clearTimeout(id); }
+    };
+    var sessionRetryClock = SESSION_RETRY_REAL_CLOCK;
+    // 测试注入入口：传完整三件套的假时钟生效；传 null/undefined 恢复真实现；
+    // 形状不全返回 false 且不生效（防半截 clock 静默破坏重试节奏）。
+    function setSessionRetryClock(next) {
+      if (next === null || next === undefined) {
+        sessionRetryClock = SESSION_RETRY_REAL_CLOCK;
+        return true;
+      }
+      if (!next || typeof next.now !== "function" || typeof next.setTimeout !== "function" || typeof next.clearTimeout !== "function") return false;
+      sessionRetryClock = next;
+      return true;
+    }
     function delayMs(ms) {
-      return new Promise(function (resolve) { setTimeout(resolve, ms); });
+      return new Promise(function (resolve) { sessionRetryClock.setTimeout(resolve, ms); });
     }
     async function listSessionsWithRetry(dsh, currentSessionId) {
       for (var attempt = 0; attempt < SESSION_LIST_ATTEMPTS; attempt++) {
@@ -8443,6 +8537,49 @@ var personaScopeTarget = personaScopeExplicit
     var FLASHBACK_POP_WIDTH = 320;
     var FLASHBACK_POP_MAX_HEIGHT = 320;
     var FLASHBACK_BTN_MIN_HEIGHT = "24px";
+    // R2（0.5 债）：浮层背板——fixed 铺满视口、透明、zIndex 低于浮层（60）高于页面
+    // 内容；点击浮层外部即落在背板上，统一走 requestClose("outside")。fixed 脱离
+    // 文档流，与浮层同口径不参与合成布局模型的 offsetTop/offsetHeight。
+    var FLASHBACK_BACKDROP_STYLE = {
+      position: "fixed",
+      zIndex: 50,
+      left: 0,
+      top: 0,
+      right: 0,
+      bottom: 0,
+      background: "transparent",
+    };
+    // R2 默认草稿探针（hasDraft 缺省时按内容检测）：扫浮层容器内 input/textarea
+    // 是否带未保存内容。真实 DOM 与合成 DOM 同构（children 树 + tagName），一条
+    // 实现两边通用；拿不到容器 → false。闪回浮层没有输入元素，探针恒 false。
+    function flashbackPopupHasDraftInput(root) {
+      if (!root || typeof root.tagName !== "string") return false;
+      var stack = [root];
+      while (stack.length > 0) {
+        var el = stack.pop();
+        if (!el || typeof el !== "object") continue;
+        var tag = String(el.tagName || "").toUpperCase();
+        if (tag === "INPUT" || tag === "TEXTAREA") {
+          var value = el.value === undefined || el.value === null ? "" : String(el.value);
+          if (value !== "") return true;
+        }
+        var children = el.children;
+        if (children && typeof children.length === "number") {
+          for (var i = 0; i < children.length; i += 1) stack.push(children[i]);
+        }
+      }
+      return false;
+    }
+    // R2 失焦内外判定：沿 parentNode 上溯判 relatedTarget 是否仍在浮层容器内
+    // （容器内子元素间移动焦点不算失焦）。真实 DOM 与合成 DOM 都有 parentNode 链。
+    function flashbackNodeInside(node, root) {
+      var cur = node;
+      for (var depth = 0; cur && typeof cur === "object" && depth < 32; depth += 1) {
+        if (cur === root) return true;
+        cur = cur.parentNode;
+      }
+      return false;
+    }
     // 浮层定位：按钮右缘对齐、浮层底缘悬在按钮上方 6px——旧版
     // bottom:calc(100% + 6px) 的 fixed 等价物；translateY(-100%) 不需要视口高度，
     // 沙箱与真机行为一致。ref 拿不到（react stub / 旧宿主）→ 不写定位四值，
@@ -8488,8 +8625,64 @@ var personaScopeTarget = personaScopeExplicit
       var rect = rectState[0];
       var feedbackDoneState = useState(null); // sparkId → "used"|"notused"；已反馈置灰防重复
       var feedbackDone = feedbackDoneState[0];
+      // R2（0.5 债）：草稿确认态——有草稿的浮层在自动关闭前先要求确认，不许静默丢草稿。
+      // 追加在既有槽位之后，不挪既有 useState 下标。
+      var closeConfirmState = useState(false);
+      var closeConfirm = closeConfirmState[0];
+      var setCloseConfirm = closeConfirmState[1];
       var anchorRef = useRef(null);           // 挂按钮元素；真机由 React 接线，stub/沙箱由 harness 接线
+      var popupRef = useRef(null);            // R2：挂浮层容器元素；失焦判定与默认草稿探针用
       var loadedSessionRef = useRef(null);    // 已拉过 getGraph 的会话 id（防 effect 重跑重复拉取）
+      // R2 评审判据 ③：闪回浮层关闭策略显式声明（不靠「当前没人有草稿」这种隐含
+      // 前提），两者分开写——
+      //   OVERLAY_DISMISSIBLE：允许 ESC / 外部点击 / 失焦「自动关」（rework R2-button-
+      //   not-trapped：闸门只限这三条路径；button 是用户明确意图，不过该闸门——
+      //   dismissible=false 意为「只允许按钮关」，不是把按钮也锁死困住用户；
+      //   本浮层无破坏性操作取 true，props 覆写仅供复用方/测试注入）。
+      //   hasDraft：含未保存输入的浮层在自动关前必须先确认；默认按内容检测（扫容器
+      //   内 input/textarea），本浮层没有输入元素 → 恒 false；props 覆写同理。
+      var OVERLAY_DISMISSIBLE = props.overlayDismissible !== undefined ? props.overlayDismissible === true : true;
+      var overlayHasDraft = typeof props.hasDraft === "function"
+        ? props.hasDraft
+        : function () { return flashbackPopupHasDraftInput(popupRef.current); };
+      // R2 rework（R2-close-reentry）：关闭重入 guard——closeOverlay 里同步
+      // trigger.focus() 在真实浏览器会同步发 focusout，popup 的 onBlur 判为移出并
+      // 再次 requestClose("blur")：有草稿时确认态被重新置 true（重开浮层立刻显示
+      // 「草稿未保存」），无草稿时 onClose 双发。closingRef 在关闭窗口内拦掉一切
+      // 重入，toggle 重新打开时复位。合成 DOM 的 focus 是桩，必须由测试显式模拟
+      // focusout 才能覆盖（ui-onboarding 新增两条）。
+      var closingRef = useRef(false);
+      // R2：唯一关闭入口。按钮 / ESC / 外部点击 / 失焦 / 确认关闭全部经 requestClose——
+      // hasDraft 决策只在这里做（对全部路径生效，含 button），任何路径不许绕过它
+      // 直接 setOpen(false)，否则漏一条就是静默丢草稿。真正关闭集中在 closeOverlay：
+      // 关浮层 + 清确认态 + 焦点还原到触发元素（还原失败降级 body）+ 通知 onClose。
+      var closeOverlay = function (reason) {
+        if (closingRef.current) return;
+        closingRef.current = true;
+        setOpen(false);
+        setCloseConfirm(false);
+        var trigger = anchorRef.current;
+        if (trigger && typeof trigger.focus === "function") {
+          trigger.focus();
+        } else {
+          var body = typeof document !== "undefined" && document ? document.body : null;
+          if (body && typeof body.focus === "function") body.focus();
+        }
+        if (typeof props.onClose === "function") props.onClose(reason);
+      };
+      var requestClose = function (reason) {
+        if (closingRef.current) return;
+        if (reason === "confirm-discard") { closeOverlay(reason); return; }
+        if (reason === "cancel-discard") { setCloseConfirm(false); return; }
+        // 草稿闸门：对所有关闭路径生效（含 button）。
+        if (overlayHasDraft()) {
+          setCloseConfirm(true);
+          return;
+        }
+        // 自动关闸门只限 ESC / 外部点击 / 失焦；button 是用户明确意图，不过闸门。
+        if (reason !== "button" && !OVERLAY_DISMISSIBLE) return;
+        closeOverlay(reason);
+      };
       var load = async function () {
         var dsh = props.dsh;
         var sessionId = typeof props.shioriSessionId === "string" ? props.shioriSessionId : "";
@@ -8544,10 +8737,14 @@ var personaScopeTarget = personaScopeExplicit
         return null;
       };
       var toggle = function (event) {
-        var next = !open;
+        // R2：开→关走唯一关闭入口（与 ESC/外点/失焦同一条 requestClose 路径）；
+        // 关→开保持原逻辑（量按钮锚点 + 首次拉取），并复位关闭重入 guard
+        //（R2-close-reentry：上一轮关闭窗口已结束，新一轮开合重新允许关闭）。
+        if (open) { requestClose("button"); return; }
+        closingRef.current = false;
         rectState[1](measureAnchor(event));
-        setOpen(next);
-        if (next && result === undefined) load();
+        setOpen(true);
+        if (result === undefined) load();
       };
       var nodeOf = function (sparkId) {
         var nodes = (result && result.nodes) || [];
@@ -8605,7 +8802,42 @@ var personaScopeTarget = personaScopeExplicit
       return h("div", { style: { display: "inline-flex", alignItems: "center" } },
         // 浮层挂在按钮前面（position:fixed 不参与布局，DOM 顺序不影响视觉）；
         // 顺序如此只为让合成布局模型的 offsetTop 断言对「浮层参与布局」敏感。
-        open ? h("div", { style: flashbackPopupStyle(rect), role: "dialog", "aria-label": "闪回投递详情" },
+        // R2：ESC / 失焦关闭（焦点真移出容器才算）；closeConfirm 时先出草稿确认行。
+        // 背板排在浮层之后——ui-flashback 既有 findPopup 以「第一个 fixed div」定位
+        // 浮层，背板若在前会顶掉它（白名单外既有断言不动）。
+        open ? h("div", {
+            ref: popupRef,
+            style: flashbackPopupStyle(rect),
+            role: "dialog",
+            "aria-label": "闪回投递详情",
+            tabIndex: -1,
+            onKeyDown: function (event) {
+              if (!event || event.key !== "Escape") return;
+              if (typeof event.preventDefault === "function") event.preventDefault();
+              requestClose("esc");
+            },
+            onBlur: function (event) {
+              // R2：失焦关闭——relatedTarget 仍在浮层容器内（子元素间移动焦点）不关；
+              // 缺席（合成事件/焦点落到非焦点区）按移出处理。
+              var related = event && event.relatedTarget;
+              if (related && flashbackNodeInside(related, popupRef.current)) return;
+              requestClose("blur");
+            },
+          },
+          closeConfirm ? h("div", {
+              "data-role": "flashback-draft-confirm",
+              style: { display: "flex", gap: "6px", alignItems: "center", borderBottom: "1px dashed var(--dsw-alias-border-l2,#dce2eb)", paddingBottom: "6px" },
+            },
+            h("span", { style: { fontSize: "11px", color: "var(--dsw-alias-label-secondary,#6b7280)", flex: "1", wordBreak: "break-word" } }, "草稿未保存，确认关闭？"),
+            h("button", {
+              style: { font: "inherit", fontSize: "11px", padding: "1px 8px", borderRadius: "6px", border: "1px solid var(--dsw-alias-border-l2,#dce2eb)", background: "var(--dsw-alias-bg-layer-3,#fff)", color: "var(--dsw-alias-label-secondary,#6b7280)", cursor: "pointer", minHeight: FLASHBACK_BTN_MIN_HEIGHT },
+              onClick: function () { requestClose("cancel-discard"); },
+            }, "继续编辑"),
+            h("button", {
+              style: { font: "inherit", fontSize: "11px", padding: "1px 8px", borderRadius: "6px", border: "1px solid var(--dsw-alias-border-l2,#dce2eb)", background: "var(--dsw-alias-bg-layer-3,#fff)", color: "var(--dsw-alias-label-primary,#1f2937)", cursor: "pointer", minHeight: FLASHBACK_BTN_MIN_HEIGHT },
+              onClick: function () { requestClose("confirm-discard"); },
+            }, "确认关闭"))
+            : null,
           h("div", { style: { fontSize: "10px", color: "var(--dsw-alias-label-tertiary,#8b93a1)", wordBreak: "break-word" } },
             matchedPrecise
               ? "已精确关联本轮回复（sourceMessageId）"
@@ -8664,9 +8896,24 @@ var personaScopeTarget = personaScopeExplicit
                         "本轮 " + cards.length + " 张 / 触发词命中 " + triggerHits + " / 语义补位 " + semanticHits),
                     ]))
           : null,
+        // R2：透明背板垫在浮层下——点击浮层外部落在背板上，统一走 requestClose("outside")。
+        // fixed 脱离布局，与浮层同口径不参与合成布局模型；排在浮层之后（见上注释）。
+        open ? h("div", {
+          style: FLASHBACK_BACKDROP_STYLE,
+          "data-role": "flashback-backdrop",
+          "aria-hidden": "true",
+          onClick: function () { requestClose("outside"); },
+        }) : null,
         h("button", {
           ref: anchorRef,
           onClick: toggle,
+          onKeyDown: function (event) {
+            // R2：焦点停在触发按钮上时按 ESC 也关浮层（浮层容器 onKeyDown 覆盖
+            // 焦点在浮层内的情形）；关闭统一走 requestClose。
+            if (!event || event.key !== "Escape" || !open) return;
+            if (typeof event.preventDefault === "function") event.preventDefault();
+            requestClose("esc");
+          },
           "aria-label": "闪回" + (badgeCount !== null ? " " + badgeCount : ""),
           title: matchedPrecise ? "已精确关联本轮回复" : "本会话最近一次投递（10 分钟内近似关联）",
           style: { minHeight: FLASHBACK_BTN_MIN_HEIGHT, display: "inline-flex", alignItems: "center", gap: "4px", font: "inherit", fontSize: "12px", padding: "2px 8px", borderRadius: "8px", border: "1px solid var(--dsw-alias-border-l2,#dce2eb)", background: "var(--dsw-alias-bg-layer-3,#fff)", color: "var(--dsw-alias-label-secondary,#6b7280)", cursor: "pointer" },
@@ -8824,6 +9071,8 @@ var personaScopeTarget = personaScopeExplicit
     exports.TYPERT_REMOTE = TYPERT_REMOTE;
     // 纯函数导出：宿主侧可直接验证 payload 无损性（R3 守卫，isRemoteJsonValue 同规则）
     exports.ensureLosslessJson = ensureLosslessJson;
+    // R3（0.5 债）：会话列表重试 clock 注入入口（测试用假时钟推进重试点，删真等待）。
+    exports.setSessionRetryClock = setSessionRetryClock;
     return module.exports;
   }
 });

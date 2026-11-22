@@ -308,7 +308,9 @@ async function setupWithFutureClock(t) {
     ownerId: "local", defaultPersona: "amber",
     organize: { enabled: true },
     forgetting: { enabled: true },
-  }, { bindings, now: () => future });
+  // 0.5 债 S3 注入面收口：management 时钟与 controller 时钟显式对齐到同一
+  // 冻结时刻（旧实现 nowIso 派生自 now；收口后经 testSeam 注入，语义等价）。
+  }, { bindings, now: () => future, testSeam: { nowIso: () => future.toISOString() } });
   await controller.start();
   return { controller, base, trusted: { session: { id: "s-panel" }, source: "panel-rpc" } };
 }
@@ -602,6 +604,10 @@ test("P-A 队列收敛：执行（link+forgetting）后 re-analyze 清失效候�
   t.after(() => rm(base, { recursive: true, force: true }));
   const futureMs = Date.now() + 90 * 24 * 3600 * 1000;
   let tick = 0;
+  // 0.5 债 S3 注入面收口：management 时钟不再派生自 controller 的 now（生产
+  // 构造不传时钟注入），测试经 dependencies.testSeam 显式对齐两端时钟——共用
+  // 同一 tick 计数器，推进序列与旧实现（nowIso 派生自 now）逐字等价。
+  const tickClock = () => new Date(futureMs + (tick++) * 3600 * 1000);
   const bindings = fakeBindingsFactory();
   const controller = await createShioriPluginController(fakeCtx(), {
     mode: "active", allowActive: true,
@@ -609,7 +615,7 @@ test("P-A 队列收敛：执行（link+forgetting）后 re-analyze 清失效候�
     ownerId: "local", defaultPersona: "amber",
     organize: { enabled: true },
     forgetting: { enabled: true },
-  }, { bindings, now: () => new Date(futureMs + (tick++) * 3600 * 1000) });
+  }, { bindings, now: tickClock, testSeam: { nowIso: () => tickClock().toISOString() } });
   await controller.start();
   const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
 
@@ -967,7 +973,8 @@ test("P-A 残留：executePlan 收敛阶段抛错时 grant 随 finally 撤销（
       return grant;
     },
     executeToolForScope: async () => { throw new Error("not used"); },
-    nowIso,
+    // 0.5 债 S3 注入面收口：时钟注入改走 testSeam 测试缝（生产构造不得传）。
+    testSeam: { nowIso },
   });
   const trusted = { session: { id: "s-grantleak" }, source: "panel-rpc" };
 
@@ -1036,7 +1043,7 @@ async function readonlyHostFixture(t) {
       return grant;
     },
     executeToolForScope: async () => { throw new Error("not used"); },
-    nowIso: () => new Date().toISOString(),
+    testSeam: { nowIso: () => new Date().toISOString() },
     // 取值函数形态：controller 的门面构造早于 start() 里的座位守卫。
     readonlyGuard: () => guard,
   });
@@ -1117,7 +1124,7 @@ test("F7：deps.readonlyGuard 形状非法在第一次写调用时拒绝（不�
     generation: () => 1,
     registerGrant: (spec) => ({ ...spec, revoke() {} }),
     executeToolForScope: async () => { throw new Error("not used"); },
-    nowIso: () => new Date().toISOString(),
+    testSeam: { nowIso: () => new Date().toISOString() },
     readonlyGuard: { nope: 1 },
   });
   const trusted = { session: { id: "s-readonly-bad" }, source: "panel-rpc" };
@@ -2096,7 +2103,7 @@ test("destroyData：invalidateScopeResources 缺失时在删除之前拒绝—�
     generation: () => 1,
     registerGrant: () => { throw new Error("not used"); },
     executeToolForScope: async () => { throw new Error("not used"); },
-    nowIso: () => new Date().toISOString(),
+    testSeam: { nowIso: () => new Date().toISOString() },
     // 故意不注入 invalidateScopeResources（必修 2 的被测前提）
   });
   const trusted = { session: { id: "s-panel" }, source: "panel-rpc", principal: { kind: "owner" } };
@@ -2139,7 +2146,7 @@ test("destroyData：invalidateScopeResources async 失败（[boom]）必须 INVA
     generation: () => 1,
     registerGrant: () => { throw new Error("not used"); },
     executeToolForScope: async () => { throw new Error("not used"); },
-    nowIso: () => new Date().toISOString(),
+    testSeam: { nowIso: () => new Date().toISOString() },
     // async 失败源：close 错误数组非空
     invalidateScopeResources: async () => ["boom"],
   });
@@ -2457,7 +2464,8 @@ test("getStatus.personas：readdir 抛 EACCES → getStatus 照常返回、perso
     generation: () => 0,
     registerGrant: () => { throw new Error("not used"); },
     executeToolForScope: async () => { throw new Error("not used"); },
-    readdir: async () => { throw eacces; },
+    // 0.5 债 S3 注入面收口：EACCES 桩改走 testSeam 测试缝（生产构造不得传）。
+    testSeam: { readdir: async () => { throw eacces; } },
   });
   const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
   const status = await management.getStatus(trusted, {});
@@ -2618,7 +2626,7 @@ async function temperatureFixture(t, { temperature, liveGetter, recordReads } = 
     generation: () => 1,
     registerGrant: () => ({}),
     executeToolForScope: async () => ({}),
-    nowIso: () => TEMP_NOW,
+    testSeam: { nowIso: () => TEMP_NOW },
     ...(typeof liveGetter === "function" ? { liveTemperature: liveGetter } : {}),
     ...(readSpy ? { readTopicActivity: readSpy } : {}),
   });
@@ -2651,7 +2659,7 @@ test("B线 getTemperatureSettings：形状齐全、纯读（零写入/零 scope 
     generation: () => 0,
     registerGrant: () => ({}),
     executeToolForScope: async () => ({}),
-    nowIso: () => TEMP_NOW,
+    testSeam: { nowIso: () => TEMP_NOW },
   });
   const shadowDto = await shadow.getTemperatureSettings(tempTrusted, {});
   assert.equal(shadowDto.current.s0Days, DEFAULT_TEMPERATURE_PARAMS.s0Days);
@@ -3118,4 +3126,48 @@ test("auto RPC：模块开关关闭时四个方法一律 UNSUPPORTED（requireMo
       `${method} 在 forgetting.enabled=false 时必须 UNSUPPORTED`,
     );
   }
+});
+
+// ── 0.5 债 S3 · R4 守卫：生产构造签名不得携带注入参数 ─────────────────────────
+// 静态断言两层互补（评审 [R4-guard-gap] 打回后补强）：
+// ① fn.length——对格式化、注释改写、换行风格完全鲁棒（源码扫描会被 JSDoc 里
+//    的参数名与代码风格变动误伤，维护成本高）；直接编码不变式「生产构造只收
+//    (deps) 一个参数」。局限（如实口径）：length 只数到第一个带缺省值的参数
+//    为止——无缺省值的回塞（如 createManagement(deps, readdirImpl)）length
+//    1→2 本断言必红；但带缺省值的尾部追加（如 createManagement(deps,
+//    readdirImpl = fsp.readdir)）不改 length，由下面 ② 的参数表断言负责覆盖。
+// ② 参数表源码断言——对 toString() 取第一个 "(" 到**按括号配平**找到的匹配
+//    ")" 之间的参数串（不用 indexOf(")")：缺省值里可能含括号），把连续空白
+//    压成单空格后逐字 equal。任何位置参数回塞——带不带缺省值、追加在尾部
+//    还是插在中部——都改变参数串，必红。
+// 属性级盲区（两层断言都管不到）：以可选「属性」形式塞回 deps 顶层的注入不
+// 改签名，该路径由 management.mjs 内 testSeam 的源码注释（该入口仅供测试
+// 注入，生产构造不得传）与评审把守——收口单的目标是把注入从「签名」上摘掉，
+// 属性级回塞属于回归评审范畴。
+function createManagementParamList() {
+  const src = createManagement.toString();
+  const open = src.indexOf("(");
+  if (open < 0) throw new Error("R4 守卫：createManagement.toString() 中找不到参数表起点 \"(\"");
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "(") depth += 1;
+    else if (src[i] === ")") {
+      depth -= 1;
+      if (depth === 0) return src.slice(open + 1, i).replace(/\s+/g, " ").trim();
+    }
+  }
+  throw new Error("R4 守卫：createManagement.toString() 参数表括号不配平");
+}
+
+test("债S3 R4 守卫：createManagement 生产签名为 (deps) 单参（fn.length === 1），测试注入一律走 deps.testSeam", () => {
+  assert.equal(createManagement.length, 1,
+    "createManagement 生产签名被改动：出现新的位置参数（疑似把测试注入塞回签名）。"
+    + "注入必须走 deps.testSeam 测试缝对象（该入口仅供测试注入，生产构造不得传）。");
+  // 评审 [R4-guard-gap]：fn.length 只数到第一个缺省参数为止，带缺省值的尾部
+  // 追加（createManagement(deps, readdirImpl = fsp.readdir)）不触发上面的
+  // 断言，由参数表逐字断言兜底。
+  assert.equal(createManagementParamList(), "deps",
+    "createManagement 生产参数表被改动：签名新增了参数（疑似把测试注入塞回签名，"
+    + "含带缺省值的尾部追加）。注入必须走 deps.testSeam 测试缝对象（该入口仅供"
+    + "测试注入，生产构造不得传）。");
 });

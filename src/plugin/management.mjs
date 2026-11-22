@@ -91,41 +91,6 @@ function personaErrorSummary(error) {
 }
 
 /**
- * 人设卡清单（getStatus 的 personas 字段）：<dataRoot>/persona/*.md 的 basename
- * 去掉 .md，名字升序。纯只读——绝不创建目录、不写盘；dataRoot 未初始化（inert）
- * 或 persona 目录不存在时返回 []。
- *
- * R1（交叉审查补漏）：其它读目录失败（EACCES 等）不再整体上抛——旧实现会让
- * getStatus 一起失败，controller 注入的 diagnostics.roots 根本到不了面板，
- * P1#8 的「面板可见」落空。改为返回 { names: [], error: 摘要 }，getStatus 把
- * 有界摘要写进 diagnostics.personasError 后照常返回——故障以诊断字段如实
- * 出线，不静默吞掉、也不把整个状态请求陪葬。ENOENT/ENOTDIR（目录不存在 /
- * 不是目录）仍按「没有卡」处理且不写 personasError（现状口径不变）。
- *
- * @param {string} dataRoot 业务数据根
- * @param {typeof import("node:fs/promises").readdir} readdirImpl 读目录实现
- *   （生产 = node:fs/promises readdir；测试注入 EACCES 桩用）
- * @returns {Promise<{names: string[], error: ?string}>} error null = 目录正常或不存在
- */
-async function listPersonaNames(dataRoot, readdirImpl) {
-  if (typeof dataRoot !== "string" || dataRoot.length === 0) return { names: [], error: null };
-  let entries;
-  try {
-    entries = await readdirImpl(join(dataRoot, "persona"), { withFileTypes: true });
-  } catch (error) {
-    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return { names: [], error: null };
-    return { names: [], error: personaErrorSummary(error) };
-  }
-  return {
-    names: entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith(PERSONA_CARD_SUFFIX))
-      .map((entry) => entry.name.slice(0, -PERSONA_CARD_SUFFIX.length))
-      .sort(),
-    error: null,
-  };
-}
-
-/**
  * @param {object} deps
  * @param {object} deps.settings 已校验 settings（validateControllerSettings）
  * @param {string} deps.dataRoot 业务数据根（organize executor 与 sparks/topic 共用）
@@ -137,15 +102,18 @@ async function listPersonaNames(dataRoot, readdirImpl) {
  * @param {(scope: object) => Promise<object>} deps.executeToolForScope  工具执行（与真实工具路径同校验/CAS）
  * @param {(agent: object|null) => string|null} [deps.workspaceForAgent] 从宿主 agent 解析可信 workspace（只读）
  * @param {object} [deps.timelineReader] 已构造的时间线读取器（测试注入；省略则按 dataRoot 惰性创建）
- * @param {() => string} [deps.nowIso]
  * @param {() => Array<{root: string, path: string, reason: string, code: string}>} [deps.getRootDegradation]
  *   降级挂载（任一根 mkdir 失败）的逐根诊断取值函数（controller 注入；缺省视为
  *   无降级）。executeTool 在 requireStarted 之前据此返回 UNSUPPORTED +
  *   details.roots——降级态不宣称 started，否则面板只会拿到 INVALID_STATE。
- * @param {typeof import("node:fs/promises").readdir} [deps.readdir] 人设卡目录读取注入点
- *   （缺省 node:fs/promises readdir；仅测试注入 EACCES 桩验证 R1 降级路径用，
- *   默认行为逐字不变。controller 经 dependencies.personasReaddir 可选透传，
- *   生产不传。）
+ * @param {{ readdir?: typeof import("node:fs/promises").readdir, nowIso?: () => string }} [deps.testSeam]
+ *   测试缝对象（0.5 债 S3 注入面收口）：**该入口仅供测试注入，生产构造不得传**。
+ *   生产装配（controller 调用点、index.mjs 挂载路径）一律不携带本对象，缺省
+ *   走真实 fsp.readdir / Date，行为逐字不变。readdir：测试注入 EACCES 桩验证
+ *   getStatus 的 R1 降级路径（故障进 diagnostics.personasError，不陪葬）；
+ *   nowIso：测试冻结时钟（温度审计 / plan 归档时间戳等确定性断言用）。
+ *   （旧形态 deps.readdir / deps.nowIso 顶层可选注入已移入本对象——生产 deps
+ *   面不再出现测试专用注入属性。）
  * @param {() => Promise<string[]>} [deps.invalidateScopeResources] scope 资源缓存失效入口
  *   （0.4 S6 中-2：仅 destroyData 使用；async——复用 controller 的 closeAllScopes，
  *   返回 Promise<string[]> 的 close 错误数组，调用方必须 await。存在性在删除之前
@@ -170,15 +138,52 @@ export function createManagement(deps) {
     registerGrant,
     executeToolForScope,
     getRootDegradation,
-    nowIso = () => new Date().toISOString(),
   } = deps;
 
   for (const [name, value] of Object.entries({ settings, state, resourcesFor, isStarted, generation, registerGrant, executeToolForScope })) {
     if (value === undefined) fail("INVALID_INPUT", `createManagement requires deps.${name}`, {});
   }
 
-  // R1：人设卡目录读取实现（缺省 = 生产 readdir；测试注入桩，controller 不传）。
-  const readdirForPersonas = typeof deps.readdir === "function" ? deps.readdir : fsp.readdir;
+  // ── 0.5 债 S3 · 注入面收口：测试缝对象 ─────────────────────────────────────
+  // testSeam **仅供测试注入，生产构造不得传**（controller 装配与 index.mjs 挂载
+  // 路径都不携带它）；生产缺省一律走真实 fsp.readdir / Date，行为逐字不变。
+  // 旧形态 deps.readdir / deps.nowIso 顶层可选注入收口进本对象——生产 deps
+  // 面不再出现任何测试专用注入属性。
+  const testSeam = deps.testSeam ?? {};
+  const readdirForPersonas = typeof testSeam.readdir === "function" ? testSeam.readdir : fsp.readdir;
+  const nowIso = typeof testSeam.nowIso === "function" ? testSeam.nowIso : () => new Date().toISOString();
+
+  // 人设卡清单（getStatus 的 personas 字段）：<dataRoot>/persona/*.md 的 basename
+  // 去掉 .md，名字升序。纯只读——绝不创建目录、不写盘；dataRoot 未初始化（inert）
+  // 或 persona 目录不存在时返回 []。
+  //
+  // 0.5 债 S3（注入面收口）：本函数收进 createManagement 闭包——readdir 实现
+  // 经上方 testSeam.readdir（缺省 fsp.readdir）闭包捕获，不再作为函数参数跨
+  // 签名传递（旧签名 listPersonaNames(dataRoot, readdirImpl) 把注入开在参数
+  // 上，签名暗示「生产可注入」；收口后生产签名与调用面零注入）。
+  //
+  // R1（交叉审查补漏）契约保持逐字不变：其它读目录失败（EACCES 等）不整体
+  // 上抛——返回 { names: [], error: 有界摘要 }，getStatus 照常返回、故障如实
+  // 进 diagnostics.personasError，不静默吞掉、也不把整个状态请求陪葬；
+  // ENOENT/ENOTDIR（目录不存在 / 不是目录）仍按「没有卡」处理且不写
+  // personasError。
+  async function listPersonaNames(dataRoot) {
+    if (typeof dataRoot !== "string" || dataRoot.length === 0) return { names: [], error: null };
+    let entries;
+    try {
+      entries = await readdirForPersonas(join(dataRoot, "persona"), { withFileTypes: true });
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return { names: [], error: null };
+      return { names: [], error: personaErrorSummary(error) };
+    }
+    return {
+      names: entries
+        .filter((entry) => entry.isFile() && entry.name.endsWith(PERSONA_CARD_SUFFIX))
+        .map((entry) => entry.name.slice(0, -PERSONA_CARD_SUFFIX.length))
+        .sort(),
+      error: null,
+    };
+  }
 
   // ── 0.5 批次 4 · B 线：热度参数热读与审计账本 writer ───────────────────────
   // liveTemperature：controller 注入（liveRefs.temperature 热读 volatile 引用，
@@ -644,7 +649,7 @@ export function createManagement(deps) {
       // 的 diagnostics.roots 等诊断字段全部到不了面板。错误以有界摘要写入
       // diagnostics.personasError（无错不出键，正常路径 wire 形状逐字不变），
       // 状态照常返回。
-      const personaList = await listPersonaNames(settings.dataRoot, readdirForPersonas);
+      const personaList = await listPersonaNames(settings.dataRoot);
       const status = {
         mode: isInert ? "inert" : settings.mode,
         configured,

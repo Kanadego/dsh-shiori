@@ -186,10 +186,13 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     // 0.5 写后增量的防抖毫秒（任务书 ~300ms）。只作依赖 seam 供测试缩短等待，
     // 不进 settings 冻结契约（config.mjs 不在本次白名单）；非法值回落缺省。
     semanticIncrementalDebounceMs = SEMANTIC_INCREMENTAL_DEBOUNCE_MS,
-    // R4②：人设卡目录读取注入点（仅测试注入 EACCES 桩；生产不传 → 门面缺省用
-    // node:fs readdir，正常路径行为逐字不变）。用于端到端验证
-    // diagnostics.personasError 与 diagnostics.roots 在面板 getStatus 上并存。
-    personasReaddir,
+    // 0.5 债 S3（注入面收口）：测试缝对象——**该入口仅供测试注入，生产构造不得传**。
+    // 透传给 management 的 testSeam（readdir / nowIso）；生产（index.mjs 挂载路径、
+    // mountShioriRpc 调用面）不传本对象 → 下方 createManagement 装配处条件展开
+    // 为空，生产调用面零注入属性，门面缺省用 node:fs readdir / 真实 Date，
+    // 正常路径行为逐字不变。用于端到端验证 diagnostics.personasError 与
+    // diagnostics.roots 在面板 getStatus 上并存，以及端到端冻结 management 时钟。
+    testSeam,
   } = dependencies;
 
   // inert 判定（0.4-S1 起，reviewer P2① 口径）：仅由 mode 与根校验共同决定——
@@ -2059,15 +2062,17 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     registerGrant,
     workspaceForAgent,
     executeToolForScope: (scope, name, args) => trackInFlight(dispatchTool(scope, name, args, null)),
-    nowIso,
     // R1（0.5 批次 3）：降级诊断注入。降级挂载时 started 恒 false，面板
     // management.executeTool 若先走 requireStarted 只会报 INVALID_STATE
     // 「尚未启动」——把 mount 的逐根诊断交给门面，让它先判降级、返回带
     // details.roots 的 UNSUPPORTED。读 ctrl 是纯内存投影，不可能抛。
     getRootDegradation: () => [...ctrl.rootDiagnostics],
-    // R4②：人设卡目录读取注入点（仅测试注入 EACCES 桩验证 personasError 与
-    // diagnostics.roots 并存；生产不传，门面缺省用 node:fs readdir）。
-    readdir: personasReaddir,
+    // 0.5 债 S3（注入面收口）：测试缝透传——**仅供测试注入，生产构造不得传
+    // dependencies.testSeam**。仅当测试显式传入时条件展开生效；生产装配
+    // （index.mjs 挂载路径）不带 testSeam，本调用不出现任何注入属性，
+    // 门面缺省走真实 fsp.readdir / Date。旧形态 nowIso / readdir: personasReaddir
+    // 顶层透传已收口（生产装配不再携带时钟/读目录注入）。
+    ...(testSeam ? { testSeam } : {}),
     // 0.5 批次 4 · B 线：热度参数三方法的数据源。liveTemperature 热读 volatile
     // 引用（见上方定义）；审计事件复用本插件唯一 topic-activity 账本实例 append
     // （评审拍板：不在 state.mjs 另开第二个 writer 写同一文件）。

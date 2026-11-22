@@ -18,7 +18,10 @@
 // 0.5 批次 2 A 线（0.5-DEV-PLAN §5 阶段 A.2）新增可选输入 groups：组布局渲染——
 //   独立活跃 topic 行（既有形态，不动）→
 //   活跃组摘要行：- group:KEY — 组名（N 名成员）[ — 组摘要]   ← 组摘要非空才带
-//   pinned 组内成员行：  - member-key — 成员摘要（两空格缩进，归档成员不列）
+//   pinned 组内成员行：  - member-key — 成员摘要（两空格缩进，归档成员不列；
+//     同 key 已有 topic 行时不输出成员行——topic 行为准，L1 里同一 key 只出现
+//     一次；组照常渲染其它成员，组行的成员计数是数据真相不因去重改变。指向
+//     已归档或不存在 topic 的成员没有 topic 行可冲突，成员行照常输出）
 //   整组冷钩子行：- group:KEY — 组名（N 篇冷专题，memory_search 可查）
 // 硬约束：
 // - groups 缺省 / undefined / 空数组时输出与旧版逐字节一致（回归零变化）；
@@ -36,6 +39,7 @@
 import { fail, describe, requireObject } from "./errors.mjs";
 import { validateTopic, compareKeys } from "./topics.mjs";
 import { validateKey } from "./keys.mjs";
+import { validateGroupEntryShared } from "./groups.mjs";
 
 export const INDEX_HEADER = "## 主题记忆索引 / Topic memory index";
 
@@ -51,34 +55,14 @@ const encoder = new TextEncoder();
  * groups.json 条目可携带 order 等字段透传），已知字段强校验。
  * 必填：key（组 key 规范与 topic key 一致）、title；summary/members/pinned
  * 缺省补 '' / [] / false。
+ * 0.5 债收口 R2：共享字段（plain record 判定、key/title/summary 类型与换行
+ * 禁令）与 core/groups.mjs 的 validateGroupEntry 走同一实现
+ * validateGroupEntryShared——两份同名校验不再各自漂移；此处只叠加渲染输入层
+ * 特有的 pinned/members。错误经共享契约抛出（INVALID_INPUT；error.name 为
+ * groups.mjs 的 StorageError 形状，调用方按 code 判定不受影响）。
  */
 function validateGroupEntry(entry, where) {
-  requireObject(entry, where);
-  if (!Object.prototype.hasOwnProperty.call(entry, "key")) {
-    fail("INVALID_INPUT", `${where} is missing required property "key"`);
-  }
-  if (typeof entry.key !== "string" || entry.key.length === 0) {
-    fail("INVALID_INPUT", `${where}: key must be a non-empty string`);
-  }
-  try {
-    validateKey(entry.key);
-  } catch (error) {
-    fail("INVALID_INPUT", `${where}: ${error.message}`);
-  }
-  if (!Object.prototype.hasOwnProperty.call(entry, "title")) {
-    fail("INVALID_INPUT", `${where} is missing required property "title"`);
-  }
-  if (typeof entry.title !== "string" || entry.title.length === 0) {
-    fail("INVALID_INPUT", `${where}: title must be a non-empty string`);
-  }
-  if (entry.summary !== undefined && typeof entry.summary !== "string") {
-    fail("INVALID_INPUT", `${where}: summary must be a string when present`);
-  }
-  const summary = entry.summary ?? "";
-  // 索引行结构不变量：组摘要进单行索引，换行会破坏行结构（与 topic summary 同规）
-  if (summary.includes("\n") || summary.includes("\r")) {
-    fail("INVALID_INPUT", `${where}: summary must not contain line breaks`);
-  }
+  const shared = validateGroupEntryShared(entry, where);
   if (entry.pinned !== undefined && typeof entry.pinned !== "boolean") {
     fail("INVALID_INPUT", `${where}: pinned must be a boolean when present`);
   }
@@ -86,9 +70,9 @@ function validateGroupEntry(entry, where) {
     fail("INVALID_INPUT", `${where}: members must be an array when present`);
   }
   return {
-    key: entry.key,
-    title: entry.title,
-    summary,
+    key: shared.key,
+    title: shared.title,
+    summary: shared.summary,
     pinned: entry.pinned ?? false,
     members: entry.members ?? [],
   };
@@ -140,9 +124,12 @@ function validateGroupMember(member, where) {
 /**
  * 组布局行渲染（0.5 A 线）：组按 key 字典序；每组先组行、后 pinned 成员行。
  * 整组冷/归档（成员非空且全部 archived）→ 一行冷钩子取代组摘要行。
+ * visibleTopicKeys 是已产出 topic 行的 key 集合（0.5 债收口 R1）：成员 key
+ * 命中时不再输出成员行（topic 行为准，L1 同 key 只出现一次），组照常渲染
+ * 其它成员；指向已归档或不存在 topic 的成员没有 topic 行可冲突，照常输出。
  * 返回行数组（无组内容时为空数组，调用方拼接结果与旧版逐字节一致）。
  */
-function renderGroupLines(groups) {
+function renderGroupLines(groups, visibleTopicKeys) {
   if (!Array.isArray(groups)) {
     fail("INVALID_INPUT", `groups must be an array, got ${describe(groups)}`);
   }
@@ -196,6 +183,9 @@ function renderGroupLines(groups) {
       .filter((member) => member.pinned && !member.archived)
       .sort((a, b) => compareKeys(a.key, b.key));
     for (const member of pinnedMembers) {
+      // R1 债收口：同 key 已由 topic 行承担时不再重复输出成员行（topic 行为准，
+      // L1 同一 key 只出现一次）；组行「N 名成员」计数是数据真相，不因去重改变。
+      if (visibleTopicKeys.has(member.key)) continue;
       lines.push(`  - ${member.key} — ${member.summary}`);
     }
   }
@@ -253,8 +243,10 @@ export function renderL1(input) {
   validated.sort((a, b) => compareKeys(a.key, b.key));
 
   // 0.5 A 线：组布局行。groups 缺省（键不存在或 undefined）时走空数组，
-  // 拼接结果与旧版逐字节一致。
-  const groupLines = input.groups === undefined ? [] : renderGroupLines(input.groups);
+  // 拼接结果与旧版逐字节一致。visibleTopicKeys 供 R1 成员行去重（topic 行为准）。
+  const visibleTopicKeys = new Set(validated.map((topic) => topic.key));
+  const groupLines =
+    input.groups === undefined ? [] : renderGroupLines(input.groups, visibleTopicKeys);
 
   const indexText =
     validated.length === 0 && archivedCount === 0 && groupLines.length === 0

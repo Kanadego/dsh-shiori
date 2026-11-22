@@ -321,6 +321,9 @@ function makeElement(tagName) {
     },
     addEventListener() {},
     removeEventListener() {},
+    // R2（0.5 债）：focus 桩——合成 DOM 里没有真实焦点语义，只计数，供「关闭后
+    // 焦点还原到触发元素（还原失败降级 body）」类断言用。
+    focus() { this._focusCalls = (this._focusCalls || 0) + 1; },
   };
 }
 
