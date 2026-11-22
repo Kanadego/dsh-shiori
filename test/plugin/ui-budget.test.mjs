@@ -109,7 +109,12 @@ function makeDsh({ scope } = {}) {
       calls.push({ method, sessionId, payload });
       if (method === "getStatus") {
         return {
-          occupancy: { l1Chars: OCCUPANCY_CHARS, l1HardCap: FULL_BUDGETS.core.hardCapChars },
+          mode: "active",
+          configured: true,
+          scope: "amber",
+          personas: [],
+          capabilities: { l2: true, organize: true, forgetting: true, tools: true, sections: true },
+          occupancy: { l0Chars: 0, l1Chars: OCCUPANCY_CHARS, l0Budget: FULL_BUDGETS.persona.maxChars, l1HardCap: FULL_BUDGETS.core.hardCapChars },
           diagnostics: { semantic: clone(SEMANTIC_DTO) },
         };
       }
@@ -431,35 +436,34 @@ function clickSectionTab(panel, label) {
   tab.onclick();
 }
 
-test("语义召回块：状态页与设置页向量召回子页同一时刻只有一份在 DOM；渲染走同一受控实现", async () => {
+test("语义召回块：专题整理页与设置页向量召回子页同一时刻只有一份在 DOM；渲染走同一受控实现", async () => {
   const { scope } = makeScope();
   const { dsh } = makeDsh({ scope });
-  // 直接挂在状态页（默认 tab=status）。
-  const panel = await harness.mount({ tab: "status", dsh });
-  await settle(panel);
+  // 0.5-13-4：写操作（含语义召回动作）迁到专题整理页。两台独立挂载分别验证
+  // 两个落点各自只有一份语义召回卡，且互不包含对方的容器（合成 harness 的
+  // 跨 tab 状态槽共享，不适合在同一实例里来回切）。
+  const settingsPanel = await mountSettings(dsh);
   try {
-    assert.equal(countRole(panel, "semantic-recall"), 1, "状态页有一份语义召回卡");
-    assert.equal(panel.find('[data-role="settings-page-recall"]'), null, "状态页没有设置页容器");
-
-    clickSectionTab(panel, "记忆预算");
-    await settle(panel);
-    assert.equal(panel.find('[data-role="settings-page-recall"]'), null, "预算 tab 默认子页不是向量召回");
-    assert.equal(countRole(panel, "semantic-recall"), 0, "切到设置页后状态页那份语义块不在 DOM");
-
-    await openPage(panel, "recall");
-    assert.equal(countRole(panel, "semantic-recall"), 1, "向量召回子页有且只有一份");
-    const page = panel.find('[data-role="settings-page-recall"]');
+    assert.equal(countRole(settingsPanel, "semantic-recall"), 0, "设置页默认子页（预算）没有语义召回卡");
+    await openPage(settingsPanel, "recall");
+    assert.equal(countRole(settingsPanel, "semantic-recall"), 1, "向量召回子页有且只有一份");
+    const page = settingsPanel.find('[data-role="settings-page-recall"]');
     const inside = descendantsOf(page, (el) => el.nodeType === 1 && el.getAttribute("data-role") === "semantic-recall");
     assert.equal(inside.length, 1, "设置页那份在 settings-page-recall 容器内");
-    const rebuildButtons = panel.findAll("button").filter((el) => panel.textOfEl(el) === "重建向量");
-    assert.equal(rebuildButtons.length, 1, "同一时刻只有一个「重建向量」可点");
-
-    clickSectionTab(panel, "状态");
-    await settle(panel);
-    assert.equal(panel.find('[data-role="settings-page-recall"]'), null, "切回状态页后设置页容器不在 DOM");
-    assert.equal(countRole(panel, "semantic-recall"), 1, "状态页那份回来，且仍只有一份");
+    assert.equal(settingsPanel.findAll("button").filter((el) => settingsPanel.textOfEl(el) === "重建向量").length, 1, "同一时刻只有一个「重建向量」可点");
+    assert.equal(settingsPanel.find('[data-role="organize-tab"]'), null, "设置页没有专题整理容器");
   } finally {
-    panel.unmount();
+    settingsPanel.unmount();
+  }
+
+  const organizePanel = await harness.mount({ tab: "candidates", dsh });
+  await settle(organizePanel);
+  try {
+    assert.equal(countRole(organizePanel, "semantic-recall"), 1, "专题整理页有一份语义召回卡");
+    assert.equal(organizePanel.find('[data-role="settings-page-recall"]'), null, "专题整理页没有设置页容器");
+    assert.equal(organizePanel.findAll("button").filter((el) => organizePanel.textOfEl(el) === "重建向量").length, 1, "专题整理页同样只有一个「重建向量」可点");
+  } finally {
+    organizePanel.unmount();
   }
 });
 
@@ -482,6 +486,22 @@ test("温度子页：12 项中文主名 + 符号名小字（symbol 仍可见，�
       const sym = panel.findAll("span").find((el) => panel.textOfEl(el).includes(key) && el.style && el.style.fontSize === "11px");
       assert.ok(sym, key + " 符号名以小字（11px）展示");
     }
+  } finally {
+    panel.unmount();
+  }
+});
+
+// 0.5-13-4：温度审计分组已迁入「最近变更」，设置页不得再有温度审计。
+test("设置页：温度子页不再渲染 temperature-audit（审计已迁最近变更）", async () => {
+  const { scope } = makeScope();
+  const { dsh } = makeDsh({ scope });
+  const panel = await mountSettings(dsh);
+  try {
+    await openPage(panel, "temp");
+    assert.ok(panel.find('[data-role="temperature-settings"]'), "温度子页仍渲染");
+    assert.equal(panel.find('[data-role="temperature-audit"]'), null, "设置页没有 temperature-audit 分组");
+    assert.equal(panel.findAll('[data-role="temperature-audit-entry"]').length, 0, "设置页没有审计条目");
+    assert.equal(panel.text().includes("尚无参数变更审计"), false, "旧审计空态文案不再出现在设置页");
   } finally {
     panel.unmount();
   }

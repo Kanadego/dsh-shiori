@@ -539,7 +539,7 @@ function makeUiDsh(over = {}) {
 
 async function mountStatus(dsh) {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
-  const mounted = await harness.mount({ tab: "status", dsh });
+  const mounted = await harness.mount({ tab: "candidates", dsh });
   mounted.render();
   await mounted.flush();
   // harness 的 fake document 不挂载渲染树（click/text 走内部 dom 引用）；元素

@@ -259,8 +259,9 @@ test("热度参数面板：12 项表单（当前/默认/范围/单位/说明）�
     }
     const text = panel.textOf('[data-role="temperature-settings"]');
     assert.ok(text.includes("记忆整理"), "分组标题");
-    assert.ok(panel.find('[data-role="temperature-audit"]'), "审计分组在");
-    assert.ok(text.includes("尚无参数变更审计"), "初始审计为空");
+    // 0.5-13-4：温度审计分组已迁到「最近变更」，设置页不再渲染。
+    assert.equal(panel.find('[data-role="temperature-audit"]'), null, "设置页不再出现温度审计分组");
+    assert.equal(panel.findAll('[data-role="temperature-audit-entry"]').length, 0, "设置页无审计条目");
   } finally {
     panel.unmount();
   }
@@ -273,7 +274,7 @@ test("热度参数面板：改值 → 预览两张清单 + L1 净变化；保存
   const { dsh, calls } = makeDsh({ scopeState, audit, order });
   const panel = await mountBudgets(dsh);
   try {
-    assert.equal(auditEntries(panel).length, 1, "初始 1 条审计");
+    assert.equal(panel.find('[data-role="temperature-audit"]'), null, "设置页无审计分组（已迁最近变更）");
     assert.ok(panel.change('input[data-temp-input="coolThreshold"]', "30"), "改 coolThreshold=30");
     await settle(panel);
 
@@ -317,8 +318,7 @@ test("热度参数面板：改值 → 预览两张清单 + L1 净变化；保存
 
     const saved = panel.textOf('[data-role="temperature-saved"]');
     assert.ok(saved.includes("已保存并记录审计（1 项变更）"), "recorded:true 提示条数取 changes.length");
-    assert.equal(auditEntries(panel).length, 2, "审计多一条（1 → 2）");
-    assert.ok(panel.textOf('[data-role="temperature-audit"]').includes("coolThreshold：25 → 30"), "新审计行显示键级旧 → 新");
+    assert.equal(panel.findAll('[data-role="temperature-audit-entry"]').length, 0, "保存后设置页仍不渲染审计（条目在最近变更页）");
   } finally {
     panel.unmount();
   }
@@ -346,7 +346,7 @@ test("热度参数面板：recorded:false（无变更、未新增审计）与 re
     assert.ok(saved.includes("参数已保存"), "仍如实提示参数已保存");
     assert.equal(saved.includes("已记录审计"), false, "recorded:false 不得出现「已记录审计」");
     assert.equal(saved.includes("项变更"), false, "recorded:false 不得套用变更条数文案");
-    assert.equal(auditEntries(panel).length, 0, "审计条数未变（0 条）");
+    assert.equal(panel.find('[data-role="temperature-audit"]'), null, "设置页不渲染审计分组");
   } finally {
     panel.unmount();
   }
@@ -423,7 +423,7 @@ test("热度参数面板：「尚未生效」INVALID_STATE 重试（≤3 次）�
     assert.ok(panel.find('[data-role="temperature-saved"]'), "重试后成功并提示");
     assert.equal(attempts(), 3, "共尝试 3 次（2 次失败 + 1 次成功）");
     assert.equal(scopeState.mutateCalls.length, 1, "设置只写一次（重试只重发审计）");
-    assert.equal(auditEntries(panel).length, 1, "最终审计入库一条");
+    assert.equal(panel.find('[data-role="temperature-audit"]'), null, "设置页不渲染审计分组（入库由 RPC 断言）");
   } finally {
     panel.unmount();
   }
@@ -533,7 +533,7 @@ test("热度参数面板：机器可读 details.reason=parameters-not-effective 
     await settle(panel, { advanceMs: 350 });
     assert.equal(attempts(), 3, "按 details.reason 识别并重试到成功");
     assert.ok(panel.find('[data-role="temperature-saved"]'), "最终成功提示");
-    assert.equal(auditEntries(panel).length, 1, "审计入库一条");
+    assert.equal(panel.find('[data-role="temperature-audit"]'), null, "设置页不渲染审计分组（入库由 RPC 断言）");
   } finally {
     panel.unmount();
   }
@@ -596,7 +596,7 @@ test("热度参数面板：replay 回执提示重放且审计条数不变；rece
     const saved = panel.textOf('[data-role="temperature-saved"]');
     assert.ok(saved.includes("重放既有审计，未新增审计记录"), "replay 分支提示重放");
     assert.equal(saved.includes("已记录审计"), false, "replay 分支不得出现「已记录审计」");
-    assert.equal(auditEntries(panel).length, 0, "审计条数不变");
+    assert.equal(panel.find('[data-role="temperature-audit"]'), null, "设置页不渲染审计分组");
   } finally {
     panel.unmount();
   }
@@ -614,5 +614,46 @@ test("热度参数面板：replay 回执提示重放且审计条数不变；rece
     assert.ok(panel2.textOf('[data-role="temperature-saved"]').includes("未新增审计记录"), "缺失回执走无变更分支");
   } finally {
     panel2.unmount();
+  }
+});
+
+// ── 0.5-13-4：温度审计迁入「最近变更」，与整理执行记录合成一条按时间倒序的流 ──
+test("最近变更：温度审计与整理执行记录合并成时间流（倒序）；只有 auto run 有「撤销这次」", async () => {
+  const undoCalls = [];
+  const audit = [{ at: "2026-11-20T08:00:00.000Z", operationId: "audit-1", changes: [{ key: "coolThreshold", from: 25, to: 30 }, { key: "s0Days", from: 30, to: 40 }] }];
+  const runs = [{ runId: "auto-run-1", at: "2026-11-21T08:00:00.000Z", trigger: "manual", applied: 2, undoneAt: null }];
+  const dsh = {
+    call: async (method, sessionId, payload) => {
+      if (method === "getStatus") return { mode: "active", configured: true, scope: "amber", personas: [], capabilities: { l2: true, organize: true, forgetting: true, tools: true, sections: true }, occupancy: { l0Chars: 0, l1Chars: 0, l0Budget: 12000, l1HardCap: 14000 }, diagnostics: {} };
+      if (method === "getTimeline") return { scope: "amber", items: [], hasMore: false, skippedCorrupted: 0, scanLimited: false };
+      if (method === "getTemperatureSettings") return { current: clone(TEMPERATURE_DTO.defaults), defaults: clone(TEMPERATURE_DTO.defaults), specs: clone(TEMPERATURE_DTO.specs), crossChecks: [], hysteresis: TEMPERATURE_DTO.hysteresis, audit: clone(audit) };
+      if (method === "getAutoStatus") return { scope: "amber", enabled: true, mode: "suggest", lastRuns: clone(runs), fuse: { fused: false, reasons: [], statsValid: true }, params: {} };
+      if (method === "undoAutoRun") { undoCalls.push(payload); return { ok: true }; }
+      return {};
+    },
+  };
+  const panel = await harness.mount({ tab: "timeline", dsh });
+  await settle(panel);
+  try {
+    const stream = panel.find('[data-role="timeline-org-stream"]');
+    assert.ok(stream, "合并流渲染在最近变更页");
+    const rows = panel.findAll('[data-role="timeline-org-row"]');
+    assert.equal(rows.length, 2, "审计 1 条 + 整理执行 1 条");
+    const text = panel.textOfEl(stream);
+    assert.ok(text.indexOf("整理执行") < text.indexOf("设置审计"), "按时间倒序：较新的整理执行在前");
+    assert.ok(text.includes("冷却线：25 → 30（coolThreshold）") && text.includes("新主题半衰期（天）：30 → 40（s0Days）"),
+      "审计用中文主名 + 符号名小字展示键级变更");
+    assert.equal(rows.filter((el) => panel.textOfEl(el).includes("撤销这次")).length, 1, "只有 auto run 行有「撤销这次」");
+    const undoBtn = panel.find('[data-role="timeline-org-undo"]');
+    assert.ok(undoBtn, "撤销按钮存在");
+    panel.click('[data-role="timeline-org-undo"]');
+    await settle(panel);
+    assert.deepEqual(undoCalls, [{ runId: "auto-run-1" }], "按既有 undoAutoRun 能力撤销该次");
+    // 审计行没有撤销入口：它不在任何按钮行里。
+    const auditRow = rows.find((el) => el.getAttribute("data-kind") === "audit");
+    assert.ok(auditRow, "审计行存在");
+    assert.equal(panel.findAll('[data-role="timeline-org-undo"]').length, 1, "审计行不带撤销按钮");
+  } finally {
+    panel.unmount();
   }
 });

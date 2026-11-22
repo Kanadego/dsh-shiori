@@ -102,27 +102,20 @@ async function mountSection(host, presets) {
 }
 
 // ---------------------------------------------------------------------------
-// a) tab：TABS 末尾追加「闪回命中」，图标走 CSS mask、不塞 emoji
+// a) tab：0.5-13-4 八页签（闪回 = 图谱 + 命中合并页），图标走 CSS mask、不塞 emoji
 // ---------------------------------------------------------------------------
 
-const FROZEN_TAB_LABELS = ["状态", "记忆内容", "闪回图谱", "遗忘", "专题", "记忆预算"];
+// 0.5-13-4 八页签（唯一被授权重写的 tab 冻结清单）。
+const MERGED_TAB_LABELS = ["概览", "专题记忆", "专题整理", "闪回", "人设与核心", "投递体检", "最近变更", "设置"];
 
-// 合并后（F2 + F4 同批）的最终顺序：闪回命中排在记忆预算之前。
-// （0.3：整理流程裁撤，第四项 tab 名「整理与遗忘」→「遗忘」，顺序与八项数不变。）
-// 0.5-4D：新增第 9 页签「投递体检」，插在闪回命中与记忆预算之间（评审
-// q-7f42e56c92c486a1 拍板，只改本清单断言）。
-const MERGED_TAB_LABELS = ["状态", "最近变更", "记忆内容", "闪回图谱", "遗忘", "专题", "闪回命中", "投递体检", "记忆预算"];
-
-test("F2 tab：闪回命中进入最终 9 项顺序，六项既有 label 与现行 TABS 一致，图标 mask 类齐备且不塞 emoji", async () => {
+test("F2 tab：八项顺序固定，闪回 tab 图标 mask 类齐备且不塞 emoji", async () => {
   const host = makeStatefulReact();
   const tree = await mountSection(host, ["status", "session-A", "", null, { mode: "active" }]);
   const tabs = flattenVNode(tree).filter((n) => n.type === "button" && String(n.props.className).includes("dshi_tab"));
   const labels = tabs.map((n) => [].concat(n.children).join(""));
   assert.deepEqual(labels, MERGED_TAB_LABELS, "最终 tab 顺序");
-  // 既有六项一字未改（只是中间插入了「最近变更」）。
-  for (const frozen of FROZEN_TAB_LABELS) assert.ok(labels.includes(frozen), "既有 label 保持原样：" + frozen);
-  const flash = tabs.find((n) => [].concat(n.children).join("") === "闪回命中");
-  assert.ok(flash, "闪回命中 tab 存在");
+  const flash = tabs.find((n) => [].concat(n.children).join("") === "闪回");
+  assert.ok(flash, "闪回 tab 存在");
   assert.equal(flash.props.className.includes("dshi_tabIco-flashbacks"), true, "专属图标类");
   assert.equal(flash.props.className.includes("dshi_tabIco "), true, "图标标记类");
   // 图标是 CSS mask 伪元素，label 是按钮唯一 children：不许 emoji、不许塞图形文本。
@@ -161,7 +154,7 @@ function graphFixture() {
   };
 }
 
-test("F2 面板：三组数据齐备——从未命中标题+存续天数、top 榜降序+命中次数+最近时间、吞吐统计与口径标注", async () => {
+test("F2 面板：三组数据齐备——从未命中标题+存续天数、最近命中按时间倒序、吞吐统计与口径标注", async () => {
   const host = makeStatefulReact();
   const sectionTree = await mountSection(host, ["flashbacks", "session-A", "", null, { mode: "active" }]);
   const tab = findComponent(sectionTree, "FlashbacksTab");
@@ -177,54 +170,87 @@ test("F2 面板：三组数据齐备——从未命中标题+存续天数、top 
   assert.ok(text.includes("从未命中（1 张）"), "从未命中分组与计数");
   assert.ok(text.includes("从未命中的卡"), "未命中卡标题");
   assert.ok(text.includes("存续 3 天"), "存续天数来自 createdAt");
-  assert.ok(text.includes("命中 top 榜"), "top 榜分组");
-
-  // ② top 榜：命中次数 + 最近命中时间；口径是「进入投递包」，不是「使用」。
+  // ② 最近命中（0.5-13-4：原 top 榜改为按 lastHitAt 倒序的最近命中）。
+  assert.ok(text.includes("最近命中（3 张）"), "最近命中分组与计数");
   assert.ok(text.includes("进入投递包 5 次"), "命中次数文案");
   assert.ok(text.includes("进入投递包 3 次"), "第二名的命中次数");
-  assert.ok(text.indexOf("高频卡") < text.indexOf("中频卡"), "top 榜按 hitCount 降序");
+  assert.ok(text.indexOf("高频卡") < text.indexOf("中频卡"), "最近命中按 lastHitAt 倒序");
+  assert.ok(text.indexOf("中频卡") < text.indexOf("老投递卡"), "无 lastHitAt 的卡片排最后");
   assert.ok(text.includes("最近进入投递包："), "最近命中时间行");
-
+  // 不足一页（3 < 8）不显示页码条。
+  assert.equal(flattenVNode(tree).some((n) => n.props && n.props["data-role"] === "flashback-hits-page"), false, "不足一页不显示页码");
   // ③ 投递吞吐：总投递张数 / 轮次 / 重复投递率（1 - 6/10 = 40%）。
   assert.ok(text.includes("总投递张数10"), "总投递张数");
   assert.ok(text.includes("投递轮次4"), "轮次");
   assert.ok(text.includes("重复投递率40%"), "重复投递率按 1 − unique/total 计算");
-  // 口径（用户硬性要求）：如实标注覆盖区间为 L2 开启期间，严禁「使用了 N 次」措辞。
   assert.ok(text.includes("只覆盖 L2 开启期间的记录"), "吞吐统计标注 L2 开启期覆盖口径");
   assert.ok(text.includes("不是全生命周期口径"), "明确否认全生命周期口径");
   assert.equal(text.includes("使用了"), false, "严禁把 hitCount 说成「使用了 N 次」");
 });
 
-test("F2 面板：top 榜严格降序并截断到 10 条，平局按最近命中时间降序", async () => {
+test("F2 面板：最近命中每页 8 条，页码边界（上一页/下一页/第 N/M 页）与平局排序", async () => {
   const host = makeStatefulReact();
   const sectionTree = await mountSection(host, ["flashbacks", "session-A", "", null, { mode: "active" }]);
   const tab = findComponent(sectionTree, "FlashbacksTab");
   const now = Date.now();
   const nodes = [];
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 14; i++) {
     nodes.push({
       id: "s-" + String(i).padStart(2, "0"), title: "卡" + i, summary: null, vitality: "evergreen",
-      revision: 1, hitCount: i + 1, lastHitAt: new Date(now - i * 1000).toISOString(), createdAt: new Date(now - DAY_MS).toISOString(),
+      revision: 1, hitCount: 20 - i, lastHitAt: new Date(now - i * 1000).toISOString(), createdAt: new Date(now - DAY_MS).toISOString(),
     });
   }
-  // 平局样本：hitCount 相同 → lastHitAt 新的在前。
-  nodes.push({ id: "s-tie-old", title: "平局旧", summary: null, vitality: "ephemeral", revision: 1, hitCount: 6, lastHitAt: new Date(now - 9000_000).toISOString(), createdAt: null });
-  nodes.push({ id: "s-tie-new", title: "平局新", summary: null, vitality: "ephemeral", revision: 1, hitCount: 6, lastHitAt: new Date(now - 1000).toISOString(), createdAt: null });
+  // 平局：lastHitAt 相同 → hitCount 高的在前。
+  nodes.push({ id: "s-tie-low", title: "平局低", summary: null, vitality: "ephemeral", revision: 1, hitCount: 16, lastHitAt: new Date(now - 3000).toISOString(), createdAt: null });
+  nodes.push({ id: "s-tie-high", title: "平局高", summary: null, vitality: "ephemeral", revision: 1, hitCount: 19, lastHitAt: new Date(now - 3000).toISOString(), createdAt: null });
   host.states.length = 0;
   host.states.push({ scope: "amber", nodes, edges: [], deliveries: [], deliveryStats: { rounds: 1, totalDelivered: 20, uniqueCards: 14 } }, { l2: true }, null);
   host.cursor.v = 0;
-  const tree = tab.type({ dsh: { call: async () => ({}) }, sessionId: "session-A" });
-  const text = collectText(tree);
-  assert.ok(text.includes("前 10 / 共 14 张"), "截断提示（12 + 2 平局 = 14 张命中卡）");
-  // hitCount 6 的三张按 lastHitAt 降序：平局新（now-1s）→ 卡5（now-5s）→ 平局旧（now-150s）。
-  const order = ["卡11", "卡10", "卡9", "卡8", "卡7", "卡6", "平局新", "卡5", "平局旧", "卡4"];
-  let cursor = -1;
-  for (const label of order) {
-    const at = text.indexOf(label);
-    assert.ok(at > cursor, `排序位置：${label}`);
-    cursor = at;
-  }
-  assert.equal(text.includes("卡3"), false, "第 11 名以后不渲染");
+  const render = () => { host.cursor.v = 0; return tab.type({ dsh: { call: async () => ({}) }, sessionId: "session-A" }); };
+  let tree = render();
+  const rows = (t) => flattenVNode(t).filter((n) => n.props && n.props["data-role"] === "flashback-hit-row");
+  assert.equal(rows(tree).length, 8, "第 1 页 8 条");
+  let text = collectText(tree);
+  assert.ok(text.includes("最近命中（16 张）"), "总计数 14 + 2 平局");
+  assert.ok(text.includes("第 1 / 2 页（每页 8 条）"), "页码信息");
+  assert.ok(text.indexOf("平局高") < text.indexOf("卡3"), "同 lastHitAt 按 hitCount 降序（平局高 19 > 卡3 17）");
+  assert.ok(text.indexOf("卡3") < text.indexOf("平局低"), "同 lastHitAt 低 hitCount 排后（卡3 17 > 平局低 16）");
+  const prev = flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "flashback-hits-prev");
+  const next = flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "flashback-hits-next");
+  assert.equal(prev.props.disabled, true, "第 1 页「上一页」禁用");
+  assert.equal(next.props.disabled, false, "第 1 页「下一页」可点");
+  next.props.onClick();
+  tree = render();
+  text = collectText(tree);
+  assert.equal(rows(tree).length, 8, "第 2 页 8 条（共 16 条）");
+  assert.ok(text.includes("第 2 / 2 页（每页 8 条）"), "翻页后页码信息");
+  assert.equal(flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "flashback-hits-prev").props.disabled, false, "第 2 页「上一页」可点");
+  assert.equal(flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "flashback-hits-next").props.disabled, true, "末页「下一页」禁用");
+  assert.equal(text.includes("卡0"), false, "第 2 页不渲染第 1 页的卡片");
+});
+
+// 0.5-13-4：合并页（闪回 = 图谱 + 命中）与图谱 460 画布 / 适应画布按钮。
+test("F2 合并页：图谱 460 画布 + 适应画布按钮；同页同时渲染图谱与最近命中", async () => {
+  const host = makeStatefulReact();
+  const sectionTree = await mountSection(host, ["graph", "session-A", "", null, { mode: "active" }]);
+  const flat = flattenVNode(sectionTree);
+  assert.ok(flat.some((n) => n.props && n.props["data-role"] === "flashback-view-graph"), "图谱段");
+  assert.ok(flat.some((n) => n.props && n.props["data-role"] === "flashback-view-hits"), "命中段");
+  const graphTab = findComponent(sectionTree, "GraphTab");
+  assert.ok(graphTab, "GraphTab reached through alias graph");
+  // GraphTab 的 view 状态在 states[3]（graph/error/selected/view...）。
+  host.states.length = 0;
+  host.states.push({ scope: "amber", nodes: [{ id: "s-1", title: "卡", vitality: "evergreen", state: "active" }], edges: [] }, null, null, { x: 40, y: 60, k: 2 });
+  host.cursor.v = 0;
+  const tree = graphTab.type({ dsh: { call: async () => ({}) }, sessionId: "session-A" });
+  const svg = flattenVNode(tree).find((n) => n.type === "svg");
+  assert.equal(svg.props.viewBox, "0 0 800 460", "viewBox 高 460");
+  const fit = flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "graph-fit");
+  assert.ok(fit, "适应画布按钮存在");
+  fit.props.onClick();
+  assert.deepEqual(host.states[3], { x: 0, y: 0, k: 1 }, "适应画布重置缩放并居中");
+  const cssFile = readFileSync(join(WORKQ, "client", "shiori.css"), "utf8");
+  assert.ok(cssFile.includes(".dshi_graphSvg{display:block;width:100%;height:460px;touch-action:none}"), "CSS 画布高 460");
 });
 
 test("F2 面板：L2 关闭显示引导（不渲染吞吐组）；空卡片显示引导；零投递不给 0% 去重率", async () => {

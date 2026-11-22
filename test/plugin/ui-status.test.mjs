@@ -207,7 +207,7 @@ test("U3 折叠区默认收起，summary 与原始字段齐全；能力徽章不
 
   // 能力徽章保持现状（渲染与文案不动）
   assert.ok(text.includes("已启用的能力"), "能力卡标题在");
-  assert.ok(text.includes("Spark 二级记忆：已开启"), "l2 徽章文案不变");
+  assert.ok(text.includes("闪回二级记忆：已开启"), "l2 徽章文案（0.5-13-4 按产品名改名）");
   assert.ok(text.includes("遗忘归档：已开启"), "forgetting 徽章文案不变");
 });
 

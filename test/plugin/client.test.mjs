@@ -3349,7 +3349,7 @@ test("P1-1：重建轮询——发起后切换会话，旧会话的轮询停止�
   assert.deepEqual(statusCalls, ["session-A", "session-A"], "both calls were for the original session");
 });
 
-test("R8：tab 栏九项冻结顺序（含 F2 闪回命中 / F4 最近变更 / 0.5-4D 投递体检）", async () => {
+test("R8：tab 栏八项冻结顺序（0.5-13-4 信息架构）", async () => {
   const services = {
     "remote.session": { list: async () => ({ ok: true, value: { items: [{ sessionId: "session-A" }] } }) },
     "remote.shiori": { getStatus: async () => ({ ok: true, value: { mode: "active", configured: true } }) },
@@ -3359,10 +3359,8 @@ test("R8：tab 栏九项冻结顺序（含 F2 闪回命中 / F4 最近变更 / 0
   const labels = flattenVNode(tree)
     .filter((n) => n.type === "button" && String((n.props && n.props.className) || "").includes("dshi_tab"))
     .map((n) => [].concat(n.children).join(""));
-  // U6 改口径：tab 名按 GLOSSARY 第三章目标名落地（记忆内容 / 闪回图谱 / 专题 / 记忆预算），
-  // tab id 与顺序不变。0.5-4D：新增第 9 页签「投递体检」，插在闪回命中与记忆预算之间
-  // （方案 §11.4 第 5 条；评审 q-7f42e56c92c486a1 拍板，只改本清单断言）。
-  assert.deepEqual(labels, ["状态", "最近变更", "记忆内容", "闪回图谱", "遗忘", "专题", "闪回命中", "投递体检", "记忆预算"]);
+  // 0.5-13-4：用户拍板的八页签信息架构（唯一被授权重写的 tab 冻结清单）。
+  assert.deepEqual(labels, ["概览", "专题记忆", "专题整理", "闪回", "人设与核心", "投递体检", "最近变更", "设置"]);
   await cleanup();
 });
 
@@ -3893,7 +3891,7 @@ test("R8：图谱力导向布局——同一数据两次渲染一致、坐标有
   assert.equal(first.length, 4, "4 个节点都有位置");
   for (const [x, y] of first) {
     assert.ok(Number.isFinite(x) && Number.isFinite(y), "坐标不含 NaN/Infinity");
-    assert.ok(x >= 30 && x <= 770 && y >= 30 && y <= 350, `坐标夹在 [30,770]×[30,350] 内（got ${x},${y}）`);
+    assert.ok(x >= 30 && x <= 770 && y >= 30 && y <= 430, `坐标夹在 [30,770]×[30,430] 内（got ${x},${y}）`);
   }
   // 同一份数据再开一个独立实例渲染，布局逐点一致（无 Math.random、顺序稳定）
   const { rerender: rerender2 } = await mountGraphTab();
@@ -3940,7 +3938,7 @@ function chainGraphPayload(count) {
   return { nodes, edges };
 }
 
-// 密集图通用断言：坐标有限、夹在 [30,770]×[30,350]、两两距离 > 6、
+// 密集图通用断言：坐标有限、夹在 [30,770]×[30,430]、两两距离 > 6、
 // 角落边界（x 与 y 同时贴边）的节点不许超过一半。
 function assertDenseLayoutHealthy(tree, count) {
   const circles = graphCircles(tree);
@@ -3949,8 +3947,8 @@ function assertDenseLayoutHealthy(tree, count) {
   let cornerBoundary = 0;
   for (const p of pts) {
     assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y), "坐标不含 NaN/Infinity");
-    assert.ok(p.x >= 30 && p.x <= 770 && p.y >= 30 && p.y <= 350, `坐标夹在 [30,770]×[30,350] 内（got ${p.x},${p.y}）`);
-    if ((p.x === 30 || p.x === 770) && (p.y === 30 || p.y === 350)) cornerBoundary++;
+    assert.ok(p.x >= 30 && p.x <= 770 && p.y >= 30 && p.y <= 430, `坐标夹在 [30,770]×[30,430] 内（got ${p.x},${p.y}）`);
+    if ((p.x === 30 || p.x === 770) && (p.y === 30 || p.y === 430)) cornerBoundary++;
   }
   assert.ok(cornerBoundary <= Math.floor(count / 2), `不许全贴边（角落边界 ${cornerBoundary}/${count}）`);
   let minDist = Infinity;
@@ -4018,7 +4016,7 @@ test("R8：图谱搜索定位——回车选中第一个匹配并居中（缩放
   assert.equal(findComponent(tree, "NodeDetail"), undefined, "无匹配不选中");
   assert.equal(graphCircles(tree).length, 4, "无匹配不清空图");
 
-  // 匹配标题：回车选中第一个匹配，view 让节点落在 800×380 中心，缩放保持
+  // 匹配标题：回车选中第一个匹配，view 让节点落在 800×460 中心，缩放保持
   searchInput().props.onChange({ target: { value: "樱桃" } });
   tree = rerender();
   searchInput().props.onKeyDown({ key: "Enter" });
@@ -4029,7 +4027,7 @@ test("R8：图谱搜索定位——回车选中第一个匹配并居中（缩放
   const circle = flattenVNode(target).find((n) => n.type === "circle");
   assert.equal(view.k, 1, "缩放保持");
   assert.ok(Math.abs(view.x - (400 - circle.props.cx * view.k)) < 1e-9
-    && Math.abs(view.y - (190 - circle.props.cy * view.k)) < 1e-9, "目标节点换算到 800×380 中心");
+    && Math.abs(view.y - (230 - circle.props.cy * view.k)) < 1e-9, "目标节点换算到 800×460 中心");
 
   // id 匹配忽略大小写
   searchInput().props.onChange({ target: { value: "SPK-4" } });
@@ -4074,7 +4072,7 @@ test("R8：图谱实体聚类着色——同实体同色、不同实体不同色
 // ---------------------------------------------------------------------------
 
 // 拥挤夹具：N 个节点链成一串，标题统一较长（估宽 > 120px，必触发截断），
-// forceLayout 归一化后整体挤在 800×380 中央；度数 0..4 交错（半径 10~18）。
+// forceLayout 归一化后整体挤在 800×460 中央；度数 0..4 交错（半径 10~18）。
 function crowdedGraphPayload(count) {
   const nodes = [];
   for (let i = 0; i < count; i++) {
@@ -4197,13 +4195,13 @@ test("025a：图谱标签去重叠——被隐藏的节点四锚皆撞（逐锚�
       { x: cx, y: cy - r - 8, anchor: "middle" },
     ];
     // 0.3 起画布边界纳入锚点判定（与 client/index.js labelLayoutOf 同口径复算）：
-    // 每个锚点先试原位（矩形须完整落在 800×380 viewBox 内且不撞），再试平移钳回
+    // 每个锚点先试原位（矩形须完整落在 800×460 viewBox 内且不撞），再试平移钳回
     // 画布后的位置（不撞即用）；两条路都失败才隐藏。被隐藏的节点因此逐锚复算
     // 「原位不可用（出画布或被撞）且钳回后仍被撞」。
-    const inCanvas = (rc) => rc.x >= 0 && rc.y >= 0 && rc.x + rc.w <= 800 && rc.y + rc.h <= 380;
+    const inCanvas = (rc) => rc.x >= 0 && rc.y >= 0 && rc.x + rc.w <= 800 && rc.y + rc.h <= 460;
     const clampToCanvas = (rc) => ({
       x: Math.min(Math.max(rc.x, 0), 800 - rc.w),
-      y: Math.min(Math.max(rc.y, 0), 380 - rc.h),
+      y: Math.min(Math.max(rc.y, 0), 460 - rc.h),
       w: rc.w, h: rc.h,
     });
     const collides = (rc) => placedRects.some((other) => rectsCollide(rc, other, LBL.gap))
@@ -4404,7 +4402,7 @@ test("U5/0.3：tab 名只讲遗忘，行按钮「稍后再说」带不删除 too
   const tabLabels = flattenVNode(sectionTree)
     .filter((n) => n.type === "button" && String((n.props && n.props.className) || "").includes("dshi_tab"))
     .map((n) => [].concat(n.children).join(""));
-  assert.ok(tabLabels.includes("遗忘"), "tab label is 遗忘 (0.3 只做遗忘)");
+  assert.ok(tabLabels.includes("专题整理"), "tab label is 专题整理 (0.5-13-4 改名)");
   assert.ok(!tabLabels.includes("整理与遗忘"), "old tab label 整理与遗忘 gone");
   assert.ok(!tabLabels.includes("候选 / 计划"), "old tab label 候选 / 计划 gone");
 
@@ -5336,15 +5334,15 @@ test("C3：力导向布局节点上限——超过 500 降级为确定性圆形�
   const tree = rerender();
   const circles = graphCircles(tree);
   assert.equal(circles.length, count, `${count} 个节点全部渲染`);
-  // 圆形静布 = forceLayout 的初始圆环（x=400+260·cosθ, y=190+140·sinθ）：
-  // 结构上逐点验证 ((x-400)/260)²+((y-190)/140)²≈1，证明没有跑 O(n²) 迭代
+  // 圆形静布 = forceLayout 的初始圆环（x=400+260·cosθ, y=230+140·sinθ）：
+  // 结构上逐点验证 ((x-400)/260)²+((y-230)/140)²≈1，证明没有跑 O(n²) 迭代
   for (const c of circles) {
     assert.ok(Number.isFinite(c.props.cx) && Number.isFinite(c.props.cy), "坐标有限");
     const u = (c.props.cx - 400) / 260;
-    const v = (c.props.cy - 190) / 140;
+    const v = (c.props.cy - 230) / 140;
     assert.ok(Math.abs(u * u + v * v - 1) < 1e-6,
       `坐标落在初始椭圆上（圆形静布）：${c.props.cx},${c.props.cy}`);
-    assert.ok(c.props.cx >= 30 && c.props.cx <= 770 && c.props.cy >= 30 && c.props.cy <= 350, "坐标夹在画布内");
+    assert.ok(c.props.cx >= 30 && c.props.cx <= 770 && c.props.cy >= 30 && c.props.cy <= 430, "坐标夹在画布内");
   }
   assert.ok(collectText(tree).includes("圆形静布"), "超限降级提示如实告知用户");
   // 降级路径仍确定性：同一份数据两次渲染逐点一致

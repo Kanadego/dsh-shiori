@@ -322,14 +322,14 @@ test("A1 状态页挂载：auto 卡渲染三档开关 + 上次评估/下次触�
   // 常规路径：宿主 configForms 可用（缺席场景归 A9）。
   const configScope = makeConfigScope({ mode: "active", forgetting: { enabled: true, autoMode: "suggest" } });
   const dsh = makeDsh(world, configScope);
-  const mounted = await harness.mount({ tab: "status", dsh });
+  const mounted = await harness.mount({ tab: "candidates", dsh });
   try {
     mounted.render();
     await mounted.flush();
     mounted.rerender();
 
     const card = mounted.find("[data-role=auto-card]");
-    assert.ok(card, "auto 卡渲染在状态页");
+    assert.ok(card, "auto 卡渲染在专题整理页");
 
     // 三档开关：当前档（suggest）高亮 primary，其余档可点。
     const offBtn = mounted.find("[data-role=auto-mode-off]");
@@ -348,10 +348,10 @@ test("A1 状态页挂载：auto 卡渲染三档开关 + 上次评估/下次触�
     assert.ok(cardText.includes("2026-11-21 10:00:00"), "lastEvaluatedAt 格式化为本地可读时间");
     assert.ok(cardText.includes("人类轮自动触发"), "lastEvaluatedBy 中文化");
     assert.ok(cardText.includes("下次评估窗口 2026-11-22 10:00:00（约 24 小时后）"), "nextTrigger 行（服务端权威）");
-    assert.ok(cardText.includes("熔断状态"), "熔断行");
-    assert.ok(cardText.includes("正常"), "熔断未触发时为正常");
-    assert.ok(cardText.includes("maxOpsPerRun=3"), "auto 参数快照行");
-    assert.ok(cardText.includes("evaluateEveryHours=24"), "auto 参数快照行（第二项）");
+    assert.ok(cardText.includes("保护期状态"), "保护期状态行");
+    assert.ok(cardText.includes("正常"), "保护期未触发时为正常");
+    assert.ok(cardText.includes("每轮最多执行（条） 3") && cardText.includes("（maxOpsPerRun）"), "auto 参数快照行（中文主名 + 小字符号）");
+    assert.ok(cardText.includes("评估周期（小时） 24") && cardText.includes("（evaluateEveryHours）"), "auto 参数快照行（第二项）");
 
     assert.ok(String(suggestBtn.className).includes("dshi_btnPrimary"), "当前档 suggest 高亮");
     assert.ok(!String(offBtn.className).includes("dshi_btnPrimary"), "off 档不高亮");
@@ -387,7 +387,7 @@ test("A2 建议模式：立即评估 → runAutoEvaluation → 候选清单/回�
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld();
   const dsh = makeDsh(world);
-  const mounted = await harness.mount({ tab: "status", dsh });
+  const mounted = await harness.mount({ tab: "candidates", dsh });
   try {
     mounted.render();
     await mounted.flush();
@@ -433,7 +433,7 @@ test("A3 auto 模式：评估 → 一键全应用 → 就地二次确认 → app
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld({ mode: "auto" });
   const dsh = makeDsh(world);
-  const mounted = await harness.mount({ tab: "status", dsh });
+  const mounted = await harness.mount({ tab: "candidates", dsh });
   try {
     mounted.render();
     await mounted.flush();
@@ -532,7 +532,7 @@ test("A4 一键撤销：最近执行记录出撤销按钮 → undoAutoRun({runId
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld({ mode: "auto" });
   const dsh = makeDsh(world);
-  const mounted = await harness.mount({ tab: "status", dsh });
+  const mounted = await harness.mount({ tab: "candidates", dsh });
   try {
     mounted.render();
     await mounted.flush();
@@ -594,7 +594,7 @@ test("A5 模式开关：写 forgetting.autoMode（configForms CAS）→ 服务�
   const configScope = makeConfigScope({ mode: "active", forgetting: { enabled: true, autoMode: "suggest" } });
   const world = makeWorld();
   const dsh = makeDsh(world, configScope);
-  const mounted = await harness.mount({ tab: "status", dsh });
+  const mounted = await harness.mount({ tab: "candidates", dsh });
   try {
     mounted.render();
     await mounted.flush();
@@ -636,7 +636,7 @@ test("A5 模式开关：写 forgetting.autoMode（configForms CAS）→ 服务�
 });
 
 // ── A6 熔断 ─────────────────────────────────────────────────────────────────
-test("A6 熔断：fuse.fused=true → 熔断徽章 + 判定明细行 + 双执行入口禁用并带 title 说明", async () => {
+test("A6 保护期：fuse.fused=true → 保护期徽章 + 判定明细行（技术细节折叠）+ 双执行入口禁用并带 title 说明", async () => {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld({
     mode: "auto",
@@ -653,7 +653,7 @@ test("A6 熔断：fuse.fused=true → 熔断徽章 + 判定明细行 + 双执行
     evalResult: autoEvalDto({ fused: true, candidates: [], plan: { ops: [], truncated: false, groupRestore: [], counts: { cool: 0, restore: 0, total: 0 } } }),
   });
   const dsh = makeDsh(world);
-  const mounted = await harness.mount({ tab: "status", dsh });
+  const mounted = await harness.mount({ tab: "candidates", dsh });
   try {
     mounted.render();
     await mounted.flush();
@@ -661,9 +661,9 @@ test("A6 熔断：fuse.fused=true → 熔断徽章 + 判定明细行 + 双执行
 
     const card = mounted.find("[data-role=auto-card]");
     const cardText = mounted.textOfEl(card);
-    assert.ok(cardText.includes("已熔断（本轮不出任何可执行候选）"), "熔断状态行");
+    assert.ok(cardText.includes("已进入保护期（本轮不出任何可执行候选）"), "保护期状态行");
     const badge = mounted.find("[data-role=auto-fuse-badge]");
-    assert.equal(mounted.textOfEl(badge), "熔断", "徽章文案");
+    assert.equal(mounted.textOfEl(badge), "保护期", "徽章文案");
     assert.ok(String(badge.className).includes("dshi_badgeWarn"), "徽章警示样式");
 
     const reasons = mounted.find("[data-role=auto-fuse-reasons]");
@@ -676,8 +676,8 @@ test("A6 熔断：fuse.fused=true → 熔断徽章 + 判定明细行 + 双执行
     const applyAllBtn = mounted.find("[data-role=auto-apply-all]");
     assert.equal(applySelectedBtn.getAttribute("disabled"), "true", "熔断时应用选中禁用");
     assert.equal(applyAllBtn.getAttribute("disabled"), "true", "熔断时一键全应用禁用");
-    assert.equal(applySelectedBtn.getAttribute("title"), "已熔断：本轮不出任何可执行候选", "应用选中 title 说明");
-    assert.equal(applyAllBtn.getAttribute("title"), "已熔断：本轮不出任何可执行候选", "一键全应用 title 说明");
+    assert.equal(applySelectedBtn.getAttribute("title"), "已进入保护期：本轮不出任何可执行候选", "应用选中 title 说明");
+    assert.equal(applyAllBtn.getAttribute("title"), "已进入保护期：本轮不出任何可执行候选", "一键全应用 title 说明");
   } finally {
     mounted.unmount();
   }
@@ -688,7 +688,7 @@ test("A7 off：立即评估禁用并说明（off 只记账不评估），双执�
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld({ mode: "off" });
   const dsh = makeDsh(world);
-  const mounted = await harness.mount({ tab: "status", dsh });
+  const mounted = await harness.mount({ tab: "candidates", dsh });
   try {
     mounted.render();
     await mounted.flush();
@@ -721,7 +721,7 @@ test("A8 getAutoStatus 失败（shadow / 未启动 / 模块关）：整卡静默
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld({ autoStatusError: Object.assign(new Error("UNSUPPORTED: forgetting module is disabled"), { code: "UNSUPPORTED" }) });
   const dsh = makeDsh(world);
-  const mounted = await harness.mount({ tab: "status", dsh });
+  const mounted = await harness.mount({ tab: "candidates", dsh });
   try {
     mounted.render();
     await mounted.flush();
@@ -729,9 +729,9 @@ test("A8 getAutoStatus 失败（shadow / 未启动 / 模块关）：整卡静默
 
     assert.equal(mounted.find("[data-role=auto-card]"), null, "auto 卡不渲染");
     assert.ok(!mounted.text().includes("记忆整理（自动冷却 / 恢复）"), "标题不出现在任何位置");
-    // 状态页其余部分不受牵连：运行状态卡照常渲染。
-    assert.ok(mounted.text().includes("运行状态"), "状态页本体不受牵连");
-    assert.ok(mounted.text().includes("运行中"), "getStatus 正常回显");
+    // 专题整理页其余部分不受牵连：候选审阅本体与整理说明照常渲染。
+    assert.ok(mounted.text().includes("专题整理：候选审阅与执行"), "专题整理页本体不受牵连");
+    assert.ok(mounted.text().includes("整理功能才启用不到 30 天"), "整理说明句照常回显");
   } finally {
     mounted.unmount();
   }
@@ -742,7 +742,7 @@ test("A9 configForms 缺席（旧宿主）：三档按钮禁用 + 指路文案�
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld();
   const dsh = makeDsh(world); // 不挂 configScope
-  const mounted = await harness.mount({ tab: "status", dsh });
+  const mounted = await harness.mount({ tab: "candidates", dsh });
   try {
     mounted.render();
     await mounted.flush();
@@ -766,7 +766,7 @@ test("A10 suggest 双通道（0.5 第三波）：评估后默认全选；全不�
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld({ mode: "suggest" });
   const dsh = makeDsh(world);
-  const mounted = await harness.mount({ tab: "status", dsh });
+  const mounted = await harness.mount({ tab: "candidates", dsh });
   try {
     mounted.render();
     await mounted.flush();
@@ -822,7 +822,7 @@ test("A11 suggest 双通道（0.5 第三波）：只勾一条时「应用选中�
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld({ mode: "suggest" });
   const dsh = makeDsh(world);
-  const mounted = await harness.mount({ tab: "status", dsh });
+  const mounted = await harness.mount({ tab: "candidates", dsh });
   try {
     mounted.render();
     await mounted.flush();

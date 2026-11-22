@@ -214,9 +214,10 @@ test("U8 壳层：选择器行与 tab 栏包进壳条、壳条不吸顶（S2-4 �
     const inside = flattenVNode(sticky);
     // 会话选择器（首帧 sessions 未出 → input 分支）在壳条内。
     assert.ok(inside.some((n) => n.type === "input" && n.props.placeholder === "session id"), "会话选择器在壳条内");
-    // 九个 tab 按钮都在壳条内（F2 闪回命中 + F4 最近变更 + 0.5-4D 投递体检）。
+    // 0.5-13-4：八页签（概览 / 专题记忆 / 专题整理 / 闪回 / 人设与核心 /
+    // 投递体检 / 最近变更 / 设置）都在壳条内。
     const tabs = inside.filter((n) => n.type === "button" && String(n.props.className).includes("dshi_tab"));
-    assert.equal(tabs.length, 9, "tab 栏在壳条内");
+    assert.equal(tabs.length, 8, "tab 栏在壳条内（八页签）");
     // 提示行不粘：壳条外仍有 hint 容器位（壳条本身不包含 dshi_hint 提示行）。
     assert.equal(flattenVNode(sticky).filter((n) => n.type === "div" && n.props.className === "dshi_hint").length, 0, "提示行不进壳条");
     // S2-3：选择器统一进一条水平行（选工作区 / 选会话 / 记忆卡 / 工作区默认卡 同容器）。
@@ -249,11 +250,11 @@ test("U8 壳层：选择器行与 tab 栏包进壳条、壳条不吸顶（S2-4 �
 // d) tab 图标 + label 冻结
 // ---------------------------------------------------------------------------
 
-// （0.3：第四项 tab 名「整理与遗忘」→「遗忘」，顺序与八项数不变。）
-const TAB_LABELS = ["状态", "最近变更", "记忆内容", "闪回图谱", "遗忘", "专题", "闪回命中", "投递体检", "记忆预算"];
-const TAB_IDS = ["status", "timeline", "memory", "graph", "candidates", "topics", "flashbacks", "delivery", "budgets"];
+// 0.5-13-4：用户拍板的八页签信息架构（唯一被授权重写的 tab 冻结清单）。
+const TAB_LABELS = ["概览", "专题记忆", "专题整理", "闪回", "人设与核心", "投递体检", "最近变更", "设置"];
+const TAB_IDS = ["overview", "topics", "candidates", "flashbacks", "soul", "delivery", "timeline", "budgets"];
 
-test("U8 tab：九项 label 逐字一致（含 F2/F4 两项新增 + 0.5-4D 投递体检），每项带图标（伪元素图形 + 每 tab 专属 mask）", async () => {
+test("U8 tab：八项 label 逐字一致、顺序固定，每项带图标（伪元素图形 + 每 tab 专属 mask）", async () => {
   const fake = makeFakeDocument();
   const previousDocument = globalThis.document;
   globalThis.document = fake.doc;
@@ -261,7 +262,7 @@ test("U8 tab：九项 label 逐字一致（含 F2/F4 两项新增 + 0.5-4D 投�
     const mod = loadClientModule();
     const { cleanup, tree } = await mountSection(mod);
     const tabs = flattenVNode(tree).filter((n) => n.type === "button" && String(n.props.className).includes("dshi_tab"));
-    assert.equal(tabs.length, 9);
+    assert.equal(tabs.length, 8);
     // label 一个字都不许改（与 R8 断言同口径：children join 后逐项比较）。
     assert.deepEqual(tabs.map((n) => [].concat(n.children).join("")), TAB_LABELS);
     // 图标节点存在：按钮带 dshi_tabIco + 每 tab 专属类；图标本体是 CSS mask
@@ -282,6 +283,36 @@ test("U8 tab：九项 label 逐字一致（含 F2/F4 两项新增 + 0.5-4D 投�
     await cleanup();
   } finally {
     globalThis.document = previousDocument;
+  }
+});
+
+// 0.5-13-4：旧 id 别名（status / memory / graph）必须仍可挂载并渲染对应合并页，
+// 高亮落在新 id 的 tab 上——不许死路由、不许灰 tab。
+test("U8 tab 别名：status/memory/graph 旧 id 仍挂载对应页（概览 / 专题记忆 / 闪回），高亮落在新 id", async () => {
+  const cases = [
+    { tab: "status", components: ["StatusTab"], label: "概览" },
+    { tab: "memory", components: ["MemoryTab", "TopicsTab"], label: "专题记忆" },
+    { tab: "graph", components: ["GraphTab", "FlashbacksTab"], label: "闪回" },
+  ];
+  for (const entry of cases) {
+    const { host, render, cleanup } = await mountSectionStateful(s4PanelPreset({ tab: entry.tab }));
+    try {
+      host.cursor.v = 0;
+      const tree = render();
+      const flat = flattenVNode(tree);
+      for (const name of entry.components) {
+        assert.ok(flat.some((n) => typeof n.type === "function" && n.type.name === name),
+          entry.tab + " 别名渲染 " + name);
+      }
+      const onTab = flat.find((n) => n.type === "button" && String(n.props.className).includes("dshi_tabOn"));
+      assert.ok(onTab, entry.tab + "：有且仅有一个高亮 tab");
+      assert.equal(collectText(onTab), entry.label, entry.tab + " 高亮落在 " + entry.label);
+      // 别名不额外长 tab：仍恰好 8 个 tab 按钮。
+      assert.equal(flat.filter((n) => n.type === "button" && String(n.props.className).includes("dshi_tab")).length, 8,
+        entry.tab + "：别名不增加 tab 数量");
+    } finally {
+      await cleanup();
+    }
   }
 });
 

@@ -162,7 +162,7 @@ async function mountPanel(harness, { tab = "delivery", dshCall } = {}) {
   };
 }
 
-test("② tab 栏含「投递体检」label（插在闪回命中与记忆预算之间）", async () => {
+test("② tab 栏含「投递体检」label（八页签：投递体检在闪回与最近变更之间）", async () => {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   await harness.install();
   try {
@@ -175,7 +175,7 @@ test("② tab 栏含「投递体检」label（插在闪回命中与记忆预算�
     const tabButtons = panel.nodes
       .filter((n) => n.type === "button" && String((n.props && n.props.className) || "").includes("dshi_tab"))
       .map((n) => harness.collectText(n));
-    assert.deepEqual(tabButtons, ["状态", "最近变更", "记忆内容", "闪回图谱", "遗忘", "专题", "闪回命中", "投递体检", "记忆预算"]);
+    assert.deepEqual(tabButtons, ["概览", "专题记忆", "专题整理", "闪回", "人设与核心", "投递体检", "最近变更", "设置"]);
     // 合并口径（0.5-4D × 0.5-4C × 0.5-4B × 0.5-5B）：C 线首屏会主动探测一次
     // onboardingPreview，B 线状态页要画冷热分布会读 getTemperatureSettings，5B 起
     // auto 卡首屏还会读一次 getAutoStatus（模式/上次评估/下次触发/熔断），因此这里

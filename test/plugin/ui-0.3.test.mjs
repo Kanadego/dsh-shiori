@@ -164,7 +164,7 @@ function labelRectOfEl(textEl) {
   return { visible, rect: { x, y: textEl.props.y - LBL.height / 2, w, h: LBL.height } };
 }
 
-test("0.3-1 图谱：任何渲染出的标签矩形都完整落在 800×380 viewBox 内（四角/贴边标签不再被裁掉），且两两不相交、不压节点圆", async () => {
+test("0.3-1 图谱：任何渲染出的标签矩形都完整落在 800×460 viewBox 内（四角/贴边标签不再被裁掉），且两两不相交、不压节点圆", async () => {
   const payload = crowdedGraphPayload(40);
   // 挂载并跑完 load effect（getGraph → states[0]）
   const mounted = await mountTabById("graph", "GraphTab");
@@ -181,7 +181,7 @@ test("0.3-1 图谱：任何渲染出的标签矩形都完整落在 800×380 view
   // ① 新口径：标签矩形一律完整在画布内（0.3 前允许排到画布外被 viewBox 裁掉）
   for (const label of labels) {
     const r = label.rect;
-    assert.ok(r.x >= 0 && r.y >= 0 && r.x + r.w <= 800 && r.y + r.h <= 380,
+    assert.ok(r.x >= 0 && r.y >= 0 && r.x + r.w <= 800 && r.y + r.h <= 460,
       `标签完整落在 viewBox 内（got x=${r.x}, y=${r.y}, w=${r.w}, h=${r.h}）`);
   }
   // ② 既有承诺不回退：可见标签两两不相交（留 2px 间距）
@@ -236,7 +236,9 @@ test("0.3-2 最近变更：界面每页 10 条——整批请求 limit=20 只显
   }));
   const dsh = {
     call: async (method, session, payload) => {
-      calls.push(payload);
+      // 0.5-13-4：TimelineTab 还会探测温度审计 / auto run（合并流），只记录
+      // getTimeline 的 wire 调用，避免首屏探测混进分页断言。
+      if (method === "getTimeline") calls.push(payload);
       return pageDto({ items, hasMore: true });
     },
   };
@@ -372,7 +374,7 @@ test("0.3-4 遗忘页：tab 名「遗忘」；整理入口（分析整理候选 
   const tabLabels = flattenVNode(sectionVNode.type(sectionVNode.props))
     .filter((n) => n.type === "button" && String((n.props && n.props.className) || "").includes("dshi_tab"))
     .map((n) => [].concat(n.children).join(""));
-  assert.ok(tabLabels.includes("遗忘"), "tab 改名只讲遗忘");
+  assert.ok(tabLabels.includes("专题整理"), "tab 改名（0.5-13-4：遗忘 → 专题整理）");
   assert.ok(!tabLabels.includes("整理与遗忘"), "旧 tab 名消失");
 
   const data = {
