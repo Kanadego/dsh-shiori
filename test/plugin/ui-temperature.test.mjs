@@ -223,6 +223,12 @@ async function settle(panel, { rounds = 8, advanceMs = 0 } = {}) {
 async function mountBudgets(dsh) {
   const panel = await harness.mount({ tab: "budgets", dsh });
   await settle(panel);
+  // 0.5 批次 13 · s2：温度参数移到「设置 → 温度」子页；挂载后先切子页。
+  // 断言只增不减：原有用例的判据（表单/预览/审计…）逐条保留在下方。
+  assert.ok(panel.find('[data-role="settings-seg"]'), "预算 tab 内渲染子页切换控件");
+  assert.ok(panel.click('[data-role="settings-tab-temp"]'), "切换到「温度」子页");
+  await settle(panel);
+  assert.ok(panel.find('[data-role="settings-page-temp"]'), "温度子页容器出现");
   return panel;
 }
 

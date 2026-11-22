@@ -1484,6 +1484,140 @@ window.__ModuleLoader__.load({
       return parts.length > 0 ? label + "：" + parts.join(" · ") : label;
     }
 
+    // ── F1b 语义召回卡（受控渲染，唯一实现）──────────────────────────────
+    // 0.5 批次 13 · s2：状态页与设置页「向量召回」子页共用这一份渲染（同一批
+    // data-role / 同一文案），状态与动作各自持有、互不共享——不许复制第二份
+    // 实现，也不许两处同时挂载（各页面只渲染当前 tab 的内容）。
+    // 传入的 model 字段：semantic / dlView / dlRunning / rebuildRunning /
+    // rebuildProgress / manualDirDraft / dlUiError / copyFeedback / configScopeNow
+    // + 动作回调 onStartDownload / onCancelDownload / onStartRebuild /
+    // onManualDirChange / onSaveManualDir / onCopyInstallHint。
+    function SemanticRecallCard(model) {
+      var semantic = model.semantic;
+      var dlView = model.dlView;
+      var dlRunning = model.dlRunning;
+      var rebuildRunning = model.rebuildRunning;
+      var rebuildProgress = model.rebuildProgress;
+      var manualDirDraft = model.manualDirDraft;
+      var dlUiError = model.dlUiError;
+      var copyFeedback = model.copyFeedback;
+      var configScopeNow = model.configScopeNow;
+      return h("div", { className: "dshi_card", "data-role": "semantic-recall" },
+        h("div", { className: "dshi_row" },
+          h("span", { className: "dshi_cardTitle" }, "语义召回"),
+          h("span", { className: "dshi_badge" + (semantic.enabled ? "" : " dshi_badgeDim") },
+            semantic.enabled ? "已开启" : "未开启"),
+          // S5 后续：按钮常显，未开启语义召回时禁用并给原因——早前按
+          // semantic.enabled 整体不渲染，用户开了面板找不到「下载模型」入口，
+          // 以为按钮丢了（实机反馈）。
+          h("div", { className: "dshi_row" },
+            h("button", {
+              className: semantic.modelInstalled === false && !dlRunning && semantic.enabled
+                ? "dshi_btn dshi_btnPrimary" : "dshi_btn",
+              onClick: model.onStartDownload,
+              disabled: dlRunning || !semantic.enabled,
+              title: semantic.enabled ? undefined : "先在插件设置里把语义召回（semantic.provider）改成 local 并重启 DSH"
+            }, dlRunning ? "下载中…" : "下载模型"),
+            dlRunning ? h("button", {
+              className: "dshi_btn dshi_btnDanger",
+              onClick: model.onCancelDownload
+            }, "取消") : null,
+            h("button", {
+              className: "dshi_btn",
+              onClick: model.onStartRebuild,
+              disabled: rebuildRunning || !semantic.enabled,
+              title: semantic.enabled ? undefined : "先在插件设置里把语义召回（semantic.provider）改成 local 并重启 DSH"
+            }, rebuildRunning ? "重建中…" : "重建向量"),
+            semantic.enabled ? null : h("span", { className: "dshi_hint" }, "语义召回未开启（provider=none），开启后才能下载模型"))),
+        h("div", { className: "dshi_items" },
+          statusRow("模型目录", semantic.modelDir ? String(semantic.modelDir) : "—",
+            "模型跟数据根走（<dataRoot>/models）：升级插件、重装包都不用重下"),
+          statusRow("模型文件", semantic.modelInstalled === true ? "已安装"
+            : (semantic.modelInstalled === false ? "未安装（点「下载模型」获取）" : "—")),
+          // S5：下载进度（一条 pipeline 拉多个文件，进度由服务端按 total 字节
+          // 加权聚合、按 file 去重；这里只如实显示快照）。
+          (dlView && dlView.phase && dlView.phase !== "idle" && dlView.phase !== "error")
+            ? h(fragment, null,
+                statusRow("下载进度", downloadPhaseText(dlView)),
+                h("div", {
+                  className: "dshi_bar",
+                  role: "progressbar",
+                  "aria-label": "模型下载进度",
+                  "aria-valuemin": 0,
+                  "aria-valuemax": 100,
+                  "aria-valuenow": typeof dlView.percent === "number" ? dlView.percent : 0
+                },
+                  h("div", {
+                    className: "dshi_barFill",
+                    style: { width: (typeof dlView.percent === "number" ? dlView.percent : 0) + "%" }
+                  })))
+            : null,
+          statusRow("提供方", semanticProviderText(semantic), "provider=" + String(semantic.provider != null ? semantic.provider : "—")),
+          statusRow("就绪状态", semanticReadyText(semantic)),
+          statusRow("已建向量数", semantic.vectors === null || semantic.vectors === undefined ? "—" : String(semantic.vectors) + " 张卡片"),
+          statusRow("重建进度", rebuildPhaseText(semantic, rebuildProgress),
+            rebuildProgress !== null && rebuildProgress.phase === "error" ? "可再次点击「重建向量」重试（增量续传，已完成的卡片不会重算）" : null),
+          dlView && dlView.phase === "done"
+            ? h("div", { className: "dshi_ok" }, "模型已就绪（已通过维度与文件校验）；点「重建向量」建立/更新索引。")
+            : null,
+          dlView && dlView.phase === "cancelled"
+            ? h("div", { className: "dshi_hint" }, "下载已取消，状态回到未就绪；需要时可再次点「下载模型」。")
+            : null,
+          semantic.lastError
+            ? h("div", { className: "dshi_error" }, "上次召回错误：" + String(semantic.lastError))
+            : null),
+        // S5：双源都失败的报错卡片——说明原因、手动目录输入框、可一键复制的
+        // 安装提示词（含规范目录写法；URL 由服务端 installHint 下发）。
+        // S2-5：缺可选依赖不是故障——卡片用中性 warn 样式（不再红色 ErrorBox），
+        // 文案说明「可选能力、只影响语义召回、其余功能不受影响」。
+        dlView && dlView.phase === "error"
+          ? h("div", {
+              className: dlView.code === "DOWNLOAD_DEPENDENCY_MISSING" ? "dshi_warn" : "dshi_error",
+              "data-role": "download-error",
+              "data-tone": dlView.code === "DOWNLOAD_DEPENDENCY_MISSING" ? "warn" : "error"
+            },
+              h("div", null, "模型下载失败：" + (dlView.error
+                ? String(dlView.error)
+                : "两个下载源都不可达。")),
+              h("div", { className: "dshi_hint" },
+                // S5 复审 P1 + 0.4 收账遗留 1：归因文案按服务端下发的 code 分
+                // 三支（本地常量与语义层错误码同字符串）——缺依赖 / 依赖已装
+                // 但加载失败 / 其余（网络）。加载失败支明确「不是网络问题」，
+                // 不复用缺依赖那句（装依赖没用）。
+                // S2-5：缺依赖支改为「可选能力缺失」口径——这是插件没装可
+                // 选依赖，不是故障也不是网络问题；缺它只影响语义召回（向量
+                // 检索），关键词召回、记忆读写等其他功能照常可用。
+                dlView.code === "DOWNLOAD_DEPENDENCY_MISSING"
+                  ? "这不是插件故障：@huggingface/transformers 是可选依赖（未随插件包安装），缺它只影响语义召回（向量检索），关键词召回与其他记忆功能都不受影响。想要语义召回时，可在插件目录执行 npm i @huggingface/transformers 后重试，或用下方任一方式手动安装："
+                  : dlView.code === "DOWNLOAD_RUNTIME_LOAD_FAILED"
+                    ? "可选依赖已安装但加载失败（不是网络问题）：单纯 npm i @huggingface/transformers 不一定解决问题，请按上方错误信息处理，或用下方任一方式手动安装："
+                    : "两个下载源都失败通常是网络原因（镜像 / 官方源均不可达，或代理未开）。请检查网络后点「下载模型」重试，或用下方任一方式手动安装："),
+              h("div", { className: "dshi_hint" },
+                "也可以手动指定已备好的模型缓存目录（目录结构必须是 <缓存根>/<org>/<model>/，保存后重新点「下载模型」即可，已存在的文件不会重下）："),
+              h("div", { className: "dshi_row" },
+                h("input", {
+                  className: "dshi_input",
+                  value: manualDirDraft,
+                  placeholder: "例如 /data/hf-cache（其下有 Xenova/bge-small-zh-v1.5）",
+                  onChange: function (event) { model.onManualDirChange(event.target.value); }
+                }),
+                h("button", {
+                  className: "dshi_btn",
+                  onClick: model.onSaveManualDir,
+                  disabled: !configScopeNow
+                }, "保存目录")),
+              configScopeNow ? null
+                : h("div", { className: "dshi_hint" },
+                    "设置命名空间不可用（configForms 缺席）：无法在此保存目录，请在宿主插件配置页设置 semantic.local.cacheDir。"),
+              ErrorBox(dlUiError),
+              dlView.installHint ? h("pre", { className: "dshi_pre" }, String(dlView.installHint)) : null,
+              dlView.installHint ? h("div", { className: "dshi_row" },
+                h("button", { className: "dshi_btn", onClick: model.onCopyInstallHint }, "复制安装提示词"),
+                copyFeedback ? h("span", { className: "dshi_hint" }, copyFeedback) : null)
+                : null)
+          : null);
+    }
+
     function StatusTab(props) {
       var state = useState(null);
       var status = state[0];
@@ -2916,121 +3050,25 @@ window.__ModuleLoader__.load({
             }))) : null,
           // F1b：语义召回只读状态 + 重建向量；S5：+ 下载模型（数据全部来自
           // diagnostics.semantic；旧服务端没有该字段时整块不渲染，不报错）。
-          semantic ? h("div", { className: "dshi_card" },
-            h("div", { className: "dshi_row" },
-              h("span", { className: "dshi_cardTitle" }, "语义召回"),
-              h("span", { className: "dshi_badge" + (semantic.enabled ? "" : " dshi_badgeDim") },
-                semantic.enabled ? "已开启" : "未开启"),
-              // S5 后续：按钮常显，未开启语义召回时禁用并给原因——早前按
-              // semantic.enabled 整体不渲染，用户开了面板找不到「下载模型」入口，
-              // 以为按钮丢了（实机反馈）。
-              h("div", { className: "dshi_row" },
-                h("button", {
-                  className: semantic.modelInstalled === false && !dlRunning && semantic.enabled
-                    ? "dshi_btn dshi_btnPrimary" : "dshi_btn",
-                  onClick: startDownload,
-                  disabled: dlRunning || !semantic.enabled,
-                  title: semantic.enabled ? undefined : "先在插件设置里把语义召回（semantic.provider）改成 local 并重启 DSH"
-                }, dlRunning ? "下载中…" : "下载模型"),
-                dlRunning ? h("button", {
-                  className: "dshi_btn dshi_btnDanger",
-                  onClick: cancelDownload
-                }, "取消") : null,
-                h("button", {
-                  className: "dshi_btn",
-                  onClick: startRebuild,
-                  disabled: rebuildRunning || !semantic.enabled,
-                  title: semantic.enabled ? undefined : "先在插件设置里把语义召回（semantic.provider）改成 local 并重启 DSH"
-                }, rebuildRunning ? "重建中…" : "重建向量"),
-                semantic.enabled ? null : h("span", { className: "dshi_hint" }, "语义召回未开启（provider=none），开启后才能下载模型"))),
-            h("div", { className: "dshi_items" },
-              statusRow("模型目录", semantic.modelDir ? String(semantic.modelDir) : "—",
-                "模型跟数据根走（<dataRoot>/models）：升级插件、重装包都不用重下"),
-              statusRow("模型文件", semantic.modelInstalled === true ? "已安装"
-                : (semantic.modelInstalled === false ? "未安装（点「下载模型」获取）" : "—")),
-              // S5：下载进度（一条 pipeline 拉多个文件，进度由服务端按 total 字节
-              // 加权聚合、按 file 去重；这里只如实显示快照）。
-              (dlView && dlView.phase && dlView.phase !== "idle" && dlView.phase !== "error")
-                ? h(fragment, null,
-                    statusRow("下载进度", downloadPhaseText(dlView)),
-                    h("div", {
-                      className: "dshi_bar",
-                      role: "progressbar",
-                      "aria-label": "模型下载进度",
-                      "aria-valuemin": 0,
-                      "aria-valuemax": 100,
-                      "aria-valuenow": typeof dlView.percent === "number" ? dlView.percent : 0
-                    },
-                      h("div", {
-                        className: "dshi_barFill",
-                        style: { width: (typeof dlView.percent === "number" ? dlView.percent : 0) + "%" }
-                      })))
-                : null,
-              statusRow("提供方", semanticProviderText(semantic), "provider=" + String(semantic.provider != null ? semantic.provider : "—")),
-              statusRow("就绪状态", semanticReadyText(semantic)),
-              statusRow("已建向量数", semantic.vectors === null || semantic.vectors === undefined ? "—" : String(semantic.vectors) + " 张卡片"),
-              statusRow("重建进度", rebuildPhaseText(semantic, rebuildProgress),
-                rebuildProgress !== null && rebuildProgress.phase === "error" ? "可再次点击「重建向量」重试（增量续传，已完成的卡片不会重算）" : null),
-              dlView && dlView.phase === "done"
-                ? h("div", { className: "dshi_ok" }, "模型已就绪（已通过维度与文件校验）；点「重建向量」建立/更新索引。")
-                : null,
-              dlView && dlView.phase === "cancelled"
-                ? h("div", { className: "dshi_hint" }, "下载已取消，状态回到未就绪；需要时可再次点「下载模型」。")
-                : null,
-              semantic.lastError
-                ? h("div", { className: "dshi_error" }, "上次召回错误：" + String(semantic.lastError))
-                : null),
-            // S5：双源都失败的报错卡片——说明原因、手动目录输入框、可一键复制的
-            // 安装提示词（含规范目录写法；URL 由服务端 installHint 下发）。
-            // S2-5：缺可选依赖不是故障——卡片用中性 warn 样式（不再红色 ErrorBox），
-            // 文案说明「可选能力、只影响语义召回、其余功能不受影响」。
-            dlView && dlView.phase === "error"
-              ? h("div", {
-                  className: dlView.code === "DOWNLOAD_DEPENDENCY_MISSING" ? "dshi_warn" : "dshi_error",
-                  "data-role": "download-error",
-                  "data-tone": dlView.code === "DOWNLOAD_DEPENDENCY_MISSING" ? "warn" : "error"
-                },
-                  h("div", null, "模型下载失败：" + (dlView.error
-                    ? String(dlView.error)
-                    : "两个下载源都不可达。")),
-                  h("div", { className: "dshi_hint" },
-                    // S5 复审 P1 + 0.4 收账遗留 1：归因文案按服务端下发的 code 分
-                    // 三支（本地常量与语义层错误码同字符串）——缺依赖 / 依赖已装
-                    // 但加载失败 / 其余（网络）。加载失败支明确「不是网络问题」，
-                    // 不复用缺依赖那句（装依赖没用）。
-                    // S2-5：缺依赖支改为「可选能力缺失」口径——这是插件没装可
-                    // 选依赖，不是故障也不是网络问题；缺它只影响语义召回（向量
-                    // 检索），关键词召回、记忆读写等其他功能照常可用。
-                    dlView.code === "DOWNLOAD_DEPENDENCY_MISSING"
-                      ? "这不是插件故障：@huggingface/transformers 是可选依赖（未随插件包安装），缺它只影响语义召回（向量检索），关键词召回与其他记忆功能都不受影响。想要语义召回时，可在插件目录执行 npm i @huggingface/transformers 后重试，或用下方任一方式手动安装："
-                      : dlView.code === "DOWNLOAD_RUNTIME_LOAD_FAILED"
-                        ? "可选依赖已安装但加载失败（不是网络问题）：单纯 npm i @huggingface/transformers 不一定解决问题，请按上方错误信息处理，或用下方任一方式手动安装："
-                        : "两个下载源都失败通常是网络原因（镜像 / 官方源均不可达，或代理未开）。请检查网络后点「下载模型」重试，或用下方任一方式手动安装："),
-                  h("div", { className: "dshi_hint" },
-                    "也可以手动指定已备好的模型缓存目录（目录结构必须是 <缓存根>/<org>/<model>/，保存后重新点「下载模型」即可，已存在的文件不会重下）："),
-                  h("div", { className: "dshi_row" },
-                    h("input", {
-                      className: "dshi_input",
-                      value: manualDirDraft,
-                      placeholder: "例如 /data/hf-cache（其下有 Xenova/bge-small-zh-v1.5）",
-                      onChange: function (event) { setManualDirDraft(event.target.value); }
-                    }),
-                    h("button", {
-                      className: "dshi_btn",
-                      onClick: saveManualDir,
-                      disabled: !configScopeNow
-                    }, "保存目录")),
-                  configScopeNow ? null
-                    : h("div", { className: "dshi_hint" },
-                        "设置命名空间不可用（configForms 缺席）：无法在此保存目录，请在宿主插件配置页设置 semantic.local.cacheDir。"),
-                  ErrorBox(dlUiError),
-                  dlView.installHint ? h("pre", { className: "dshi_pre" }, String(dlView.installHint)) : null,
-                  dlView.installHint ? h("div", { className: "dshi_row" },
-                    h("button", { className: "dshi_btn", onClick: copyInstallHint }, "复制安装提示词"),
-                    copyFeedback ? h("span", { className: "dshi_hint" }, copyFeedback) : null)
-                    : null)
-              : null)
-            : null,
+          // 渲染走 SemanticRecallCard（与设置页「向量召回」子页同一份实现）；
+          // 本轮状态页这份保留不动（页签重组在下一单）。
+          semantic ? SemanticRecallCard({
+            semantic: semantic,
+            dlView: dlView,
+            dlRunning: dlRunning,
+            rebuildRunning: rebuildRunning,
+            rebuildProgress: rebuildProgress,
+            manualDirDraft: manualDirDraft,
+            dlUiError: dlUiError,
+            copyFeedback: copyFeedback,
+            configScopeNow: configScopeNow,
+            onStartDownload: startDownload,
+            onCancelDownload: cancelDownload,
+            onStartRebuild: startRebuild,
+            onManualDirChange: setManualDirDraft,
+            onSaveManualDir: saveManualDir,
+            onCopyInstallHint: copyInstallHint
+          }) : null,
           // 0.5 批次 4 · B 线：冷热分布（simulateTemperature base.tiers）。
           // 0.5 批次 5 · B 线：上次评估 / 下次触发 / 熔断改由下方 auto 卡用
           // getAutoStatus 真实数据展示——原先的「尚未评估」占位行与
@@ -6207,6 +6245,37 @@ window.__ModuleLoader__.load({
           pageBar(topicsPageData.page, topicsPageData.totalPages, setTopicsPage, busy)) : null);
     }
 
+    // ── 0.5 批次 13 · s2：设置页四个子页（预算 / 温度 / 闪回卡片 / 向量召回）──
+    // 只做页内重组：tab id 仍 budgets、tab 名仍「记忆预算」、不新增 RPC。
+    // 显隐表显式覆盖四个 id；未知 id 一律回落预算页——上一版预览在这里出过
+    // 「点某页空白」的 bug（显隐表漏项 → 四页全部不渲染 → 白屏）。
+    var SETTINGS_SUBPAGE_IDS = ["budget", "temp", "spark", "recall"];
+    var SETTINGS_SUBPAGE_LABELS = { budget: "预算", temp: "温度", spark: "闪回卡片", recall: "向量召回" };
+    function settingsPageOf(id) {
+      var key = String(id == null ? "" : id);
+      for (var i = 0; i < SETTINGS_SUBPAGE_IDS.length; i += 1) {
+        if (SETTINGS_SUBPAGE_IDS[i] === key) return key;
+      }
+      return "budget";
+    }
+
+    // 温度参数中文主名（界面名主位；symbol 名缩成小字放同一行）。键集合与
+    // src/forgetting/params.mjs 的 12 项一一对应；未知键回落显示原键名。
+    var TEMPERATURE_LABELS = {
+      s0Days: "新主题半衰期（天）",
+      sMaxDays: "半衰期上限（天）",
+      consolidateGain: "巩固增益",
+      readAlpha: "读取加热系数",
+      updatedFloor: "改动后保底温度",
+      readDedupHours: "去重窗口（小时）",
+      coolThreshold: "冷却线",
+      restoreThreshold: "恢复线",
+      minCooldownDays: "最短冷却天数",
+      minRestoreGraceDays: "恢复后保护期（天）",
+      maxOpsPerRun: "每轮最多执行（条）",
+      evaluateEveryHours: "评估周期（小时）"
+    };
+
     // ── U2 预算页重写（标杆页，其他页对齐它的标准） ─────────────────────────
     // - 命名三层分离：界面名主位；技术名进 tooltip（title）与页尾「技术细节」；
     //   机制说明一律写成后果描述（例：超过这个长度就不再接受新增内容，只能删减）。
@@ -6426,17 +6495,20 @@ window.__ModuleLoader__.load({
       var fillColor = level === "danger"
         ? "var(--dshi-danger)"
         : (level === "warn" ? "var(--dshi-warn)" : "var(--dshi-safe)");
-      return h("div", { className: "dshi_preview" },
+      return h("div", { className: "dshi_preview", "data-role": "budget-occupancy" },
         h("div", { className: "dshi_row" },
           h("span", { className: "dshi_cardTitle" }, "当前占用"),
           h("span", { className: "dshi_hint" },
             used === null
               ? "占用数据不可用（未取到 getStatus 的 occupancy；切换会话或刷新后重试）"
               : "记忆核心已用 " + used + " / " + cap + " 字符")),
+        // 占用条四色（全部走 token）：绿=已用（按占用分档）、橙=软水位、红=硬阀、
+        // 灰=硬顶（右上角的边界刻度，硬顶本身不可调整到占用之上）。
         h("div", { className: "dshi_track" },
-          used !== null ? h("div", { className: "dshi_trackFill", style: { width: pct(used) + "%", background: fillColor } }) : null,
-          Number.isInteger(soft) ? h("div", { className: "dshi_trackMark", style: { left: pct(soft) + "%", background: "var(--dshi-warn)" }, title: "软水位 " + soft + " 字符" }) : null,
-          Number.isInteger(hard) ? h("div", { className: "dshi_trackMark", style: { left: pct(hard) + "%", background: "var(--dshi-danger)" }, title: "硬闸 " + hard + " 字符" }) : null),
+          used !== null ? h("div", { className: "dshi_trackFill", "data-role": "budget-occupancy-fill", style: { width: pct(used) + "%", background: fillColor } }) : null,
+          Number.isInteger(soft) ? h("div", { className: "dshi_trackMark", "data-role": "budget-occupancy-soft", style: { left: pct(soft) + "%", background: "var(--dshi-warn)" }, title: "软水位 " + soft + " 字符" }) : null,
+          Number.isInteger(hard) ? h("div", { className: "dshi_trackMark", "data-role": "budget-occupancy-hard", style: { left: pct(hard) + "%", background: "var(--dshi-danger)" }, title: "硬闸 " + hard + " 字符" }) : null,
+          h("div", { className: "dshi_trackMark", "data-role": "budget-occupancy-cap", style: { right: 0, background: "var(--dshi-text-dim)" }, title: "硬顶 " + (Number.isInteger(cap) ? cap : "—") + " 字符（不可越过）" })),
         h("div", { className: "dshi_trackLegend" },
           "软水位 " + soft, "·", "硬闸 " + hard, "·", "硬顶 " + cap,
           level === "warn" ? "—— 已过软水位：新增内容开始被压缩着写" : null,
@@ -6479,6 +6551,12 @@ window.__ModuleLoader__.load({
       var tempSaveState = useState(null);
       var tempSave = tempSaveState[0];
       var setTempSave = tempSaveState[1];
+      // 0.5 批次 13 · s2：当前子页（组件本地 state，重渲染不丢；未知值由
+      // settingsPageOf 回落预算页）。新 state 一律追加在既有 state 之后。
+      var settingsPageState = useState("budget");
+      var settingsPageRaw = settingsPageState[0];
+      var setSettingsPageRaw = settingsPageState[1];
+      var settingsPage = settingsPageOf(settingsPageRaw);
       // S2-3：「工作区默认卡」编辑已移到壳条顶部选择器区（与「选工作区」「选会话」
       // 同一水平行），本页不再持有 persona 相关 state。老测试预置的 states[0..4]
       // 下标不变。
@@ -6520,7 +6598,9 @@ window.__ModuleLoader__.load({
       // 展示用草稿：用户改过的字段优先，其余取快照换算值（老配置只有 ratio 时
       // 按 hardCapChars × ratio 换算成水位）。
       var snapshotDraft = value ? extractBudgetDraft(value.budgets) : null;
-      var draft = draftEdits
+      // snapshotDraft 为空时忽略残留草稿（切会话 / 快照暂不可用时两者可能不同步，
+      // 直接展开 null 会白屏）。
+      var draft = draftEdits && snapshotDraft
         ? { core: assign({}, snapshotDraft.core, draftEdits.core), persona: assign({}, snapshotDraft.persona, draftEdits.persona), spark: assign({}, snapshotDraft.spark, draftEdits.spark) }
         : snapshotDraft;
       var fieldErrors = draft ? budgetDraftFieldErrors(draft) : {};
@@ -6777,7 +6857,15 @@ window.__ModuleLoader__.load({
                   change(path, Number.isFinite(parsed) ? parsed : text);
                 }
               }),
-              h("span", { className: "dshi_hint" }, "字符 / 硬顶 " + (Number.isInteger(cap) ? cap : "—"))),
+              // 字符数 + 百分比（0.5 批次 13 评审口径）：百分比由
+              // softChars|hardChars ÷ hardCapChars 现算，只显示、不落盘、
+              // 不参与校验（保存仍是字符数权威）。
+              h("span", { className: "dshi_hint", "data-role": "water-percent-" + key },
+                (Number.isInteger(current) ? current + " 字符" : "—")
+                + (Number.isInteger(current) && Number.isInteger(cap) && cap > 0
+                  ? " · 占硬顶 " + (Math.round((current / cap) * 1000) / 10) + "%"
+                  : "")
+                + " / 硬顶 " + (Number.isInteger(cap) ? cap : "—"))),
               h("button", {
                 className: "dshi_btn", type: "button", title: "恢复出厂默认 " + tech,
                 onClick: function () { resetField(path); }
@@ -6876,8 +6964,12 @@ window.__ModuleLoader__.load({
                 var max = spec.max !== undefined ? String(spec.max) : undefined;
                 var range = (min !== undefined ? min : "—") + " ~ " + (max !== undefined ? max : "—");
                 return h("div", { className: "dshi_fieldRow", key: key, "data-temp-key": key },
+                  // 中文主名在左（界面名主位）；符号名 + 单位缩成小字同一行，
+                  // 方便对照文档 / 服务端参数名，又不抢视觉主位。
                   h("label", { className: "dshi_label", title: spec.description || key },
-                    String(key) + (spec.unit ? "（" + spec.unit + "）" : ""),
+                    TEMPERATURE_LABELS[key] || String(key),
+                    h("span", { style: { fontSize: "11px", color: "var(--dshi-text-dim)", fontWeight: 400 } },
+                      " " + String(key) + (spec.unit ? "（" + spec.unit + "）" : "")),
                     changed ? h("span", { className: "dshi_modBadge" }, "已修改") : null),
                   h("div", { className: "dshi_hint" },
                     "当前 " + tempNumberText(tempCurrent ? tempCurrent[key] : undefined)
@@ -6967,8 +7059,29 @@ window.__ModuleLoader__.load({
                           return String(change.key) + "：" + tempNumberText(change.from) + " → " + tempNumberText(change.to);
                         }).join("；")));
                     })))));
-      return h(fragment, null,
-        h("form", {
+      // 子页切换控件：四个按钮的 id 与显隐表一一对应；当前页高亮 + aria-pressed。
+      // 样式走内联对象（不新增 CSS 规则：内嵌 CSS 与 client/shiori.css 有
+      // 逐字节一致性测试，该文件不在本子任务白名单内）。
+      var settingsTabButton = function (id) {
+        var onPage = settingsPage === id;
+        return h("button", {
+          key: id, type: "button",
+          style: {
+            border: "1px solid " + (onPage ? "var(--dshi-warn)" : "transparent"),
+            background: onPage ? "var(--dshi-bg-card)" : "none",
+            color: onPage ? "var(--dshi-text)" : "var(--dshi-text-dim)",
+            font: "inherit", fontSize: "12px", borderRadius: "6px",
+            padding: "4px 12px", cursor: "pointer",
+            fontWeight: onPage ? 600 : 400
+          },
+          "data-role": "settings-tab-" + id,
+          "aria-pressed": onPage ? "true" : "false",
+          onClick: function () { setSettingsPageRaw(id); }
+        }, SETTINGS_SUBPAGE_LABELS[id]);
+      };
+      // 预算子页：现有预算输入全保留（现有测试按默认渲染的 11 个 input 冻结），
+      // 另加 L0「不计入水位」说明与四色占用条（budgetPreviewBar 内）。
+      var budgetPageBody = h("form", {
         className: "dshi_card",
         onSubmit: function (event) { event.preventDefault(); save(); }
       },
@@ -6979,14 +7092,16 @@ window.__ModuleLoader__.load({
         value && draft ? budgetPreviewBar(draft, occupancy) : null,
         value && draft ? h("div", { className: "dshi_items" },
           groupCard("L0", "人设卡", "写给模型的人设与约定，整段注入每次对话。", [
-            integerField("persona.maxChars")
+            integerField("persona.maxChars"),
+            h("div", { className: "dshi_hint", "data-role": "persona-max-note" },
+              "不计入水位：人设卡整段注入每次对话，不参与记忆核心（L1）的软 / 硬水位统计。")
           ]),
           groupCard("L1", "记忆核心", "模型长期维护的记忆正文：超过软水位开始压缩，越过硬闸只减不增。", [
             integerField("core.hardCapChars"),
             waterField("softChars", "软水位", "core.softChars（旧 core.softRatio，保存时清除）", "超过这个长度就不再原样接受新增内容，开始压缩着写。"),
             waterField("hardChars", "硬水位（硬闸）", "core.hardChars（旧 core.hardRatio，保存时清除）", "越过这道闸就不再接受新增内容，只能删减。")
           ]),
-          groupCard("L2", "闪回卡片", "小张的独立记忆卡，按触发词召回后作为附件投递。", [
+          groupCard("L2", "闪回卡片", "小张的独立记忆卡，按触发词召回后作为附件投递；逐项说明见「闪回卡片」子页。", [
             integerField("spark.maxChars"),
             integerField("spark.inlineMaxChars"),
             integerField("spark.maxCards"),
@@ -7010,8 +7125,298 @@ window.__ModuleLoader__.load({
             "旧版占比字段（core.softRatio / core.hardRatio）已在界面隐藏，保存时自动清除、按水位生效；记忆目标长度（core.targetChars）不在界面出现，保存时自动收敛到「软水位 ~ 硬水位-1」之间并写回。",
             snapshot ? " rev " + String(snapshot.revision) : null,
             "。"),
-          value ? h("pre", { className: "dshi_pre" }, stableStringify(value.budgets)) : null)),
-        temperatureCard);
+          value ? h("pre", { className: "dshi_pre" }, stableStringify(value.budgets)) : null));
+      // 闪回卡片子页：只接线后端已有字段（budgets.spark 5 项 + persona.maxChars），
+      // 与预算子页共用同一份草稿（在哪页改都同步；保存仍在预算子页一次写入）。
+      var sparkPageBody = h("div", { className: "dshi_card", "data-role": "settings-spark" },
+        h("div", { className: "dshi_row" },
+          h("span", { className: "dshi_cardTitle" }, "闪回卡片"),
+          h("span", { className: "dshi_titleSub" }, "L2 独立记忆卡；下面每一项都直接影响召回与投递")),
+        h("div", { className: "dshi_hint" },
+          "这些值与「预算」子页共用同一份草稿：在哪页修改都会同步；保存请回「预算」子页一次写入。"),
+        value && draft ? h("div", { className: "dshi_items" },
+          integerField("persona.maxChars"),
+          h("div", { className: "dshi_hint", "data-role": "spark-persona-note" },
+            "人设卡属 L0：整段注入每次对话，不计入记忆核心（L1）的水位。"),
+          integerField("spark.maxChars"),
+          h("div", { className: "dshi_hint" }, "一轮投递的闪回卡片文本总长超过它就发不出去（超出即改走外置摘要 / 分批）。"),
+          integerField("spark.inlineMaxChars"),
+          h("div", { className: "dshi_hint" }, "卡片正文短于它就整篇投递；长于它只发摘要 + 卡片 id。"),
+          integerField("spark.maxCards"),
+          h("div", { className: "dshi_hint" }, "一轮投递最多带这么多张闪回卡，超出的会被截断，防止刷屏。"),
+          integerField("spark.seedCount"),
+          h("div", { className: "dshi_hint" }, "每轮最多召回的种子素材条数；种子数 + 关联数不得超过单次最多卡片数。"),
+          integerField("spark.linkCount"),
+          h("div", { className: "dshi_hint" }, "每轮最多附带的 1 跳关联条数；种子数 + 关联数不得超过单次最多卡片数。"),
+          h("div", { className: "dshi_hint", "data-role": "spark-pending-backend" },
+            "回看天数等其余闪回卡片设置：待后端提供。"))
+          : h("div", { className: "dshi_loading" }, snapshot && snapshot.status !== "ready" ? "设置命名空间不可用（服务端未注册 shiori 命名空间？）" : "加载中…"));
+      // 显隐表：四个 id 一一对应页面容器；未知 id 已在 settingsPageOf 回落 budget，
+      // 这里再以 budget 兜底，保证任何输入都不会渲染出空白页。
+      var settingsPageStyle = { display: "flex", flexDirection: "column", gap: "12px" };
+      var settingsPageElements = {
+        budget: h("div", { style: settingsPageStyle, "data-role": "settings-page-budget", key: "budget" }, budgetPageBody),
+        temp: h("div", { style: settingsPageStyle, "data-role": "settings-page-temp", key: "temp" }, temperatureCard),
+        spark: h("div", { style: settingsPageStyle, "data-role": "settings-page-spark", key: "spark" }, sparkPageBody),
+        recall: h("div", { style: settingsPageStyle, "data-role": "settings-page-recall", key: "recall" },
+          h(SemanticRecallPanel, { dsh: props.dsh, sessionId: props.sessionId, scope: scope }))
+      };
+      return h(fragment, null,
+        h("div", {
+          style: {
+            display: "flex", gap: "4px", flexWrap: "wrap",
+            border: "1px solid var(--dsw-alias-border-l2,#dce2eb)",
+            background: "var(--dsw-alias-bg-layer-2,transparent)",
+            borderRadius: "8px", padding: "4px"
+          },
+          "data-role": "settings-seg"
+        }, SETTINGS_SUBPAGE_IDS.map(settingsTabButton)),
+        settingsPageElements[settingsPage] || settingsPageElements.budget);
+    }
+
+    // ── 0.5 批次 13 · s2：设置页「向量召回」子页（F1b 块搬入）──────────────
+    // 内容与 StatusTab 的语义召回卡同构：同一批模块级 helper（rebuildPhaseText /
+    // downloadPhaseText / semanticProviderText / semanticReadyText）、同样的按钮
+    // 文案与 data-role（download-error 等）、同一套 executeTool 保留名。状态由
+    // 本组件自持——既有状态页的 hooks 顺序被外层测试按 states 下标冻结，不能把
+    // 块里的 state 搬到别的组件再往回长。
+    function SemanticRecallPanel(props) {
+      var statusState = useState(null);
+      var status = statusState[0];
+      var setStatus = statusState[1];
+      var errorState = useState(null);
+      var error = errorState[0];
+      var setError = errorState[1];
+      var rebuildState = useState(null);
+      var rebuildProgress = rebuildState[0];
+      var setRebuildProgress = rebuildState[1];
+      var dlProgressState = useState(null);
+      var dlProgress = dlProgressState[0];
+      var setDlProgress = dlProgressState[1];
+      var manualDirState = useState("");
+      var manualDirDraft = manualDirState[0];
+      var setManualDirDraft = manualDirState[1];
+      var dlUiErrorState = useState(null);
+      var dlUiError = dlUiErrorState[0];
+      var setDlUiError = dlUiErrorState[1];
+      var copyFeedbackState = useState(null);
+      var copyFeedback = copyFeedbackState[0];
+      var setCopyFeedback = copyFeedbackState[1];
+      // 会话切换 / 卸载：镜像 ref 与存活 ref（同 StatusTab 的 P1-1 纪律）。
+      var sidRef = useRef(props.sessionId);
+      sidRef.current = props.sessionId;
+      var aliveRef = useRef(false);
+      useEffect(function () {
+        aliveRef.current = true;
+        return function () { aliveRef.current = false; };
+      }, []);
+      var aliveFor = function (sid) { return aliveRef.current && sidRef.current === sid; };
+      var load = async function () {
+        setError(null);
+        try {
+          var result = await props.dsh.call("getStatus", props.sessionId, {});
+          setStatus(result);
+        } catch (e) {
+          setStatus(null);
+          if (!reportSessionUnavailable(e, props, setError)) setError(e);
+        }
+      };
+      useEffect(function () { load(); }, [props.sessionId]);
+      var semantic = status && status.diagnostics && typeof status.diagnostics === "object" && !Array.isArray(status.diagnostics)
+        ? (status.diagnostics.semantic && typeof status.diagnostics.semantic === "object" ? status.diagnostics.semantic : null)
+        : null;
+      var rebuildRunning = rebuildProgress !== null && rebuildProgress.running === true;
+      var startRebuild = async function () {
+        if (!semantic || !semantic.enabled || rebuildRunning) return;
+        var sid = props.sessionId;
+        setRebuildProgress({ running: true, phase: "starting", done: 0, total: null, error: null });
+        try {
+          await props.dsh.call("executeTool", sid, { name: SEMANTIC_REBUILD_TOOL, args: {} });
+        } catch (e) {
+          setRebuildProgress({ running: false, phase: "error", error: (e && e.message) ? String(e.message) : String(e) });
+          return;
+        }
+        await pollStatus({
+          dsh: props.dsh,
+          sid: sid,
+          intervalMs: REBUILD_POLL_MS,
+          alive: function () { return aliveFor(sid); },
+          extract: function (fresh) {
+            return fresh && fresh.diagnostics && fresh.diagnostics.semantic ? fresh.diagnostics.semantic : null;
+          },
+          setStatus: setStatus,
+          onSample: function (freshSemantic) {
+            var rebuild = freshSemantic.rebuild || {};
+            setRebuildProgress({
+              running: rebuild.running === true,
+              phase: rebuild.phase || "running",
+              done: rebuild.done,
+              total: rebuild.total,
+              error: rebuild.error || null,
+            });
+            return rebuild.running !== true;
+          },
+          onError: function (e) {
+            setRebuildProgress({ running: false, phase: "error", error: (e && e.message) ? "进度查询失败：" + String(e.message) : String(e) });
+          },
+        });
+      };
+      // 下载态：本地快照优先，否则回落 diagnostics.semantic.download（面板重开
+      // 时任务仍在跑 → 直接看到服务端在跑的进度）。
+      var serverDownload = semantic && typeof semantic.download === "object" && semantic.download !== null
+        ? semantic.download : null;
+      var dlView = dlProgress !== null ? dlProgress : serverDownload;
+      var dlRunning = dlView !== null && dlView.running === true;
+      var dlPollingRef = useRef(false);
+      var pollDownloadLoop = async function (sid) {
+        if (dlPollingRef.current) return;
+        dlPollingRef.current = true;
+        try {
+          await pollStatus({
+            dsh: props.dsh,
+            sid: sid,
+            intervalMs: DOWNLOAD_POLL_MS,
+            alive: function () { return aliveFor(sid); },
+            extract: function (fresh) {
+              return fresh && fresh.diagnostics && fresh.diagnostics.semantic
+                && fresh.diagnostics.semantic.download ? fresh.diagnostics.semantic : null;
+            },
+            setStatus: setStatus,
+            onSample: function (freshSemantic) {
+              var dl = freshSemantic.download;
+              setDlProgress({
+                running: dl.running === true,
+                phase: dl.phase || "idle",
+                percent: dl.percent !== undefined ? dl.percent : null,
+                loadedBytes: dl.loadedBytes !== undefined ? dl.loadedBytes : 0,
+                totalBytes: dl.totalBytes !== undefined ? dl.totalBytes : 0,
+                filesDone: dl.filesDone !== undefined ? dl.filesDone : 0,
+                filesTotal: dl.filesTotal !== undefined ? dl.filesTotal : 0,
+                source: dl.source || null,
+                error: dl.error || null,
+                code: dl.code || null,
+                installHint: dl.installHint || null,
+              });
+              return dl.running !== true;
+            },
+            onError: function (e) {
+              setDlProgress({
+                running: false, phase: "error", percent: null, loadedBytes: 0, totalBytes: 0,
+                error: "进度查询失败：" + ((e && e.message) ? String(e.message) : String(e)),
+              });
+            },
+          });
+        } finally {
+          dlPollingRef.current = false;
+        }
+      };
+      var startDownload = async function () {
+        if (!semantic || !semantic.enabled || dlRunning) return;
+        var sid = props.sessionId;
+        setDlProgress({
+          running: true, phase: "starting", percent: null, loadedBytes: 0, totalBytes: 0,
+          filesDone: 0, filesTotal: 0, source: null, error: null, installHint: null,
+        });
+        try {
+          await props.dsh.call("executeTool", sid, { name: SEMANTIC_DOWNLOAD_TOOL, args: {} });
+        } catch (e) {
+          setDlProgress({
+            running: false, phase: "error", percent: null, loadedBytes: 0, totalBytes: 0,
+            error: (e && e.message) ? String(e.message) : String(e), installHint: null,
+          });
+          return;
+        }
+        await pollDownloadLoop(sid);
+      };
+      var cancelDownload = async function () {
+        if (!dlRunning) return;
+        var sid = props.sessionId;
+        try {
+          await props.dsh.call("executeTool", sid, { name: SEMANTIC_DOWNLOAD_TOOL, args: { cancel: true } });
+        } catch (e) {
+          setDlUiError("取消失败：" + ((e && e.message) ? String(e.message) : String(e)));
+        }
+      };
+      var serverDlRunning = serverDownload !== null && serverDownload.running === true;
+      useEffect(function () {
+        if (serverDlRunning && semantic && semantic.enabled) pollDownloadLoop(props.sessionId);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [serverDlRunning]);
+      // 「手动指定模型目录」：与状态页同一 CAS 口径（单键 read-modify-write）。
+      var saveManualDir = async function () {
+        var dir = String(manualDirDraft ?? "").trim();
+        if (dir === "") {
+          setDlUiError("请先填写非空的模型缓存目录。");
+          return;
+        }
+        var scope = props.scope;
+        if (!scope || typeof scope.mutate !== "function") {
+          setDlUiError("设置命名空间不可用（configForms 缺席），无法在面板里保存目录；请在宿主插件配置页手动设置 semantic.local.cacheDir。");
+          return;
+        }
+        var ops = [{ op: "set", path: ["semantic", "local", "cacheDir"], value: dir }];
+        var attempt = function () {
+          var snap = scope.getSnapshot();
+          if (!snap || snap.status !== "ready" || !snap.value || typeof snap.value !== "object" || snap.revision === undefined || snap.revision === null) {
+            var bad = new Error("设置快照不可用（status=" + String(snap && snap.status) + "）。");
+            bad.code = "shiori/ui-scope";
+            throw bad;
+          }
+          return scope.mutate(ops, snap.revision);
+        };
+        setDlUiError(null);
+        try {
+          await casMutate(attempt, "shiori/ui-dl-conflict", function (ctx) {
+            return "设置刚被其他窗口修改（revision 冲突），已重试一次仍未成功；请再点一次。"
+              + (ctx.lastMessage !== "" ? "（最近错误：" + ctx.lastMessage + "）" : "");
+          }, true, { readRevision: function () { return scopeRevisionOf(scope); } });
+          await load();
+        } catch (e) {
+          setDlUiError("保存目录失败：" + ((e && e.message) || String(e)));
+        }
+      };
+      var copyInstallHint = async function () {
+        var text = dlView && dlView.installHint ? String(dlView.installHint) : "";
+        if (text === "") {
+          setCopyFeedback("暂无安装提示词可复制。");
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopyFeedback("已复制到剪贴板。");
+        } catch (e) {
+          setCopyFeedback("复制失败：" + ((e && e.message) ? String(e.message) : String(e)) + "（请手动选择文本复制）");
+        }
+      };
+      var configScopeNow = !!(props.scope && typeof props.scope.mutate === "function");
+      if (!semantic) {
+        return h("div", { className: "dshi_card", "data-role": "semantic-recall" },
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_cardTitle" }, "语义召回")),
+          ErrorBox(error),
+          status === null && !error ? h("div", { className: "dshi_loading" }, "加载中…") : null,
+          status !== null ? h("div", { className: "dshi_hint" },
+            "当前宿主没有提供语义召回状态（旧版服务端）：升级插件后这里会显示 provider / 模型 / 重建与下载入口。") : null);
+      }
+      return h(fragment, null,
+        ErrorBox(error),
+        SemanticRecallCard({
+          semantic: semantic,
+          dlView: dlView,
+          dlRunning: dlRunning,
+          rebuildRunning: rebuildRunning,
+          rebuildProgress: rebuildProgress,
+          manualDirDraft: manualDirDraft,
+          dlUiError: dlUiError,
+          copyFeedback: copyFeedback,
+          configScopeNow: configScopeNow,
+          onStartDownload: startDownload,
+          onCancelDownload: cancelDownload,
+          onStartRebuild: startRebuild,
+          onManualDirChange: setManualDirDraft,
+          onSaveManualDir: saveManualDir,
+          onCopyInstallHint: copyInstallHint
+        }));
     }
 
     // ── F2 闪回命中（面板统计页）──────────────────────────────────────────
