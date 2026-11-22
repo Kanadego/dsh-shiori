@@ -198,6 +198,19 @@ export function createManagement(deps) {
       return normalizeTemperatureParams(settings.temperature);
     }
   }
+  // 0.5 批次 13：forgetting 段热读，与 liveTemperature 同款——controller 注入
+  // liveForgetting（liveRefs.forgetting 热读 volatile 引用，失败回落冻结快照）；
+  // 直构（测试/嵌入方）缺省回落 settings.forgetting，行为逐字不变。
+  const liveForgetting = typeof deps.liveForgetting === "function"
+    ? deps.liveForgetting
+    : () => settings.forgetting;
+  function currentLiveForgetting() {
+    try {
+      return liveForgetting();
+    } catch {
+      return settings.forgetting;
+    }
+  }
   // appendTemperatureAudit：controller 注入其唯一 topic-activity 账本实例的
   // append（评审拍板：不另开第二个 writer 写同一文件）。直构缺省惰性自建一个
   // 账本（仅测试/嵌入方路径；生产永远走 controller 注入）。
@@ -351,7 +364,7 @@ export function createManagement(deps) {
     if (kind === "organize" && settings.organize.enabled !== true) {
       fail("UNSUPPORTED", "organize module is disabled by settings.organize.enabled=false", {});
     }
-    if (kind === "forgetting" && settings.forgetting.enabled !== true) {
+    if (kind === "forgetting" && currentLiveForgetting().enabled !== true) {
       fail("UNSUPPORTED", "forgetting module is disabled by settings.forgetting.enabled=false", {});
     }
   }
@@ -661,7 +674,7 @@ export function createManagement(deps) {
         capabilities: {
           l2: settings.l2.enabled,
           organize: settings.organize.enabled,
-          forgetting: settings.forgetting.enabled,
+          forgetting: currentLiveForgetting().enabled,
           tools: !isInert && settings.mode === "active",
           sections: !isInert && settings.mode === "active",
         },
@@ -1083,7 +1096,7 @@ export function createManagement(deps) {
         scopeId: scope.scopeId,
         sparks: records,
         now: nowIso(),
-        policy: settings.forgetting.policy,
+        policy: currentLiveForgetting().policy,
       });
       let planId = null;
       let planDiff = [];
@@ -1392,7 +1405,7 @@ export function createManagement(deps) {
             scopeId: scope.scopeId,
             authorize,
             now: nowIso,
-            policy: settings.forgetting.policy,
+            policy: currentLiveForgetting().policy,
           });
           result = await executor.execute(entry.plan, { operationId: payload.operationId });
         }
@@ -1993,7 +2006,7 @@ export function createManagement(deps) {
       const engine = requireAutoEngine("getAutoStatus");
       const scope = await scopeFromTrustedContext(trustedContext);
       const status = await engine.status({ scopeId: scope.scopeId });
-      return { ...status, enabled: settings.forgetting.enabled === true };
+      return { ...status, enabled: currentLiveForgetting().enabled === true };
     },
 
     /** wire 19：手动评估（只读回放，返回候选 + reason；成功后记账评估锚）。 */

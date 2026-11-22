@@ -163,7 +163,8 @@ function hostRejectIfNotVolatile(schema, path) {
 test("0.5 批次 13：forgetting 整块 volatile（schema meta + 引用对象 + 宿主放行判据三层）", () => {
   // 真机缺陷：面板顶部「建议 / 自动 / 关闭」三档切换写 forgetting.autoMode 被宿主拒
   // —— settings/rejected  Config field "forgetting.autoMode" is not volatile。
-  // 与 semantic / temperature 同款：叶子单独标仍会被同段未标字段挡下，故整块标记。
+  // 与 semantic / temperature 同款：叶子单独标只覆盖该叶子；写 enabled / policy
+  // 或用宿主插件配置页整块编辑时会被挡，故整块标记。
   const writePaths = [
     ["forgetting"],
     ["forgetting", "autoMode"],

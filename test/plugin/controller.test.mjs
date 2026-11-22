@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { createShioriPluginController } from "../../src/plugin/controller.mjs";
+import { buildLiveRefs } from "../../index.mjs";
 import { TOOL_NAMES, TOOL_OUTPUT_SCHEMAS } from "../../src/plugin/tool-schemas.mjs";
 import { openCompletionState } from "../../src/completion/index.mjs";
 import { defaultPluginRoots } from "../../src/plugin/config.mjs";
@@ -2747,4 +2748,66 @@ test("债S3 R4 守卫：createShioriPluginController 生产签名为 (ctx, rawSe
     "createShioriPluginController 生产参数表被改动：签名新增了参数（疑似把测试注入"
     + "塞回签名，含带缺省值的尾部追加）。注入必须走 dependencies.testSeam 测试缝"
     + "对象（该入口仅供测试注入，生产构造不得传）。");
+});
+
+// 0.5 批次 13：forgetting 接 liveRefs 热读——面板顶部「建议 / 自动 / 关闭」三档切换
+// 写入后宿主只就地更新 volatile 引用、不重载插件；这里验证 diagnostics.modules 与
+// management 暴露的 auto mode 每次现读，且非法热值回落装配期快照、绝不抛错。
+test("forgetting 热读：liveRefs.forgetting 改档后 diagnostics.modules 与 auto mode 立即生效，非法值回落快照不抛错", async (t) => {
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  const VOLATILE_WRITE = Symbol.for("cosmokit.volatile.write");
+  const policy = { baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 };
+  let current = { enabled: true, autoMode: "suggest", policy };
+  const forgettingRef = {
+    get: () => current,
+    set: (next) => { current = next; },
+    [VOLATILE_WRITE]: () => {},
+  };
+  const settings = {
+    ...activeSettings(roots),
+    forgetting: { enabled: true, autoMode: "suggest", policy },
+    liveRefs: { forgetting: forgettingRef },
+  };
+  const controller = await createShioriPluginController(fakeCtx(), settings, { bindings: fakeBindingsFactory() });
+  await controller.start();
+  const trusted = { session: { id: "s-panel" }, source: "panel-rpc" };
+
+  // 初始：diagnostics.modules.forgetting 与 auto mode 取自热值（此刻 = 快照）。
+  assert.equal(controller.diagnostics().modules.forgetting, true);
+  assert.equal((await controller.management.getAutoStatus(trusted, {})).mode, "suggest");
+
+  // 热提交 autoMode → auto：不重启，management 暴露的 mode 立即变。
+  forgettingRef.set({ enabled: true, autoMode: "auto", policy });
+  assert.equal((await controller.management.getAutoStatus(trusted, {})).mode, "auto");
+
+  // 热提交 enabled=false：diagnostics.modules.forgetting 立即变 false，模块门禁同步现读。
+  forgettingRef.set({ enabled: false, autoMode: "auto", policy });
+  assert.equal(controller.diagnostics().modules.forgetting, false);
+  await assert.rejects(
+    () => controller.management.getAutoStatus(trusted, {}),
+    (error) => error.code === "UNSUPPORTED",
+    "热读 enabled=false 后 auto 面同步拒绝",
+  );
+
+  // 非法热值（autoMode="bogus"）：回落装配期快照（enabled=true / suggest），绝不抛错。
+  forgettingRef.set({ enabled: true, autoMode: "bogus", policy });
+  assert.equal(controller.diagnostics().modules.forgetting, true, "非法热值回落快照 enabled=true");
+  assert.equal((await controller.management.getAutoStatus(trusted, {})).mode, "suggest", "非法热值回落快照 autoMode=suggest");
+});
+
+// 0.5 批次 13：index.mjs 透传面——buildLiveRefs 必须把 forgetting 的 volatile 引用原样
+// 带给 controller（缺失漏传则 liveForgetting 永远回落快照，面板切档不生效）。
+test("buildLiveRefs：index 透传 forgetting volatile 引用（与 temperature / 选卡同款）", () => {
+  const VOLATILE_WRITE = Symbol.for("cosmokit.volatile.write");
+  const forgetRef = { get: () => ({ enabled: true, autoMode: "auto" }), [VOLATILE_WRITE]: () => {} };
+  const tempRef = { get: () => ({}), [VOLATILE_WRITE]: () => {} };
+  const refs = buildLiveRefs({ forgetting: forgetRef, temperature: tempRef, defaultPersona: "amber" });
+  assert.equal(refs.forgetting, forgetRef, "forgetting 引用必须原样透传");
+  assert.equal(refs.temperature, tempRef);
+  assert.equal(refs.defaultPersona, "amber");
+  // 缺失一律 null（readLiveRefs 再判一次引用形态）
+  assert.equal(buildLiveRefs({}).forgetting, null);
+  assert.equal(buildLiveRefs(undefined).forgetting, null);
+  assert.equal(buildLiveRefs(null).forgetting, null);
 });

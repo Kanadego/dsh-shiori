@@ -40,6 +40,22 @@ test("readLiveRefs：只认带 get() 的引用，普通值一律记 null", () =>
   assert.equal(readLiveRefs(undefined).defaultPersona, null);
 });
 
+// 0.5 批次 13：forgetting 与选卡字段/temperature 同款拣选——引用透传、普通值记 null，
+// 无参/非对象分支同样带 forgetting:null 键（形状与主分支一致）。
+test("readLiveRefs：forgetting 引用透传；普通值与无参分支记 null（形状补齐）", () => {
+  const forgettingRef = volatileRef({ enabled: true, autoMode: "auto", policy: {} });
+  const refs = readLiveRefs({ forgetting: forgettingRef });
+  assert.equal(typeof refs.forgetting.get, "function");
+  assert.equal(refs.forgetting, forgettingRef);
+  // 普通对象（非纯引用）记 null
+  assert.equal(readLiveRefs({ forgetting: { enabled: true } }).forgetting, null);
+  // 无参 / null / undefined 分支：键形状与主分支一致（含 forgetting:null）
+  assert.deepEqual(Object.keys(readLiveRefs(null)),
+    ["defaultPersona", "sessionPersonas", "workspacePersonas", "temperature", "forgetting"]);
+  assert.equal(readLiveRefs(null).forgetting, null);
+  assert.equal(readLiveRefs(undefined).forgetting, null);
+});
+
 test("liveSettingsForScope：引用里的最新值覆盖装配期快照", () => {
   const defaultRef = volatileRef("amber");
   const settings = settingsWith({ defaultPersona: defaultRef }, { defaultPersona: "amber" });

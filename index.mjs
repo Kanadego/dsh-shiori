@@ -34,6 +34,28 @@ export const inject = ["tools", "systemPrompt"];
 export { Config } from "./src/plugin/config.mjs";
 
 /**
+ * 组装交给 controller 的宿主 volatile 引用透传面（选卡三字段 + temperature + forgetting）。
+ * 选卡三字段（defaultPersona / sessionPersonas / workspacePersonas）在宿主侧是 volatile
+ * 引用（cordis-plugin-loader 热提交后引用值就地更新、不重载插件），引用原样带到
+ * controller，pinScope 每次实时解包，切卡才会在会话进行中立即生效。
+ * 0.5 批次 4 · B 线：temperature 同样是 volatile 引用——面板保存后服务端要能热读到新值
+ * （预览 base / 审计「live==params」确认），一并透传（评审授权扩展）。
+ * 0.5 批次 13：forgetting 整块 volatile——面板顶部「建议 / 自动 / 关闭」三档切换保存后
+ * 服务端要能热读到新值（否则面板显示「已写入配置…服务端当前仍是 X」，需重启才换挡），
+ * 与 temperature 同款理由透传，controller.liveForgetting 每次实时解包。
+ * 导出仅供测试钉住透传面（生产仅 apply 内调用一次）。
+ */
+export function buildLiveRefs(config) {
+  return Object.freeze({
+    defaultPersona: config?.defaultPersona ?? null,
+    sessionPersonas: config?.sessionPersonas ?? null,
+    workspacePersonas: config?.workspacePersonas ?? null,
+    temperature: config?.temperature ?? null,
+    forgetting: config?.forgetting ?? null,
+  });
+}
+
+/**
  * @param {object} ctx 本插件的 Cordis 上下文。
  * @param {object} config 宿主传入的原始配置（settings 命名空间承载，缺省 inert shadow）。
  * @returns {Promise<() => Promise<void>>} 卸载清理（RPC 先停，controller 后停）。
@@ -77,17 +99,8 @@ export async function apply(ctx, config) {
       `[shiori] 0.3.x 旧模型缓存迁移失败（不影响启动）：${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  // 选卡三字段（defaultPersona / sessionPersonas / workspacePersonas）在宿主侧是
-  // volatile 引用（cordis-plugin-loader 热提交后引用值就地更新、不重载插件）。引用原样
-  // 带到 controller，pinScope 每次实时解包，切卡才会在会话进行中立即生效。
-  // 0.5 批次 4 · B 线：temperature 同样是 volatile 引用——面板保存后服务端要能
-  // 热读到新值（预览 base / 审计「live==params」确认），一并透传（评审授权扩展）。
-  const liveRefs = Object.freeze({
-    defaultPersona: config?.defaultPersona ?? null,
-    sessionPersonas: config?.sessionPersonas ?? null,
-    workspacePersonas: config?.workspacePersonas ?? null,
-    temperature: config?.temperature ?? null,
-  });
+  // 组装 volatile 引用透传面（详见 buildLiveRefs 注释）。
+  const liveRefs = buildLiveRefs(config);
   const settings = Object.freeze({ ...normalized, dataRoot: verified.dataRoot, stateRoot: verified.stateRoot, liveRefs });
 
   // 3. 构造 controller（契约签名为 async，返回 {start,stop,diagnostics,management}；

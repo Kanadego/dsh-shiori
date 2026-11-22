@@ -93,7 +93,7 @@ import { registerShioriTypert, readOptionalCordisService } from "./typert-descri
 import {
   validateControllerSettings, pinScope, sessionEvidenceFromExec,
   sessionEvidenceFromAgent, rejectIdentityFields, NULL_PERSONA_SCOPE, scopeIdForPersona,
-  liveSettingsForScope, readLiveRefs,
+  liveSettingsForScope, readLiveRefs, normalizeForgettingConfig,
 } from "./scope.mjs";
 import { TOOL_OUTPUT_SCHEMAS, renderToolOutput } from "./tool-schemas.mjs";
 import { validateRoots } from "../runtime/index.mjs";
@@ -222,6 +222,27 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       }
     }
     return normalizeTemperatureParams(settings.temperature);
+  }
+
+  // 0.5 批次 13：forgetting 段（enabled / autoMode / policy）与 temperature 同款热读。
+  // forgetting 在宿主侧是整块 volatile 引用（index.mjs 透传进 liveRefs），面板顶部
+  // 「建议 / 自动 / 关闭」三档切换保存后引用值就地更新、不重载插件，故 mode getter /
+  // 调度判定 / diagnostics 都要每次现读。兜底口径与 liveTemperature 逐字一致：引用
+  // 缺失 / get() 抛错 / 值非法（normalizeForgettingConfig 抛 INVALID_INPUT）一律回落
+  // 装配期冻结快照，绝不因热读失败拒绝请求。
+  function liveForgetting() {
+    const ref = settings.liveRefs && settings.liveRefs.forgetting;
+    if (ref !== null && ref !== undefined && typeof ref === "object" && typeof ref.get === "function") {
+      try {
+        const raw = ref.get();
+        if (raw !== undefined) {
+          return normalizeForgettingConfig(raw);
+        }
+      } catch {
+        /* 回落冻结快照 */
+      }
+    }
+    return settings.forgetting;
   }
 
   // 0.5-2B：topic-activity 事件账本（每实例一个；事件自带 targetScopeId 归属，
@@ -1674,7 +1695,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
    */
   function scheduleAutoEvaluationSafely(payload) {
     try {
-      if (settings.forgetting?.enabled !== true) return;
+      if (liveForgetting().enabled !== true) return;
       if (ctrl.banned || !ctrl.started) return;
       const humanTurn = (Array.isArray(payload?.messages) ? payload.messages : [])
         .some((m) => m?.source?.kind === "user");
@@ -1990,9 +2011,12 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
   const autoEngine = createAutoEngine({
     nowIso,
     // 三档模式现读（§7 off/suggest/auto）：模块开关关闭时按 off 处理（只记账，
-    // 调度不评估）。settings.forgetting 非 volatile——改档需重载插件，引擎每次
-    // 调用现读以便未来热切换不改这里。
-    mode: () => (settings.forgetting.enabled === true ? settings.forgetting.autoMode : "off"),
+    // 调度不评估）。forgetting 已接 liveRefs 热读——liveForgetting 每次取最新值，
+    // 面板切档无需重载插件（批次 13）。
+    mode: () => {
+      const forgetting = liveForgetting();
+      return forgetting.enabled === true ? forgetting.autoMode : "off";
+    },
     params: () => liveTemperature(),
     replaySource: autoReplaySource,
     serviceFor: async (scopeId) => (await resourcesFor(scopeId)).service,
@@ -2077,6 +2101,10 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
     // 引用（见上方定义）；审计事件复用本插件唯一 topic-activity 账本实例 append
     // （评审拍板：不在 state.mjs 另开第二个 writer 写同一文件）。
     liveTemperature,
+    // 0.5 批次 13：forgetting 段热读注入（与 liveTemperature 同款）——management 的
+    // requireModule / analyze policy / executePlan policy / getAutoStatus enabled
+    // 全部现读，面板切档后无需重启。
+    liveForgetting,
     appendTemperatureAudit: (event) => (topicActivity !== null
       ? topicActivity.append(event)
       : Promise.resolve({ ok: false, code: "NOT_CONFIGURED", error: "topic-activity ledger unavailable" })),
@@ -2484,7 +2512,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
         if (settings.l2.enabled) {
           ctrl.createUserMessage = await bindings.loadCreateUserMessage();
           bindings.registerPreStep((payload, next) => trackInFlight(preStepHandler(payload, next)));
-        } else if (settings.forgetting?.enabled === true) {
+        } else if (liveForgetting().enabled === true) {
           // 0.5 批次 5 · A 线：重启路径同款（L2 关闭 + auto 开启的人类轮入口）。
           bindings.registerPreStep((payload, next) => trackInFlight(autoOnlyPreStep(payload, next)));
         }
@@ -2542,7 +2570,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       if (settings.l2.enabled) {
         ctrl.createUserMessage = await bindings.loadCreateUserMessage();
         bindings.registerPreStep((payload, next) => trackInFlight(preStepHandler(payload, next)));
-      } else if (settings.forgetting?.enabled === true) {
+      } else if (liveForgetting().enabled === true) {
         // 0.5 批次 5 · A 线：L2 关闭但 auto 冷却开启——仍需 pre-step 人类轮入口
         //（§11.2.1）。该入口只观察 payload（人类轮判定 + fire-and-forget 调度）后
         // 原样放行，绝不投递、不建消息；l2.enabled=true 时由完整 preStepHandler
@@ -2767,7 +2795,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       downloadGeneration: ctrl.downloadGeneration,
       ownerId: settings.ownerId,
       budgets: settings.budgets,
-      modules: { l2: settings.l2.enabled, organize: settings.organize.enabled, forgetting: settings.forgetting.enabled },
+      modules: { l2: settings.l2.enabled, organize: settings.organize.enabled, forgetting: liveForgetting().enabled },
       scopes: scopeDiags,
       bindings: bindings.diagnostics,
       probe: ctrl.probe?.diagnostics() ?? null,

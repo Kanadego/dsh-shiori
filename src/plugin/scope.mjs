@@ -435,13 +435,13 @@ export function personaForSession(settings, { sessionId, workspace } = {}) {
 }
 
 /**
- * 从装配期 raw settings 里挑出三个选卡字段的 volatile 引用（宿主热提交时不重载插件，
- * 引用值就地更新；非引用形态一律记为 null，回落快照）。
+ * 从装配期 raw settings 里挑出选卡字段与热读配置段的 volatile 引用（宿主热提交时
+ * 不重载插件，引用值就地更新；非引用形态一律记为 null，回落快照）。
  */
 export function readLiveRefs(raw) {
   const pick = (value) => (value !== null && typeof value === "object" && typeof value.get === "function" ? value : null);
   if (raw === null || typeof raw !== "object") {
-    return Object.freeze({ defaultPersona: null, sessionPersonas: null, workspacePersonas: null, temperature: null });
+    return Object.freeze({ defaultPersona: null, sessionPersonas: null, workspacePersonas: null, temperature: null, forgetting: null });
   }
   return Object.freeze({
     defaultPersona: pick(raw.defaultPersona),
@@ -450,7 +450,20 @@ export function readLiveRefs(raw) {
     // 0.5 批次 4 · B 线：12 项热度参数的 volatile 引用（面板保存后服务端热读；
     // 消费方是 controller.liveTemperature，不参与选卡）。
     temperature: pick(raw.temperature),
+    // 0.5 批次 13：forgetting 整块 volatile 引用——面板顶部「建议 / 自动 / 关闭」三档
+    // 切换保存后引用值就地更新；消费方是 controller.liveForgetting，不参与选卡。
+    forgetting: pick(raw.forgetting),
   });
+}
+
+/**
+ * forgetting 段的归一化 + 既有校验（readLiveRefs 的热读值经此解包）。复用
+ * validateModuleSwitch 的 forgetting 分支口径：enabled 必须 boolean、autoMode ∈
+ * off/suggest/auto、policy 三键经 normalizeForgetPolicy 归一。非法值抛 INVALID_INPUT
+ * 由调用方（controller.liveForgetting）catch 后回落装配期冻结快照。
+ */
+export function normalizeForgettingConfig(value) {
+  return validateModuleSwitch(value, "forgetting");
 }
 
 /**
