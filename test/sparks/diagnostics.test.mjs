@@ -696,19 +696,31 @@ function humanMessage(id, text) {
 /** 评审 R21：等 fire-and-forget 计数到位。计数在 appendRecord 的 .then 里更新，
  * 文件内容可见早于 promise 决议（waitForFile 一见文件就读计数会翻车，全量负载
  * 下顺序翻转即「本地绿、CI 红」）；固定 sleep 不许用、放宽成 >= 失去守卫意义——
- * 25ms 一步轮询，超时把当前实际值打印进断言消息。 */
-async function awaitCounter(controller, key, expected, timeoutMs = 3000) {
+ * 25ms 一步轮询计数快照（测试侧唯一可观测面，controller 无事件可订阅）。
+ * 0.5 批次 7-3：到达等待的判据仍是「计数到达」本身，POLL_BACKSTOP_MS 只是失败
+ * 诊断的兜底、不是失败截止——正确实现下计数迟早到，等待多久都不改变结论；
+ * 兜底拉长只救「负载拖慢的假红」，不放松任何守卫（计数不到照样红，只是红得
+ * 更晚、且把 key/目标次数/实际值写进断言消息便于定位）。 */
+const POLL_BACKSTOP_MS = 10000;
+
+async function awaitCounter(controller, key, expected, timeoutMs = POLL_BACKSTOP_MS) {
   const deadline = Date.now() + timeoutMs;
   let current = controller.diagnostics().counters[key];
   while (current !== expected && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 25));
     current = controller.diagnostics().counters[key];
   }
-  assert.equal(current, expected, `${key} 应为 ${expected}（轮询超时，实际值 ${current}）——fire-and-forget 计数在 appendRecord 的 .then 里更新，需等待决议`);
+  assert.equal(
+    current,
+    expected,
+    `等待 ${key} 第 ${expected} 次超时（兜底 ${timeoutMs}ms 到点），实际 count=${current}——判据是计数到达，fire-and-forget 计数在 appendRecord 的 .then 里更新`,
+  );
 }
 
-/** 等待 fire-and-forget 落账出现（诊断写不阻塞 pre-step，测试轮询文件）。 */
-async function waitForFile(file, { timeoutMs = 3000 } = {}) {
+/** 等待 fire-and-forget 落账出现（诊断写不阻塞 pre-step，测试轮询文件）。
+ * 与 awaitCounter 同口径（0.5 批次 7-3）：文件出现即事件、判据只有它；
+ * POLL_BACKSTOP_MS 只是失败诊断兜底，负载拖慢不构成误红截止。 */
+async function waitForFile(file, { timeoutMs = POLL_BACKSTOP_MS } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (existsSync(file)) return true;
@@ -931,6 +943,10 @@ test("只读宿主（HOST_LOCKED）零写入：座位被占时 pre-step 照常�
     async () => ({ kind: "enter", messages: [humanMessage("m-1", "芝麻")] }),
   );
   assert.equal(decision.messages.length, 2, "投递主链路不受只读座位影响（既有行为）");
+  // 负向观察窗（0.5 批次 7-3 备注：与 awaitCounter 口径不同、保持固定窗）：
+  // 断言「落账绝不发生」没有事件可等，只能开一段固定窗口确认它没来。窗口长度
+  // 只影响假绿（真有 bug 时窗口太短会漏检），不影响假红——正确实现下永远没有
+  // 写盘事件、计数恒 0，等多久都是绿，故不适用「超时只是诊断兜底」的改法。
   await new Promise((resolve) => setTimeout(resolve, 150)); // 给（不应发生的）落账留窗口
   assert.equal(existsSync(path.join(stateRoot, "diagnostics")), false, "只读宿主不得创建 diagnostics 目录");
   const d = controller.diagnostics();

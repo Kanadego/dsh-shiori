@@ -2318,7 +2318,9 @@ test("R3/rework：disposeAll 报错或抛错 → degradedRegistered 保留，后
 // 人类轮判据：本轮上下文存在 source.kind === "user" 的消息（心跳投递/引擎室轮的
 // source 不是 user → 天然跳过）。调度 fire-and-forget：绝不阻塞主回答、失败静默
 // 进诊断（diagnostics().counters.autoEvaluationFailures 与 getStatus.diagnostics.auto）。
-// 同步手段：auto 记账落盘 <stateRoot>/auto-organize.json，用 waitForAutoState 轮询。
+// 同步手段（0.5 批次 7-1 去墙钟）：事件门控——等 getStatus().diagnostics.auto 的
+// evaluations/runs 计数到位（auto-eval/auto-run 记账在落盘之后发出），再读
+// <stateRoot>/auto-organize.json 做最终断言（waitForAutoState / awaitAutoDiag）。
 
 import { writeFile as autoWriteFile, readFile as autoReadFile, mkdir as autoMkdir } from "node:fs/promises";
 
@@ -2374,17 +2376,77 @@ function autoHeartbeatMessage(id) {
   return { id, role: "user", source: { kind: "heartbeat-inject" }, content: [{ type: "text", text: "心跳注入" }] };
 }
 
-async function waitForAutoState(stateRoot, timeoutMs = 3000) {
-  const file = path.join(stateRoot, "auto-organize.json");
+/** 0.5 批次 7-1：auto 记账等待改事件门控（去墙钟 flake，照 6B-2 awaitCounter 先例）。
+ * 完成信号：auto-eval（suggest）/ auto-run（auto 模式）诊断都在 markEvaluated
+ * （auto-organize.json 落盘）之后发出（src/forgetting/auto.mjs：先 await 落盘再
+ * diag），controller 侧 onDiagnostics 同步自增 ctrl.auto，getStatus().diagnostics.auto
+ * 是其纯内存快照——「计数 ≥1」即「本轮评估已记账、文件必已落盘」，此后读文件做
+ * 最终断言（正常路径首读即中）。轮询超时只作失败兜底，错误信息区分
+ * 「调度未触发评估」（计数全 0，附 notDue/busy/failures/fused 细节）、
+ * 「评估已触发但熔断」（fused > 0：auto-eval-fused 后不记账不发 run）与
+ * 「已评估但记账未落盘」（计数到位、文件读取仍失败）。 */
+async function waitForAutoState(controller, stateRoot, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs;
+  let auto = null;
+  while (Date.now() < deadline) {
+    auto = (await controller.management.getStatus(
+      { session: { id: "s-1" }, source: "panel-rpc" }, {},
+    )).diagnostics.auto ?? null;
+    if ((auto?.evaluations ?? 0) > 0 || (auto?.runs ?? 0) > 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if ((auto?.evaluations ?? 0) === 0 && (auto?.runs ?? 0) === 0) {
+    // 0.5 批次 7-1 R2：熔断（auto-eval-fused）时评估已触发但不记账、不发
+    // auto-eval/auto-run——计数全 0 但 fused > 0，不能误报「调度未触发评估」。
+    const fused = auto?.fused ?? 0;
+    throw new Error(
+      fused > 0
+        ? `auto-organize.json 等待超时（${timeoutMs}ms）：评估已触发但熔断`
+          + `（auto-eval-fused，fused=${fused}，evaluations=0 runs=0`
+          + ` failures=${auto?.failures ?? 0} lastError=${auto?.lastError ?? "null"}）`
+        : `auto-organize.json 等待超时（${timeoutMs}ms）：调度未触发评估`
+          + `（evaluations=0 runs=0 notDue=${auto?.notDue ?? 0} busy=${auto?.busy ?? 0}`
+          + ` failures=${auto?.failures ?? 0} fused=${fused} lastError=${auto?.lastError ?? "null"}）`,
+    );
+  }
+  const file = path.join(stateRoot, "auto-organize.json");
+  const readDeadline = Date.now() + 2000;
   for (;;) {
     try {
       const raw = await autoReadFile(file, "utf8");
       if (raw.includes("lastEvaluatedAt")) return JSON.parse(raw);
-    } catch { /* 尚未落盘，继续等 */ }
-    if (Date.now() > deadline) throw new Error("auto-organize.json 未在超时内落盘（调度未触发评估）");
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    } catch { /* 已记账但文件尚不可读：短暂重试 */ }
+    if (Date.now() > readDeadline) {
+      throw new Error(
+        `auto-organize.json 已评估但记账未落盘/未含 lastEvaluatedAt`
+        + `（evaluations=${auto?.evaluations ?? 0} runs=${auto?.runs ?? 0}）`
+        + `——记账信号已到、文件读取仍失败`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
+
+/** 0.5 批次 7-1：等 auto 诊断计数到位（事件门控）。照 6B-2 awaitCounter 先例
+ * （test/sparks/diagnostics.test.mjs:700）：25ms 一步轮询 getStatus.diagnostics.auto
+ * （纯内存计数快照），超时把当前实际值打印进断言消息。 */
+async function awaitAutoDiag(controller, key, expected, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let current = 0;
+  while (Date.now() < deadline) {
+    const auto = (await controller.management.getStatus(
+      { session: { id: "s-1" }, source: "panel-rpc" }, {},
+    )).diagnostics.auto ?? {};
+    current = auto[key] ?? 0;
+    if (current >= expected) return current;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(
+    current >= expected,
+    `auto 诊断 ${key} 应 ≥ ${expected}（轮询超时，实际 ${current}）`
+    + `——auto 记账在落盘后发出（fire-and-forget），需等待决议`,
+  );
+  return current;
 }
 
 test("pre-step auto 调度：心跳轮不触发（source.kind ≠ user）；人类轮首评触发且绝不阻塞主回答", async (t) => {
@@ -2408,7 +2470,7 @@ test("pre-step auto 调度：心跳轮不触发（source.kind ≠ user）；人�
   const decision = await preStep({ agent, messages: [autoHumanMessage("m-1")] }, async () => nextDecision);
   assert.equal(decision.kind, "enter", "人类轮 preStep 照常放行（不被 auto 阻塞）");
   assert.ok(Date.now() - startedAt < 300, "调度构造同步返回（评估在后台跑）");
-  const storeState = await waitForAutoState(stateRoot);
+  const storeState = await waitForAutoState(controller, stateRoot);
   assert.equal(storeState.scopes.amber.lastEvaluatedBy, "human-turn", "人类轮评估已记账");
 
   // 诊断可见：计数为 0 次失败；面板 status 记账同步。
@@ -2423,16 +2485,14 @@ test("pre-step auto 调度：L2 关闭时照常调度；auto 模式人类轮直�
   const agent = { session: { id: "s-1" } };
   const decision = await preStep({ agent, messages: [autoHumanMessage("m-auto")] }, async () => ({ kind: "enter", messages: [] }));
   assert.equal(decision.kind, "enter");
-  await waitForAutoState(stateRoot);
-  // auto 模式：调度接执行——冷态 topic 已被归档。
-  const deadline = Date.now() + 3000;
-  let archived = false;
-  while (Date.now() < deadline) {
-    const raw = await autoReadFile(path.join(topicsDir, "pre-cold.md"), "utf8");
-    if (raw.includes("archivedAt")) { archived = true; break; }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  assert.equal(archived, true, "auto 模式人类轮执行了冷却（archivedAt 落盘）");
+  await waitForAutoState(controller, stateRoot);
+  // auto 模式：调度接执行——冷态 topic 已被归档。auto-run 记账（runs 计数）在
+  // executeOp 全部完成（archivedAt 已写盘）与 recordRun/markEvaluated 落盘之后
+  // 发出（src/forgetting/auto.mjs apply），计数到位后读文件做最终断言（0.5 批次
+  // 7-1：原 3s 墙钟轮询在并行负载下不稳，改事件门控）。
+  await awaitAutoDiag(controller, "runs", 1);
+  const raw = await autoReadFile(path.join(topicsDir, "pre-cold.md"), "utf8");
+  assert.ok(raw.includes("archivedAt"), "auto 模式人类轮执行了冷却（archivedAt 落盘）");
   const autoDiag = (await controller.management.getStatus({ session: { id: "s-1" }, source: "panel-rpc" }, {})).diagnostics.auto;
   assert.ok(autoDiag.runs >= 1, "执行轮数进诊断");
 });
@@ -2445,14 +2505,11 @@ test("pre-step auto 调度：评估失败静默计数（autoStore 损坏 → 记
   const agent = { session: { id: "s-1" } };
   const decision = await preStep({ agent, messages: [autoHumanMessage("m-fail")] }, async () => ({ kind: "enter", messages: [] }));
   assert.equal(decision.kind, "enter", "评估失败不打断 pre-step");
-  // 失败计数进诊断（轮询等待后台调度收场）。
-  const deadline = Date.now() + 3000;
-  let failures = 0;
-  while (Date.now() < deadline) {
-    failures = controller.diagnostics().counters.autoEvaluationFailures;
-    if (failures > 0) break;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+  // 失败计数进诊断（0.5 批次 7-1 R1：原 3s 墙钟轮询在并行负载/记账延迟下不稳，
+  // 改事件门控——auto-schedule-failed 在同一 onDiagnostics 回调里同步自增
+  // ctrl.auto.failures 与 counters.autoEvaluationFailures，两处同源，等前者到位）。
+  await awaitAutoDiag(controller, "failures", 1);
+  const failures = controller.diagnostics().counters.autoEvaluationFailures;
   assert.ok(failures >= 1, `autoEvaluationFailures ≥ 1（实际 ${failures}）`);
   const autoDiag = (await controller.management.getStatus({ session: { id: "s-1" }, source: "panel-rpc" }, {})).diagnostics.auto;
   assert.ok(autoDiag.failures >= 1);

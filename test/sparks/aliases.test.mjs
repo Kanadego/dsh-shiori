@@ -300,6 +300,27 @@ test("loadAliasTable：坏条目之前的合法条目仍入表（已解析前缀
   assert.match(r.error, /manual 或 learned/);
 });
 
+test("loadAliasTable：非对象条目（\"oops\"/null）之前的合法条目仍入表，不被清空", async (t) => {
+  const dir = await mkTmp(t);
+  await writeSidecar(dir, "aliases.json", { version: 1, aliases: [
+    { alias: "js", canonical: "javascript", source: "manual" },
+    "oops", // 条目非对象（字符串）——「条目必须是对象」分支
+  ]});
+  const r = await loadAliasTable(dir);
+  assert.match(r.error, /aliases 条目必须是对象/);
+  assert.equal(r.table.size, 1); // 前面的合法条目不因坏条目被清空
+  assert.equal(r.table.get("js"), "javascript");
+  const dir2 = await mkTmp(t);
+  await writeSidecar(dir2, "aliases.json", { version: 1, aliases: [
+    { alias: "k8s", canonical: "kubernetes", source: "manual" },
+    null, // 条目非对象（null 走同一分支）
+  ]});
+  const r2 = await loadAliasTable(dir2);
+  assert.match(r2.error, /aliases 条目必须是对象/);
+  assert.equal(r2.table.size, 1);
+  assert.equal(r2.table.get("k8s"), "kubernetes");
+});
+
 test("loadAliasTable：513 条合法条目 → table.size 512 + error 含「上限 512」；恰 512 条无 error", async (t) => {
   const mkEntries = (count) => Array.from({ length: count }, (_, i) => ({
     alias: `a-${String(i + 1).padStart(4, "0")}`,
@@ -438,6 +459,22 @@ test("loadClusterOverrides：混合桶（合法+非法条目共存）→ 非法�
   assert.equal(r.overrides.get("good"), "alpha");
   assert.equal(r.overrides.get("good2"), "beta"); // 合法条目 trim 后照常入表
   assert.equal(r.overrides.has("bad"), false);
+});
+
+test("loadClusterOverrides：混合桶含非法 cardId（空串/超 64 字）与合法条目共存 → 合法条目保留不被清空", async (t) => {
+  const dir = await mkTmp(t);
+  await writeSidecar(dir, "spark-clusters.json", {
+    version: 1, scopes: { "s": {
+      "good": "alpha", "": "beta", ["x".repeat(65)]: "gamma", "good2": "  delta  ",
+    }},
+  });
+  const r = await loadClusterOverrides(dir, "s");
+  assert.match(r.error, /cardId 必须是 1\.\.64 字的字符串/); // 坏 key 记 error
+  assert.equal(r.overrides.size, 2); // 合法条目不因非法 cardId 被清空
+  assert.equal(r.overrides.get("good"), "alpha");
+  assert.equal(r.overrides.get("good2"), "delta"); // 合法条目 trim 后照常入表
+  assert.equal(r.overrides.has(""), false); // 坏 key 不入表
+  assert.equal(r.overrides.has("x".repeat(65)), false);
 });
 
 test("loadClusterOverrides：坏 JSON → 空 + error 含「不是合法 JSON」", async (t) => {

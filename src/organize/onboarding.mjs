@@ -17,6 +17,10 @@
 // - 所有排序按 UTF-16 码点二进制序，绝不依赖系统 locale；
 // - 聚类全规则化：分词停用词表内建，无随机值、无时间戳、无 LLM 建议；
 // - 候选组只是建议，不含任何批准 / 执行语义（应用走 management 层既有通道）。
+// - 归档口径：本模块不自行剔除归档 topic——调用方（plugin/management.mjs 的
+//   onboardingTopicsFor）先过滤出未归档行再传入，needsOnboarding / proposeGroups
+//   拿到的就是未归档人群。因此向导预览的计数只含未归档，与 group_manage list
+//   的组行计数（含已归档、按主组计）天然不同，不是计数 bug。
 //
 // 错误码统一 Error.code = INVALID_INPUT（形状 / 数据错误即刻显式失败，不静默纠正）。
 

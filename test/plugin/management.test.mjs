@@ -1498,6 +1498,31 @@ test("group_manage list 主组口径：多组 topic 只计入主组 t.group[0]�
   assert.equal(life.topics, 1, "life 主组只计 t-b（t-c 挂了 life 但主组是 dev，不重复计）");
 });
 
+// ── group_manage list 归档口径（0.5-7-4，用户 2026-11-22 拍板）──────────────
+// list 组行计数含已归档（cold/archived）专题；只有面板整理向导预览才只列未归档。
+// 交叉审查在 list 分支插入 archived 过滤后全量用例 0 红——本用例把口径钉死：
+// 验证方式：在 list 分支把 listTopics 行按 archived 过滤（snapshot 前 filter）→
+// 本用例必红（dev 2 → 1），恢复后即绿。
+
+test("group_manage list 归档口径：组行计数含已归档专题（勿按 archived 过滤）", async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-p5-grouparchived-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await seedGroups(base);
+  const service = {
+    async listTopics() {
+      return [
+        { key: "t-live", group: ["dev"] },
+        { key: "t-cold", group: ["dev"], archived: true, archivedAt: "2026-01-01T00:00:00.000Z" },
+      ];
+    },
+    async mutate() { throw new Error("list 计数用例不触写路径"); },
+  };
+  const tool = createGroupManageTool({ service, dataRoot: base, scopeId: "amber" });
+  const out = await tool.execute({ action: "list" });
+  const dev = out.groups.find((g) => g.key === "dev");
+  assert.equal(dev.topics, 2, "dev 计 t-live + t-cold：组行计数含已归档专题，拍板口径不许过滤归档");
+});
+
 // group 字段畸形（0.4 P0 交叉审查补钉）：实现只认 t.group[0]（数组首元素），
 // 空数组 / 缺失 / 非数组都没有合法主组——一律不计入任何组，组计数总和必须
 // 等于「有主组的 topic 数」，退化实现会把畸形挂载错算进某些组或整体虚增。

@@ -2328,7 +2328,7 @@ window.__ModuleLoader__.load({
       };
       var renderObPreview = function (pv, payload) {
         return h("div", { className: "dshi_items", "data-role": "onboarding-preview" },
-          h("div", { className: "dshi_hint", "data-role": "onboarding-preview-scope" }, "只按未归档专题提议分组（向导不为归档专题建组或挂载；归档不摘除已有挂载）。"),
+          h("div", { className: "dshi_hint", "data-role": "onboarding-preview-scope" }, "只按未归档专题提议分组（向导不为归档专题建组或挂载；归档不摘除已有挂载）。与分组管理的组行计数（含已归档专题、按主组计）口径不同，两处数字可能不同（存在已归档专题时），不是统计出错。"),
           h("div", { className: "dshi_item dshi_mono" }, pv.summary),
           // R4/P2-2：生产 L1 渲染（readCoreView）尚不传 groups——这里给的是
           // 组目录投影（既有组 + 提案组），如实标注，不冒称「应用后 L1」。

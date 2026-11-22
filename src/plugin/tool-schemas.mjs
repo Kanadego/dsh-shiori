@@ -105,6 +105,9 @@ const groupEntry = {
     title: { type: "string", required: true },
     summary: { type: "string", required: true },
     order: { type: "number", required: true },
+    // 计数口径（0.5-7-4 写清，行为不动）：list 返回的组清单包含已归档（cold/archived）
+    // 组，这里的 topics 也含已归档专题（按主组 t.group[0] 计）；面板整理向导预览
+    // 只列未归档专题，两者计数天然不同，不是统计 bug。
     topics: { type: "integer" },
   },
 };

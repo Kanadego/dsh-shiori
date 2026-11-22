@@ -32,17 +32,19 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKQ = join(HERE, "..", "..");
 const CLIENT_SRC = join(WORKQ, "client", "index.js");
 
-// applyAutoChanges 幂等键格式：生产 newId()（client/index.js:561-566）优先
-// crypto.randomUUID()，无 crypto 时回退 op-<base36 时间>-<8 位随机>。二选一即可。
-const OPERATION_ID_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const OPERATION_ID_FALLBACK = /^op-[a-z0-9]+-[a-z0-9]{8}$/;
+// applyAutoChanges 幂等键形状：与服务端契约对齐（src/storage/paths.mjs
+// validateOperationId，:111-131）——长度 1..128 且 ^[A-Za-z0-9][A-Za-z0-9._-]*$。
+// 生产 newId()（client/index.js:561-566）的 UUID 与 op-<base36>-<8 位随机> 两种
+// 产物都满足该契约；这里只锁服务端接受的形状，不锁客户端实现格式（客户端换
+// id 方案不应被测试误杀）。
+const OPERATION_ID_SERVER_CONTRACT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 function assertOperationIdShape(value, label) {
   assert.equal(typeof value, "string", `${label} 为非空字符串（幂等键）`);
-  assert.ok(value.length >= 8 && value.length <= 128, `${label} 长度在 1..128 约束内`);
+  assert.ok(value.length >= 1 && value.length <= 128, `${label} 长度在 1..128 约束内`);
   assert.ok(
-    OPERATION_ID_UUID.test(value) || OPERATION_ID_FALLBACK.test(value),
-    `${label} 格式合理（UUID 或 op-<base36>-<8 位随机>）：实际 ${JSON.stringify(value)}`,
+    OPERATION_ID_SERVER_CONTRACT.test(value),
+    `${label} 匹配服务端契约（字母/数字开头，仅字母/数字/点/下划线/连字符）：实际 ${JSON.stringify(value)}`,
   );
 }
 
@@ -458,7 +460,9 @@ test("A3 auto 模式：执行本轮 → 就地二次确认 → applyAutoChanges�
     assert.ok(mounted.textOfEl(opRows[1]).includes("已跳过"), "status 中文化：skipped");
     assert.ok(mounted.textOfEl(opRows[2]).includes("恢复"), "operationKind 中文化：unarchive-topic");
 
-    // replay 回执（同 operationId 重放）：口径改为「回放首次结果」。
+    // replay 回执：客户端每次「执行本轮」都生成新 operationId（下方三次调用
+    // 两两不同可证），replay 标记由 stub 伪造——模拟服务端按幂等键判定重复
+    // 提交后「回放首次结果、不二次执行」的口径，验证的是 UI 渲染不是重放链路。
     world.applyResult = autoApplyDto({ replay: true });
     assert.equal(mounted.click("[data-role=auto-apply]"), true, "再次点「执行本轮」");
     await settle(mounted);
@@ -490,7 +494,7 @@ test("A3 auto 模式：执行本轮 → 就地二次确认 → applyAutoChanges�
       assertOperationIdShape(call.payload && call.payload.operationId, `第 ${i + 1} 次执行 operationId`);
     }
     const secondOperationId = allApplyCalls[2].payload.operationId;
-    assert.notEqual(secondOperationId, operationId, "两次独立执行的 operationId 必须严格不等（幂等键不可复用）");
+    assert.notEqual(secondOperationId, operationId, "两次独立执行的 operationId 必须严格不等（不同提交不得复用同一 operationId）");
     const distinctIds = new Set(allApplyCalls.map((c) => c.payload.operationId));
     assert.equal(distinctIds.size, 3, "三次执行各自独立 payload：operationId 两两不同");
 
