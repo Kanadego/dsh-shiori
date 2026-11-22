@@ -1849,8 +1849,7 @@ export function createManagement(deps) {
         // 字符数按正文长度注入（L1 净变化的预估口径，见 replay.mjs 头注释）。
         chars: typeof row.body === "string" ? row.body.length : 0,
       }));
-      void skippedTopics; // 坏文件已按 listTopics 同精神跳过；不把内部计数塞进冻结 DTO
-      return simulateTemperaturePure({
+      const replay = simulateTemperaturePure({
         topics: replayTopics,
         groups,
         events,
@@ -1858,6 +1857,13 @@ export function createManagement(deps) {
         params,
         baseParams,
       });
+      // 批次 8-4：跳过计数不再静默——坏 topic 文件 / 越根链接会让预览少算，
+      // 有跳过时在返回里给出可读告警（可选字段，正常路径 wire 形状不变；
+      // 协议见 protocol.mjs simulateTemperature.outputSchema.warning）。
+      if (skippedTopics > 0) {
+        replay.warning = `已跳过 ${skippedTopics} 个无法读取的 topic 文件（损坏或越根链接），预览结果未计入它们`;
+      }
+      return replay;
     },
 
     /**

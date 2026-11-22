@@ -321,6 +321,24 @@ test("loadAliasTable：非对象条目（\"oops\"/null）之前的合法条目�
   assert.equal(r2.table.get("k8s"), "kubernetes");
 });
 
+// 批次 8-3 守卫补缺：nonObject 用例此前坏条目全在末尾，continue→break 变异仍全绿。
+// 本用例把坏条目放中间：坏条目之后的合法条目必须仍入表——continue 语义被改成 break 时必红。
+test("loadAliasTable：非对象坏条目居中，其后合法条目仍全部入表（continue 不截断后续）", async (t) => {
+  const dir = await mkTmp(t);
+  await writeSidecar(dir, "aliases.json", { version: 1, aliases: [
+    { alias: "js", canonical: "javascript", source: "manual" },
+    "oops", // 坏条目居中（非对象）——若实现把 continue 写成 break，其后条目全部丢失
+    { alias: "k8s", canonical: "kubernetes", source: "manual" },
+    { alias: "py3", canonical: "python", source: "learned" },
+  ]});
+  const r = await loadAliasTable(dir);
+  assert.match(r.error, /aliases 条目必须是对象/);
+  assert.equal(r.table.size, 3, "坏条目之后的合法条目仍全部入表（3 条）");
+  assert.equal(r.table.get("js"), "javascript");
+  assert.equal(r.table.get("k8s"), "kubernetes");
+  assert.equal(r.table.get("py3"), "python");
+});
+
 test("loadAliasTable：513 条合法条目 → table.size 512 + error 含「上限 512」；恰 512 条无 error", async (t) => {
   const mkEntries = (count) => Array.from({ length: count }, (_, i) => ({
     alias: `a-${String(i + 1).padStart(4, "0")}`,

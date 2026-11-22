@@ -193,6 +193,26 @@ describe('0.5 A 线：retention / archiveOrigin 保留策略字段', () => {
     }
   });
 
+  it('显式 retention:"standing" 属有意归一化：parse→rewrite 省略该行但语义不变（8-4 口径钉死）', () => {
+    // 磁盘上手写了「显式 standing」：读取值仍是 standing，rewrite 会按缺省值
+    // 归一化省略整行——这是拍板口径（信息不丢失：两形态读取等价），不是 bug。
+    const explicitText = '---\nkey: "a"\ntitle: "t"\nsummary: "s"\nupdated: "u"\nscopeId: "g"\n'
+      + 'retention: "standing"\n---\nb';
+    const parsed = parseTopicFile(Buffer.from(explicitText, 'utf8'));
+    assert.equal(parsed.retention, 'standing', '显式 standing 读取值不变');
+    // rewrite：把解析出的完整字段回写（模拟 service append/rewrite 继承路径）
+    const rewritten = serializeTopicFile({
+      ...META, key: 'a', title: 't', summary: 's', updated: 'u', scopeId: 'g',
+      retention: parsed.retention,
+    }, 'b').toString('utf8');
+    assert.doesNotMatch(rewritten, /^retention:/m, '显式 standing 经 rewrite 省略整行（有意归一化）');
+    const reparsed = parseTopicFile(Buffer.from(rewritten, 'utf8'));
+    assert.equal(reparsed.retention, 'standing', '重写后语义仍是 standing');
+    // 对照组：同一路径上 historical 绝不能被抹掉（防「顺手省略所有 retention」的误修）
+    const historical = serializeTopicFile({ ...META, retention: 'historical' }, 'b').toString('utf8');
+    assert.match(historical, /^retention: "historical"$/m, '非缺省策略必须落盘');
+  });
+
   it('旧文件（手工构造无新字段）读取补默认值且 meta 不被注入；已有 archivedAt 无来源 → manual', () => {
     const legacyText = [
       '---',

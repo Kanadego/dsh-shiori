@@ -742,6 +742,29 @@ test("UI 预览：草稿 payload 形状（组/成员/档位/ungrouped）+ 预览
   }
 });
 
+// 批次 8-3 守卫补缺：client/index.js 渲染的向导口径提示（data-role=onboarding-preview-scope）
+// 此前在 test/ 无任何断言——节点被删/文案改坏都不会红。这里钉住节点存在与关键语义
+//（「未归档」「可能不同」），不逐字钉整段长文案。
+test("UI 预览口径提示：onboarding-preview-scope 节点存在且含「未归档」「可能不同」关键语义", async () => {
+  const dsh = makeUiDsh();
+  const state = await mountStatus(dsh);
+  const { mounted } = state;
+  try {
+    dsh.preview = { ...neededStatus(), proposal: null, preview: FIXTURE_PREVIEW };
+    assert.equal(mounted.click("[data-role=onboarding-preview-run]"), true, "点「生成预览」");
+    await mounted.flush();
+    state.fresh();
+    assert.equal(hasCard(state, "onboarding-preview"), true, "预览卡在（前置）");
+    const scopeHint = elByRole(state.dom(), "onboarding-preview-scope");
+    assert.ok(scopeHint, "渲染 onboarding 预览时口径提示节点存在");
+    const hintText = collectDomText(scopeHint);
+    assert.ok(hintText.includes("未归档"), "口径提示含「未归档」关键语义（只按未归档专题提议分组）");
+    assert.ok(hintText.includes("可能不同"), "口径提示含「可能不同」关键语义（与分组管理计数口径差异提示）");
+  } finally {
+    mounted.unmount();
+  }
+});
+
 test("UI 组交互：组默认档位切换与逐条 override 进 payload；并入上一组合并成员", async () => {
   const dsh = makeUiDsh();
   const state = await mountStatus(dsh);

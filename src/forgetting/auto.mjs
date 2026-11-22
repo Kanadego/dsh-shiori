@@ -52,6 +52,9 @@ import { parseTopicFile } from "../storage/frontmatter.mjs";
 import { parseGroupsFile } from "../core/groups.mjs";
 import { readTopicActivity } from "../storage/topic-activity.mjs";
 import { isCanonicalIso, readFileOrNull, sha256Buffer } from "../storage/fsutil.mjs";
+// 0.5 批次 8-4：readTopics 的越根链接检查与 store 快照共用同一实现（同一个
+// 管理根身份 realpath 后逐级 lstat），不再各写一份符号链接判定。
+import { assertNoEscapeViaSymlink } from "../storage/paths.mjs";
 
 /**
  * 子操作身份（与 organize/executor.mjs 的 deriveStageOperationId 同一模式）：
@@ -581,7 +584,10 @@ export function assertRunShape(run) {
  * 只读评估装配源。硬约束：全部裸 readFile / readdir，不开存储锁、不建目录、
  * 不写盘（预览与评估零写入；锁内读会 mkdir 数据根并写 .shiori-lock，把只读
  * 预览变成写操作——见 management.mjs 0.5 批次 4 B 线注释）。坏文件按「跳过
- * 并计数」降级，不让一个手改坏文件拖垮整次评估。
+ * 并计数」降级，不让一个手改坏文件拖垮整次评估；单文件越根 symlink/junction
+ * 同口径计入 skipped（与 store 快照进 shadow 跳过一致），目录级越根与 store
+ * 一样直接拒绝（INVALID_INPUT）；悬空链接（realpath 失败 ENOENT/ELOOP）
+ * 按坏文件降级——单文件计入 skipped、目录级视为无 topics。
  *
  * @param {object} deps
  * @param {string|null} deps.dataRoot 业务数据根（null → 全空装配）。
@@ -603,11 +609,33 @@ export function createAutoReplaySource({ dataRoot, stateRoot, fs = fsp } = {}) {
     if (typeof scopeId !== "string" || scopeId.length === 0) {
       throw invalidInput("readTopics 的 scopeId 必须是非空字符串");
     }
+    // 批次 8-4：realpath 口径与 store/listTopics 对齐——快照读路径先 realpath
+    // 管理根（store.mjs rootReal 同一身份），再对目录与单文件做越根
+    // symlink/junction 检查。目录级越根与 store 一样直接拒绝（快照同样会抛
+    // INVALID_INPUT）；单文件越根按「跳过并计数」降级（store 进 shadow 跳过），
+    // 保证预览/评估看到的 topic 集合与 listTopics 一致，不再多吃根外链接。
+    // 悬空链接（lstat 成功但 realpath 失败）不是越界：ENOENT/ELOOP 按坏文件
+    // 降级——单文件计入 skipped，目录级视为该 scope 无 topics（continue），
+    // 兑现本函数「坏文件跳过不拖垮评估」的承诺；其余错误照旧上抛。
+    const degradableLinkError = (error) => error?.code === "ENOENT" || error?.code === "ELOOP";
+    let rootReal;
+    try {
+      rootReal = await fsp.realpath(root);
+    } catch (error) {
+      if (error?.code === "ENOENT") return { rows: [], skipped: 0 };
+      throw error;
+    }
     const scopes = scopeId === "global" ? ["global"] : ["global", scopeId];
     const byKey = new Map();
     let skipped = 0;
     for (const sid of scopes) {
-      const dir = path.join(root, "scopes", sid, "topics");
+      const dir = path.join(rootReal, "scopes", sid, "topics");
+      try {
+        await assertNoEscapeViaSymlink(rootReal, dir);
+      } catch (error) {
+        if (degradableLinkError(error)) continue;
+        throw error;
+      }
       let names;
       try {
         names = await fs.readdir(dir);
@@ -619,9 +647,16 @@ export function createAutoReplaySource({ dataRoot, stateRoot, fs = fsp } = {}) {
       for (const name of names) {
         if (!name.endsWith(".md")) continue;
         const key = name.slice(0, -3);
+        const file = path.join(dir, name);
+        try {
+          await assertNoEscapeViaSymlink(rootReal, file);
+        } catch (error) {
+          if (error?.code === "INVALID_INPUT" || degradableLinkError(error)) { skipped += 1; continue; }
+          throw error;
+        }
         let raw;
         try {
-          raw = await fs.readFile(path.join(dir, name));
+          raw = await fs.readFile(file);
         } catch (error) {
           if (error?.code === "ENOENT") { skipped += 1; continue; }
           throw error;

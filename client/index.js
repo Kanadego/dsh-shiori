@@ -2328,6 +2328,9 @@ window.__ModuleLoader__.load({
       };
       var renderObPreview = function (pv, payload) {
         return h("div", { className: "dshi_items", "data-role": "onboarding-preview" },
+          // 口径镜像文案（勿单改一处）：本提示中「组行计数含已归档 / 向导只列未归档 /
+          // 两处数字可能不同」的口径，与 src/host/tools.mjs 的 group_manage description
+          // 互为镜像——两处必须同步改。不跨包引运行时常量（client 与 host 是两套 bundle）。
           h("div", { className: "dshi_hint", "data-role": "onboarding-preview-scope" }, "只按未归档专题提议分组（向导不为归档专题建组或挂载；归档不摘除已有挂载）。与分组管理的组行计数（含已归档专题、按主组计）口径不同，两处数字可能不同（存在已归档专题时），不是统计出错。"),
           h("div", { className: "dshi_item dshi_mono" }, pv.summary),
           // R4/P2-2：生产 L1 渲染（readCoreView）尚不传 groups——这里给的是

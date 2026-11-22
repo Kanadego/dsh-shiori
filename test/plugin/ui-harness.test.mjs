@@ -91,15 +91,18 @@ test("H2a 正常 mount→unmount 后：4 个定时器全局逐字节还原 + pen
 
 test("H2b 故意留 interval：unmount 必须清掉（删 restore 的 timers.restore 会红）", async () => {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
+  const siBefore = globalThis.setInterval; // install 前原引用（H3 windowBefore 同款保存模式）
   const mounted = await harness.mount({ tab: "memory" });
+  // install 后 setInterval 必须已替换为可控实现：不再是原引用（自比恒真用例已废）
+  assert.notEqual(globalThis.setInterval, siBefore, "install 后 setInterval 已替换为可控实现（非原引用）");
   // 故意在 mount 的假定时器环境里留一个 interval
   globalThis.setInterval(() => {}, 1000);
   assert.equal(harness.timers.pendingCount(), 1, "已留 1 个 interval");
 
   mounted.unmount();
   assert.equal(harness.timers.pendingCount(), 0, "unmount 清掉残留 interval");
-  // 全局已还原：再排真 interval 不会进 fakeTimers
-  assert.equal(globalThis.setInterval, globalThis.setInterval, "setInterval 仍可用");
+  // restore 后逐字节还原原引用：再排真 interval 不会进 fakeTimers
+  assert.equal(globalThis.setInterval, siBefore, "restore 后 setInterval 还原为原引用");
 });
 
 // ── H3 install/restore 成对（R5：无条件断言）────────────────────────

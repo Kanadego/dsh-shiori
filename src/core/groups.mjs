@@ -236,6 +236,13 @@ export function serializeGroupsFile(data) {
 /**
  * 磁盘字节 → 组清单数据：严格解码 + JSON 解析 + 全量校验。
  * 纯函数：只消费 Buffer，不触文件系统。
+ *
+ * 错误族（0.5 批次 8-4 统一）：磁盘字节入口一律 INVALID_STATE——与 topic 解析
+ * （parseTopicFile 全部 invalidState）同族。validateGroupsData 的字段级校验
+ * 会抛 INVALID_INPUT（那是「写入口的用户 payload」族），本函数在此裹成
+ * INVALID_STATE（message/details 原样保留）；写入口（serializeGroupsFile /
+ * writeGroups / store.commit 的 payload 校验）仍直接调 validateGroupsData，
+ * 保持 INVALID_INPUT 不变。
  */
 export function parseGroupsFile(raw, fileLabel) {
   const text = decodeUtf8Strict(raw, fileLabel);
@@ -245,7 +252,14 @@ export function parseGroupsFile(raw, fileLabel) {
   } catch (error) {
     throw invalidState(`${fileLabel} 不是合法 JSON: ${error.message}`);
   }
-  return validateGroupsData(data, fileLabel);
+  try {
+    return validateGroupsData(data, fileLabel);
+  } catch (error) {
+    if (error?.code === 'INVALID_INPUT') {
+      throw invalidState(error.message, error.details);
+    }
+    throw error;
+  }
 }
 
 /**

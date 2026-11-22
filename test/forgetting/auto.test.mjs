@@ -478,3 +478,107 @@ test("createAutoReplaySource：dataRoot null 全空装配；坏文件跳过计�
     await rm(base, { recursive: true, force: true });
   }
 });
+
+// ── 批次 8-4：readTopics 的越根链接口径与 store/listTopics 对齐 ────────────────
+
+test("createAutoReplaySource：单文件越根 symlink 跳过并计数（与 listTopics 同集合）", async (t) => {
+  const { mkdtemp, mkdir, writeFile, rm, symlink } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-escape-"));
+  const outsideBase = await mkdtemp(path.join(tmpdir(), "shiori-auto-escape-out-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  t.after(() => rm(outsideBase, { recursive: true, force: true }));
+  const topicsDir = path.join(base, "scopes", "amber", "topics");
+  const outsideDir = outsideBase;
+  await mkdir(topicsDir, { recursive: true });
+  await mkdir(outsideDir, { recursive: true });
+  const body = (key, scope, updated) => `---\nkey: ${key}\nscopeId: ${scope}\ntitle: ${key}\nsummary: s\nupdated: ${updated}\n---\n\nbody\n`;
+  await writeFile(path.join(topicsDir, "good.md"), body("good", "amber", iso(1)));
+  await writeFile(path.join(outsideDir, "evil.md"), body("evil", "amber", iso(1)));
+  try {
+    await symlink(path.join(outsideDir, "evil.md"), path.join(topicsDir, "evil.md"), "file");
+  } catch (error) {
+    // Windows 非开发者模式/无符号链接权限：无法构造越根单文件链接，明确跳过而不假绿。
+    t.skip(`当前环境不允许创建文件符号链接（${error?.code ?? error?.message}）`);
+    return;
+  }
+  const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
+  const { rows, skipped } = await live.readTopics("amber");
+  assert.deepEqual(rows.map((r) => r.key), ["good"], "越根链接不得进入回放装配（预览少算的根因）");
+  assert.equal(skipped, 1, "单文件越根按「跳过并计数」，与 store 快照进 shadow 同口径");
+});
+
+test("createAutoReplaySource：目录级越根 junction 直接拒绝（与 store 快照同口径 INVALID_INPUT）", async (t) => {
+  const { mkdtemp, mkdir, writeFile, rm, symlink } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-escape-dir-"));
+  const outsideBase = await mkdtemp(path.join(tmpdir(), "shiori-auto-escape-dir-out-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  t.after(() => rm(outsideBase, { recursive: true, force: true }));
+  const scopeDir = path.join(base, "scopes", "amber");
+  const outsideDir = outsideBase;
+  await mkdir(scopeDir, { recursive: true });
+  await mkdir(outsideDir, { recursive: true });
+  await writeFile(path.join(outsideDir, "evil.md"), `---\nkey: evil\nscopeId: amber\ntitle: evil\nsummary: s\nupdated: ${iso(1)}\n---\n\nbody\n`);
+  try {
+    await symlink(outsideDir, path.join(scopeDir, "topics"), process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    t.skip(`当前环境不允许创建目录链接（${error?.code ?? error?.message}）`);
+    return;
+  }
+  const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
+  await assert.rejects(
+    () => live.readTopics("amber"),
+    (error) => error.code === "INVALID_INPUT" && /越出管理根/.test(error.message),
+    "topics 目录整体越根时，与 store 快照一样拒绝，不得静默读根外内容",
+  );
+});
+
+test("createAutoReplaySource：悬空单文件 symlink 按坏文件降级（跳过计数，不抛）", async (t) => {
+  const { mkdtemp, mkdir, writeFile, rm, symlink } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-dangling-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const topicsDir = path.join(base, "scopes", "amber", "topics");
+  await mkdir(topicsDir, { recursive: true });
+  await writeFile(path.join(topicsDir, "good.md"),
+    `---\nkey: good\nscopeId: amber\ntitle: good\nsummary: s\nupdated: ${iso(1)}\n---\n\nbody\n`);
+  try {
+    // 目标不存在 = 悬空链接（lstat 成功、realpath ENOENT），不得把预览/评估拖垮。
+    await symlink(path.join(base, "missing-target.md"), path.join(topicsDir, "dangling.md"), "file");
+  } catch (error) {
+    t.skip(`当前环境不允许创建文件符号链接（${error?.code ?? error?.message}）`);
+    return;
+  }
+  const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
+  const { rows, skipped } = await live.readTopics("amber");
+  assert.deepEqual(rows.map((r) => r.key), ["good"], "悬空链接不进入装配");
+  assert.equal(skipped, 1, "悬空链接计入 skipped（与坏 JSON 同口径）");
+});
+
+test("createAutoReplaySource：悬空 topics 目录 junction 视为空集合（不抛）", async (t) => {
+  const { mkdtemp, mkdir, rm, symlink } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-dangling-dir-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const outside = await mkdtemp(path.join(tmpdir(), "shiori-auto-dangling-target-"));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await mkdir(path.join(base, "scopes", "amber"), { recursive: true });
+  try {
+    await symlink(outside, path.join(base, "scopes", "amber", "topics"), process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    // 构造不出悬空 junction 时如实跳过；本机实测 junction 可用（失败码 EPERM/EACCES）。
+    t.skip(`当前环境不允许创建目录链接（${error?.code ?? error?.message}）`);
+    return;
+  }
+  // 删目标 = 悬空 junction（lstat 成功、realpath ENOENT）。
+  await rm(outside, { recursive: true, force: true });
+  const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
+  const { rows, skipped } = await live.readTopics("amber");
+  assert.deepEqual(rows, [], "悬空目录视为该 scope 无 topics");
+  assert.equal(skipped, 0, "目录级悬空不计单文件跳过");
+});

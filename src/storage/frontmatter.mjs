@@ -10,6 +10,8 @@
 //   archivedAt: "2026-11-07T00:00:00.000Z"   ← 可选；空/缺省时整行省略
 //   archiveOrigin: "auto-inactive"           ← 可选（0.5 A 线）；缺省 manual 整行省略
 //   retention: "historical"                  ← 可选（0.5 A 线）；缺省 standing 整行省略
+//                                             （显式写 standing 也省略属有意归一化，
+//                                              见下方写入策略说明）
 //   group: ["dev", "self"]                   ← 可选（0.4 S3）；空数组/缺省时整行省略
 //   pinned: true                             ← 可选（0.4 S3）；false/缺省时整行省略
 //   ---
@@ -30,6 +32,12 @@
 //   文件即人工归档；retention = "standing"），不回写磁盘，老文件原样保留；
 //   磁盘上的非法枚举值 → INVALID_STATE（显式拒绝，不静默纠正成默认值——
 //   静默纠正会把「手改坏数据」伪装成合法状态）；
+// - 显式写 standing（0.5 批次 8-4 口径钉死）：standing 是缺省值，写出侧
+//   对「显式 standing」与「缺省」一视同仁地省略整行，属**有意的归一化**而非
+//   信息丢失——读取侧两者都还原为 standing，语义等价；因此磁盘上显式写下的
+//   retention: "standing" 经 parse → rewrite 后会消失。需要「磁盘保留用户
+//   原样字节」的场景不适用本模块（写入侧只承诺语义往返，不承诺字节保持）。
+//   测试见 test/storage/frontmatter.test.mjs「有意归一化」用例；
 // - group（0.4 S3 分组）：可选，JSON 双引号字符串数组标量（如 ["dev","self"]，
 //   是 YAML 流序列的合法子集）；元素必须为非空字符串且不重复；缺省 = 未分组。
 //   group/pinned 与新字段不混入 meta 字符串记录，作为独立字段随解析结果返回
@@ -105,6 +113,8 @@ export function serializeTopicFile(meta, body) {
   // '' 是清除哨兵（与 archivedAt 同款：写 null 清除时以空串流经继承链，序列化
   // 层省略整行 = 磁盘回到缺省口径）；其余非默认值必须是合法枚举成员，否则
   // INVALID_INPUT（不许静默纠正）。
+  // 显式 standing 同样落在 fallback 分支被省略：0.5 批次 8-4 拍板为**有意的
+  // 归一化**（standing 是缺省值，读取侧无差别还原；语义往返成立），不是丢数据。
   // 两个字段都在写入侧校验，与读取侧（parse 侧 INVALID_STATE）形成同一组枚举。
   for (const [name, values, fallback] of [
     ['archiveOrigin', ARCHIVE_ORIGIN_VALUES, DEFAULT_ARCHIVE_ORIGIN],

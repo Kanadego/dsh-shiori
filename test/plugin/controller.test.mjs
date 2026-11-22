@@ -115,7 +115,12 @@ async function tempRoots() {
     base,
     dataRoot: path.join(base, "data"),
     stateRoot: path.join(base, "state"),
-    cleanup: () => rm(base, { recursive: true, force: true }),
+    // 清理有界重试（0.5 批次 8-1 交叉审查 R1）：Windows 上后台写句柄未释放时
+    // 单次 rm 会以 ENOTEMPTY/EBUSY 把整个用例记红（与业务无关的清理竞态）。
+    // maxRetries/retryDelay 是 fs.rm 内建重试——只对 EBUSY/EMFILE/ENFILE/
+    // ENOTEMPTY/EPERM 线性退避后重试，其余错误码照常抛出；这是清理，不是断言，
+    // 判据零改动。
+    cleanup: () => rm(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }),
   };
 }
 
@@ -2032,6 +2037,11 @@ test("0.5 启动差集兜底：重启后索引与卡片漂移（过期 revision 
     args: { title: "会议室", content: "打印报销单", triggers: [], vitality: "evergreen" },
   });
   assert.equal(saved2.ok, true);
+  // 同步手段（0.5 批次 8-1 去墙钟，照 0.5 批次 7-1 awaitAutoDiag 先例）：先等
+  // 启动差集完成信号（startupSyncs 在补嵌/剔除并落盘后才 +1，见 awaitStartupSync
+  // 注释），再读索引做最终断言——判据与断言零改动，只是不再赌 6s 墙钟内后台
+  // 修复必然收场（并行负载下偶发超时是批次 8 抓到的 flake）。
+  await awaitStartupSync(controller2, trustedContext, 1);
   assert.ok(await waitFor(async () => {
     const store = await openSemanticVectorStore({
       stateRoot: roots.stateRoot, scopeId,
@@ -2445,6 +2455,29 @@ async function awaitAutoDiag(controller, key, expected, timeoutMs = 10000) {
     current >= expected,
     `auto 诊断 ${key} 应 ≥ ${expected}（轮询超时，实际 ${current}）`
     + `——auto 记账在落盘后发出（fire-and-forget），需等待决议`,
+  );
+  return current;
+}
+
+/** 0.5 批次 8-1：等启动差集完成信号（事件门控）。照 0.5 批次 7-1 awaitAutoDiag
+ * 先例：25ms 一步轮询 getStatus.diagnostics.semantic.incremental.startupSyncs，
+ * 超时把当前实际值打印进断言消息。计数语义见 src/semantic/incremental.mjs——
+ * startupSyncs 在差集轮「过期卡补嵌 + 幽灵 retainOnly + saveIfDirty 落盘」全部
+ * 完成后才 +1（fire-and-forget），以完成信号代替墙钟猜测；最终索引断言零改动。 */
+async function awaitStartupSync(controller, trustedContext, expected, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  let current = 0;
+  while (Date.now() < deadline) {
+    const inc = (await controller.management.getStatus(trustedContext, {}))
+      .diagnostics.semantic.incremental ?? {};
+    current = inc.startupSyncs ?? 0;
+    if (current >= expected) return current;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(
+    current >= expected,
+    `启动差集诊断 startupSyncs 应 ≥ ${expected}（轮询超时，实际 ${current}）`
+    + `——startupSyncs 在差集轮补嵌/剔除并落盘后记账（fire-and-forget），需等待收场`,
   );
   return current;
 }

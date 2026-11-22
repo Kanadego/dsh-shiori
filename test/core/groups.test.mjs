@@ -655,3 +655,34 @@ test("A-0.5: 无 retention 的老清单序列化输出与 0.4 版本字节一致
 
 // 本段补充导入（ESM 顶层 import 提升生效；不改动上方既有 import 区，便于 review 对照）
 import { serializeGroupsFile, parseGroupsFile } from "../../src/core/groups.mjs";
+
+// ---------- 0.5 批次 8-4：磁盘解析错误族统一（与 topic 解析同为 INVALID_STATE） ----------
+
+test("A-8-4: parseGroupsFile 磁盘字节入口一律 INVALID_STATE；写入口仍 INVALID_INPUT", () => {
+  const diskCases = [
+    ["坏 JSON", Buffer.from("{not json", "utf8"), /不是合法 JSON/],
+    ["缺 title", Buffer.from(JSON.stringify({ version: 1, groups: [{ key: "dev", summary: "", order: 10 }] }), "utf8"), /title/],
+    ["retention 非法", Buffer.from(JSON.stringify({
+      version: 1, groups: [{ key: "dev", title: "T", summary: "", order: 1, retention: "bogus" }],
+    }), "utf8"), /retention/],
+  ];
+  for (const [label, raw, messagePattern] of diskCases) {
+    // 磁盘字节入口属数据损坏族：与 parseTopicFile 一致，不得抛成用户入参族。
+    assert.throws(
+      () => parseGroupsFile(raw, "groups.json(disk)"),
+      (error) => error.code === "INVALID_STATE" && messagePattern.test(error.message),
+      `${label} 应报 INVALID_STATE（message 原样保留）`,
+    );
+  }
+  // 同一份非法 payload 走写入口：仍是 INVALID_INPUT（service/store 的入参校验族不变）。
+  assert.throws(
+    () => validateGroupsData({ version: 1, groups: [{ key: "dev", summary: "", order: 10 }] }, "groups.json(写)"),
+    (error) => error.code === "INVALID_INPUT" && /title/.test(error.message),
+    "写入口缺 title 必须仍是 INVALID_INPUT",
+  );
+  assert.throws(
+    () => serializeGroupsFile({ version: 1, groups: [{ key: "dev", title: "T", summary: "", order: 1, retention: "bogus" }] }),
+    (error) => error.code === "INVALID_INPUT" && /retention/.test(error.message),
+    "写入口非法 retention 必须仍是 INVALID_INPUT",
+  );
+});

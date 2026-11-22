@@ -21,6 +21,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createUiHarness } from "./ui-harness.mjs";
+import { DEFAULT_TEMPERATURE_PARAMS, PARAM_SPECS } from "../../src/forgetting/params.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKQ = join(HERE, "..", "..");
@@ -61,6 +62,23 @@ const TEMPERATURE_DTO = Object.freeze({
 });
 
 const TEMP_KEYS = Object.keys(TEMPERATURE_DTO.specs);
+
+// 批次 8-3 漂移守卫：TEMPERATURE_DTO 夹具此前与 src/forgetting/params.mjs 无同源校验——
+// params.mjs 加参数/改默认值忘了同步夹具不会红。这里锁「键集合（数量+逐 key）」与
+// 「默认值逐键一致」。说明文案（description）两侧允许措辞差异，不逐字比对。
+test("夹具同源守卫：TEMPERATURE_DTO 的参数键集合 ≡ PARAM_SPECS（数量+逐 key），defaults ≡ DEFAULT_TEMPERATURE_PARAMS", () => {
+  const srcKeys = Object.keys(PARAM_SPECS);
+  assert.equal(TEMP_KEYS.length, srcKeys.length,
+    `参数数量一致（DTO ${TEMP_KEYS.length} / PARAM_SPECS ${srcKeys.length}）——params.mjs 加了参数必须同步夹具`);
+  assert.deepEqual([...TEMP_KEYS].sort(), [...srcKeys].sort(),
+    "DTO specs 键集合与 PARAM_SPECS 逐 key 一致（双向无缺无多）");
+  for (const key of TEMP_KEYS) {
+    assert.ok(Object.hasOwn(PARAM_SPECS, key), `DTO 键 ${key} 在 PARAM_SPECS 中存在`);
+    assert.ok(Object.hasOwn(DEFAULT_TEMPERATURE_PARAMS, key), `DTO 键 ${key} 在 DEFAULT_TEMPERATURE_PARAMS 中存在`);
+  }
+  assert.deepEqual({ ...TEMPERATURE_DTO.defaults }, { ...DEFAULT_TEMPERATURE_PARAMS },
+    "DTO defaults 与 DEFAULT_TEMPERATURE_PARAMS 逐键逐值一致——改默认值必须同步夹具");
+});
 
 // 自洽夹具：base/candidate 的分级计数与 transitions 逐条对应（5 个专题），
 // L1 净变化 = 迁入 cold/frozen 的 chars 之和 − 迁出 cold/frozen 的 chars 之和。

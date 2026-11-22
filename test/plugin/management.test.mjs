@@ -2688,6 +2688,43 @@ test("B线 simulateTemperature：只读预览（dataRoot/stateRoot 逐字节不�
   }
 });
 
+test("B线/8-4 simulateTemperature：坏 topic 文件不再静默——warning 计数且不进预览", async (t) => {
+  const fx = await temperatureFixture(t);
+  await writeFile(path.join(fx.dataRoot, "scopes", "global", "topics", "broken.md"), "not-a-topic", "utf8");
+  const sim = await fx.management.simulateTemperature(tempTrusted, { params: DEFAULT_TEMPERATURE_PARAMS });
+  assert.equal(sim.base.topics.some((entry) => entry.key === "broken"), false, "坏文件不得进入预览");
+  assert.equal(sim.base.tiers.cool + sim.base.tiers.cold + sim.base.tiers.frozen + sim.base.tiers.active, 2, "正常 topic 仍计入");
+  assert.equal(typeof sim.warning, "string", "有跳过时必须出告警（可观测）");
+  assert.match(sim.warning, /已跳过 1 个无法读取的 topic 文件/, "告警带跳过计数与原因");
+  // 无跳过的正常路径不出 warning（既有 wire 形状不变）。
+  await rm(path.join(fx.dataRoot, "scopes", "global", "topics", "broken.md"));
+  const clean = await fx.management.simulateTemperature(tempTrusted, { params: DEFAULT_TEMPERATURE_PARAMS });
+  assert.equal("warning" in clean, false, "无跳过不出键");
+});
+
+test("B线/8-4 simulateTemperature：越根 symlink 与 listTopics 同口径（不进预览 + warning）", async (t) => {
+  const fx = await temperatureFixture(t);
+  const { mkdtemp, symlink } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const outsideBase = await mkdtemp(path.join(tmpdir(), "shiori-mgmt-escape-"));
+  t.after(() => rm(outsideBase, { recursive: true, force: true }));
+  const { serializeTopicFile } = await import("../../src/storage/frontmatter.mjs");
+  const evilFile = path.join(outsideBase, "evil.md");
+  await writeFile(evilFile, serializeTopicFile({
+    key: "evil", title: "根外", summary: "s", updated: TEMP_NOW, scopeId: "global", retention: "historical",
+  }, "evil body"), "utf8");
+  try {
+    await symlink(evilFile, path.join(fx.dataRoot, "scopes", "global", "topics", "evil.md"), "file");
+  } catch (error) {
+    t.skip(`当前环境不允许创建文件符号链接（${error?.code ?? error?.message}）`);
+    return;
+  }
+  const sim = await fx.management.simulateTemperature(tempTrusted, { params: DEFAULT_TEMPERATURE_PARAMS });
+  assert.equal(sim.base.topics.some((entry) => entry.key === "evil"), false, "越根链接不得进入预览（listTopics 同集合）");
+  assert.equal(sim.base.tiers.cool + sim.base.tiers.cold + sim.base.tiers.frozen + sim.base.tiers.active, 2);
+  assert.match(String(sim.warning ?? ""), /已跳过 1 个无法读取的 topic 文件/, "越根跳过同样可观测");
+});
+
 test("B线 simulateTemperature：非法参数 INVALID_INPUT（带键名/区间）且 settings 不变、账本零新增", async (t) => {
   const fx = await temperatureFixture(t);
   const before = await snapshotTree(fx.base);

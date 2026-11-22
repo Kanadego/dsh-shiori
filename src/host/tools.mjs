@@ -29,7 +29,7 @@ import { groupSoftLimitWarning } from "../core/topics.mjs";
 import { readGroups, writeGroups, deleteGroup } from "../storage/groups.mjs";
 import { planGroupMigration, validateGroupEntry } from "../core/groups.mjs";
 
-/** 派生索引标题（= src/core/render.mjs 的 INDEX_HEADER）。正文与索引在读取时拼接，正文里不得自带。 */
+/** 派生索引标题（src/core/render.mjs INDEX_HEADER 的稳定前缀，子串拦截用：正文含渲染头即拒）。正文与索引在读取时拼接，正文里不得自带。 */
 const DERIVED_INDEX_HEADER = "## 主题记忆索引";
 
 /** core 正文禁止自带派生索引：否则读取渲染时会再拼一份，索引重复。 */
@@ -388,7 +388,7 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
     // ── L2/L3 检索 ────────────────────────────────────────────────────────
     {
       name: "memory_search",
-      description: "Keyword search over visible topics; archived (cold) topics are included by default but return summary-level entries only (state='archived', score=0, listed after active hits) — never full text; use memory_read(topic) for full text. Returns keys, titles and summaries only. Lexical search, not semantic matching.",
+      description: "Keyword search over visible topics; archived (cold) topics are included by default but return summary-level entries only (state='archived', score = lexical hit count kept for ranking, listed after active hits) — never full text; use memory_read(topic) for full text. Returns keys, titles and summaries only. Lexical search, not semantic matching.",
       inputSchema: {
         query: { type: "string", required: true, description: "Keywords or a short question." },
         limit: { type: "integer", description: "Maximum results, 1–20 (default 5)." },
@@ -861,6 +861,11 @@ export function createGroupManageTool({ service, dataRoot, scopeId, now, readonl
 
   return {
     name: "group_manage",
+    // 口径镜像文案（勿单改一处）：本 description 中「list 计数含归档 / 面板向导
+    // 只列未归档 / 两处数字可能不同」的口径，与 client/index.js 的向导预览提示
+    // （renderObPreview 里 data-role="onboarding-preview-scope" 那条 dshi_hint）
+    // 互为镜像——两处必须同步改，改一处不改另一处即漂移。不跨包引运行时常量
+    // （client 与 host 是两套 bundle）。
     description: "Manage topic groups for the current scope: list groups (with per-group topic counts and the dangling field reporting topic.group entries that point at groups no longer in the list), create/update group metadata (key/title/summary/order), delete a group, or repair dangling references. List returns the whole group list including groups made up only of archived (cold) topics, and the per-group counts include archived topics, counted only under each topic's primary group (group[0]); topics mounted in extra groups are not recounted. The panel's onboarding wizard preview, by contrast, lists only unarchived topics — the two counts can differ when the scope has archived topics, by design and not a counting bug. Create a group once topics naturally cluster: grouping early keeps L1 readable and stops related memories from piling up ungrouped. Deleting a non-empty group requires migrateTo: the topic re-mounts and the group-entry deletion are committed together as ONE atomic store transaction (same journal, all-or-nothing); if a topic is mounted into the dying group concurrently during the commit, the whole delete is rejected with nothing applied — rerun the delete and the new member is migrated too, so no dangling keys are left for repair to clean. A service that predates the groups transaction field falls back to the legacy two-step flow: the group's topics are re-grouped in one commit first, and the group entry is removed afterwards as a second, separate step; if that second step hits a revision conflict after the migration already committed, the revision is re-read and the entry deletion is retried once automatically (never a second migration); if that retry also fails, the error is rethrown annotated with the fact that the migration already took effect (rerunning is not guaranteed to be idempotent), and a topic newly attached between the two steps may be left with a dangling key — action=repair removes exactly those dangling references and reports cleaned/remaining (one CAS'd mutate commit with operationId; cleaned counts only pairs actually removed at write time; valid groups and card bodies untouched; refused with INVALID_STATE when the group list is empty but topics carry mounts, to avoid wiping every mount). repair re-reads the group list right before committing, but that recheck is NOT atomic with the mutate: a group created in the window right after the recheck can still make a fresh mount removable — this residual window is reported as-is, not closed. If the post-commit re-read fails, the result still reports cleaned plus a warning and omits remaining rather than inventing a value. Groups are per-scope and referenced from topic front-matter; a topic's first group is its primary group (soft limit: 3 groups per topic, more only yields a warning).",
     inputSchema: {
       action: { type: "string", required: true, description: "One of: list, create, update, delete, repair." },

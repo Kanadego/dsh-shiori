@@ -1020,6 +1020,9 @@ export const MANAGEMENT_METHODS = Object.freeze({
         // L1 字符净变化（预估：迁入 cold/frozen − 迁出 cold/frozen）。
         l1DeltaChars: { type: "integer" },
         alarms: { type: "array", items: { type: "object", additionalProperties: true } },
+        // 批次 8-4：只读装配跳过的 topic 文件数 > 0 时的可读告警（坏文件/越根
+        // 链接会让预览少算）；无跳过不出键，正常路径 wire 形状不变。
+        warning: { type: "string" },
       },
       required: ["base", "candidate", "transitions", "l1DeltaChars", "alarms"],
     },

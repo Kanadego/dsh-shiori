@@ -370,4 +370,41 @@ describe('storage/groups.mjs I/O 语义锚定', () => {
     assert.equal(second.created, false);
     assert.equal(second.revision, first.revision);
   });
+
+  it('磁盘 groups.json 字段级损坏 → INVALID_STATE（与 topic 磁盘解析同族）；写入口仍是 INVALID_INPUT', async (t) => {
+    // 批次 8-4 债：parseGroupsFile 对「单条字段错」曾抛 INVALID_INPUT（用户入参族），
+    // 而 topic 磁盘损坏一律 INVALID_STATE（数据损坏族）。磁盘字节入口统一为
+    // INVALID_STATE；service/store 的写 payload 校验（validateGroupsData）保持
+    // INVALID_INPUT 不变。
+    const root = await makeTmpRoot(t, 'shiori-groups-code-');
+    const file = groupsFilePath(root, 'amber');
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    // 合法 JSON、合法顶层，但单条缺 title / 组级 retention 非法：只会在字段校验层炸。
+    const corrupt = {
+      version: 1,
+      groups: [{ key: 'dev', summary: '', order: 10 }],
+    };
+    await fsp.writeFile(file, `${JSON.stringify(corrupt, null, 2)}\n`, 'utf8');
+    await assert.rejects(
+      () => readGroups({ dataRoot: root, scopeId: 'amber' }),
+      (e) => e.code === 'INVALID_STATE' && /title/.test(e.message),
+      '磁盘解析错误码必须与 topic 解析同族（INVALID_STATE）',
+    );
+    // 对照：同一形状作为「写入入参」仍是 INVALID_INPUT（入参族不变）。
+    await assert.rejects(
+      () => writeGroups({
+        dataRoot: root, scopeId: 'amber', groups: corrupt.groups, expectedRevision: null,
+      }),
+      (e) => e.code === 'INVALID_INPUT',
+      '写入口的用户 payload 校验不得被改成 INVALID_STATE',
+    );
+    // 对照：topic 文件字段损坏也是 INVALID_STATE（同族证据，防单边断言漂移）。
+    const parsedTopic = await import('../../src/storage/frontmatter.mjs');
+    assert.throws(
+      () => parsedTopic.parseTopicFile(Buffer.from(
+        '---\nkey: "a"\nsummary: "s"\nupdated: "2026-01-01T00:00:00.000Z"\nscopeId: "amber"\n---\nb', 'utf8',
+      )),
+      (e) => e.code === 'INVALID_STATE',
+    );
+  });
 });
