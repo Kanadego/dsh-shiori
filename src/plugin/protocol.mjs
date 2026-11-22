@@ -1119,6 +1119,29 @@ export const MANAGEMENT_METHODS = Object.freeze({
       additionalProperties: false,
       properties: {
         operationId,
+        // 0.5 第三波 suggest 双通道：可选 selection——null / 缺省 = 全量执行
+        // （旧调用兼容）；数组 = 只执行选中项（1..200 条；每项闭合对象，重复
+        // (operationKind,key) 由引擎 INVALID_INPUT 拒绝，不静默去重）。选中但
+        // 服务端复算后已消失的候选记 skipped: candidate-missing，不整单失败。
+        selection: {
+          oneOf: [
+            { type: "null" },
+            {
+              type: "array",
+              minItems: 1,
+              maxItems: 200,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  key: nonEmptyString,
+                  operationKind: { enum: ["archive-topic", "unarchive-topic"] },
+                },
+                required: ["key", "operationKind"],
+              },
+            },
+          ],
+        },
       },
       required: ["operationId"],
     },

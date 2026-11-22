@@ -1979,8 +1979,10 @@ export function createManagement(deps) {
     //   - 四个方法全部 requireModule("forgetting")：模块开关关闭时面板不应看到
     //     半可用的 auto 面（与 analyze / previewPlan 的 requireModule 同款）；
     //   - 模式门槛在引擎里现读（mode() 取值函数）：runAutoEvaluation 在 off 拒绝
-    //     （off 只记账不计算）；applyAutoChanges 仅 auto 可执行（suggest 只出
-    //     清单）；undoAutoRun 不看当前模式（auto 期执行的 run，切回 suggest 后
+    //     （off 只记账不计算）；applyAutoChanges 在 suggest / auto 可手动执行
+    //     （0.5 第三波 suggest 双通道拍板：suggest 不自动执行、确认后执行；
+    //     selection 透传给引擎——null=全量、数组=只执行选中项），off 仍拒绝；
+    //     undoAutoRun 不看当前模式（auto 期执行的 run，切回 suggest 后
     //     仍要能撤销）。
 
     /** wire 18：auto 状态视图（模式/上次评估/下次触发/熔断/最近 run 摘要）。 */
@@ -2005,10 +2007,13 @@ export function createManagement(deps) {
     },
 
     /**
-     * wire 20：执行候选（仅 mode=auto；每轮 ≤ maxOpsPerRun；operationId 幂等）。
-     * 守门链（评审 a2 拍板）：shadow/未启动/inert 由 requireActiveDataAccess 一并
-     * 拦截（其 mode 检查先抛「requires active mode」），不再叠加冗余 requireActive
-     * （同判据死代码，删；见 requireActiveDataAccess 注释）。
+     * wire 20：执行候选（0.5 第三波：mode=suggest / auto 手动执行，off 拒绝；
+     * 每轮 ≤ maxOpsPerRun；operationId 幂等）。payload.selection 可选：
+     * null / 缺省 = 全量执行；数组 = 只执行选中项（服务端复算后已消失的候选
+     * 记 skipped: candidate-missing）。守门链（评审 a2 拍板）：shadow/未启动/
+     * inert 由 requireActiveDataAccess 一并拦截（其 mode 检查先抛「requires
+     * active mode」），不再叠加冗余 requireActive（同判据死代码，删；见
+     * requireActiveDataAccess 注释）。
      */
     async applyAutoChanges(trustedContext, payload) {
       validateManagementPayload("applyAutoChanges", payload);
@@ -2017,7 +2022,12 @@ export function createManagement(deps) {
       requireModule("forgetting");
       const engine = requireAutoEngine("applyAutoChanges");
       const scope = await scopeFromTrustedContext(trustedContext);
-      return engine.apply({ scopeId: scope.scopeId, trigger: "manual", operationId: payload.operationId });
+      return engine.apply({
+        scopeId: scope.scopeId,
+        trigger: "manual",
+        operationId: payload.operationId,
+        selection: payload.selection ?? null,
+      });
     },
 
     /**

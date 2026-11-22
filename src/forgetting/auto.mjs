@@ -14,10 +14,12 @@
 //      的四个 auto RPC 与 controller pre-step 调度共用同一实例；全部持久状态落
 //      state.mjs 的 autoStore（<stateRoot>/auto-organize.json），内存只留单飞闸。
 //
-// 语义钉死（§11.2.3 / §5）：
-//   - 三档模式：off 只记账不计算；suggest 只出清单（候选/原因），绝不执行；
-//     auto 只执行可逆的两类——archive-topic（archivedAt + archiveOrigin=
-//     "auto-inactive"）与 unarchive-topic（清 archivedAt + 清 archiveOrigin）。
+// 语义钉死（§11.2.3 / §5；0.5 第三波 suggest 双通道拍板 2026-11-22）：
+//   - 三档模式：off 只记账不计算；suggest 只评估出清单（候选/原因），绝不自动
+//     执行，但允许手动 apply——逐条勾选（selection 数组）或一键全应用
+//     （selection=null 全量）；auto 在人类轮调度里评估后自动执行。两类可逆操作
+//     不变——archive-topic（archivedAt + archiveOrigin="auto-inactive"）与
+//     unarchive-topic（清 archivedAt + 清 archiveOrigin）。
 //   - 每轮 ≤ params.maxOpsPerRun（默认 20）；单条 CAS（fresh read + revision
 //     token）+ operationId（service journal 幂等）。
 //   - run 记录（runId / 时间 / 每条变更前后值）供 undoAutoRun 一键撤销；
@@ -555,12 +557,27 @@ export function buildUndoOps(run) {
   return undoOps;
 }
 
-/** run 记录形状复核（store 读出后 / 纯函数消费前的最后防线）。非法抛 INVALID_STATE。 */
+/** run 记录形状复核（store 读出后 / 纯函数消费前的最后防线）。非法抛 INVALID_STATE。
+ * 0.5 第三波起 run.selection 可选：旧 run（第三波前落盘）缺该字段按 null 读，
+ * 不报错（回放 / 撤销链路必须兼容旧账）；字段存在时必须为 null 或合法 selection
+ * 数组（形状与 apply 入参一致）。 */
 export function assertRunShape(run) {
   if (!isPlainObject(run)) throw invalidState("run 记录必须是普通对象", {});
   for (const field of ["runId", "at", "scopeId", "trigger", "mode", "operationId"]) {
     if (typeof run[field] !== "string" || run[field].length === 0) {
       throw invalidState(`run 记录缺少合法的 ${field}`, { field: String(run[field]) });
+    }
+  }
+  if (run.selection !== undefined && run.selection !== null) {
+    if (!Array.isArray(run.selection) || run.selection.length === 0) {
+      throw invalidState("run 记录的 selection 必须是 null 或非空数组", {});
+    }
+    for (const item of run.selection) {
+      if (!isPlainObject(item)
+        || typeof item.key !== "string" || item.key.length === 0
+        || !AUTO_OP_KINDS.includes(item.operationKind)) {
+        throw invalidState("run.selection 条目缺少合法的 key/operationKind", {});
+      }
     }
   }
   if (!Array.isArray(run.ops)) throw invalidState("run 记录的 ops 必须是数组", {});
@@ -579,6 +596,55 @@ export function assertRunShape(run) {
       throw invalidState("run.ops 条目缺少 before/after", {});
     }
   }
+}
+
+/** selection 复合身份键（0.5 第三波）：operationKind + key 唯一确定一条候选。 */
+function selectionItemKey(item) {
+  return `${item.operationKind}\u0000${item.key}`;
+}
+
+/**
+ * apply 的 selection 归一与校验（0.5 第三波 suggest 双通道）：
+ *   - 缺省 / null → null（全量执行，旧调用兼容）；
+ *   - 数组 → 每项 { key: 非空字符串, operationKind: AUTO_OP_KINDS 之一 }，
+ *     长度 1..200；重复 (operationKind,key) → INVALID_INPUT（不静默去重）。
+ * 返回归一后的数组（只保留 key/operationKind 两字段，多余键不入 run 记录）。
+ */
+function normalizeApplySelection(selection) {
+  if (selection === undefined || selection === null) return null;
+  if (!Array.isArray(selection)) {
+    throw invalidInput("selection 必须是 null 或数组（null=全量执行，数组=只执行选中项）", {
+      valueType: typeof selection,
+    });
+  }
+  if (selection.length < 1 || selection.length > 200) {
+    throw invalidInput("selection 数组长度必须为 1..200", { length: selection.length });
+  }
+  const seen = new Set();
+  const normalized = [];
+  for (const item of selection) {
+    if (!isPlainObject(item)) {
+      throw invalidInput("selection 每项必须是普通对象 { key, operationKind }", { valueType: typeof item });
+    }
+    if (typeof item.key !== "string" || item.key.length === 0) {
+      throw invalidInput("selection 每项的 key 必须是非空字符串", { key: String(item?.key) });
+    }
+    if (!AUTO_OP_KINDS.includes(item.operationKind)) {
+      throw invalidInput(`selection 每项的 operationKind 必须是 ${AUTO_OP_KINDS.join(" / ")} 之一`, {
+        operationKind: String(item?.operationKind),
+      });
+    }
+    const identity = selectionItemKey(item);
+    if (seen.has(identity)) {
+      throw invalidInput(`selection 存在重复条目（${item.operationKind} ${item.key}）：不静默去重，请去掉重复项后重试`, {
+        operationKind: item.operationKind,
+        key: item.key,
+      });
+    }
+    seen.add(identity);
+    normalized.push({ key: item.key, operationKind: item.operationKind });
+  }
+  return normalized;
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,14 +1148,23 @@ export function createAutoEngine(deps = {}) {
     },
 
     /**
-     * 执行一轮（仅 mode=auto）：评估 → 逐条执行（CAS + operationId）→ run 记录。
+     * 执行一轮（0.5 第三波：mode=suggest / auto 的手动执行入口；off 拒绝——off
+     * 只记账不计算。自动调度路径 onHumanTurn 仍只在 mode=auto 调本方法，suggest
+     * 绝不自跑）。selection（0.5 第三波 suggest 双通道）：
+     *   - 缺省 / null = 全量执行（旧调用语义不变）；
+     *   - 数组 = 只执行选中项（≤200 条；过滤发生在 evaluatePure 之后、逐条
+     *     executeOp 之前，按 plan 原顺序过滤）。
+     * 选中但复算后已不存在的 key（候选已随温度变化消失）→ 记一条
+     * { key, operationKind, status: "skipped", reason: "candidate-missing" } 进
+     * run.ops（计入 skipped），不整单失败；未选中的候选既不执行也不记 ops、
+     * 不计 skipped。run.selection 落账（null 或数组）供审计与回放。
      * operationId 重放口径（0.5 批次 10-2 注释纠正，与实现一致）：run 账本只
      * 保留最近 AUTO_RUN_KEEP 轮（state.mjs recordRun 滚动裁旧），同 operationId
      * 仅在窗口内重放首次结果；被逐出窗口后会重跑——单操作自身的幂等不靠 run
      * 查重，靠底层 journal 的 operationId（service.mutate 幂等重放）。重放命中
      * 还必须 scopeId 一致（getRunByOperationId 过滤），跨 scope 同 opId 不串。
      */
-    async apply({ scopeId, trigger, operationId }) {
+    async apply({ scopeId, trigger, operationId, selection: rawSelection }) {
       if (typeof scopeId !== "string" || scopeId.length === 0) {
         throw invalidInput("apply 的 scopeId 必须是非空字符串");
       }
@@ -1099,9 +1174,10 @@ export function createAutoEngine(deps = {}) {
       if (typeof operationId !== "string" || operationId.length === 0 || operationId.length > 128) {
         throw invalidInput("apply 的 operationId 必须是 1..128 字符的非空字符串", {});
       }
+      const selection = normalizeApplySelection(rawSelection);
       const activeMode = currentMode();
-      if (activeMode !== "auto") {
-        throw invalidState(`auto mode=${activeMode}：suggest 只出清单、off 只记账，执行被拒绝`, { mode: activeMode });
+      if (activeMode === "off") {
+        throw invalidState("auto mode=off：只记账不计算，执行被拒绝（面板切到 suggest/auto 后再试）", { mode: activeMode });
       }
       assertWritableForAuto("apply");
       const ledgerStore = requireStore("apply");
@@ -1117,6 +1193,38 @@ export function createAutoEngine(deps = {}) {
         diag({ kind: "auto-apply-fused", scopeId, reasons: pure.fuse.reasons.map((reason) => reason.code), at: pure.now });
         throw invalidState("auto 熔断：本轮不出任何可执行候选（详见 fuse.reasons）", { fuse: pure.fuse });
       }
+      // selection 过滤（null = 全量）：在 evaluatePure 之后、逐条 executeOp 之前，
+      // 按 plan 原顺序过滤；选中但复算后已消失的候选按 selection 原顺序补记
+      // candidate-missing（skipped），不进执行、不整单失败。
+      const opsToExecute = [];
+      const missingEntries = [];
+      if (selection === null) {
+        for (const op of pure.plan.ops) opsToExecute.push(op);
+      } else {
+        const remaining = new Set(selection.map(selectionItemKey));
+        for (const op of pure.plan.ops) {
+          const identity = selectionItemKey(op);
+          if (!remaining.has(identity)) continue; // 未选中：不执行、不记 ops、不计 skipped
+          remaining.delete(identity);
+          opsToExecute.push(op);
+        }
+        for (const item of selection) {
+          if (!remaining.has(selectionItemKey(item))) continue;
+          // 选中但复算后已不存在（候选随温度变化消失）：记 skipped，不失败。
+          // before/after 无真实前后值（候选已不在盘上），占位 null 值——本条
+          // status=skipped 不落盘变更，buildUndoOps 只取 applied，占位值不进撤销。
+          missingEntries.push({
+            operationKind: item.operationKind,
+            key: item.key,
+            scopeId,
+            title: null,
+            before: { archivedAt: null, archiveOrigin: null },
+            after: { archivedAt: null, archiveOrigin: null },
+            status: "skipped",
+            reason: "candidate-missing",
+          });
+        }
+      }
       const run = {
         runId: `auto-${Date.parse(pure.now)}-${randomUUID().replace(/-/g, "").slice(0, 8)}`,
         at: pure.now,
@@ -1124,12 +1232,14 @@ export function createAutoEngine(deps = {}) {
         trigger,
         mode: activeMode,
         operationId,
+        selection,
         undoneAt: null,
         ops: [],
       };
-      for (let index = 0; index < pure.plan.ops.length; index += 1) {
-        run.ops.push(await executeOp(pure.plan.ops[index], { operationIdBase: operationId, index }));
+      for (let index = 0; index < opsToExecute.length; index += 1) {
+        run.ops.push(await executeOp(opsToExecute[index], { operationIdBase: operationId, index }));
       }
+      for (const entry of missingEntries) run.ops.push(entry);
       await ledgerStore.recordRun(run);
       await ledgerStore.markEvaluated(scopeId, pure.now, trigger);
       diag({
@@ -1139,6 +1249,7 @@ export function createAutoEngine(deps = {}) {
         at: pure.now,
         trigger,
         applied: run.ops.filter((op) => op.status === "applied").length,
+        selected: selection === null ? null : selection.length,
         truncated: pure.plan.truncated,
       });
       return applyView(run, false, {

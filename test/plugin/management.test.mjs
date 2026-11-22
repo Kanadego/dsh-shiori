@@ -2961,7 +2961,7 @@ test("auto RPC：getAutoStatus / runAutoEvaluation 走真实 management 入口�
   assert.equal(status2.lastEvaluatedBy, "manual");
 });
 
-test("auto RPC：off 模式拒绝评估；applyAutoChanges 在 suggest/off 拒绝执行（mode 门槛在引擎现读）", async (t) => {
+test("auto RPC：off 模式拒绝评估与执行；suggest + selection 手动执行成功（0.5 第三波双通道：磁盘只变选中那条）+ selection 透传（null=全量）", async (t) => {
   const fx = await autoFixture(t, { autoMode: "off" });
   await assert.rejects(
     () => fx.controller.management.runAutoEvaluation(fx.trusted, {}),
@@ -2971,15 +2971,74 @@ test("auto RPC：off 模式拒绝评估；applyAutoChanges 在 suggest/off 拒�
     () => fx.controller.management.applyAutoChanges(fx.trusted, { operationId: "op-x" }),
     (e) => e.code === "INVALID_STATE",
   );
-
-  const suggest = await autoFixture(t, { autoMode: "suggest" });
-  await suggest.controller.management.runAutoEvaluation(suggest.trusted, {});
   await assert.rejects(
-    () => suggest.controller.management.applyAutoChanges(suggest.trusted, { operationId: "op-y" }),
-    (e) => e.code === "INVALID_STATE" && /suggest/.test(e.message),
+    () => fx.controller.management.applyAutoChanges(fx.trusted, {
+      operationId: "op-x-sel",
+      selection: [{ key: "cold-a", operationKind: "archive-topic" }],
+    }),
+    (e) => e.code === "INVALID_STATE",
+    "off 对 selection 数组同样拒绝（0.5 第三波只放开 suggest/auto，off 门槛不动）",
   );
-  const raw = await readFile(path.join(suggest.topicsDir, "cold-a.md"), "utf8");
-  assert.ok(!raw.includes("archivedAt"), "suggest 模式下 apply 被拒，磁盘零变更");
+
+  // 0.5 第三波契约变更（不是放宽，2026-11-22 拍板 m02028）：suggest 从「只出清单、
+  // 执行拒绝」改成「不自动执行、确认后手动执行」。selection 只执行勾选的那条，
+  // 未勾选的候选磁盘原样。
+  const suggest = await autoFixture(t, { autoMode: "suggest" });
+  const applied = await suggest.controller.management.applyAutoChanges(suggest.trusted, {
+    operationId: "op-y",
+    selection: [{ key: "cold-a", operationKind: "archive-topic" }],
+  });
+  assert.equal(applied.replay, false);
+  assert.equal(applied.applied, 1, "只执行勾选的那条");
+  assert.deepEqual(applied.ops.map((op) => `${op.operationKind}:${op.key}`), ["archive-topic:cold-a"]);
+  assert.equal(applied.trigger, "manual");
+  const rawA = await readFile(path.join(suggest.topicsDir, "cold-a.md"), "utf8");
+  assert.ok(/archivedAt: "/.test(rawA), "选中那条已归档落盘");
+  assert.ok(/archiveOrigin: "auto-inactive"/.test(rawA), "来源=auto-inactive");
+  const rawB = await readFile(path.join(suggest.topicsDir, "cold-b.md"), "utf8");
+  assert.ok(!rawB.includes("archivedAt"), "未选中的候选磁盘原样（suggest 下磁盘只变选中那条）");
+  // selection 透传断言（数组形态）：run 落账、lastRuns 出现本次执行记录。
+  const statusSel = await suggest.controller.management.getAutoStatus(suggest.trusted, {});
+  assert.equal(statusSel.lastRuns.length, 1, "suggest 手动执行照常落 run");
+  assert.equal(statusSel.lastRuns[0].applied, 1);
+
+  // selection 透传断言（null 形态）：不传 / 显式 null 等价全量——旧调用语义不变。
+  const suggestFull = await autoFixture(t, { autoMode: "suggest" });
+  const appliedFull = await suggestFull.controller.management.applyAutoChanges(suggestFull.trusted, {
+    operationId: "op-y-full",
+    selection: null,
+  });
+  assert.equal(appliedFull.applied, 2, "selection=null 透传为全量执行（两条冷档都执行）");
+  const rawFullA = await readFile(path.join(suggestFull.topicsDir, "cold-a.md"), "utf8");
+  const rawFullB = await readFile(path.join(suggestFull.topicsDir, "cold-b.md"), "utf8");
+  assert.ok(/archivedAt: "/.test(rawFullA) && /archivedAt: "/.test(rawFullB), "全量执行两条都落盘");
+
+  // wire 层闭合校验（protocol inputSchema 新增 selection 分支）：坏形状在 wire 层拒绝。
+  const suggestSchema = await autoFixture(t, { autoMode: "suggest" });
+  await assert.rejects(
+    () => suggestSchema.controller.management.applyAutoChanges(suggestSchema.trusted, {
+      operationId: "op-schema-1",
+      selection: [],
+    }),
+    (e) => e.code === "INVALID_INPUT",
+    "selection=[] 违反 minItems:1，wire 层拒绝",
+  );
+  await assert.rejects(
+    () => suggestSchema.controller.management.applyAutoChanges(suggestSchema.trusted, {
+      operationId: "op-schema-2",
+      selection: [{ key: "cold-a", operationKind: "archive-topic", extra: true }],
+    }),
+    (e) => e.code === "INVALID_INPUT",
+    "selection 条目闭合（additionalProperties:false），多余键拒绝",
+  );
+  await assert.rejects(
+    () => suggestSchema.controller.management.applyAutoChanges(suggestSchema.trusted, {
+      operationId: "op-schema-3",
+      selection: [{ key: "cold-a", operationKind: "rewrite" }],
+    }),
+    (e) => e.code === "INVALID_INPUT",
+    "operationKind 枚举外拒绝",
+  );
 });
 
 test("auto RPC：applyAutoChanges 真实执行（archivedAt + archiveOrigin=auto-inactive 落盘）+ operationId 幂等重放 + run 记录可查", async (t) => {

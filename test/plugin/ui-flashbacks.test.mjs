@@ -490,7 +490,7 @@ test("F2 按钮：assistant-actions 插槽注册成功，降级关联如实标�
   await cleanup();
 });
 
-test("F2 按钮：窗口内无本会话投递 → 明确提示；点按钮发起 getGraph 并按 shioriSessionId 过滤", async () => {
+test("F2 按钮（R3 收口）：未拉取整位不渲染；挂载 effect 按注入会话 id 拉取；无投递浮层兜底文案保留；有卡按钮照常且点击不重复拉取", async () => {
   const host = makeStatefulReact();
   const { registered, cleanup } = await applyWithSlots(host);
   const action = registered["conversation.chat.assistant-actions"];
@@ -503,30 +503,63 @@ test("F2 按钮：窗口内无本会话投递 → 明确提示；点按钮发起
       return { nodes: [], deliveries: [{ deliveryId: "d-old", at: new Date(Date.now() - 11 * 60_000).toISOString(), sessionId: "session-A", cards: [] }] };
     },
   };
-  // 关闭态：点击 → 展开 + 首次拉取。
+  const props = { dsh, shioriSessionId: "session-A", messageId: "m-1" };
+  // ① 未拉取（result=undefined）：整位不渲染（§11.5 R3 收口——加载中不留灰度入口）。
+  // 原「按钮以『闪回』占位」断言按新契约改写。
   host.states.length = 0;
   host.states.push(false, undefined, false);
   host.cursor.v = 0;
-  const props = { dsh, shioriSessionId: "session-A", messageId: "m-1" };
-  const tree = vnode.type(props);
-  // 0.5-5D 规格连带（唯一放行的既有断言改动）：按钮文案从「闪回命中」改为
-  // 「闪回 N」——未拉取到 N 前按钮先以「闪回」占位（线稿图标 + 文案），命中后
-  // 徽标显示 N；「命中」一词从按钮上消失（§11.5 第 5 条）。
-  const button = findButton(tree, "闪回");
-  assert.ok(button, "按钮存在");
-  button.props.onClick();
-  assert.equal(host.states[0], true, "点击展开");
-  assert.equal(calls.length, 1, "点击后立即发起 getGraph（async 函数首个 await 前同步执行）");
+  let tree = vnode.type(props);
+  assert.equal(findButton(tree, "闪回"), undefined, "未拉取：整位不渲染");
+
+  // ③ 挂载 effect 手动跑（本文件 react stub 不自动执行 effect）：getGraph 按注入的
+  // shioriSessionId 发出——验证目标在本用例内自证，不引用别的文件的断言。
+  host.effects.length = 0;
+  host.cursor.v = 0;
+  vnode.type(props);
+  const mountEffects = host.effects.splice(0);
+  assert.ok(mountEffects.length >= 1, "挂载 effect 已入列");
+  for (const effect of mountEffects) effect();
   await Promise.resolve();
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(calls, [{ method: "getGraph", session: "session-A" }], "按注入的会话 id 拉取 getGraph");
-  assert.equal(host.states[2], false, "拉取完成后 busy 复位");
+  assert.deepEqual(calls, [{ method: "getGraph", session: "session-A" }], "挂载即按注入的会话 id 拉取 getGraph（原验证目标：按 shioriSessionId 过滤拉取）");
   assert.equal(host.states[1].delivery, null, "11 分钟前的投递超出窗口 → 无最近投递");
+
+  // ② 已拉取、窗口外无投递（delivery=null、error=null）：按钮仍不占位（新契约）；
+  // open=true（竞态窗口：浮层开着时数据被重新拉取）时浮层兜底文案照常渲染——
+  // 防竞态分支保留，不因按钮不显示而删除。
+  host.states.length = 0;
+  host.states.push(false, { delivery: null, matchedPrecise: false, nodes: [], error: null }, false);
+  host.cursor.v = 0;
+  tree = vnode.type(props);
+  assert.equal(findButton(tree, "闪回"), undefined, "已拉取确认无投递：按钮不占位");
   host.states[0] = true;
   host.cursor.v = 0;
+  const fallbackTree = vnode.type(props);
+  assert.ok(collectText(fallbackTree).includes("最近 10 分钟内本会话没有投递记录。"), "无投递浮层兜底文案保留（原验证目标：窗口外如实提示）");
+
+  // 有卡已拉取：按钮照常出现；点击开浮层不再重复发 getGraph（拉取已由挂载
+  // effect 完成，R3 收口后 toggle 不再兜底首次拉取）。
+  host.states.length = 0;
+  host.states.push(false, {
+    delivery: { deliveryId: "d-new", sourceMessageId: "m-1", at: new Date(Date.now() - 60_000).toISOString(), sessionId: "session-A",
+      cards: [{ sparkId: "s1", trigger: "触发词A", source: "seed" }] },
+    matchedPrecise: false,
+    nodes: [{ id: "s1", title: "卡片甲", summary: null }],
+    error: null,
+  }, false);
+  host.cursor.v = 0;
+  tree = vnode.type(props);
+  const button = findButton(tree, "闪回");
+  assert.ok(button, "有卡已拉取：按钮占位");
+  const callsBeforeClick = calls.length;
+  button.props.onClick();
+  assert.equal(host.states[0], true, "点击展开浮层");
+  assert.equal(calls.length, callsBeforeClick, "已拉取状态下点击不再重复发 getGraph（拉取由挂载 effect 承担）");
+  host.cursor.v = 0;
   const openTree = vnode.type(props);
-  assert.ok(collectText(openTree).includes("最近 10 分钟内本会话没有投递记录。"), "窗口外如实提示");
+  assert.ok(collectText(openTree).includes("卡片甲"), "浮层卡片在列");
   await cleanup();
 });
 

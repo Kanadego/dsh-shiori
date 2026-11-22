@@ -912,3 +912,242 @@ test("auto apply：跨 scope 同 operationId 不串（重放命中必须 scopeId
   assert.equal(deltaAgain.replay, true, "delta 自己的窗口内重放照常命中");
   assert.equal(deltaAgain.runId, deltaRun.runId);
 });
+
+// ── 0.5 第三波：selection 双通道（suggest 手动执行 / 逐条勾选 / candidate-missing）──
+//
+// 引擎级用例：回放源注入「三冷一热」候选（61/62/63 天冷档 + 29 天 auto-inactive
+// 热档），service 为内存假实现（readTopic/mutate 记账），覆盖：
+//   selection 子集执行（plan 原顺序）/ 未选中不执行不记录 / candidate-missing 记
+//   skipped 不整单失败 / 重复与非法 selection INVALID_INPUT / off 拒绝 / suggest
+//   手动执行成功（run.mode=suggest）/ suggest 自动调度仍不执行 / 旧 run 缺
+//   selection 可回放。
+
+/** 三冷一热候选的回放源（纯内存注入；行形状与 createAutoReplaySource.readTopics 产物一致）。 */
+function candidateReplaySource() {
+  const rows = [
+    { key: "cool-1", scopeId: "amber", updated: iso(61), retention: "historical", pinned: false, group: [], title: "冷一" },
+    { key: "cool-2", scopeId: "amber", updated: iso(62), retention: "historical", pinned: false, group: [], title: "冷二" },
+    { key: "cool-3", scopeId: "amber", updated: iso(63), retention: "historical", pinned: false, group: [], title: "冷三" },
+    { key: "rest-1", scopeId: "amber", updated: iso(29), retention: "historical", pinned: false, group: [], title: "热一", archivedAt: iso(3), archiveOrigin: AUTO_ARCHIVE_ORIGIN },
+  ];
+  return {
+    rows,
+    readTopics: async () => ({ rows: rows.map((r) => ({ ...r })), skipped: 0 }),
+    readGroups: async () => [],
+    readLedger: async () => ({
+      // 远古种子事件（90 天前 ≥ minCooldownDays=30）：统计健康、不加热任何 topic。
+      events: [{ at: iso(90), scopeId: "amber", kind: "search_hit", topicKey: "__seed__" }],
+      skipped: 0,
+      error: null,
+    }),
+  };
+}
+
+/** 假 service 状态（按回放源行初始化：archivedAt/archiveOrigin 与行一致）。 */
+function fakeServiceState(rows) {
+  const state = {};
+  for (const row of rows) {
+    state[row.key] = {
+      scopeId: row.scopeId,
+      revision: 1,
+      body: "正文。",
+      archivedAt: row.archivedAt ?? null,
+      archiveOrigin: row.archiveOrigin ?? null,
+    };
+  }
+  return state;
+}
+
+/** 假 serviceFor：readTopic 供 CAS 复核、mutate 记账（log 收集调用，磁盘效果反映在 state）。 */
+function fakeServiceFor(state, log) {
+  return async () => ({
+    async readTopic(key) {
+      const rec = state[key];
+      if (!rec) {
+        const error = new Error(`NOT_FOUND: topic "${key}"`);
+        error.code = "NOT_FOUND";
+        throw error;
+      }
+      return { key, scopeId: rec.scopeId, revision: rec.revision, body: rec.body, archivedAt: rec.archivedAt, archiveOrigin: rec.archiveOrigin };
+    },
+    async mutate(call) {
+      log.push(call);
+      for (const change of call.changes) {
+        const rec = state[change.key];
+        rec.revision += 1;
+        rec.archivedAt = change.topic.archivedAt;
+        rec.archiveOrigin = change.topic.archiveOrigin;
+      }
+      return { ok: true };
+    },
+  });
+}
+
+/** 带候选的引擎（mode 可注入；serviceFor 调用收集进 log）。 */
+function candidateEngine(store, { mode = "suggest", log = [] } = {}) {
+  const source = candidateReplaySource();
+  return createAutoEngine({
+    nowIso: () => NOW,
+    mode: () => mode,
+    params: () => params(),
+    replaySource: source,
+    serviceFor: fakeServiceFor(fakeServiceState(source.rows), log),
+    store: store.autoStore,
+  });
+}
+
+test("auto apply selection（0.5 第三波）：子集执行——只执行勾选项、按 plan 原顺序、未选中不执行不记录；run.selection 落账", async (t) => {
+  const store = await withTempState(t);
+  const log = [];
+  const engine = candidateEngine(store, { mode: "suggest", log });
+  const receipt = await engine.apply({
+    scopeId: "amber",
+    trigger: "manual",
+    operationId: "op-sel-1",
+    selection: [
+      { key: "rest-1", operationKind: "unarchive-topic" },
+      { key: "cool-1", operationKind: "archive-topic" },
+    ],
+  });
+  assert.equal(receipt.replay, false);
+  assert.equal(receipt.applied, 2);
+  assert.equal(receipt.skipped, 0);
+  assert.equal(receipt.failed, 0);
+  // 顺序保持：执行顺序跟随 plan 原顺序（cool-1 在前、rest-1 在后），不是 selection 给的顺序。
+  assert.deepEqual(receipt.ops.map((op) => op.key), ["cool-1", "rest-1"]);
+  // 未选中的候选既不执行也不记 ops、不计 skipped。
+  assert.equal(receipt.ops.some((op) => op.key === "cool-2"), false, "未选中的 cool-2 不记 ops");
+  assert.equal(receipt.ops.some((op) => op.key === "cool-3"), false, "未选中的 cool-3 不记 ops");
+  assert.equal(receipt.skipped, 0, "未选中的候选不计 skipped");
+  // 服务端只写勾选项（mutate 恰两次，覆盖 cool-1 / rest-1）。
+  assert.deepEqual(log.flatMap((call) => call.changes.map((change) => change.key)).sort(), ["cool-1", "rest-1"]);
+  // run.selection 落账（归一为 key/operationKind，按调用侧顺序），run.mode 记当前模式。
+  const run = await store.autoStore.getRun(receipt.runId);
+  assertRunShape(run);
+  assert.deepEqual(run.selection, [
+    { key: "rest-1", operationKind: "unarchive-topic" },
+    { key: "cool-1", operationKind: "archive-topic" },
+  ]);
+  assert.equal(run.mode, "suggest");
+});
+
+test("auto apply selection：candidate-missing——选中但复算后已消失的候选记 skipped，不整单失败", async (t) => {
+  const store = await withTempState(t);
+  const engine = candidateEngine(store, { mode: "suggest" });
+  const receipt = await engine.apply({
+    scopeId: "amber",
+    trigger: "manual",
+    operationId: "op-sel-2",
+    selection: [
+      { key: "gone", operationKind: "archive-topic" },
+      { key: "cool-1", operationKind: "archive-topic" },
+    ],
+  });
+  assert.equal(receipt.applied, 1, "cool-1 正常执行");
+  assert.equal(receipt.skipped, 1, "gone 计入 skipped");
+  assert.equal(receipt.failed, 0, "缺失候选不整单失败");
+  const missing = receipt.ops.find((op) => op.key === "gone");
+  assert.ok(missing, "消失候选有条目（不静默吞掉）");
+  assert.equal(missing.status, "skipped");
+  assert.equal(missing.reason, "candidate-missing");
+  assert.equal(missing.operationKind, "archive-topic");
+  // 执行条目按 plan 原顺序在前，缺失补记条目在后。
+  assert.deepEqual(receipt.ops.map((op) => op.key), ["cool-1", "gone"]);
+});
+
+test("auto apply selection：校验——重复 (operationKind,key) INVALID_INPUT（不静默去重）；空数组/非法项/越界长度拒绝", async (t) => {
+  const store = await withTempState(t);
+  const engine = candidateEngine(store, { mode: "suggest" });
+  const applyWith = (selection, operationId) =>
+    engine.apply({ scopeId: "amber", trigger: "manual", operationId, selection });
+  // 重复 (operationKind,key)：INVALID_INPUT，不静默去重。
+  await assert.rejects(
+    () => applyWith([
+      { key: "cool-1", operationKind: "archive-topic" },
+      { key: "cool-1", operationKind: "archive-topic" },
+    ], "op-dup"),
+    (e) => e.code === "INVALID_INPUT" && /重复/.test(e.message),
+  );
+  // 空数组 / 非数组 / 空 key / 非法 operationKind：一律 INVALID_INPUT。
+  await assert.rejects(() => applyWith([], "op-empty"), (e) => e.code === "INVALID_INPUT");
+  await assert.rejects(() => applyWith("cool-1", "op-str"), (e) => e.code === "INVALID_INPUT");
+  await assert.rejects(() => applyWith([{ key: "", operationKind: "archive-topic" }], "op-empty-key"), (e) => e.code === "INVALID_INPUT");
+  await assert.rejects(() => applyWith([{ key: "cool-1", operationKind: "rewrite" }], "op-bad-kind"), (e) => e.code === "INVALID_INPUT");
+  // 201 条越界 → INVALID_INPUT；200 条恰好合法（全为盘上没有的 key → 全部
+  // candidate-missing，不失败——长度上限只约束入参形状，不约束命中与否）。
+  const build = (count) => Array.from({ length: count }, (_, i) => ({ key: `k-${i}`, operationKind: "archive-topic" }));
+  await assert.rejects(() => applyWith(build(201), "op-too-many"), (e) => e.code === "INVALID_INPUT");
+  const boundary = await applyWith(build(200), "op-boundary-200");
+  assert.equal(boundary.applied, 0);
+  assert.equal(boundary.skipped, 200, "200 条为合法上界：全按 candidate-missing 计 skipped");
+});
+
+test("auto apply：mode 门槛（0.5 第三波）——off 拒绝（含 selection）；suggest 手动全量执行成功且 run.mode=suggest、run.selection=null", async (t) => {
+  const offStore = await withTempState(t);
+  const offEngine = candidateEngine(offStore, { mode: "off" });
+  await assert.rejects(
+    () => offEngine.apply({ scopeId: "amber", trigger: "manual", operationId: "op-off" }),
+    (e) => e.code === "INVALID_STATE" && /off/.test(e.message),
+  );
+  await assert.rejects(
+    () => offEngine.apply({
+      scopeId: "amber", trigger: "manual", operationId: "op-off-sel",
+      selection: [{ key: "cool-1", operationKind: "archive-topic" }],
+    }),
+    (e) => e.code === "INVALID_STATE",
+    "off 对 selection 数组同样拒绝（mode 门槛先于一切执行路径）",
+  );
+
+  const store = await withTempState(t);
+  const log = [];
+  const engine = candidateEngine(store, { mode: "suggest", log });
+  const receipt = await engine.apply({ scopeId: "amber", trigger: "manual", operationId: "op-sug-1" });
+  assert.equal(receipt.replay, false);
+  assert.equal(receipt.applied, 4, "全量执行：三冷一热全部应用");
+  assert.deepEqual(receipt.ops.map((op) => op.key), ["cool-3", "cool-2", "cool-1", "rest-1"], "plan 原顺序：最冷优先、恢复在后");
+  const run = await store.autoStore.getRun(receipt.runId);
+  assert.equal(run.mode, "suggest", "run.mode 记当前模式");
+  assert.equal(run.selection, null, "缺省 selection 落账为 null（旧调用语义不变）");
+  assert.equal(log.length, 4, "每条候选一次 mutate");
+});
+
+test("auto apply：suggest 自动调度仍不执行（onHumanTurn 只评估，绝不触达执行层、不落 run）", async (t) => {
+  const store = await withTempState(t);
+  const log = [];
+  const engine = candidateEngine(store, { mode: "suggest", log });
+  await engine.onHumanTurn({ scopeId: "amber" });
+  const read = await store.autoStore.read();
+  assert.equal((read.state.runs ?? []).length, 0, "suggest 调度不落 run（绝不自动执行）");
+  assert.equal(log.length, 0, "suggest 调度不触达 serviceFor（执行层零调用）");
+  const anchor = read.state?.scopes?.amber ?? null;
+  assert.ok(anchor !== null && typeof anchor.lastEvaluatedAt === "string" && anchor.lastEvaluatedAt.length > 0,
+    "评估照常记账锚（suggest 只是不自动执行，不是不评估）");
+});
+
+test("auto apply：auto 模式人类轮调度仍自动执行（对照——门槛放开没有误伤调度路径）", async (t) => {
+  const store = await withTempState(t);
+  const log = [];
+  const engine = candidateEngine(store, { mode: "auto", log });
+  await engine.onHumanTurn({ scopeId: "amber" });
+  const read = await store.autoStore.read();
+  assert.equal((read.state.runs ?? []).length, 1, "auto 调度照常落 run");
+  assert.ok(log.length >= 1, "auto 调度照常执行候选");
+});
+
+test("旧 run 缺 selection 字段可回放：assertRunShape 兼容（缺字段按 null 读），重放链路不报错", async (t) => {
+  const store = await withTempState(t);
+  // 0.5 第三波之前的 run 形状：没有 selection 字段。
+  await store.autoStore.recordRun(dummyRun({ runId: "r-old", operationId: "op-old", trigger: "manual" }));
+  const engine = candidateEngine(store, { mode: "suggest" });
+  const replayed = await engine.apply({ scopeId: "amber", trigger: "manual", operationId: "op-old" });
+  assert.equal(replayed.replay, true, "窗口内命中 → 重放首次结果，不因缺 selection 报错");
+  assert.equal(replayed.runId, "r-old");
+  const run = await store.autoStore.getRun("r-old");
+  assert.doesNotThrow(() => assertRunShape(run), "旧 run（无 selection 字段）通过形状复核");
+  // 新形状直测：selection=null / 合法数组放行；非法类型 / 空数组 / 坏条目拒。
+  assert.doesNotThrow(() => assertRunShape(dummyRun({ selection: null })));
+  assert.doesNotThrow(() => assertRunShape(dummyRun({ selection: [{ key: "k", operationKind: "archive-topic" }] })));
+  assert.throws(() => assertRunShape(dummyRun({ selection: 42 })), (e) => e.code === "INVALID_STATE");
+  assert.throws(() => assertRunShape(dummyRun({ selection: [] })), (e) => e.code === "INVALID_STATE");
+  assert.throws(() => assertRunShape(dummyRun({ selection: [{ key: "k", operationKind: "bogus" }] })), (e) => e.code === "INVALID_STATE");
+});

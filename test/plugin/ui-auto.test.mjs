@@ -8,9 +8,12 @@
 // 覆盖面（对应 StatusTab auto 卡，服务端权威在 forgetting/auto.mjs，面板只透传）：
 //   A1 首屏渲染：三档模式开关 + 上次评估 / 下次触发 / 熔断 / auto 参数行 + 动作按钮
 //   A2 建议模式：立即评估 → 候选清单（逐条候选行 / 回放规模 / 计划计数）→
-//      按钮转「重新评估」；suggest 下「执行本轮」禁用（只出清单）
-//   A3 自动模式：执行本轮 → 就地二次确认 → 确认执行 → applyAutoChanges（operationId
-//      幂等键）→ 回执（已执行/跳过/失败 + 逐条 ops + runId）；replay 回执同口径
+//      按钮转「重新评估」；候选行 checkbox 默认全选（0.5 第三波）
+//   A3 自动模式：评估 → 一键全应用 → 就地二次确认 → 确认执行 → applyAutoChanges
+//      （selection:null + operationId 幂等键）→ 回执（已执行/跳过/失败 + 逐条 ops +
+//      runId）；replay 回执同口径
+//   A3b 建议模式双通道（0.5 第三波）：suggest 可执行——勾选子集「应用选中」payload
+//      只含选中项；「一键全应用」payload selection=null；N=0 禁用；新评估回包重置全选
 //   A4 一键撤销：最近执行记录出现撤销按钮 → 点撤销 → undoAutoRun({runId}) →
 //      回执（回滚 / 已是撤销态 / 跳过 / 失败）→ 服务端 undoneAt 回读后按钮变文本
 //   A5 三档模式开关（configForms CAS 通道）：写入 forgetting.autoMode → 服务端
@@ -337,7 +340,8 @@ test("A1 状态页挂载：auto 卡渲染三档开关 + 上次评估/下次触�
     const cardText = mounted.textOfEl(card);
     assert.ok(cardText.includes("记忆整理（自动冷却 / 恢复）"), "卡片标题");
     // 模式行只回显服务端当前档的说明文案（autoModeText 当前档一个）；三档按钮各自带档名。
-    assert.ok(cardText.includes("建议（评估出清单，不自动执行）"), "suggest 当前档说明文本");
+    // 0.5 第三波：suggest 文案改为「不自动执行，确认后执行」（双通道拍板）。
+    assert.ok(cardText.includes("建议（不自动执行，确认后执行）"), "suggest 当前档说明文本");
     assert.ok(mounted.textOfEl(suggestBtn).includes("建议（当前）"), "当前档按钮带（当前）标记");
     assert.equal(mounted.textOfEl(offBtn), "关闭", "off 档按钮文案");
     assert.ok(cardText.includes("上次评估"), "上次评估行");
@@ -353,19 +357,26 @@ test("A1 状态页挂载：auto 卡渲染三档开关 + 上次评估/下次触�
     assert.ok(!String(offBtn.className).includes("dshi_btnPrimary"), "off 档不高亮");
     assert.equal(suggestBtn.getAttribute("disabled"), "false", "按钮可点（configForms 缺席时才禁用）");
 
-    // 动作按钮：立即评估 + 执行本轮 + 刷新。
+    // 动作按钮：立即评估 + 双执行入口（应用选中 / 一键全应用）+ 刷新。
     const evaluateBtn = mounted.find("[data-role=auto-evaluate]");
-    const applyBtn = mounted.find("[data-role=auto-apply]");
-    assert.ok(evaluateBtn && applyBtn, "动作按钮齐备");
+    const applySelectedBtn = mounted.find("[data-role=auto-apply-selected]");
+    const applyAllBtn = mounted.find("[data-role=auto-apply-all]");
+    assert.ok(evaluateBtn && applySelectedBtn && applyAllBtn, "动作按钮齐备（评估 + 双执行入口）");
     assert.equal(textOfElText(mounted, "[data-role=auto-evaluate]"), "立即评估", "首屏按钮文案");
-    assert.equal(applyBtn.getAttribute("disabled"), "true", "suggest 模式下执行本轮禁用（只出清单）");
+    // 0.5 第三波：未评估时 N=0 / M=0 → 双执行入口禁用（对应数量为 0）；suggest 档
+    // 本身不再禁用（禁用条件只剩 off / 熔断 / enabled=false / busy / 数量为 0）。
+    assert.equal(applySelectedBtn.getAttribute("disabled"), "true", "未评估 N=0：应用选中禁用");
+    assert.equal(textOfElText(mounted, "[data-role=auto-apply-selected]"), "应用选中（0 条）", "应用选中带 N 计数");
+    assert.equal(applyAllBtn.getAttribute("disabled"), "true", "未评估 M=0：一键全应用禁用");
+    assert.equal(textOfElText(mounted, "[data-role=auto-apply-all]"), "一键全应用", "一键全应用按钮文案");
 
     // 最近执行记录空态。
     assert.ok(mounted.find("[data-role=auto-runs-empty]"), "无 run 时空态文案");
     assert.equal(mounted.findAll("[data-role=auto-run-row]").length, 0, "无 run 行");
 
-    // 建议模式提示语。
-    assert.ok(cardText.includes("建议模式只出清单"), "suggest 模式提示语");
+    // 建议模式提示语（0.5 第三波新语义：确认后执行）。
+    assert.ok(cardText.includes("建议模式不会自动执行：勾选候选后点「应用选中」，或直接「一键全应用」。"), "suggest 模式提示语（新语义）");
+    assert.equal(cardText.includes("建议模式只出清单"), false, "旧「只出清单」提示语已废弃");
   } finally {
     mounted.unmount();
   }
@@ -417,8 +428,8 @@ test("A2 建议模式：立即评估 → runAutoEvaluation → 候选清单/回�
   }
 });
 
-// ── A3 执行本轮（auto 模式）─────────────────────────────────────────────────
-test("A3 auto 模式：执行本轮 → 就地二次确认 → applyAutoChanges（operationId）→ 回执逐条 ops + runId；replay 回执同口径；两次执行 operationId 严格不等", async () => {
+// ── A3 一键全应用（auto 模式）────────────────────────────────────────────────
+test("A3 auto 模式：评估 → 一键全应用 → 就地二次确认 → applyAutoChanges（selection:null + operationId）→ 回执逐条 ops + runId；replay 回执同口径；两次执行 operationId 严格不等", async () => {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld({ mode: "auto" });
   const dsh = makeDsh(world);
@@ -428,14 +439,22 @@ test("A3 auto 模式：执行本轮 → 就地二次确认 → applyAutoChanges�
     await mounted.flush();
     mounted.rerender();
 
-    assert.equal(mounted.find("[data-role=auto-apply]").getAttribute("disabled"), "false", "auto 模式下执行本轮可点");
-    assert.equal(mounted.click("[data-role=auto-apply]"), true, "点「执行本轮」命中");
+    // 0.5 第三波：未评估时 M=0 → 一键全应用禁用；先评估拿到候选（候选区与计数
+    // 都来自评估回包）。
+    assert.equal(mounted.find("[data-role=auto-apply-all]").getAttribute("disabled"), "true", "未评估 M=0：一键全应用禁用");
+    assert.equal(mounted.click("[data-role=auto-evaluate]"), true, "先评估");
+    await settle(mounted);
+    assert.equal(mounted.find("[data-role=auto-apply-all]").getAttribute("disabled"), "false", "评估后 auto 模式一键全应用可点");
+    assert.equal(mounted.click("[data-role=auto-apply-all]"), true, "点「一键全应用」命中");
     await settle(mounted);
 
     // 二次确认行就地展开（此时还没发 RPC——执行写真实数据，必须先确认）。
     const confirm = mounted.find("[data-role=auto-confirm]");
     assert.ok(confirm, "就地确认行出现");
-    assert.ok(mounted.textOfEl(confirm).includes("这不是预览"), "确认行明确告知会写数据");
+    const confirmText = mounted.textOfEl(confirm);
+    assert.ok(confirmText.includes("本轮全部 2 条"), "全应用通道确认文案带 M（本轮全部 2 条）");
+    assert.ok(confirmText.includes("这不是预览"), "确认行明确告知会写数据");
+    assert.ok(confirmText.includes("≤ 3"), "确认文案标明服务端复算后 ≤ maxOpsPerRun=3");
     assert.equal(dsh.calls.filter((c) => c.method === "applyAutoChanges").length, 0, "确认前零执行调用");
 
     assert.equal(mounted.click("[data-role=auto-apply-confirm]"), true, "点「确认执行」命中");
@@ -443,6 +462,7 @@ test("A3 auto 模式：执行本轮 → 就地二次确认 → applyAutoChanges�
 
     const applyCalls = dsh.calls.filter((c) => c.method === "applyAutoChanges");
     assert.equal(applyCalls.length, 1, "恰发一次 applyAutoChanges");
+    assert.equal(applyCalls[0].payload.selection, null, "一键全应用 payload selection=null（0.5 第三波契约）");
     const operationId = applyCalls[0].payload && applyCalls[0].payload.operationId;
     assertOperationIdShape(operationId, "首次执行 operationId");
 
@@ -460,11 +480,11 @@ test("A3 auto 模式：执行本轮 → 就地二次确认 → applyAutoChanges�
     assert.ok(mounted.textOfEl(opRows[1]).includes("已跳过"), "status 中文化：skipped");
     assert.ok(mounted.textOfEl(opRows[2]).includes("恢复"), "operationKind 中文化：unarchive-topic");
 
-    // replay 回执：客户端每次「执行本轮」都生成新 operationId（下方三次调用
+    // replay 回执：客户端每次「一键全应用」都生成新 operationId（下方三次调用
     // 两两不同可证），replay 标记由 stub 伪造——模拟服务端按幂等键判定重复
     // 提交后「回放首次结果、不二次执行」的口径，验证的是 UI 渲染不是重放链路。
     world.applyResult = autoApplyDto({ replay: true });
-    assert.equal(mounted.click("[data-role=auto-apply]"), true, "再次点「执行本轮」");
+    assert.equal(mounted.click("[data-role=auto-apply-all]"), true, "再次点「一键全应用」");
     await settle(mounted);
     assert.equal(mounted.click("[data-role=auto-apply-confirm]"), true, "再次确认");
     await settle(mounted);
@@ -474,10 +494,10 @@ test("A3 auto 模式：执行本轮 → 就地二次确认 → applyAutoChanges�
     );
 
     // ── 两次独立执行：operationId 必须严格不等 ──────────────────────────────
-    // 完整再走一遍「执行本轮」→「确认执行」，world 回正常回执（replay:false）。
+    // 完整再走一遍「一键全应用」→「确认执行」，world 回正常回执（replay:false）。
     // 生产若把 newId() 写死成常量 / 复用同一 id，下面的 notEqual 即变红。
     world.applyResult = autoApplyDto();
-    assert.equal(mounted.click("[data-role=auto-apply]"), true, "第二次干净执行：点「执行本轮」");
+    assert.equal(mounted.click("[data-role=auto-apply-all]"), true, "第二次干净执行：点「一键全应用」");
     await settle(mounted);
     assert.equal(
       dsh.calls.filter((c) => c.method === "applyAutoChanges").length,
@@ -489,9 +509,10 @@ test("A3 auto 模式：执行本轮 → 就地二次确认 → applyAutoChanges�
 
     const allApplyCalls = dsh.calls.filter((c) => c.method === "applyAutoChanges");
     assert.equal(allApplyCalls.length, 3, "共三次 applyAutoChanges（首次 + replay 轮 + 干净第二轮）");
-    // 每次调用各自独立 payload：逐个核 operationId 格式与长度，不只看最后一个。
+    // 每次调用各自独立 payload：逐个核 operationId 格式、长度与 selection=null。
     for (const [i, call] of allApplyCalls.entries()) {
       assertOperationIdShape(call.payload && call.payload.operationId, `第 ${i + 1} 次执行 operationId`);
+      assert.equal(call.payload.selection, null, `第 ${i + 1} 次全应用 selection=null`);
     }
     const secondOperationId = allApplyCalls[2].payload.operationId;
     assert.notEqual(secondOperationId, operationId, "两次独立执行的 operationId 必须严格不等（不同提交不得复用同一 operationId）");
@@ -518,7 +539,9 @@ test("A4 一键撤销：最近执行记录出撤销按钮 → undoAutoRun({runId
     mounted.rerender();
 
     // 执行一轮（拿 runId）→ 服务端记账 → 面板回读出现 run 行。
-    assert.equal(mounted.click("[data-role=auto-apply]"), true, "执行本轮");
+    assert.equal(mounted.click("[data-role=auto-evaluate]"), true, "先评估（0.5 第三波：M 计数来自评估回包）");
+    await settle(mounted);
+    assert.equal(mounted.click("[data-role=auto-apply-all]"), true, "一键全应用");
     await settle(mounted);
     assert.equal(mounted.click("[data-role=auto-apply-confirm]"), true, "确认执行");
     await settle(mounted);
@@ -613,7 +636,7 @@ test("A5 模式开关：写 forgetting.autoMode（configForms CAS）→ 服务�
 });
 
 // ── A6 熔断 ─────────────────────────────────────────────────────────────────
-test("A6 熔断：fuse.fused=true → 熔断徽章 + 判定明细行 + 「执行本轮」禁用并带 title 说明", async () => {
+test("A6 熔断：fuse.fused=true → 熔断徽章 + 判定明细行 + 双执行入口禁用并带 title 说明", async () => {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld({
     mode: "auto",
@@ -648,16 +671,20 @@ test("A6 熔断：fuse.fused=true → 熔断徽章 + 判定明细行 + 「执行
     assert.ok(mounted.textOfEl(reasons).includes("[LEDGER_DAMAGED]"), "明细带 code");
     assert.ok(mounted.textOfEl(reasons).includes("坏行"), "明细带 detail");
 
-    const applyBtn = mounted.find("[data-role=auto-apply]");
-    assert.equal(applyBtn.getAttribute("disabled"), "true", "熔断时执行本轮禁用");
-    assert.equal(applyBtn.getAttribute("title"), "已熔断：本轮不出任何可执行候选", "title 说明");
+    // 0.5 第三波：双执行入口在熔断时都禁用（禁用条件含熔断），title 说明熔断口径。
+    const applySelectedBtn = mounted.find("[data-role=auto-apply-selected]");
+    const applyAllBtn = mounted.find("[data-role=auto-apply-all]");
+    assert.equal(applySelectedBtn.getAttribute("disabled"), "true", "熔断时应用选中禁用");
+    assert.equal(applyAllBtn.getAttribute("disabled"), "true", "熔断时一键全应用禁用");
+    assert.equal(applySelectedBtn.getAttribute("title"), "已熔断：本轮不出任何可执行候选", "应用选中 title 说明");
+    assert.equal(applyAllBtn.getAttribute("title"), "已熔断：本轮不出任何可执行候选", "一键全应用 title 说明");
   } finally {
     mounted.unmount();
   }
 });
 
 // ── A7 off 模式 ─────────────────────────────────────────────────────────────
-test("A7 off：立即评估禁用并说明（off 只记账不评估），模式行显示关闭档", async () => {
+test("A7 off：立即评估禁用并说明（off 只记账不评估），双执行入口禁用并说明，模式行显示关闭档", async () => {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld({ mode: "off" });
   const dsh = makeDsh(world);
@@ -676,9 +703,14 @@ test("A7 off：立即评估禁用并说明（off 只记账不评估），模式�
     assert.equal(evaluateBtn.getAttribute("disabled"), "true", "立即评估禁用");
     assert.equal(evaluateBtn.getAttribute("title"), "mode=off 只记账不评估：先切到「建议」或「自动」", "title 说明");
 
-    const applyBtn = mounted.find("[data-role=auto-apply]");
-    assert.equal(applyBtn.getAttribute("disabled"), "true", "执行本轮禁用");
-    assert.equal(applyBtn.getAttribute("title"), "仅 mode=auto 可执行：先切到「自动」（suggest 只出清单，off 只记账）", "title 说明");
+    // 0.5 第三波：off 仍拒绝执行——双执行入口禁用，title 说明 off 口径（文案换成
+    // off 专属：suggest 已放开，不再拖 suggest 一起提）。
+    const applySelectedBtn = mounted.find("[data-role=auto-apply-selected]");
+    const applyAllBtn = mounted.find("[data-role=auto-apply-all]");
+    assert.equal(applySelectedBtn.getAttribute("disabled"), "true", "off 模式应用选中禁用");
+    assert.equal(applyAllBtn.getAttribute("disabled"), "true", "off 模式一键全应用禁用");
+    assert.equal(applySelectedBtn.getAttribute("title"), "mode=off 只记账不执行：先切到「建议」或「自动」", "应用选中 title 说明（off）");
+    assert.equal(applyAllBtn.getAttribute("title"), "mode=off 只记账不执行：先切到「建议」或「自动」", "一键全应用 title 说明（off）");
   } finally {
     mounted.unmount();
   }
@@ -723,7 +755,119 @@ test("A9 configForms 缺席（旧宿主）：三档按钮禁用 + 指路文案�
     }
     assert.ok(mounted.textOfEl(card).includes("设置命名空间不可用（configForms 缺席）"), "指路文案");
     assert.ok(mounted.textOfEl(card).includes("forgetting.autoMode"), "指到具体配置键");
-    assert.ok(mounted.textOfEl(card).includes("建议（评估出清单"), "模式行照常回显服务端现值");
+    assert.ok(mounted.textOfEl(card).includes("建议（不自动执行"), "模式行照常回显服务端现值（0.5 第三波新文案）");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+// ── A10 suggest 双通道：默认全选 / 全不选 / N=0 禁用 / 新评估回包重置全选 ───────
+test("A10 suggest 双通道（0.5 第三波）：评估后默认全选；全不选 → 应用选中（0 条）禁用、一键全应用保持可点；重新评估回包把勾选重置为全选", async () => {
+  const harness = createUiHarness({ clientSource: CLIENT_SRC });
+  const world = makeWorld({ mode: "suggest" });
+  const dsh = makeDsh(world);
+  const mounted = await harness.mount({ tab: "status", dsh });
+  try {
+    mounted.render();
+    await mounted.flush();
+    mounted.rerender();
+
+    assert.equal(mounted.click("[data-role=auto-evaluate]"), true, "点「立即评估」命中");
+    await settle(mounted);
+
+    // 默认全选：两条候选行的 checkbox 都是 checked，计数「已勾选 2 条」，应用选中（2 条）可点。
+    const checkboxes = () => mounted.findAll("[data-role=auto-candidate-pick]");
+    assert.equal(checkboxes().length, 2, "每条候选行一个 checkbox");
+    for (const box of checkboxes()) {
+      assert.equal(box.getAttribute("checked"), "true", "默认全选：checkbox checked");
+      assert.equal(String(box.getAttribute("value")).includes("|"), true, "勾选值为 operationKind|key 复合 id");
+    }
+    const pickToolsText = mounted.textOfEl(mounted.find("[data-role=auto-pick-tools]"));
+    assert.ok(pickToolsText.includes("本轮共 2 条候选 · 已勾选 2 条"), "勾选计数行");
+    assert.equal(mounted.find("[data-role=auto-select-all]") !== null, true, "全选按钮存在");
+    assert.equal(mounted.find("[data-role=auto-select-none]") !== null, true, "全不选按钮存在");
+    assert.equal(mounted.find("[data-role=auto-apply-selected]").getAttribute("disabled"), "false", "suggest 下应用选中可点（不再禁用）");
+    assert.equal(mounted.textOfEl(mounted.find("[data-role=auto-apply-selected]")), "应用选中（2 条）", "N=2 计数");
+
+    // 全不选 → N=0：应用选中禁用；M=2>0 → 一键全应用保持可点。
+    assert.equal(mounted.click("[data-role=auto-select-none]"), true, "点「全不选」命中");
+    await settle(mounted);
+    assert.equal(mounted.textOfEl(mounted.find("[data-role=auto-apply-selected]")), "应用选中（0 条）", "N=0 计数");
+    assert.equal(mounted.find("[data-role=auto-apply-selected]").getAttribute("disabled"), "true", "N=0 时应用选中禁用");
+    assert.equal(mounted.find("[data-role=auto-apply-all]").getAttribute("disabled"), "false", "M=2>0：一键全应用保持可点");
+
+    // 全选恢复。
+    assert.equal(mounted.click("[data-role=auto-select-all]"), true, "点「全选」命中");
+    await settle(mounted);
+    assert.equal(mounted.find("[data-role=auto-apply-selected]").getAttribute("disabled"), "false", "全选后应用选中恢复可点");
+
+    // 取消一条 → 重新评估：新评估回包把勾选重置为全选（不复用上一轮勾选残留）。
+    checkboxes()[0].onchange();
+    await settle(mounted);
+    assert.equal(checkboxes()[0].getAttribute("checked"), "false", "取消勾选第一条生效");
+    assert.equal(mounted.textOfEl(mounted.find("[data-role=auto-apply-selected]")), "应用选中（1 条）", "N=1 计数");
+    assert.equal(mounted.click("[data-role=auto-evaluate]"), true, "重新评估");
+    await settle(mounted);
+    for (const box of mounted.findAll("[data-role=auto-candidate-pick]")) {
+      assert.equal(box.getAttribute("checked"), "true", "新评估回包重置为全选");
+    }
+    assert.equal(mounted.textOfEl(mounted.find("[data-role=auto-apply-selected]")), "应用选中（2 条）", "重置后 N=2");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+// ── A11 suggest 双通道：应用选中 payload 只含勾选项；一键全应用 payload selection=null ──
+test("A11 suggest 双通道（0.5 第三波）：只勾一条时「应用选中」payload 只含选中项（含 operationKind）；「一键全应用」payload selection=null；确认文案分清两条通道", async () => {
+  const harness = createUiHarness({ clientSource: CLIENT_SRC });
+  const world = makeWorld({ mode: "suggest" });
+  const dsh = makeDsh(world);
+  const mounted = await harness.mount({ tab: "status", dsh });
+  try {
+    mounted.render();
+    await mounted.flush();
+    mounted.rerender();
+
+    assert.equal(mounted.click("[data-role=auto-evaluate]"), true, "先评估");
+    await settle(mounted);
+
+    // 取消勾选第一条（project-alpha，archive-topic）→ 只勾 topic-beta（unarchive-topic）。
+    const boxes = mounted.findAll("[data-role=auto-candidate-pick]");
+    assert.equal(String(boxes[0].getAttribute("value")), "archive-topic|project-alpha", "复合 id：kind|key（第一条）");
+    assert.equal(String(boxes[1].getAttribute("value")), "unarchive-topic|topic-beta", "复合 id：kind|key（第二条）");
+    boxes[0].onchange();
+    await settle(mounted);
+    assert.equal(mounted.textOfEl(mounted.find("[data-role=auto-apply-selected]")), "应用选中（1 条）", "N=1");
+
+    // 应用选中通道：确认文案是「选中的 N 条」，payload.selection 只含勾选项。
+    assert.equal(mounted.click("[data-role=auto-apply-selected]"), true, "点「应用选中」命中");
+    await settle(mounted);
+    const confirmSelected = mounted.textOfEl(mounted.find("[data-role=auto-confirm]"));
+    assert.ok(confirmSelected.includes("选中的 1 条"), "选中通道确认文案（选中的 1 条）");
+    assert.equal(confirmSelected.includes("本轮全部 2 条"), false, "选中通道不出全量文案");
+    assert.equal(mounted.click("[data-role=auto-apply-confirm]"), true, "确认执行（选中通道）");
+    await settle(mounted);
+
+    const selectedCalls = dsh.calls.filter((c) => c.method === "applyAutoChanges");
+    assert.equal(selectedCalls.length, 1);
+    assert.deepEqual(selectedCalls[0].payload.selection, [
+      { key: "topic-beta", operationKind: "unarchive-topic" },
+    ], "payload.selection 只含勾选项（project-alpha 已取消，不出现在 payload）");
+    assertOperationIdShape(selectedCalls[0].payload.operationId, "应用选中 operationId");
+
+    // 一键全应用通道：确认文案是「本轮全部 M 条」，payload.selection=null。
+    assert.equal(mounted.click("[data-role=auto-apply-all]"), true, "点「一键全应用」命中");
+    await settle(mounted);
+    const confirmAll = mounted.textOfEl(mounted.find("[data-role=auto-confirm]"));
+    assert.ok(confirmAll.includes("本轮全部 2 条"), "全应用通道确认文案（本轮全部 2 条）");
+    assert.equal(confirmAll.includes("选中的 1 条"), false, "全应用通道不出选中文案");
+    assert.equal(mounted.click("[data-role=auto-apply-confirm]"), true, "确认执行（全应用通道）");
+    await settle(mounted);
+
+    const allCalls = dsh.calls.filter((c) => c.method === "applyAutoChanges");
+    assert.equal(allCalls.length, 2);
+    assert.equal(allCalls[1].payload.selection, null, "一键全应用 payload selection=null");
+    assert.notEqual(allCalls[1].payload.operationId, allCalls[0].payload.operationId, "两通道各自独立 operationId");
   } finally {
     mounted.unmount();
   }

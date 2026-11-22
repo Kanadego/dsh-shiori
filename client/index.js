@@ -1179,12 +1179,19 @@ window.__ModuleLoader__.load({
     // 对应；全部纯函数，只做格式化，不触碰数据、不做本地业务推断（权威在服务端）。
     var AUTO_MODES = ["off", "suggest", "auto"];
     var AUTO_MODE_LABELS = { off: "关闭", suggest: "建议", auto: "自动" };
+    // 0.5 第三波 suggest 双通道：建议档不再「只出清单」——不自动执行，但允许
+    // 手动确认后执行（逐条勾选「应用选中」或「一键全应用」）。
     function autoModeText(mode) {
       if (mode === "off") return "关闭（只记账，不评估）";
-      if (mode === "suggest") return "建议（评估出清单，不自动执行）";
+      if (mode === "suggest") return "建议（不自动执行，确认后执行）";
       if (mode === "auto") return "自动（评估后自动执行，可一键撤销）";
       if (mode === undefined || mode === null || mode === "") return "未知";
       return String(mode);
+    }
+    // 0.5 第三波：候选勾选复合 id（operationKind + 分隔符 + key）。分隔符用「|」：
+    // topic key 是 markdown 文件名（Windows 文件名不允许 |），不会与 key 内容撞分隔符。
+    function autoCandidatePickId(candidate) {
+      return String((candidate && candidate.operationKind) || "") + "|" + String((candidate && candidate.key) || "");
     }
     function autoTimeText(iso) {
       if (typeof iso !== "string" || iso === "") return null;
@@ -2039,6 +2046,17 @@ window.__ModuleLoader__.load({
       var autoConfirmState = useState(false); // 「执行本轮」的就地二次确认行
       var autoConfirm = autoConfirmState[0];
       var setAutoConfirm = autoConfirmState[1];
+      // 0.5 第三波 suggest 双通道：确认行由哪条执行入口打开（"selected"=应用选中 /
+      // "all"=一键全应用；null=确认行关闭）。两个入口共用同一条确认行，确认按钮按
+      // 通道组装 payload（selected → selection: 选中项数组；all → selection: null）。
+      var autoConfirmChannelState = useState(null);
+      var autoConfirmChannel = autoConfirmChannelState[0];
+      var setAutoConfirmChannel = autoConfirmChannelState[1];
+      // 0.5 第三波：勾选中的候选复合 id 清单（autoCandidatePickId 口径）。默认全选：
+      // 每轮新评估回包到达时重置为全选（runAutoEval 成功路径统一收口）。
+      var autoPicksState = useState([]);
+      var autoPicks = autoPicksState[0];
+      var setAutoPicks = autoPicksState[1];
       var loadAutoStatus = async function () {
         var origin = tabGuard.mark();
         setAutoStatus({ loading: true, error: null, data: null });
@@ -2113,38 +2131,60 @@ window.__ModuleLoader__.load({
         }
       };
       // 立即评估（只读回放；off 会被服务端拒绝——按钮禁用是前端预判，拒绝兜底照常展示）。
-      // 新评估取代旧结论：清上一轮执行回执与确认行。
+      // 新评估取代旧结论：清上一轮执行回执与确认行；勾选重置为全选（0.5 第三波
+      // 默认全选口径：每轮新评估回包到达都重置，不复用上一轮的勾选残留）。
       var runAutoEval = async function () {
         var origin = tabGuard.mark();
         setAutoEval({ loading: true, error: null, data: null });
         setAutoApply({ busy: false, error: null, data: null });
         setAutoConfirm(false);
+        setAutoConfirmChannel(null);
         try {
           var result = await props.dsh.call("runAutoEvaluation", props.sessionId, {});
           if (tabGuard.isStale(origin)) return;
           setAutoEval({ loading: false, error: null, data: result });
+          setAutoPicks((result !== null && result !== undefined && Array.isArray(result.candidates)
+            ? result.candidates : []).map(function (candidate) { return autoCandidatePickId(candidate); }));
           await loadAutoStatus(); // 成功评估已记账锚：上次评估 / 下次触发随之刷新
         } catch (e) {
           if (tabGuard.isStale(origin)) return;
           setAutoEval({ loading: false, error: e, data: null });
         }
       };
-      // 执行本轮（仅 mode=auto）：服务端重新评估后逐条执行（CAS + operationId），
-      // 每轮 ≤ maxOpsPerRun；熔断时服务端拒绝。二次确认后就地展开——执行写的是
-      // 真实归档 / 恢复（可撤销），不是预览。
-      var applyAutoRun = async function () {
+      // 执行本轮（0.5 第三波 suggest 双通道：suggest / auto 手动执行，off 被服务端
+      // 拒绝——按钮禁用是前端预判）：channel="selected" 只执行勾选项（selection:
+      // 选中项数组，按候选原顺序）；channel="all" 全量执行（selection: null）。服务端
+      // 重新评估复算后逐条执行（CAS + operationId），每轮 ≤ maxOpsPerRun；熔断时
+      // 服务端拒绝。二次确认后就地展开——执行写的是真实归档 / 恢复（可撤销），不是预览。
+      var applyAutoRun = async function (channel) {
         var origin = tabGuard.mark();
         setAutoApply({ busy: true, error: null, data: null });
         try {
-          var receipt = await props.dsh.call("applyAutoChanges", props.sessionId, { operationId: newId() });
+          var payload = { operationId: newId(), selection: null };
+          if (channel === "selected") {
+            // 只发勾选中的候选（按当前评估清单原顺序映射为 { key, operationKind }）。
+            payload.selection = (function () {
+              var picked = [];
+              for (var i = 0; i < autoEvalCandidates.length; i += 1) {
+                var candidate = autoEvalCandidates[i];
+                if (autoPicks.indexOf(autoCandidatePickId(candidate)) >= 0) {
+                  picked.push({ key: String(candidate.key), operationKind: candidate.operationKind });
+                }
+              }
+              return picked;
+            })();
+          }
+          var receipt = await props.dsh.call("applyAutoChanges", props.sessionId, payload);
           if (tabGuard.isStale(origin)) return;
           setAutoApply({ busy: false, error: null, data: receipt });
           setAutoConfirm(false);
+          setAutoConfirmChannel(null);
           await loadAutoStatus(); // lastRuns / 熔断统计已刷新
         } catch (e) {
           if (tabGuard.isStale(origin)) return;
           setAutoApply({ busy: false, error: e, data: null });
           setAutoConfirm(false);
+          setAutoConfirmChannel(null);
         }
       };
       // 一键撤销：按 runId 回滚该轮全部变更（重复撤销幂等，回放首次结论不碰盘）。
@@ -2488,8 +2528,9 @@ window.__ModuleLoader__.load({
       // ── 0.5 批次 5 · B 线：状态页「记忆整理（auto）」卡的渲染层 ─────────────
       // 派生口径全部就地计算（每次渲染重算，不缓存）：autoData=getAutoStatus 回包；
       // 评估清单 / 计划来自 runAutoEvaluation 回包。动作按钮的禁用条件是前端预判
-      //（服务端仍权威把关：off 评估拒绝、suggest 执行拒绝、熔断执行拒绝、
-      // 只读宿主拒绝写路径）——禁用只为少一次注定失败的往返，不替服务端拍板。
+      //（服务端仍权威把关：off 评估拒绝、0.5 第三波起 suggest/auto 手动执行放行、
+      // off 执行拒绝、熔断执行拒绝、只读宿主拒绝写路径）——禁用只为少一次注定
+      // 失败的往返，不替服务端拍板。
       var autoData = autoStatus !== null && autoStatus.error === null && autoStatus.data
         && typeof autoStatus.data === "object" ? autoStatus.data : null;
       var autoModeValue = autoData !== null && typeof autoData.mode === "string" ? autoData.mode : null;
@@ -2507,13 +2548,58 @@ window.__ModuleLoader__.load({
       var autoUndoBusy = autoUndo !== null && autoUndo.busy === true;
       var autoUndoData = autoUndo !== null && autoUndo.data && typeof autoUndo.data === "object" ? autoUndo.data : null;
       var autoLastRuns = autoData !== null && Array.isArray(autoData.lastRuns) ? autoData.lastRuns : [];
-      var autoApplyAllowed = autoModeValue === "auto" && (autoFuse === null || autoFuse.fused !== true);
+      // 0.5 第三波：执行门槛放开到 suggest（双通道拍板核心）——off / 熔断仍禁。
+      // 禁用条件只剩：mode=off / 熔断 / enabled=false / busy / 对应数量为 0
+      //（suggest 与 auto 都允许手动执行；自动调度仍只在 auto 跑，服务端权威）。
+      var autoApplyAllowed = (autoModeValue === "suggest" || autoModeValue === "auto")
+        && (autoFuse === null || autoFuse.fused !== true);
+      // 勾选中的候选（按当前评估清单原顺序）：N 取「当前清单 ∩ 勾选集合」，
+      // 不吃旧清单残留（勾选集合每轮评估已重置，这里再兜一层）。
+      var autoPickedCandidates = (function () {
+        var picked = [];
+        for (var i = 0; i < autoEvalCandidates.length; i += 1) {
+          if (autoPicks.indexOf(autoCandidatePickId(autoEvalCandidates[i])) >= 0) {
+            picked.push(autoEvalCandidates[i]);
+          }
+        }
+        return picked;
+      })();
+      var autoSelectedCount = autoPickedCandidates.length;
+      // M：优先取本轮计划计数（服务端复算后 ≤ maxOpsPerRun 的真实执行规模），
+      // 缺省（无 plan / 计数缺失）用候选数组长度。
+      var autoTotalCount = (function () {
+        if (autoEvalPlan !== null && autoEvalPlan.counts
+          && typeof autoEvalPlan.counts.total === "number") {
+          return autoEvalPlan.counts.total;
+        }
+        return autoEvalCandidates.length;
+      })();
+      var toggleAutoPick = function (pickId) {
+        setAutoPicks(function (prev) {
+          var current = Array.isArray(prev) ? prev : [];
+          if (current.indexOf(pickId) >= 0) {
+            return current.filter(function (id) { return id !== pickId; });
+          }
+          return current.concat([pickId]);
+        });
+      };
       var renderAutoCandidateRow = function (candidate, index) {
         var tierText = candidate && candidate.tier ? String(candidate.tier) : "—";
         var tText = candidate && typeof candidate.T === "number" ? String(candidate.T) : "—";
         var ageText = candidate && typeof candidate.ageDays === "number" ? String(candidate.ageDays) : "—";
         var titleText = candidate && candidate.title ? String(candidate.title) : "";
+        var pickId = autoCandidatePickId(candidate);
+        var picked = autoPicks.indexOf(pickId) >= 0;
         return h("div", { key: (candidate && candidate.key ? String(candidate.key) : "idx-" + index) + ":" + index, className: "dshi_item", "data-role": "auto-candidate" },
+          // 0.5 第三波：逐条勾选（默认全选；toggleAutoPick 翻转，选中集合见 autoPicks）。
+          h("input", {
+            type: "checkbox",
+            checked: picked,
+            value: pickId,
+            "data-role": "auto-candidate-pick",
+            "aria-label": "勾选候选 " + String((candidate && candidate.key) || "—"),
+            onChange: function () { toggleAutoPick(pickId); },
+          }),
           h("span", { className: "dshi_badge" }, autoOpKindText(candidate && candidate.operationKind) + "候选"),
           h("span", null, String((candidate && candidate.key) || "—") + (titleText !== "" ? "（" + titleText + "）" : "")),
           h("span", { className: "dshi_hint" },
@@ -2612,6 +2698,8 @@ window.__ModuleLoader__.load({
             paramTexts.length > 0 ? statusRow("auto 参数", paramTexts.join(" · "), "12 项热度参数中与 auto 相关的六项（改参数去「记忆预算」页）") : null),
           fuseReasons !== "" ? h("div", { className: "dshi_hint", "data-role": "auto-fuse-reasons" }, "熔断判定明细：" + fuseReasons) : null,
           autoData.storeError ? h("div", { className: "dshi_warn", "data-role": "auto-store-error" }, "⚠ auto 记账存储异常（按无记账降级）：" + String(autoData.storeError)) : null,
+          // 0.5 第三波：执行入口拆两条（共用同一条确认行）。禁用条件只剩 mode=off /
+          // 熔断 / enabled=false / busy / 对应数量为 0——suggest 不再禁用。
           h("div", { className: "dshi_row" },
             h("button", {
               className: "dshi_btn dshi_btnPrimary",
@@ -2622,27 +2710,44 @@ window.__ModuleLoader__.load({
             }, autoEvalLoading ? "评估中…" : (autoEvalData !== null ? "重新评估" : "立即评估")),
             h("button", {
               className: "dshi_btn",
-              "data-role": "auto-apply",
-              disabled: autoApplyBusy || !autoApplyAllowed || autoData.enabled === false,
-              title: !autoApplyAllowed && autoModeValue !== "auto"
-                ? "仅 mode=auto 可执行：先切到「自动」（suggest 只出清单，off 只记账）"
-                : (fuseFused ? "已熔断：本轮不出任何可执行候选" : undefined),
-              onClick: function () { setAutoConfirm(true); }
-            }, autoApplyBusy ? "执行中…" : "执行本轮"),
+              "data-role": "auto-apply-selected",
+              disabled: autoApplyBusy || !autoApplyAllowed || autoData.enabled === false || autoSelectedCount === 0,
+              title: !autoApplyAllowed
+                ? (autoModeValue === "off"
+                  ? "mode=off 只记账不执行：先切到「建议」或「自动」"
+                  : (fuseFused ? "已熔断：本轮不出任何可执行候选" : undefined))
+                : undefined,
+              onClick: function () { setAutoConfirm(true); setAutoConfirmChannel("selected"); }
+            }, autoApplyBusy && autoConfirmChannel === "selected" ? "执行中…" : "应用选中（" + String(autoSelectedCount) + " 条）"),
+            h("button", {
+              className: "dshi_btn",
+              "data-role": "auto-apply-all",
+              disabled: autoApplyBusy || !autoApplyAllowed || autoData.enabled === false || autoTotalCount === 0,
+              title: !autoApplyAllowed
+                ? (autoModeValue === "off"
+                  ? "mode=off 只记账不执行：先切到「建议」或「自动」"
+                  : (fuseFused ? "已熔断：本轮不出任何可执行候选" : undefined))
+                : undefined,
+              onClick: function () { setAutoConfirm(true); setAutoConfirmChannel("all"); }
+            }, autoApplyBusy && autoConfirmChannel === "all" ? "执行中…" : "一键全应用"),
             h("button", { className: "dshi_btn", "data-role": "auto-refresh", onClick: function () { loadAutoStatus(); } }, "刷新"),
-            autoModeValue === "suggest" ? h("span", { className: "dshi_hint" }, "建议模式只出清单：确认候选合理后切「自动」再执行。") : null),
+            autoModeValue === "suggest" ? h("span", { className: "dshi_hint" }, "建议模式不会自动执行：勾选候选后点「应用选中」，或直接「一键全应用」。") : null),
           autoConfirm ? h("div", { className: "dshi_confirm", "data-role": "auto-confirm" },
-            h("div", null, "将执行一轮自动冷却 / 恢复：服务端会重新评估并逐条执行候选（每轮 ≤ "
-              + String(params.maxOpsPerRun !== undefined ? params.maxOpsPerRun : "maxOpsPerRun")
-              + " 条，归档 / 恢复均可撤销）。这不是预览——确认后数据立即变化。"),
+            // 确认文案按通道分清「选中的 N 条」与「本轮全部 M 条」。
+            h("div", null, autoConfirmChannel === "selected"
+              ? "将执行选中的 " + String(autoSelectedCount) + " 条候选：服务端会重新评估复算，选中但复算后已不存在的候选记为跳过（candidate-missing），其余勾选项逐条执行；归档 / 恢复均可撤销。这不是预览——确认后数据立即变化。"
+              : "将执行本轮全部 " + String(autoTotalCount) + " 条候选：服务端会重新评估并逐条执行（复算后 ≤ "
+                + String(params.maxOpsPerRun !== undefined ? params.maxOpsPerRun : "maxOpsPerRun")
+                + " 条，归档 / 恢复均可撤销）。这不是预览——确认后数据立即变化。"),
             h("div", { className: "dshi_row" },
               h("button", {
                 className: "dshi_btn dshi_btnDanger", "data-role": "auto-apply-confirm",
-                disabled: autoApplyBusy, onClick: function () { applyAutoRun(); }
+                disabled: autoApplyBusy, onClick: function () { applyAutoRun(autoConfirmChannel); }
               }, autoApplyBusy ? "执行中…" : "确认执行"),
               h("button", {
                 className: "dshi_btn", disabled: autoApplyBusy,
-                "data-role": "auto-apply-cancel", onClick: function () { setAutoConfirm(false); }
+                "data-role": "auto-apply-cancel",
+                onClick: function () { setAutoConfirm(false); setAutoConfirmChannel(null); }
               }, "取消"))) : null,
           autoEval ? ErrorBox(autoEval.error) : null,
           autoEvalData !== null ? (function () {
@@ -2656,9 +2761,21 @@ window.__ModuleLoader__.load({
                 "回放规模：topics " + String(replay.topics !== undefined ? replay.topics : "—")
                 + " · groups " + String(replay.groups !== undefined ? replay.groups : "—")
                 + " · alarms " + String(replay.alarms !== undefined ? replay.alarms : "—")),
+              // 0.5 第三波：候选区上方「全选 / 全不选」小按钮 + 勾选计数（候选存在时才出）。
               autoEvalCandidates.length === 0
                 ? h("div", { className: "dshi_item dshi_hint" }, autoEvalData.fused === true ? "熔断中：本轮不出候选。" : "本轮无候选（全部专题都在阈内）。")
-                : autoEvalCandidates.map(renderAutoCandidateRow),
+                : [h("div", { key: "auto-pick-tools", className: "dshi_item", "data-role": "auto-pick-tools" },
+                    h("span", { className: "dshi_hint" },
+                      "本轮共 " + String(autoTotalCount) + " 条候选 · 已勾选 " + String(autoSelectedCount) + " 条："),
+                    h("button", { className: "dshi_btn", "data-role": "auto-select-all",
+                      onClick: function () {
+                        setAutoPicks(autoEvalCandidates.map(function (candidate) { return autoCandidatePickId(candidate); }));
+                      }
+                    }, "全选"),
+                    h("button", { className: "dshi_btn", "data-role": "auto-select-none",
+                      onClick: function () { setAutoPicks([]); }
+                    }, "全不选"))]
+                  .concat(autoEvalCandidates.map(renderAutoCandidateRow)),
               autoEvalPlan !== null && planCounts !== null
                 ? h("div", { className: "dshi_item dshi_hint", "data-role": "auto-plan-counts" },
                     "本轮计划：冷却 " + String(planCounts.cool !== undefined ? planCounts.cool : 0)
@@ -8740,11 +8857,12 @@ var personaScopeTarget = personaScopeExplicit
         // R2：开→关走唯一关闭入口（与 ESC/外点/失焦同一条 requestClose 路径）；
         // 关→开保持原逻辑（量按钮锚点 + 首次拉取），并复位关闭重入 guard
         //（R2-close-reentry：上一轮关闭窗口已结束，新一轮开合重新允许关闭）。
+        // 0.5 第三波 R3 守卫收口后，这里不再兜底首次拉取——守卫保证按钮渲染时
+        // result 必已定义（拉取只由挂载 effect 承担）。
         if (open) { requestClose("button"); return; }
         closingRef.current = false;
         rectState[1](measureAnchor(event));
         setOpen(true);
-        if (result === undefined) load();
       };
       var nodeOf = function (sparkId) {
         var nodes = (result && result.nodes) || [];
@@ -8795,10 +8913,15 @@ var personaScopeTarget = personaScopeExplicit
         else if (cardSource === "semantic") semanticHits += 1;
       }
       var matchedPrecise = Boolean(result && result.matchedPrecise);
-      // 「无投递不占位」守卫（0.5-5D 拍板：不显示灰度图标）：已拉取、确认无投递、
-      // 且浮层关闭 → 整个动作位不渲染。拉取失败（result.error）不算「确认无投递」，
-      // 保留按钮让用户能重开浮层看错误。
-      if (result !== undefined && !result.error && delivery === null && !open) return null;
+      // §11.5 收口（0.5 第三波 R3，2026-11-22 拍板「没有可看的投递就完全不显示，
+      // 不占位、不留灰度入口」）：只有「已拉取（result !== undefined）&& 无错误
+      //（!result.error）&& 有投递（delivery !== null）&& 至少一张卡（cards.length
+      // > 0）」且浮层关闭时才渲染按钮；加载中 / 拉取失败 / 无投递 / 投递存在但
+      // 0 卡一律整位不渲染，诊断信息只在面板「投递体检」页签（本组件不再展示）。
+      // 浮层打开时不拦——浮层内部「无投递 / 该次投递没有携带卡片」兜底分支保留
+      //（竞态窗口：浮层开着时数据被重新拉取，投递/卡片可能消失），仍可被单测覆盖。
+      var flashbackHasCards = result !== undefined && !result.error && delivery !== null && cards.length > 0;
+      if (!flashbackHasCards && !open) return null;
       return h("div", { style: { display: "inline-flex", alignItems: "center" } },
         // 浮层挂在按钮前面（position:fixed 不参与布局，DOM 顺序不影响视觉）；
         // 顺序如此只为让合成布局模型的 offsetTop 断言对「浮层参与布局」敏感。

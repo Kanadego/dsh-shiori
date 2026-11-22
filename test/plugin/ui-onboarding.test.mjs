@@ -979,7 +979,10 @@ test("R1（评审二轮）：自愈的备份 rename 失败必须显式失败（�
 //      保存，确认关闭？/继续编辑/确认关闭」，继续编辑保持打开，确认后才关且 onClose
 //      才触发；
 //   ④ 关闭后焦点还原到触发元素（harness 的 focus 桩计数）。
-// 夹具：dsh.call 必败 → 浮层带 error 文案，按钮常驻（拉取失败不占位守卫放行）。
+// 夹具：R3 守卫收口（0.5 第三波）后按钮只在「已拉取 + 有投递 + 至少一张卡」时
+// 渲染。本系列测的是浮层关闭行为（ESC/背板/失焦/草稿确认/重入/dismissible），
+// 夹具从旧口径「拉取必败 → 失败态按钮常驻」改为「返回一张卡的有卡结果」；
+// 拉取失败/加载中/无投递/0 卡的整位不渲染口径由 ui-flashback.test.mjs ①~①e 覆盖。
 // ---------------------------------------------------------------------------
 
 const FB_DRAFT_TEXT = "用户没保存的话";
@@ -989,9 +992,25 @@ const r2Harness = createUiHarness({ clientSource: CLIENT_SRC });
 const popupOf = (ui) => ui.findAll("div").find((el) => el.style && el.style.zIndex === 60) || null;
 const backdropOf = (ui) => ui.find('[data-role="flashback-backdrop"]');
 const confirmRowOf = (ui) => ui.find('[data-role="flashback-draft-confirm"]');
+// R3 收口后有卡渲染，aria-label 带 N 徽标（harness matchesSelector 只支持
+// [attr=value] 精确匹配）；选择器统一收成本 helper，不写死徽标数字。
+const flashbackTriggerSelector = (n = 1) => `button[aria-label=闪回 ${n}]`;
 
 async function mountFlashbackPopup(slotProps = {}) {
-  const dsh = { call: async () => { throw new Error("simulated fetch failure"); } };
+  const dsh = {
+    call: async (method) => (method === "getGraph"
+      ? {
+        nodes: [{ id: "s1", title: "卡片甲", summary: null }],
+        deliveries: [{
+          deliveryId: "d-1",
+          sourceMessageId: "m-1",
+          at: new Date(r2Harness.timers.now() - 60_000).toISOString(),
+          sessionId: "session-A",
+          cards: [{ sparkId: "s1", trigger: "触发词A", source: "seed" }],
+        }],
+      }
+      : { ok: true }),
+  };
   const ui = await r2Harness.mountSlot("conversation.chat.assistant-actions", {
     dsh,
     slotProps: { shioriSessionId: "session-A", messageId: "m-1", ...slotProps },
@@ -1003,7 +1022,7 @@ async function mountFlashbackPopup(slotProps = {}) {
 }
 
 async function openFlashbackPopup(ui) {
-  assert.equal(ui.click('button[aria-label=闪回]'), true, "触发按钮存在且可点");
+  assert.equal(ui.click(flashbackTriggerSelector()), true, "触发按钮存在且可点");
   ui.rerender();
   const dialog = popupOf(ui);
   assert.ok(dialog, "浮层已打开");
@@ -1018,8 +1037,8 @@ test("R2 浮层：ESC 关闭，焦点还原到触发元素", async () => {
     ui.rerender();
     assert.equal(popupOf(ui), null, "ESC 关闭浮层");
     assert.equal(backdropOf(ui), null, "背板随浮层卸载");
-    const trigger = ui.find('button[aria-label=闪回]');
-    assert.ok(trigger, "触发按钮仍在（拉取失败不占位守卫放行）");
+    const trigger = ui.find(flashbackTriggerSelector());
+    assert.ok(trigger, "触发按钮仍在（关闭后焦点还原锚点）");
     assert.ok((trigger._focusCalls || 0) >= 1, "焦点还原到触发元素（focus 桩计数 ≥1）");
   } finally {
     ui.unmount();
@@ -1083,7 +1102,7 @@ test("R2 草稿确认（评审判据）：hasDraft=true 时 ESC / 外部点击�
     assert.deepEqual(onCloseCalls, ["confirm-discard"], "确认关闭才触发 onClose（一次，带 reason）");
 
     // 外部点击同样被草稿闸门拦住（mutation ② 的正向锚：外部点击必须走 requestClose）。
-    assert.equal(ui.click('button[aria-label=闪回]'), true, "重开浮层");
+    assert.equal(ui.click(flashbackTriggerSelector()), true, "重开浮层");
     ui.rerender();
     assert.ok(popupOf(ui), "重开成功");
     assert.equal(ui.click('[data-role="flashback-backdrop"]'), true, "点背板");
@@ -1131,7 +1150,7 @@ test("R2 rework 重入 (b)：hasDraft=true 确认关闭后再模拟 focusout，�
   const ui = await mountFlashbackPopup({ hasDraft: () => true, onClose: (reason) => onCloseCalls.push(reason) });
   try {
     const dialog = await openFlashbackPopup(ui);
-    assert.equal(ui.click('button[aria-label=闪回]'), true, "按钮点击 handler 被调到");
+    assert.equal(ui.click(flashbackTriggerSelector()), true, "按钮点击 handler 被调到");
     ui.rerender();
     assert.ok(popupOf(ui), "有草稿时按钮 toggle 不直接关（草稿闸门拦住）");
     assert.ok(confirmRowOf(ui), "确认行出现");
@@ -1142,7 +1161,7 @@ test("R2 rework 重入 (b)：hasDraft=true 确认关闭后再模拟 focusout，�
     dialog.onblur({ relatedTarget: null }); // 重入 focusout
     ui.rerender();
     assert.deepEqual(onCloseCalls, ["confirm-discard"], "重入不双发 onClose");
-    assert.equal(ui.click('button[aria-label=闪回]'), true, "重开浮层");
+    assert.equal(ui.click(flashbackTriggerSelector()), true, "重开浮层");
     ui.rerender();
     assert.ok(popupOf(ui), "浮层重开成功");
     assert.equal(confirmRowOf(ui), null, "确认态无残留（重开不再显示「草稿未保存」）");
@@ -1161,7 +1180,7 @@ test("R2 rework：overlayDismissible=false 时 ESC / 外部点击不自动关，
     assert.equal(ui.click('[data-role="flashback-backdrop"]'), true, "背板可点");
     ui.rerender();
     assert.ok(popupOf(ui), "dismissible=false：外部点击不自动关");
-    assert.equal(ui.click('button[aria-label=闪回]'), true, "按钮可点");
+    assert.equal(ui.click(flashbackTriggerSelector()), true, "按钮可点");
     ui.rerender();
     assert.equal(popupOf(ui), null, "dismissible=false：按钮仍能关（用户明确意图不过闸门）");
   } finally {
@@ -1174,7 +1193,7 @@ test("R2 rework：dismissible=false + hasDraft=true 时按钮先出确认行，�
   const ui = await mountFlashbackPopup({ overlayDismissible: false, hasDraft: () => true, onClose: (r) => onCloseCalls.push(r) });
   try {
     const dialog = await openFlashbackPopup(ui);
-    assert.equal(ui.click('button[aria-label=闪回]'), true, "按钮可点");
+    assert.equal(ui.click(flashbackTriggerSelector()), true, "按钮可点");
     ui.rerender();
     assert.ok(popupOf(ui), "有草稿：按钮不直接关");
     assert.ok(confirmRowOf(ui), "草稿闸门对 button 路径同样生效，先出确认行");

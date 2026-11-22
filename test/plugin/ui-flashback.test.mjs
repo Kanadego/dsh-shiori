@@ -109,6 +109,97 @@ test("5D ①无投递不占位：挂载拉取后确认窗口内无投递 → 动
   }
 });
 
+// ── ①b 加载中不占位（§11.5 收口，0.5 第三波 R3）──────────────────────────────
+// 新口径：没有可看的投递就完全不显示——「已拉取 + 无错误 + 有投递 + 至少一张卡」
+// 之外的一切状态（含加载中）整位不渲染，诊断信息只在面板「投递体检」页签。
+
+test("R3 ①b加载中不占位：挂载后 effect 未跑完（result===undefined）→ 整位不渲染，不留灰度入口", async () => {
+  const graph = {
+    deliveries: [
+      { deliveryId: "d-1", sourceMessageId: "m-1", at: new Date(harness.timers.now() - 60_000).toISOString(), sessionId: "session-A",
+        cards: [{ sparkId: "s1", trigger: "触发词A", source: "seed" }] },
+    ],
+    nodes: [cardNode("s1", "卡片甲", null)],
+  };
+  const { ui } = await mountFlashback({ graph });
+  try {
+    ui.render(); // 首渲染：挂载 effect 尚未 flush → result 还是 undefined（加载中）
+    assert.equal(ui.find("button"), null, "加载中：按钮不占位");
+    assert.equal(ui.text(), "", "加载中：动作位无任何文本（连「闪回」占位文案都不出）");
+    await ui.flush();
+    ui.rerender();
+    assert.equal(ui.find("button") !== null, true, "对照组：拉取完成后有卡 → 按钮照常出现");
+  } finally {
+    ui.unmount();
+  }
+});
+
+test("R3 ①c拉取失败不占位：getGraph 抛错 → 整位不渲染（错误诊断只进面板「投递体检」页签）", async () => {
+  const calls = [];
+  const dsh = {
+    call: async (method, sessionId, payload) => {
+      calls.push({ method, sessionId, payload });
+      if (method === "getGraph") throw Object.assign(new Error("boom"), { code: "shiori/graph-failed" });
+      return { ok: true };
+    },
+  };
+  const ui = await harness.mountSlot("conversation.chat.assistant-actions", {
+    dsh,
+    injectArg: "session-A",
+    slotProps: { messageId: "m-1", shioriSessionId: "session-A" },
+  });
+  try {
+    ui.render();
+    await ui.flush();
+    ui.rerender();
+    assert.equal(calls.some((c) => c.method === "getGraph"), true, "拉取确实发生且失败");
+    assert.equal(ui.find("button"), null, "拉取失败：按钮不占位（不再保留按钮让用户重开浮层看错误）");
+    assert.equal(ui.text(), "", "拉取失败：动作位无任何文本");
+  } finally {
+    ui.unmount();
+  }
+});
+
+test("R3 ①d投递存在但 0 卡不占位：窗口内命中投递但 cards 为空 → 整位不渲染", async () => {
+  const graph = {
+    deliveries: [
+      // 窗口内、本会话、本消息——唯一缺的是卡片：按新口径同样不占位。
+      { deliveryId: "d-empty", sourceMessageId: "m-1", at: new Date(harness.timers.now() - 60_000).toISOString(), sessionId: "session-A", cards: [] },
+    ],
+    nodes: [],
+  };
+  const { ui } = await bootFlashback({ graph });
+  try {
+    assert.equal(ui.find("button"), null, "0 卡：按钮不占位");
+    assert.equal(ui.text(), "", "0 卡：动作位无任何文本");
+  } finally {
+    ui.unmount();
+  }
+});
+
+test("R3 ①e有卡照常：已拉取 + 无错误 + 有投递 + 至少一张卡 → 按钮占位 + N 徽标（其余三态收口不误伤）", async () => {
+  const graph = {
+    deliveries: [
+      { deliveryId: "d-1", sourceMessageId: "m-1", at: new Date(harness.timers.now() - 60_000).toISOString(), sessionId: "session-A",
+        cards: [{ sparkId: "s1", trigger: "触发词A", source: "seed" }] },
+    ],
+    nodes: [cardNode("s1", "卡片甲", null)],
+  };
+  const { ui } = await bootFlashback({ graph });
+  try {
+    const btn = ui.find("button");
+    assert.ok(btn, "有卡：按钮占位");
+    assert.equal(ui.textOf("button"), "闪回1", "N 徽标照常（N=1）");
+    assert.equal(btn.getAttribute("aria-label"), "闪回 1", "可访问名称带 N");
+    assert.equal(openPopup(ui, 1), true, "浮层照常可开（有卡行为不变）");
+    ui.rerender();
+    assert.ok(findPopup(ui), "浮层渲染");
+    assert.ok(ui.text().includes("卡片甲"), "卡片在列");
+  } finally {
+    ui.unmount();
+  }
+});
+
 // ── ②有投递显示 N ──────────────────────────────────────────────────────────
 
 test("5D ②有投递显示 N：线稿图标 + 文案「闪回」+ 徽标 N，aria-label「闪回 N」", async () => {
