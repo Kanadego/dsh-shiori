@@ -4,7 +4,7 @@
 >
 > **编号说明**：历史协作注释按开发槽位（slot A–Q、1–8）复用了 §A–§I 与 §1–§8 两套编号，同一编号在不同槽位语境下指不同契约（如 §2 在 P 槽指 plugin 装配、在 J 槽指 organize 分析职责）。本文件按槽位分节，每节标注该槽注释使用的编号；源码注释里的引用按「槽位 + 编号」对号入座。
 >
-> **行号有效性**：行号以 0.4 分支（基线 61854b5 及其后）为准；后续代码移动只影响行号不影响事实本身。
+> **行号有效性**：行号以 0.5 分支（基线 9473ed1，0.5 批次 0–5 合并后）实测为准（0.4 时期以基线 61854b5 为准）；后续代码移动只影响行号不影响事实本身。
 
 ---
 
@@ -58,13 +58,13 @@
 
 ## G · L2 Sparks 存储与工具（注释编号 §G）
 
-被引用处：`src/sparks/errors.mjs:2`、`src/sparks/graph.mjs:16`、`src/sparks/tools.mjs:4,216`、`src/host/errors.mjs:4`、`test/sparks/tools.test.mjs:2`。
+被引用处：`src/sparks/errors.mjs:2`、`src/sparks/graph.mjs:16`、`src/sparks/tools.mjs:4,244`、`src/host/errors.mjs:4`、`test/sparks/tools.test.mjs:2`。
 
 - 错误码至少区分 `INVALID_INPUT / INVALID_STATE / REVISION_CONFLICT / NOT_FOUND / LOCK_BUSY / UNSUPPORTED`；`IO_ERROR` 为 sparks 模块补充（底层文件系统失败时显式抛出并保留 cause）。错误形状与 `src/storage/errors.mjs` 的 StorageError 对齐（name/code/details）但刻意不继承。出处：`src/sparks/errors.mjs:2-12`。
 - host 桥错误（`src/host/errors.mjs`）要求带 code 的 Error，至少区分 `INVALID_INPUT / REVISION_CONFLICT / BUDGET_REJECTED / INVALID_STATE / UNSUPPORTED`，不静默截断。出处：`src/host/errors.mjs:4-6`。
-- 可信 store 入口 `openSparkStore({root, scopeId, ...})`：`src/sparks/store.mjs:1155`。
+- 可信 store 入口 `openSparkStore({root, scopeId, ...})`：`src/sparks/store.mjs:1276`。
 - public record 字段集：`id, scopeId, revision, title, summary, triggers, entities, links, content, vitality, state`（图谱投影的消费形状依据）。出处：`src/sparks/graph.mjs:15-16`。
-- 工具门面是纯 host-agnostic 门面，接收可信 scopeId 与 store 实例；payload 中出现 `scope` / `scopeId` / `root` 键一律 INVALID_INPUT。出处：`src/sparks/tools.mjs:3-10`；store 缺必需方法时报 INVALID_INPUT（`src/sparks/tools.mjs:216`）。
+- 工具门面是纯 host-agnostic 门面，接收可信 scopeId 与 store 实例；payload 中出现 `scope` / `scopeId` / `root` 键一律 INVALID_INPUT。出处：`src/sparks/tools.mjs:3-10`；store 缺必需方法时报 INVALID_INPUT（`src/sparks/tools.mjs:242-244`）。
 
 ## H · L2 检索与投递纯函数边界（注释编号 §H）
 
@@ -94,29 +94,29 @@
 
 ## M/N 槽 · 双轨遗忘（注释编号 §1/§2/§3/§4/§5/§7）
 
-被引用处：`src/forgetting/decay.mjs:3`、`src/sparks/store.mjs:74,966,1000,1023,1749,1875`、`src/forgetting/executor.mjs:10`、`test/forgetting/*.test.mjs`。
+被引用处：`src/forgetting/decay.mjs:3`、`src/sparks/store.mjs:74,1087,1121,1144,1959,2085`、`src/forgetting/executor.mjs:10`、`test/forgetting/*.test.mjs`。
 
 - **§1（衰减公式）**：`score = 2**(−elapsedDays/halfLifeDays)`；`halfLifeDays = min(baseHalfLifeDays × 2**useCount, maxHalfLifeDays)`；`elapsedDays = max(0, (now − (lastUsedAt ?? createdAt)) / 86400000)`；归档资格：active、ephemeral、`supersedes===null`、`elapsedDays >= 60` 且 `score < archiveScore`；默认 policy 恰为 `{baseHalfLifeDays:30, maxHalfLifeDays:240, archiveScore:0.25}`。出处：`src/sparks/store.mjs:74-81`、`src/forgetting/decay.mjs:9-13`。
 - **§2（policy 规范化）**：`normalizeForgetPolicy` 对三字段做「部分覆盖 + 默认补全」的严格规范化。出处：`src/forgetting/decay.mjs:3-5`。
-- **§1/§3（store 严格校验）**：forget policy 必须恰好三字段、拒绝未知键，base ∈ [1,365]、max ∈ [base,3650]、archiveScore ∈ (0,1)（`src/sparks/store.mjs:966-997`）；forget Source 恰好 `id/revision/createdAt/lastUsedAt/useCount` 五个自有键（`src/sparks/store.mjs:1000-1008`）；forget plan 严格校验（恰好六键等，`src/sparks/store.mjs:1023`）。
-- **§3/§4（store 三提案）**：`store.archiveEphemeralBatch(...)` 批量软归档 1..20 张 active ephemeral 卡、任一失败零卡变化（`src/sparks/store.mjs:1749`）；`store.listArchived()` 当前 scope 恰好 archived 的完整卡、只读无 global fallback；`store.recordUsefulFeedback(id, {used, sourceEventId, operationId?})` 按 (scope,id,event) 去重、仅 `used=true` 时 useCount+1（`src/sparks/store.mjs:1875`）。完整描述见 `src/sparks/store.mjs:60-72` 头注释。
+- **§1/§3（store 严格校验）**：forget policy 必须恰好三字段、拒绝未知键，base ∈ [1,365]、max ∈ [base,3650]、archiveScore ∈ (0,1)（`src/sparks/store.mjs:1091-1119`）；forget Source 恰好 `id/revision/createdAt/lastUsedAt/useCount` 五个自有键（`src/sparks/store.mjs:1122-1141`）；forget plan 严格校验（恰好六键等，`src/sparks/store.mjs:1149`）。
+- **§3/§4（store 三提案）**：`store.archiveEphemeral(plan, {operationId, executedAt})`（0.4 文档期旧名 `archiveEphemeralBatch`，现名以代码为准）批量软归档 1..20 张 active ephemeral 卡、任一失败零卡变化（契约注释 `src/sparks/store.mjs:1959`，实现 `:1971`）；`store.listArchived()` 当前 scope 恰好 archived 的完整卡、只读无 global fallback（`:2075`）；`store.recordUsefulFeedback(id, {used, sourceEventId, operationId?})` 按 (scope,id,event) 去重、仅 `used=true` 时 useCount+1（`:2093`）。完整描述见 `src/sparks/store.mjs:60-72` 头注释。
 - **§7（fail-closed 授权）**：每次 execute（含底层可重放的尝试）都重新 authorize 并采样可信 now；`now < plan.now` 时即使同 operationId 已有持久收据也拒绝且不触碰 store。出处：`src/forgetting/executor.mjs:10-12`。
 
 ## P/Q 槽 · plugin 装配与面板 wire（注释编号 §2/§3/§4/§5/§6/§7）
 
-被引用处：`index.mjs:3`、`src/plugin/{bindings,controller,config,scope,persona,state,tool-schemas,client-rpc,management}.mjs` 头注释、`client/index.js:11`、`docs/plugin/client.md:9`、`test/plugin/client.test.mjs:218`。
+被引用处：`index.mjs:3`、`src/plugin/{bindings,controller,config,scope,persona,state,tool-schemas,client-rpc,management}.mjs` 头注释、`client/index.js:11`、`docs/plugin/client.md:9`、`test/plugin/client.test.mjs:230`。
 
 - **§2（Q/P 装配边界）**：插件入口 `apply` 固定顺序 `normalizePluginConfig → verifyPluginRoots → createShioriPluginController → controller.start → mountShioriRpc`，返回 async cleanup（RPC stop → controller.stop），部分启动失败逆序清理（`index.mjs:3-9`）；controller 生命周期冻结契约——构造不自动 start、start/stop 幂等、失败逆序清理、部分 start 不残留工具/section/锁（`src/plugin/controller.mjs:5-14`）；config 职责边界——Config 只证明可序列化结构 + 默认值，权威规范化在 `normalizePluginConfig`（未知键拒绝；0.4-S1 起 dataRoot/stateRoot 为 null 时解析为 DSH_HOME 默认根），路径安全由 `verifyPluginRoots` 真实校验（`src/plugin/config.mjs:3-10`；`verifyPluginRoots` 实现见 `:16-17`）；生产 bindings 来自 ctx（`src/plugin/bindings.mjs:1-3`）；scope 只能从可信证据解析，payload 中的 ownerId/scopeId/persona/authorize/root 一律拒绝（`src/plugin/scope.mjs:3-7`）；management 为面板管理 API 生产实现（`src/plugin/management.mjs:1`）。
 - **§3（persona adapter）**：L0 persona 持久化到 `dataRoot/persona`；read/commit 与 service 契约一致（文件锁、CAS、原子写、持久 operationId 重放先于 liveCAS）；上限 12000 UTF-16；外改坏格式/超限不覆盖原文件。出处：`src/plugin/persona.mjs:3-8`。
-- **§4（工具输出 schema）**：所有宿主工具提供 `output:{schema,render}`；输出 schema 覆盖所有读分支 / nullable / changes / 写回执；严禁空对象闭合 schema；实际 9 兼容工具 + topic_create + group_manage + 6 Spark 工具共 **17 个**（`TOOL_NAMES` / `TOOL_OUTPUT_SCHEMAS` 为唯一权威）。出处：`src/plugin/tool-schemas.mjs:3-5,127,304`。
-- **§4/§5/§6（stateRoot 账本）**：工具 operationId 重放账（重放先于新 liveCAS）、L2 投递账（pending/accepted/committed 三阶段 + journal 可恢复提交）、L1 投影快照等；`src/plugin/state.mjs:3-9,187-225`（其中「§5」的历史原文未定义，此处按模块实际职责记录）。
-- **§6（wire 冻结）**：面板 RPC wire 为 namespace `shiori` 的 management 方法 `(sessionId, payload)`；方法清单冻结为 **11 个**：`getStatus / getMemoryView / getGraph / executeTool / listCandidates / analyze / reviewCandidate / previewPlan / executePlan / getTimeline / destroyData`，由 `MANAGEMENT_METHODS`（`src/plugin/protocol.mjs`）唯一权威定义并 `validateManagementPayload` 校验；Q 侧挂载时若与冻结清单不一致立刻失败（`src/plugin/client-rpc.mjs:43-49`）；client 按同一冻结 wire 消费（`client/index.js:11-13`，测试镜像 `test/plugin/client.test.mjs:218`）。
-- **§6.1（destroyData，0.4 S6 新增，wire 唯一一次增项）**：焚毁整个 dataRoot（目录本身一并移除）。输入闭合 `{ confirm: string }`（required，additionalProperties:false），语义是 `confirm` 必须等于当前 `settings.dataRoot` 原文（逐字符相等，不等抛 `INVALID_INPUT`）；输出闭合 `{ deleted: boolean, files: integer, bytes: integer, dataRoot: string }`（additionalProperties:false），目录不存在返回 `deleted:false` 而不是抛错。实现走共享模块 `src/storage/purge.mjs`（`purgeDataRoot(root, { expectedRoot, stateRoot })`）——与命令行 `bin/admin.mjs destroy` 同一份校验与删除代码，行为一致。安全边界（fail-closed，任一不满足抛 `PurgeSafetyError`，`details.rule` 记规则名）：目标必须绝对路径、不含 `..` 段、真实 link 解析后与 stateRoot 互不相交（相等/互相嵌套都拒绝）、非盘符根 / POSIX 根、非用户主目录（或其祖先；目标位于主目录之内允许——默认根 `<~/.dsh>/shiori-data` 本就在主目录内）、非仓库根（或其祖先；仓库根之内允许）、目标存在时必须是普通目录（symlink/junction 一律拒绝）；删除实现逐项 lstat——symlink/junction 只删链接本身，绝不递归删软链目标；IO 失败原样上抛，绝不忽略错误后继续。门面守门顺序：schema 校验 → inert（NOT_CONFIGURED）→ shadow/未 start（UNSUPPORTED / INVALID_STATE）→ 只读宿主（HOST_LOCKED）→ owner principal 二次核验（UNAUTHORIZED）→ confirm 比对（INVALID_INPUT）→ purge 安全校验 → 删除。出处：`src/plugin/protocol.mjs`（destroyData schema）、`src/plugin/management.mjs`（destroyData 实现）、`src/storage/purge.mjs`、`bin/admin.mjs`。
+- **§4（工具输出 schema）**：所有宿主工具提供 `output:{schema,render}`；输出 schema 覆盖所有读分支 / nullable / changes / 写回执；严禁空对象闭合 schema；实际 9 兼容工具 + topic_create + group_manage + 8 Spark 工具（0.5-5C 起新增 spark_link / spark_unlink）共 **19 个**（`TOOL_NAMES` / `TOOL_OUTPUT_SCHEMAS` 为唯一权威）。出处：`src/plugin/tool-schemas.mjs:3-5,144,353`。
+- **§4/§5/§6（stateRoot 账本）**：工具 operationId 重放账（重放先于新 liveCAS）、L2 投递账（pending/accepted/committed 三阶段 + journal 可恢复提交）、L1 投影快照等；`src/plugin/state.mjs:3-9,148-158,199-236`（头注释逐条职责 + tool-ops/l2 两账本定义 + projectionStore 实现；其中「§5」的历史原文未定义，此处按模块实际职责记录）。
+- **§6（wire 冻结）**：面板 RPC wire 为 namespace `shiori` 的 management 方法 `(sessionId, payload)`；方法清单冻结为 **21 个**（0.4 收口时 11 个）：`getStatus / getMemoryView / getGraph / executeTool / listCandidates / analyze / reviewCandidate / previewPlan / executePlan / getTimeline / destroyData`（0.4 S6 增 `destroyData` 到 11，为 0.4 唯一一次增项，见 §6.1），0.5 批次 4 增 `onboardingPreview / onboardingApply / onboardingMark / getTemperatureSettings / simulateTemperature / recordTemperatureChange`（11 → 17），0.5 批次 5 增 `getAutoStatus / runAutoEvaluation / applyAutoChanges / undoAutoRun`（17 → 21）。清单由 `MANAGEMENT_METHODS`（`src/plugin/protocol.mjs:454`）唯一权威定义并 `validateManagementPayload`（`src/plugin/protocol.mjs:1292`）校验；镜像清单现同集合——`CONTRACT_METHODS`（`src/plugin/client-rpc.mjs:51`）、`DRAINED_MANAGEMENT_METHODS`（`src/plugin/controller.mjs:2104`，合法地少纯内存 `getStatus` 共 20 个，`methodSetMismatch` 断言防错位，`src/plugin/controller.mjs:2115-2121`）、client 侧 `RPC_METHODS`（`client/index.js:489`）；Q 侧挂载时若与冻结清单不一致立刻失败（`src/plugin/client-rpc.mjs:43-49`）；client 按同一冻结 wire 消费（`client/index.js:11-13`，测试镜像 `test/plugin/client.test.mjs:230`）。
+- **§6.1（destroyData，0.4 S6 新增，wire 唯一一次增项）**：焚毁整个 dataRoot（目录本身一并移除）。输入闭合 `{ confirm: string }`（required，additionalProperties:false），语义是 `confirm` 必须等于当前 `settings.dataRoot` 原文（逐字符相等，不等抛 `INVALID_INPUT`）；输出闭合 `{ deleted: boolean, files: integer, bytes: integer, dataRoot: string }`（additionalProperties:false），目录不存在返回 `deleted:false` 而不是抛错。实现走共享模块 `src/storage/purge.mjs`（`purgeDataRoot(root, { expectedRoot, stateRoot })`）——与命令行 `bin/admin.mjs destroy` 同一份校验与删除代码，行为一致。安全边界（fail-closed，任一不满足抛 `PurgeSafetyError`，`details.rule` 记规则名）：目标必须绝对路径、不含 `..` 段、真实 link 解析后与 stateRoot 互不相交（相等/互相嵌套都拒绝）、非盘符根 / POSIX 根、非用户主目录（或其祖先；目标位于主目录之内允许——默认根 `<~/.dsh>/shiori-data` 本就在主目录内）、非仓库根（或其祖先；仓库根之内允许）、目标存在时必须是普通目录（symlink/junction 一律拒绝）；删除实现逐项 lstat——symlink/junction 只删链接本身，绝不递归删软链目标；IO 失败原样上抛，绝不忽略错误后继续。门面守门顺序：schema 校验 → inert（NOT_CONFIGURED）→ shadow/未 start（UNSUPPORTED / INVALID_STATE）→ 只读宿主（HOST_LOCKED）→ owner principal 二次核验（UNAUTHORIZED）→ confirm 比对（INVALID_INPUT）→ purge 安全校验 → 删除。出处：`src/plugin/protocol.mjs:833`（destroyData schema）、`src/plugin/management.mjs:1482`（destroyData 实现）、`src/storage/purge.mjs`、`bin/admin.mjs`。
 - **§7（RPC 授权）**：授权只认服务端绑定身份 `ctx.invocation.peer.principal`（本批仅 `principal.kind === "owner"`）；payload / wire 永不携带 trustedContext；存在 sessionId 不等于获授权。出处：`src/plugin/client-rpc.mjs:5-13`。
 
 ## host 桥工具最小集合（`src/host/tools.mjs:4-5` 引用）
 
-- `createCompatTools` 覆盖契约要求的最小集合：`soul_read` / `soul_update` / `memory_read` / `memory_search` / `memory_append` / `memory_rewrite` / `core_write` / `topic_append` / `memory_list_topics`（9 个）；`topic_create`（独立工厂，`src/host/tools.mjs:542`）、`group_manage`（`src/host/tools.mjs:672`）与 6 个 Spark 工具（`src/sparks/tools.mjs`）由 controller 一并注册成 17 工具全集（`src/plugin/controller.mjs:82`）。
+- `createCompatTools` 覆盖契约要求的最小集合：`soul_read` / `soul_update` / `memory_read` / `memory_search` / `memory_append` / `memory_rewrite` / `core_write` / `topic_append` / `memory_list_topics`（9 个）；`topic_create`（独立工厂，`src/host/tools.mjs:682`）、`group_manage`（`src/host/tools.mjs:813`）与 8 个 Spark 工具（0.5-5C 起含 spark_link / spark_unlink，`src/sparks/tools.mjs`）由 controller 一并注册成 19 工具全集（`src/plugin/controller.mjs:605,661`）。
 
 ## §8 · 真实宿主证据（注释编号 §8）
 

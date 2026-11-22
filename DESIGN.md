@@ -1,6 +1,6 @@
 # dsh-shiori — 开发者设计与维护手册
 
-> **当前版本**：v0.4.0（feat/0.4 开发线；`package.json` 的 `version` 尚为 0.3.1，发版收口时同步）· **宿主兼容**：DSH `>=0.2.1-rc.2 <0.3.0` · **平台**：Windows / Linux / macOS
+> **当前版本**：v0.5.0（开发中；0.5 批次 0–5 已合并，`package.json` 仍为 0.4.0，发版收口时同步）· **宿主兼容**：DSH `>=0.2.1-rc.2 <0.3.0` · **平台**：Windows / Linux / macOS
 >
 > 本文档面向插件维护者与二次开发者，提供：**架构与核心功能全景**、**源码与双根磁盘文件索引**、**全量参数速查表**、以及 **状态/时间线审计与错误码排障指南**。
 
@@ -40,7 +40,7 @@ Shiori 把角色记忆按注入频率拆成四层，并将**长期业务数据**
 | `src/core/` | 纯函数核心规则：预算与水位计算（`budget.mjs`）、配置校验（`config.mjs`）、L1 渲染（`render.mjs`）、命名校验（`keys.mjs`） |
 | `src/storage/` | L1/L3 文件仓库（`store.mjs`）：跨进程锁（`lockfile.mjs`）、两阶段事务日志（`journal.mjs`）、YAML 头解析（`frontmatter.mjs`） |
 | `src/service/index.mjs` | 组合 Core 与 Storage 的高层读写服务（提供 `read` / `mutate` / `search` / `listTopics`） |
-| `src/sparks/` | L2 闪回卡子系统：单文件存储（`store.mjs`）、字面匹配（`match.mjs`）、投递状态机（`delivery.mjs`）、关系图（`graph.mjs`）、6 个工具（`tools.mjs`） |
+| `src/sparks/` | L2 闪回卡子系统：单文件存储（`store.mjs`）、字面匹配（`match.mjs`）、投递状态机（`delivery.mjs`）、关系图（`graph.mjs`）、8 个工具（`tools.mjs`，0.5-5C 起含 `spark_link` / `spark_unlink`） |
 | `src/semantic/` | 本地语义补召回：ONNX 模型懒加载推理（`local.mjs`）与派生句向量库（`store.mjs`） |
 | `src/organize/` | 记忆整理子系统：聚类与孤岛分析（`analyze.mjs`）、候选队列（`queue.mjs`）、受审计划执行器（`executor.mjs`） |
 | `src/forgetting/` | 双轨遗忘子系统：半衰期衰减计算（`decay.mjs`）、批量归档执行器（`executor.mjs`）、冷库只读检索（`cold-search.mjs`） |
@@ -123,18 +123,18 @@ Shiori 把角色记忆按注入频率拆成四层，并将**长期业务数据**
 - **整理与遗忘的三步受审流（`src/organize/` & `src/forgetting/`）**
   - 插件绝不在后台自动合并或删除卡片，所有整理与遗忘操作都必须经过：**① 分析生成候选 → ② 预览生成带签名摘要（`planDigest`）的不可变计划 → ③ 用户在面板点击确认执行**。
   - **双轨遗忘规则**：`evergreen`（常青）卡片永久免疫衰减；`ephemeral`（短期）卡片按年龄与被调用次数（`useCount`）计算半衰期保持率，用得越多衰减越慢。归档后的冷卡仅退出日常触发池，仍可通过 `memory_search(includeArchived: true)` 随时找回。
-- **17 个模型工具分组（仅在 `active` 模式下注册；清单唯一权威 `src/plugin/tool-schemas.mjs:304` 的 `TOOL_NAMES`）**
+- **19 个模型工具分组（仅在 `active` 模式下注册；清单唯一权威 `src/plugin/tool-schemas.mjs:353` 的 `TOOL_NAMES`）**
   - **L0 人设卡（2 个）**：`soul_read`、`soul_update`
   - **L1 核心与 L3 专题（9 个）**：`memory_read`、`memory_search`、`memory_append`、`memory_rewrite`、`core_write`、`topic_append`、`topic_create`、`memory_list_topics`、`group_manage`
-  - **L2 闪回卡（6 个）**：`spark_save`、`spark_read`、`spark_update`、`spark_forget`、`spark_feedback`、`spark_graph`
+  - **L2 闪回卡（8 个）**：`spark_save`、`spark_read`、`spark_update`、`spark_forget`、`spark_feedback`、`spark_graph`、`spark_link`、`spark_unlink`
 
 ### 3.3 0.4 版增量（对齐实现）
 
-- **组管理与主组口径（0.4 P0#2，2026-11-14 用户拍板）**：`group_manage`（action=list/create/update/delete/repair）管理当前 scope 的 Topic 组；一个 topic 可挂多组，但**计数与成员浏览只认主组 `group[0]`**——工具侧组行计数只统计主组（`group_manage` 的 list 分支），面板组页成员列表只归属主组 `row.group[0] === key`（`client/index.js:4012、:4035` 两处过滤），避免多组 topic 在非主组重复计数。删除非空组必须给 `migrateTo`：组内 topic 在同一原子提交里改挂后再删组条目（`group_manage` 的 delete 分支、`src/core/groups.mjs` 的 `deleteGroup`）。`list` 另返回 `dangling` 字段：`topic.group` 里指向清单外组的条目；`action=repair` 走单次 CAS `mutate`（带 `operationId`）只摘这些悬空引用，返回 `cleaned`（实际摘除对数）/`remaining`（提交后重读清单算出的残余）；组清单为空或缺失而 topic 仍有挂载时以 `INVALID_STATE` 拒绝，绝不把全部挂载当悬空清空。
-- **S5 模型目录与自动重建（0.4 P0#3）**：模型缓存落点从 `<stateRoot>/semantic/models` 退役为 `<dataRoot>/models`（`semantic.local.cacheDir` 显式配置优先，空串兑现默认；`src/plugin/controller.mjs:153-161`）。显式 `cacheDir` 必须是绝对路径且不含 `..` 段，`localModelDir` 校验（`src/semantic/local.mjs:331-348`）。面板下载模型完成后**自动串一次向量重建**（同代次幂等，计数器 `autoRebuildAttempts` 经 diagnostics 可观测；`src/plugin/controller.mjs:748-780`）；`semantic_rebuild` / `semantic_download` 是保留名通道（dispatchTool 拦截，不占宿主工具名额，`src/plugin/controller.mjs:92-100`）。
-- **面板 rootsSource 契约（0.4 P0#1）**：`normalizePluginConfig` 在把 null 根改写为默认根**之前**计算来源标记 `rootsSource = { dataRoot: "explicit"|"default", stateRoot: "explicit"|"default" }`（profileRoot 派生根也属 default），随 settings 冻结下发（`src/plugin/config.mjs:561-568`），面板 `getStatus` 按字段原样回显，不再出现 `[object Object]`（`src/plugin/management.mjs:261-270`）。
-- **wire 10 → 11（0.4 S6 唯一一次增项）**：面板 RPC 冻结为 `MANAGEMENT_METHODS` 的 **11 个**方法（`src/plugin/protocol.mjs`），0.4 新增 `destroyData`（卸载与焚毁：`confirm` 必须等于当前 dataRoot 原文，只删 dataRoot，stateRoot 与 DSH 配置不动；面板按钮与命令行 `bin/admin.mjs` 共用 `src/storage/purge.mjs` 同一份 fail-closed 校验与删除实现），除此之外 wire 未增删。`CONTRACT_METHODS`（`src/plugin/client-rpc.mjs`）与 `DRAINED_MANAGEMENT_METHODS`（`src/plugin/controller.mjs`）已同步，挂载校验按 11 方法对齐。
-- **inert 退役（apply 路径）**：0.4-S1 起 `dataRoot`/`stateRoot` 为 null 时解析为 `<DSH_HOME>/shiori-data` / `<DSH_HOME>/shiori-state`（DSH_HOME 取环境变量，缺省 `~/.dsh`；`src/plugin/config.mjs:16-21,516-525`）——经插件 `apply` 挂载不再产生 inert 状态；`inert` 仅直构/嵌入方传 null 根时可达（`src/plugin/controller.mjs:144-148`）。
+- **组管理与主组口径（0.4 P0#2，2026-11-14 用户拍板）**：`group_manage`（action=list/create/update/delete/repair）管理当前 scope 的 Topic 组；一个 topic 可挂多组，但**计数与成员浏览只认主组 `group[0]`**——工具侧组行计数只统计主组（`group_manage` 的 list 分支），面板组页成员列表只归属主组 `row.group[0] === key`（`client/index.js:5125、:5148` 两处过滤），避免多组 topic 在非主组重复计数。删除非空组必须给 `migrateTo`：组内 topic 在同一原子提交里改挂后再删组条目（`group_manage` 的 delete 分支、`src/core/groups.mjs` 的 `deleteGroup`）。`list` 另返回 `dangling` 字段：`topic.group` 里指向清单外组的条目；`action=repair` 走单次 CAS `mutate`（带 `operationId`）只摘这些悬空引用，返回 `cleaned`（实际摘除对数）/`remaining`（提交后重读清单算出的残余）；组清单为空或缺失而 topic 仍有挂载时以 `INVALID_STATE` 拒绝，绝不把全部挂载当悬空清空。
+- **S5 模型目录与自动重建（0.4 P0#3）**：模型缓存落点从 `<stateRoot>/semantic/models` 退役为 `<dataRoot>/models`（`semantic.local.cacheDir` 显式配置优先，空串兑现默认；`src/plugin/controller.mjs:237-253`）。显式 `cacheDir` 必须是绝对路径且不含 `..` 段，`localModelDir` 校验（`src/semantic/local.mjs:334-350`）。面板下载模型完成后**自动串一次向量重建**（同代次幂等，计数器 `autoRebuildAttempts` 经 diagnostics 可观测；`src/plugin/controller.mjs:1024-1056`）；`semantic_rebuild` / `semantic_download` 是保留名通道（dispatchTool 拦截，不占宿主工具名额，`src/plugin/controller.mjs:125-134,852`）。
+- **面板 rootsSource 契约（0.4 P0#1）**：`normalizePluginConfig` 在把 null 根改写为默认根**之前**计算来源标记 `rootsSource = { dataRoot: "explicit"|"default", stateRoot: "explicit"|"default" }`（profileRoot 派生根也属 default），随 settings 冻结下发（`src/plugin/config.mjs:707-710`），面板 `getStatus` 按字段原样回显，不再出现 `[object Object]`（`src/plugin/management.mjs:656-658`）。
+- **wire 11 → 21（0.4 S6 增 `destroyData` 到 11；0.5 批次 4 到 17；0.5 批次 5 到 21）**：面板 RPC 冻结为 `MANAGEMENT_METHODS` 的 **21 个**方法（`src/plugin/protocol.mjs:454`）。0.4 S6 新增 `destroyData`（卸载与焚毁：`confirm` 必须等于当前 dataRoot 原文，只删 dataRoot，stateRoot 与 DSH 配置不动；面板按钮与命令行 `bin/admin.mjs` 共用 `src/storage/purge.mjs` 同一份 fail-closed 校验与删除实现）到 11；0.5 批次 4 新增 `onboardingPreview` / `onboardingApply` / `onboardingMark` 与热度参数三方法 `getTemperatureSettings` / `simulateTemperature` / `recordTemperatureChange` 到 17；0.5 批次 5 新增 auto 冷却/恢复四方法 `getAutoStatus` / `runAutoEvaluation` / `applyAutoChanges` / `undoAutoRun` 到 21。`CONTRACT_METHODS`（`src/plugin/client-rpc.mjs:51`）、`DRAINED_MANAGEMENT_METHODS`（`src/plugin/controller.mjs:2104`，合法地少纯内存 `getStatus` 共 20 个，`methodSetMismatch` 断言防错位）与 client 侧 `RPC_METHODS`（`client/index.js:489`）已同步，挂载校验按 21 方法对齐。
+- **inert 退役（apply 路径）**：0.4-S1 起 `dataRoot`/`stateRoot` 为 null 时解析为 `<DSH_HOME>/shiori-data` / `<DSH_HOME>/shiori-state`（DSH_HOME 取环境变量，缺省 `~/.dsh`；`src/plugin/config.mjs:20-21,654-661,722-729`）——经插件 `apply` 挂载不再产生 inert 状态；`inert` 仅直构/嵌入方传 null 根时可达（`src/plugin/controller.mjs:195-199`）。
 
 ---
 
@@ -144,14 +144,14 @@ Shiori 把角色记忆按注入频率拆成四层，并将**长期业务数据**
 
 ### 4.1 第一层：宿主基础与功能开关（`cordis.patch.yml` / 插件设置页）
 
-定义在 `src/plugin/config.mjs:176-224`：
+定义在 `src/plugin/config.mjs:228-298`：
 
 | 参数路径 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `mode` | `"shadow" \| "active"` | `"shadow"` | 运行模式：`shadow` 为只读影子；设为 `active` 才挂载工具与提示词注入 |
 | `allowActive` | `boolean` | `false` | 启用 `active` 模式的双重确认开关（`mode: "active"` 时必须设为 `true`） |
-| `dataRoot` | `string \| null` | `null` | 业务数据根目录绝对路径（不能与 `stateRoot` 相同或互相嵌套）；0.4-S1 起 `null` 在加载阶段自动解析为 `<DSH_HOME>/shiori-data` 并自动创建目录（`src/plugin/config.mjs:179`） |
-| `stateRoot` | `string \| null` | `null` | 运行状态根目录绝对路径（不能与 `dataRoot` 相同或互相嵌套）；0.4-S1 起 `null` 自动解析为 `<DSH_HOME>/shiori-state`（`src/plugin/config.mjs:180`） |
+| `dataRoot` | `string \| null` | `null` | 业务数据根目录绝对路径（不能与 `stateRoot` 相同或互相嵌套）；0.4-S1 起 `null` 在加载阶段自动解析为 `<DSH_HOME>/shiori-data` 并自动创建目录（`src/plugin/config.mjs:231`） |
+| `stateRoot` | `string \| null` | `null` | 运行状态根目录绝对路径（不能与 `dataRoot` 相同或互相嵌套）；0.4-S1 起 `null` 自动解析为 `<DSH_HOME>/shiori-state`（`src/plugin/config.mjs:232`） |
 | `defaultPersona` | `string \| null` | `null` | 默认人设卡名（对应 `personas/<name>.md`）；`null` 表示默认使用 `global` |
 | `sessionPersonas` | `Array<{sessionId, persona}>` | `[]` | 会话级人设卡指定列表（优先级最高） |
 | `workspacePersonas` | `Array<{workspace, persona}>` | `[]` | 工作区目录绑定的人设卡列表（按最长路径前缀匹配） |
@@ -166,13 +166,13 @@ Shiori 把角色记忆按注入频率拆成四层，并将**长期业务数据**
 | `semantic.local.model` | `string` | `"Xenova/bge-small-zh-v1.5"` | 本地向量模型的 HuggingFace 仓库 ID（首次开启时按需下载） |
 | `semantic.local.dims` | `number` | `512` | 向量维度（需与模型输出维度一致） |
 | `semantic.local.dtype` | `"fp32" \| "fp16" \| "q8"` | `"fp32"` | 模型推理精度（`fp32` 约 91MB；`q8` 约 23MB 速度最快） |
-| `semantic.local.cacheDir` | `string` | `""` | 模型缓存路径（0.4-S5 起留空使用 `<dataRoot>/models`；显式给出必须是绝对路径且不含 `..` 段，`src/semantic/local.mjs:331-348` 校验） |
+| `semantic.local.cacheDir` | `string` | `""` | 模型缓存路径（0.4-S5 起留空使用 `<dataRoot>/models`；显式给出必须是绝对路径且不含 `..` 段，`src/semantic/local.mjs:334-350` 校验） |
 | `semantic.local.mirror` | `string` | `"https://hf-mirror.com/"` | 模型下载镜像站地址 |
 
 ### 4.2 第二层：容量预算与水位参数（`budgets.*`）
 
 - **去哪里查定义与默认出厂值**：`src/core/config.mjs:9-27`（`DEFAULT_CONFIG`）
-- **去哪里查生产上限与水位派生**：`src/plugin/config.mjs:118-123`（`derivedWaterDefaults`）、`125-159` 及 `285-286`（`BUDGET_CEILINGS`）
+- **去哪里查生产上限与水位派生**：`src/plugin/config.mjs:129-134`（`derivedWaterDefaults`）、`360-363`（`BUDGET_CEILINGS`）
 - **水位校验关系**：整体必须满足 `softAt <= targetChars < hardAt < hardCapChars`，以及 `seedCount + linkCount <= maxCards`。
 
 | 路径 | 默认值 | 生产上限 | 作用说明 |
@@ -200,8 +200,8 @@ Shiori 把角色记忆按注入频率拆成四层，并将**长期业务数据**
 | `SEAT_TAKEOVER_MS` | `60_000` (60 s) | `src/host/seat.mjs:45` | PID 存活但心跳停止超 60 秒时，判定为系统 PID 复用并强制接管写权 |
 | `SEAT_RELEASE_MS` | `4000` (4 s) | `src/host/seat.mjs:47` | 先启动的宿主退出后，后启动宿主等待多久自动升格为可写 |
 | `MAX_KEY_CHARS` | `128` | `src/storage/paths.mjs:29` | Topic key、Scope ID 与 `operationId` 的最大字符长度 |
-| `ANALYZE_CANDIDATE_LIMIT` | `1000` | `src/plugin/management.mjs:37` | 单次记忆整理分析扫描的最大候选条数 |
-| `SEMANTIC_REBUILD_BATCH` | `20` | `src/plugin/controller.mjs:107` | 面板点击「重建向量」时每批计算向量的卡片张数（批间让出事件循环） |
+| `ANALYZE_CANDIDATE_LIMIT` | `1000` | `src/plugin/management.mjs:66` | 单次记忆整理分析扫描的最大候选条数 |
+| `SEMANTIC_REBUILD_BATCH` | `20` | `src/plugin/controller.mjs:141` | 面板点击「重建向量」时每批计算向量的卡片张数（批间让出事件循环） |
 | `TIMELINE_JOURNAL_SCAN_LIMIT` | `4000` | `src/timeline/index.mjs:28` | 时间线单次按修改时间扫描的最新 journal 文件数上限 |
 
 ---
@@ -256,7 +256,7 @@ Shiori 所有异常均带有稳定的 `error.code` 属性，按场景分类如�
 |---|---|---|
 | `HOST_LOCKED` | **从属宿主只读保护**：已有更早启动的另一个 DSH 实例（如同时开了 Desktop 和 Web）占着写权座位 | 关掉先启动的那个 DSH 实例，等待约 4 秒后本实例会自动升格为可写；或者直接在先启动的实例上修改 |
 | `LOCK_BUSY` | **文件写锁争用超时**：等待 `.shiori-lock` 超过 10 秒仍未拿到锁 | 检查是否有卡死的 Node 进程占着锁；若持锁进程已退出，锁模块会在下次操作时自动接管并把旧锁改名为 `.residue-*` |
-| `NOT_CONFIGURED` | **未配置双根路径**：仅直构/嵌入方路径可达——0.4-S1 起 `apply` 挂载时 `dataRoot`/`stateRoot` 为 `null` 会自动解析为 `<DSH_HOME>/shiori-data` / `<DSH_HOME>/shiori-state`，不再产生 inert；直构传 null 根才进入 `inert`（`src/plugin/controller.mjs:144-148`） | 在设置中填好 `dataRoot` 与 `stateRoot` 的绝对路径（或交由默认根解析），并开启 `mode: "active"` 与 `allowActive: true` |
+| `NOT_CONFIGURED` | **未配置双根路径**：仅直构/嵌入方路径可达——0.4-S1 起 `apply` 挂载时 `dataRoot`/`stateRoot` 为 `null` 会自动解析为 `<DSH_HOME>/shiori-data` / `<DSH_HOME>/shiori-state`，不再产生 inert；直构传 null 根才进入 `inert`（`src/plugin/controller.mjs:195-199`） | 在设置中填好 `dataRoot` 与 `stateRoot` 的绝对路径（或交由默认根解析），并开启 `mode: "active"` 与 `allowActive: true` |
 | `UNSUPPORTED` | **功能开关未开或处于只读模式**：在 `shadow` 模式下调了写接口，或未开启 `organize.enabled` / `forgetting.enabled` 就调用了分析与计划接口 | 将 `mode` 切到 `"active"`，并在设置里打开对应的子系统开关 |
 | `UNAUTHORIZED` | **受审计划未授权或已过期**：调用 `executePlan` 时缺少面板确认标记，或计划生成后底层卡片已被改过 | 回到面板重新点一次「预览计划」，拿到最新的 `planId` 与 `planDigest` 后再点确认执行 |
 
