@@ -1,5 +1,7 @@
 // ui-harness 自身验证（R3）：走一条真实重渲染循环 + unmount 无泄漏，
-// 并对可控定时器、useEffect deps/cleanup、useRef 持久、useState 合并做判别性断言。
+// 并对可控定时器、useEffect deps/cleanup、useRef 持久、useState 合并、rerender 的
+// diff 渲染语义（§9 债 4②）与表单交互钩子 find/findAll/change/textOf（§9 债 7）
+// 做判别性断言。
 // 证据级别：真实执行 client/index.js（ShioriSection → MemoryTab 组件函数真执行），
 // harness 的 renderer 把 vnode 落地为 fake document element 树，click 触发 onClick →
 // useState 变更 → rerender 重新执行组件函数 → DOM 文本变化。非浏览器实机。
@@ -255,4 +257,117 @@ test("R4c useState 同组件多次 set 合并（最后一次胜出）", () => {
   setV2((prev) => prev + 1);
   setV2((prev) => prev + 1);
   assert.equal(host.states[1], 12, "函数式 set 基于最新值链式累加");
+});
+
+// ── H5 rerender = diff 渲染（§9 债 4② / 10-3）───────────────────────────────
+// 判别性：rerender 必须是 diff 调和而不是全量重建——
+//   * 根元素身份保留（退回全量重建会换新对象 → 根引用断言红）；
+//   * 未变子树（刷新按钮）保持同一 DOM 引用（同上红）；
+//   * 状态变更确实生效（出现取消按钮，退回 no-op rerender 红）。
+test("H5 rerender 是 diff 渲染：未变子树 DOM 身份保留（退回全量 render 或 no-op 时红）", async () => {
+  const harness = createUiHarness({ clientSource: CLIENT_SRC });
+  const dsh = makeDsh();
+
+  const mounted = await harness.mount({ tab: "memory", dsh });
+  try {
+    mounted.render();
+    await mounted.flush(); // 跑 getMemoryView effect → setView
+    const rootBefore = mounted.rerender();
+    const refreshBtnBefore = mounted.find('button[text=刷新]');
+    assert.ok(refreshBtnBefore, "刷新按钮可定位（未变子树锚点）");
+
+    assert.equal(mounted.click('button[text=编辑]'), true, "点编辑进入编辑态");
+    const rootAfter = mounted.rerender();
+    assert.equal(rootAfter, rootBefore, "rerender 后根元素复用同一引用（diff 语义；退回全量重建必红）");
+    const refreshBtnAfter = mounted.find('button[text=刷新]');
+    assert.equal(refreshBtnAfter, refreshBtnBefore, "未变子树（刷新按钮）保持同一 DOM 引用（退回全量重建必红）");
+    assert.ok(mounted.text().includes("取消"), "状态变更已生效（进编辑态出现取消按钮；no-op rerender 必红）");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+// ── H4 表单交互钩子直测（§9 债 7 / 10-3）：find/findAll/change/textOf ────────
+// 此前四个钩子在 harness 里零引用零自测。判别性：删掉 harness 里任一钩子实现或
+// 改坏其语义，对应用例红。
+
+test("H4a find：命中返回元素本体，selector 不匹配返回 null", async () => {
+  const harness = createUiHarness({ clientSource: CLIENT_SRC });
+  const mounted = await harness.mount({ tab: "memory", dsh: makeDsh() });
+  try {
+    mounted.render();
+    await mounted.flush();
+    mounted.rerender();
+    const btn = mounted.find('button[text=编辑]');
+    assert.ok(btn, "命中返回元素（编辑按钮）");
+    assert.equal(btn.tagName, "BUTTON", "返回的是 fake DOM 元素本体");
+    assert.equal(mounted.find('button[text=不存在的按钮]'), null, "selector 不匹配返回 null");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("H4b findAll：命中返回元素数组，不匹配返回空数组", async () => {
+  const harness = createUiHarness({ clientSource: CLIENT_SRC });
+  const mounted = await harness.mount({ tab: "memory", dsh: makeDsh() });
+  try {
+    mounted.render();
+    await mounted.flush();
+    mounted.rerender();
+    const buttons = mounted.findAll('button');
+    assert.ok(Array.isArray(buttons), "返回数组");
+    assert.ok(buttons.length >= 2, "命中多个按钮（tab 条 + 卡片动作）");
+    for (const b of buttons) assert.equal(b.tagName, "BUTTON", "数组元素都是命中元素本体");
+    assert.deepEqual(mounted.findAll('button[text=不存在的按钮]'), [], "selector 不匹配返回空数组");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("H4c change：触发 input+change 事件（先 input 后 change 均带新值）；无命中/无 handler 返回 false", async () => {
+  const harness = createUiHarness({ clientSource: CLIENT_SRC });
+  const mounted = await harness.mount({ tab: "memory", dsh: makeDsh() });
+  try {
+    mounted.render();
+    await mounted.flush();
+    mounted.rerender();
+    assert.equal(mounted.click('button[text=编辑]'), true, "进入编辑态");
+    mounted.rerender();
+    assert.ok(mounted.find('textarea'), "编辑态出现 textarea（面板自带 onChange）");
+
+    // 集成位：change 触发面板 onChange → setDraft → 重渲染后 value 属性更新。
+    assert.equal(mounted.change('textarea', '新草稿内容'), true, "命中带 onChange 的元素返回 true");
+    mounted.rerender();
+    assert.equal(mounted.find('textarea').getAttribute('value'), '新草稿内容',
+      "change 触发面板 onChange → draft 更新 → textarea value 跟随");
+
+    // 直测事件分发：挂两个监听验证 input 先、change 后，事件均携带新值。
+    const events = [];
+    const ta = mounted.find('textarea');
+    ta.oninput = (e) => events.push(['input', e.target.value]);
+    ta.onchange = (e) => events.push(['change', e.target.value]);
+    assert.equal(mounted.change('textarea', 'XYZ'), true);
+    assert.deepEqual(events, [['input', 'XYZ'], ['change', 'XYZ']], "先 input 后 change，均带 target.value");
+
+    // 无 handler：按钮只有 onclick，change 不算命中；selector 不匹配同样 false
+    // （属性名用拉丁字母——matchesSelector 的属性段只认 [a-zA-Z-]+）。
+    assert.equal(mounted.change('button[text=刷新]', 'x'), false, "元素无 input/change handler 返回 false");
+    assert.equal(mounted.change('textarea[data-harness-nope]', 'x'), false, "selector 不匹配返回 false");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("H4d textOf：取命中元素文本（含嵌套），selector 不匹配取空文本", async () => {
+  const harness = createUiHarness({ clientSource: CLIENT_SRC });
+  const mounted = await harness.mount({ tab: "memory", dsh: makeDsh() });
+  try {
+    mounted.render();
+    await mounted.flush();
+    mounted.rerender();
+    assert.equal(mounted.textOf('button[text=编辑]'), '编辑', "取命中元素文本");
+    assert.equal(mounted.textOf('button[text=不存在的按钮]'), '', "selector 不匹配返回空文本");
+  } finally {
+    mounted.unmount();
+  }
 });

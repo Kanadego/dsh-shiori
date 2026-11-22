@@ -7,77 +7,21 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, writeFile } from "node:fs/promises";
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { REQUIRED_CASE_IDS, runAcceptanceMatrix, validateEvidenceBundle } from "../../src/acceptance/index.mjs";
 import { createSyntheticCompletionFactory, createSyntheticRuntimeFactory } from "../../src/acceptance/synthetic.mjs";
-import { withTempDir } from "./helpers.mjs";
+import { acquireLoopbackLane, withTempDir } from "./helpers.mjs";
 
 const execFileAsync = promisify(execFile);
 
-// ─── 回环车道锁（0.5 批次 8-1，审阅者拍板方案 A）───────────────────────────────
-// 目的：node --test 的并行单位是文件（scripts/run-tests.mjs 一条 node --test 统一
-// 调度，不在本单白名单），文件内顶层用例实测严格串行（3×300ms sleep 用例 328/651/
-// 960ms 累计）——单文件无法向运行器声明「把重网络用例摘出并行池」。这里用跨进程
-// 互斥锁把本文件与另一个重网络 acceptance 文件（loopback-capture.test.mjs，两文件
-// 内联同款锁）错开：真实回环 HTTP 抓取在并行负载下偶发被挤掉（批次 8 抓到的
-// 「fetch failed」同族，full-system-first reason 变形导致 /byte-identical/ 断言红）。
-// 审阅者四条硬约束：① best-effort——抢锁异常或等待超 30s 一律放行照跑并打一行
-// 说明，绝不 skip/fail/少跑用例；② 防盗死锁——锁内写持有者 PID，持锁进程死亡
-// （process.kill(pid,0) 探测）或锁超龄 120s 即接管清理；③ 判据零改动——锁只在
-// 文件加载时抢，不介入用例内部；④ 生效证明见提交 note（两文件并行起止时间戳 +
-// npm test 连跑 5 次）。锁只用来「尽量错开」，不是正确性门禁。
-const LANE_DIR = path.join(tmpdir(), "shiori-acceptance-loopback-lane");
-const LANE_WAIT_MS = 30_000;
-const LANE_STALE_MS = 120_000;
-let laneOwned = false;
-process.on("exit", () => {
-  if (laneOwned) { try { rmSync(LANE_DIR, { recursive: true, force: true }); } catch { /* 退出清理失败无碍 */ } }
-});
-try {
-  const laneDeadline = Date.now() + LANE_WAIT_MS;
-  for (;;) {
-    try {
-      mkdirSync(LANE_DIR); // 原子抢占；EEXIST = 已有人持锁
-      writeFileSync(path.join(LANE_DIR, "pid"), String(process.pid));
-      laneOwned = true;
-      break;
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error; // 非「已存在」异常 → 外层放行照跑
-      let steal = true;
-      try {
-        const holder = Number(readFileSync(path.join(LANE_DIR, "pid"), "utf8").trim());
-        const age = Date.now() - statSync(LANE_DIR).mtimeMs;
-        let holderAlive = false;
-        try { process.kill(holder, 0); holderAlive = true; } catch (e) { holderAlive = e?.code === "EPERM"; }
-        if (Number.isInteger(holder) && holder > 0 && holderAlive && age < LANE_STALE_MS) steal = false;
-      } catch { /* pid 文件缺失/读失败 → 视为可接管 */ }
-      if (steal) {
-        let cleared = true;
-        try { rmSync(LANE_DIR, { recursive: true, force: true }); } catch { cleared = false; }
-        if (cleared) continue;
-        // 批次 9-1（R2）：接管清理失败原先裸 continue——不 sleep 不查 deadline，
-        // 锁目录一直删不掉时会忙空转挂死。改为失败后睡一小段并查 deadline，
-        // 超时走 best-effort 放行（打说明行照跑用例，绝不 skip / fail / 少跑）。
-        if (Date.now() >= laneDeadline) {
-          console.error(`[loopback-lane] 接管清理失败且已等超 ${LANE_WAIT_MS}ms，放行照跑（best-effort，不改变判据）`);
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 40));
-        continue;
-      }
-      if (Date.now() >= laneDeadline) {
-        console.error(`[loopback-lane] 等待回环车道锁超 ${LANE_WAIT_MS}ms，放行照跑（best-effort，不改变判据）`);
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-} catch (error) {
-  console.error(`[loopback-lane] 锁机制异常（${error?.message ?? error}），放行照跑（best-effort，不改变判据）`);
-}
+// 回环车道锁：共享实现在 ./helpers.mjs 的 acquireLoopbackLane（§9 债 15c/10-3 自
+// 本文件与 loopback-capture.test.mjs 的两份逐字内联拷贝抽取；pid 写入、死 PID/
+// 超龄接管、清理失败 sleep+deadline 放行、exit 清理行为逐项等价）。审阅者四条
+// 硬约束不变：① best-effort 放行绝不 skip/fail/少跑；② 锁内写 PID、死亡/超龄
+// 120s 接管；③ 判据零改动——锁只在文件加载时抢，不介入用例内部；④ 生效证明
+// 见提交 note。锁只用来「尽量错开」，不是正确性门禁。
+await acquireLoopbackLane();
 
 function statusOf(bundle, caseId) {
   return bundle.cases.find((c) => c.id === caseId);

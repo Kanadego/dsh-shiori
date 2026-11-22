@@ -19,6 +19,7 @@ import {
 } from "../../src/plugin/protocol.mjs";
 import { createGroupManageTool } from "../../src/host/tools.mjs";
 import { ensureGroupsFile, readGroups, writeGroups } from "../../src/storage/groups.mjs";
+import { readTopicActivity } from "../../src/storage/topic-activity.mjs";
 
 // 默认组模板已收敛成一个「通用」组；组相关用例仍需要 dev/life 这套多组夹具，
 // 显式写四组，避免用例被模板变更牵连。
@@ -2570,7 +2571,7 @@ async function ledgerLines(stateRoot) {
   }
 }
 
-async function temperatureFixture(t, { temperature, liveGetter } = {}) {
+async function temperatureFixture(t, { temperature, liveGetter, recordReads } = {}) {
   const base = await mkdtemp(path.join(tmpdir(), "shiori-temp-rpc-"));
   t.after(() => rm(base, { recursive: true, force: true }));
   const dataRoot = path.join(base, "data");
@@ -2598,6 +2599,16 @@ async function temperatureFixture(t, { temperature, liveGetter } = {}) {
   };
   const state = createStateStore({ stateRoot });
   let resourcesCalls = 0;
+  // review-rework a2 R2 测试缝：可选注入「记录实参 + 委托真实实现」的 spy，供
+  // 200 行混排用例断 readTemperatureAudit 的下推实参。未要求时不注入（生产默认
+  // 路径不变）；逐次实参存浅拷贝快照，readCalls() 返回逐次记录。
+  const readCalls = [];
+  const readSpy = recordReads === true
+    ? async (args) => {
+      readCalls.push({ ...args });
+      return readTopicActivity(args);
+    }
+    : undefined;
   const { management } = createManagement({
     settings,
     dataRoot,
@@ -2609,8 +2620,9 @@ async function temperatureFixture(t, { temperature, liveGetter } = {}) {
     executeToolForScope: async () => ({}),
     nowIso: () => TEMP_NOW,
     ...(typeof liveGetter === "function" ? { liveTemperature: liveGetter } : {}),
+    ...(readSpy ? { readTopicActivity: readSpy } : {}),
   });
-  return { base, dataRoot, stateRoot, settings, state, management, resourcesCalls: () => resourcesCalls };
+  return { base, dataRoot, stateRoot, settings, state, management, resourcesCalls: () => resourcesCalls, readCalls: () => readCalls };
 }
 
 const tempTrusted = { session: { id: "s-temp" }, source: "panel-rpc", principal: { kind: "owner" } };
@@ -2653,6 +2665,39 @@ test("B线 getTemperatureSettings：账本不可读 → audit:[] + auditError（
   assert.deepEqual(dto.audit, []);
   assert.equal(typeof dto.auditError, "string");
   assert.ok(dto.auditError.length > 0);
+});
+
+test("B线 getTemperatureSettings：200 条混排账本回放最近 20 条 settings_change（管理层 kind+limit=20 下推）", async (t) => {
+  const fx = await temperatureFixture(t, { recordReads: true });
+  // 0.5-10（债 1③）：200 行账本 = 1..100 read + 101..124 settings_change(op-101..124)
+  // + 125..200 read。管理层向 readTopicActivity 下推 kind+limit=20（尾部反向扫描），
+  // 审计必须是「最近 20 条 settings_change = op-105..124」，而不是「最后 20 行里的
+  // settings_change」（后者是 0 条——若实现把 limit 用错在原始行数上，此用例必红）。
+  const at = (i) => new Date(Date.UTC(2026, 0, 1, 0, 0, 0) + i * 1000).toISOString();
+  const lines = [];
+  for (let i = 1; i <= 200; i += 1) {
+    lines.push(i >= 101 && i <= 124
+      ? JSON.stringify({ at: at(i), scopeId: "global", kind: "settings_change", operationId: `op-${i}`, changes: [{ key: "s0Days", from: 30, to: i }], next: { ...DEFAULT_TEMPERATURE_PARAMS, s0Days: i } })
+      : JSON.stringify({ at: at(i), scopeId: "global", kind: "read", topicKey: `t${i}` }));
+  }
+  await writeFile(path.join(fx.stateRoot, "topic-activity.jsonl"), lines.join("\n") + "\n", "utf8");
+  const dto = await fx.management.getTemperatureSettings(tempTrusted, {});
+  // R2（review-rework a2）：下推口径本身要可断——spy 记录 readTemperatureAudit 的
+  // 历次实参，最近一次（也是唯一一次）必须恰为 {stateRoot, kind:"settings_change",
+  // limit:20}。deepEqual 顺带证明不带 scopeId（审计是全局设置账本，不按 scope 过滤）；
+  // 下推被去掉（M7 改回全量读）或窗口被改（M9 limit 20→200）时此断言必红。
+  assert.equal(fx.readCalls().length, 1, "getTemperatureSettings 恰经审计读缝调用一次");
+  assert.deepEqual(fx.readCalls()[0],
+    { stateRoot: fx.stateRoot, kind: "settings_change", limit: 20 },
+    "下推实参逐字匹配：kind 过滤 + limit 20 下推到存储层尾部反向扫描");
+  assert.equal(dto.auditError, undefined, "账本可读，无 auditError");
+  assert.equal(dto.audit.length, 20, "审计恰好 20 条（最近 20 次 settings 变更）");
+  assert.deepEqual(dto.audit.map((e) => e.operationId),
+    Array.from({ length: 20 }, (_, k) => `op-${124 - k}`),
+    "新 → 旧：op-124 在前、op-105 收尾（回放序不受尾部反向扫描影响）");
+  assert.equal(dto.audit[0].changes[0].to, 124, "changes 原样透传");
+  assert.ok(dto.audit.every((e) => e.scopeId === "global" && !("next" in e)),
+    "scopeId 溯源透传；next 快照不外带（面板用不到的 12×20 数字，评审口径）");
 });
 
 test("B线 simulateTemperature：只读预览（dataRoot/stateRoot 逐字节不变），T 与 evaluateTopics 一致", async (t) => {

@@ -217,14 +217,14 @@ test('写侧尾部防线：重启后的账本探测到崩溃残行（尾缺 \\n�
 test('账本不存在（ENOENT）视为空账本；空文件返回零事件', async (t) => {
   const root = await makeTmpRoot(t, 'shiori-topic-activity-');
   const empty = await readTopicActivity({ stateRoot: root });
-  assert.deepEqual(empty, { events: [], skipped: 0 });
+  assert.deepEqual(empty, { events: [], skipped: 0, parsed: 0 });
   const stats = await topicActivityStats({ stateRoot: root });
   assert.deepEqual(stats, { total: 0, skipped: 0, byKind: { read: 0, updated: 0, search_hit: 0, group_list: 0 } });
 
   const file = topicActivityFilePath(root);
   await fsp.writeFile(file, '', 'utf8');
   const blank = await readTopicActivity({ stateRoot: root });
-  assert.deepEqual(blank, { events: [], skipped: 0 });
+  assert.deepEqual(blank, { events: [], skipped: 0, parsed: 0 });
 });
 
 test('写失败 fs 桩：appendFile 抛错时 append 照常返回 {ok:false}，诊断进 stats，绝不抛绝不 reject', async (t) => {
@@ -309,4 +309,79 @@ test('TOPIC_ACTIVITY_KINDS 恒为五类（0.5 批次 4 B 线追加 settings_chan
   await ledger.flush();
   const { events } = await readTopicActivity({ stateRoot: root });
   assert.equal(events[0].at, '2026-11-07T00:00:00.000Z', '显式规范 at 原样保留');
+});
+
+// ── 0.5-10（债 1③）：尾部反向扫描 / limit / kind / parsed 解析行数证据 ──
+
+/** 混排账本构造：200 行 = 1..100 read + 101..124 settings_change(op-101..124) + 125..200 read。 */
+async function writeMixedLedger(root, scopeId = 'amber') {
+  const at = (i) => new Date(Date.UTC(2026, 0, 1, 0, 0, 0) + i * 1000).toISOString();
+  const lines = [];
+  for (let i = 1; i <= 200; i += 1) {
+    lines.push(i >= 101 && i <= 124
+      ? JSON.stringify({ at: at(i), scopeId, kind: 'settings_change', operationId: `op-${i}`, changes: [{ key: 's0Days', from: 30, to: i }], next: {} })
+      : JSON.stringify({ at: at(i), scopeId, kind: 'read', topicKey: `t${i}` }));
+  }
+  await fsp.writeFile(topicActivityFilePath(root), lines.join('\n') + '\n', 'utf8');
+}
+
+test('尾部反向扫描：200 条混排账本按 kind+limit 只解析尾部必要行，结果仍为文件（时间）序', async (t) => {
+  const root = await makeTmpRoot(t, 'shiori-topic-activity-');
+  await writeMixedLedger(root);
+  // 最近 20 条 settings_change = op-105..124，横跨 105..200 行。反向扫描从 200 行
+  // 起集齐 20 条即停在 105 行：parsed = 200 - 105 + 1 = 96 ≪ 200（头部 104 行零解析）。
+  const tail = await readTopicActivity({ stateRoot: root, kind: 'settings_change', limit: 20 });
+  assert.equal(tail.parsed, 96, '解析行数证据：只解析了尾部 96 行，不是全量 200 行');
+  assert.equal(tail.skipped, 0);
+  assert.deepEqual(tail.events.map((e) => e.operationId),
+    Array.from({ length: 20 }, (_, k) => `op-${105 + k}`),
+    '恰好最近 20 条 settings_change，且为文件（时间）顺序（不是反向收集序）');
+  assert.ok(tail.events.every((e) => e.kind === 'settings_change'));
+
+  // 对照组：全量读（无 limit）解析全部 200 行，事件序与旧实现一致。
+  const full = await readTopicActivity({ stateRoot: root });
+  assert.equal(full.parsed, 200);
+  assert.equal(full.events.length, 200);
+  assert.equal(full.events[0].kind, 'read');
+  assert.equal(full.events[100].operationId, 'op-101', '第 101 行是 sc#1：全量读顺序不受反向扫描改写影响');
+  assert.equal(full.events[199].kind, 'read');
+
+  // limit 不带 kind：最近 20 条合法事件（任意 kind，尾部全是 read 行）。
+  const anyKind = await readTopicActivity({ stateRoot: root, limit: 20 });
+  assert.deepEqual(anyKind.events.map((e) => e.kind), Array.from({ length: 20 }, () => 'read'));
+  assert.equal(anyKind.parsed, 20, '尾部 20 行即集齐，提前停止');
+
+  // limit + scopeId 无命中：反向扫描走完全文件（无提前停止路径）。
+  const scoped = await readTopicActivity({ stateRoot: root, scopeId: 'nobody', limit: 5 });
+  assert.deepEqual(scoped.events, []);
+  assert.equal(scoped.parsed, 200, 'scope 无命中 → 全文件扫描，parsed = 总行数');
+});
+
+test('尾部反向扫描边界：limit/kind 入参校验、ENOENT 空账本、坏行/空白行只计扫描到的部分', async (t) => {
+  const root = await makeTmpRoot(t, 'shiori-topic-activity-');
+  await assert.rejects(() => readTopicActivity({ stateRoot: root, limit: 0 }), (e) => e.code === 'INVALID_INPUT');
+  await assert.rejects(() => readTopicActivity({ stateRoot: root, limit: 2.5 }), (e) => e.code === 'INVALID_INPUT');
+  await assert.rejects(() => readTopicActivity({ stateRoot: root, limit: -1 }), (e) => e.code === 'INVALID_INPUT');
+  await assert.rejects(() => readTopicActivity({ stateRoot: root, kind: '' }), (e) => e.code === 'INVALID_INPUT');
+  await assert.rejects(() => readTopicActivity({ stateRoot: root, kind: 42 }), (e) => e.code === 'INVALID_INPUT');
+
+  const empty = await readTopicActivity({ stateRoot: root, kind: 'settings_change', limit: 20 });
+  assert.deepEqual(empty, { events: [], skipped: 0, parsed: 0 }, 'ENOENT 视为空账本（带 parsed 口径）');
+
+  // 坏行/空白行混排：反向扫描只统计扫描过的部分（头部坏行未扫描不计入 skipped）。
+  const file = topicActivityFilePath(root);
+  const good = JSON.stringify({ at: '2026-11-21T08:30:00.000Z', scopeId: 'amber', kind: 'settings_change', operationId: 'op-a', changes: [{ key: 's0Days', from: 30, to: 31 }], next: {} });
+  await fsp.writeFile(file, `${'{"at":"broken'}\n\n${good}\n${'{"torn":'}\n`, 'utf8');
+  // split('\n')：['{"at":"broken"', '', good, '{"torn":', '']——末位 '' 是文件结尾剥掉。
+  // 反向扫描：torn（解析失败 skipped）→ good（收 1 条，limit=1 即停）→ 头部不再扫描。
+  const tail = await readTopicActivity({ stateRoot: root, kind: 'settings_change', limit: 1 });
+  assert.deepEqual(tail.events.map((e) => e.operationId), ['op-a']);
+  assert.equal(tail.skipped, 1, '只计扫描到的坏行（torn）；头部坏行/空白行未扫描不计');
+  assert.equal(tail.parsed, 2, 'torn + good 两行尝试解析');
+
+  // 同一文件全量读：全部 4 行扫描，torn/broken 两坏行 + 空白行进入 skipped。
+  const full = await readTopicActivity({ stateRoot: root });
+  assert.equal(full.events.length, 1);
+  assert.equal(full.skipped, 3, '全量读口径：torn + 空白行 + broken 三条');
+  assert.equal(full.parsed, 3);
 });

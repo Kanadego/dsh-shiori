@@ -152,6 +152,12 @@ async function listPersonaNames(dataRoot, readdirImpl) {
  *   校验（review-rework a2 必修 1：校验后置会让「数据先删净、再抛错」），缺失时
  *   destroyData fail-closed 拒绝且不删任何文件；await 后错误数组非空同样
  *   INVALID_STATE 上报（review-rework a3 必修：不 await 会把失败静默吞掉））
+ * @param {typeof import("../storage/topic-activity.mjs").readTopicActivity} [deps.readTopicActivity]
+ *   审计账本读注入点（review-rework a2 R2 测试缝：缺省 = 文件顶部 import 的真实
+ *   实现，生产默认路径逐字不变。只替换 readTemperatureAudit 里的调用，
+ *   readEventsForReplay 仍走真实全量读，避免 spy 记录无关调用；测试注入
+ *   「记录实参 + 委托真实实现」的 spy，断下推实参恰为
+ *   {stateRoot, kind:"settings_change", limit:20}。）
  */
 export function createManagement(deps) {
   const {
@@ -202,6 +208,13 @@ export function createManagement(deps) {
       }
       return auditFallbackLedger.append(event);
     };
+  // 审计账本读实现（review-rework a2 R2 测试缝）：缺省 = 文件顶部 import 的真实
+  // readTopicActivity，生产默认路径逐字不变；只供 readTemperatureAudit 使用
+  // （readEventsForReplay 保持真实全量读）。写法对齐既有 deps.readdir /
+  // deps.liveTemperature 注入点。
+  const readTemperatureLedger = typeof deps.readTopicActivity === "function"
+    ? deps.readTopicActivity
+    : readTopicActivity;
   // settings_change 审计的读-查重-append 串行化：同进程唯一写者下，同 operationId
   // 的并发调用不会各落一条（重复返回首次结果）。
   let temperatureAuditQueue = Promise.resolve();
@@ -210,11 +223,16 @@ export function createManagement(deps) {
     temperatureAuditQueue = run.then(() => {}, () => {});
     return run;
   }
-  /** 读 settings_change 审计（全局设置：不按 scope 过滤；只读、不加锁、不建目录）。 */
+  /** 读 settings_change 审计（全局设置：不按 scope 过滤；只读、不加锁、不建目录）。
+   *  0.5-10（债 1③）：kind + limit=20 下推到存储层尾部反向扫描，只解析账本尾部
+   *  必要行，不再全量解析。窗口含义：getTemperatureSettings 的面板展示与
+   *  recordTemperatureChange 的幂等去重 / 回放链都以最近 20 条 settings_change
+   *  为准——operationId 重试窗口从「全史」收窄为「最近 20 次 settings 变更」，
+   *  宿主热提交重试都发生在紧邻操作内，窗口足够。 */
   async function readTemperatureAudit() {
     if (settings.stateRoot === null) return { entries: [], error: "stateRoot 未配置，审计账本不可读" };
     try {
-      const { events } = await readTopicActivity({ stateRoot: settings.stateRoot });
+      const { events } = await readTemperatureLedger({ stateRoot: settings.stateRoot, kind: "settings_change", limit: 20 });
       return {
         entries: events
           .filter((entry) => entry.kind === "settings_change")

@@ -223,37 +223,58 @@ export function createTopicActivityLedger({ stateRoot, now = () => new Date(), f
  * 读取账本事件（坏行容忍）：按行独立 JSON 解析 + 结构校验，非法行整行跳过
  * （计入 skipped），后续行照常解析。账本不存在（ENOENT）视为空账本。
  *
+ * 0.5-10（债 1③）：支持尾部反向扫描——账本是 append-only JSONL，越新的事件越
+ * 靠文件尾；limit/kind 给定时从文件尾向前扫描，解析到「集齐 limit 条通过过滤的
+ * 事件」或「扫到文件头」即停，头部行不再解析（getTemperatureSettings 热路径每次
+ * 只取最近 20 条 settings_change，全量解析是大账本下的固定开销）。无论是否提前
+ * 停止，返回的 events 恒按文件（时间）顺序排列；skipped 只统计实际扫描过的行
+ * （提前停止时未扫描行不计入——健康度观测口径随之变为「已扫描部分」）。
+ *
  * @param {object} args
  * @param {string} args.stateRoot 状态根
  * @param {string} [args.scopeId] 可选过滤：只返回该 scope 的事件（targetScopeId 口径）
+ * @param {string} [args.kind] 可选过滤：只返回该 kind 的事件（读取侧宽口径，不限于
+ *   写入侧 TOPIC_ACTIVITY_KINDS——对未来版本新增 kind 结构兼容）
+ * @param {number} [args.limit] 可选上限：最多返回多少条过滤后的事件；从文件尾反向
+ *   扫描、集齐即停
  * @param {object} [args.fs] fs 注入（缺省 node:fs/promises；使用面 readFile）
- * @returns {Promise<{events: Array<object>, skipped: number}>}
+ * @returns {Promise<{events: Array<object>, skipped: number, parsed: number}>}
+ *   parsed = 本次实际尝试 JSON 解析的行数（诊断/测试证据：limit 读取应远小于总行数）
  */
-export async function readTopicActivity({ stateRoot, scopeId, fs = fsp } = {}) {
+export async function readTopicActivity({ stateRoot, scopeId, kind, limit, fs = fsp } = {}) {
   assertStateRoot(stateRoot);
   if (typeof fs?.readFile !== 'function') {
     throw invalidInput('fs 注入必须提供 readFile');
+  }
+  if (kind !== undefined && (typeof kind !== 'string' || kind.length === 0)) {
+    throw invalidInput('kind 必须是非空字符串或缺省');
+  }
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+    throw invalidInput('limit 必须是正整数或缺省');
   }
   const file = topicActivityFilePath(stateRoot);
   let raw;
   try {
     raw = await fs.readFile(file, 'utf8');
   } catch (err) {
-    if (err?.code === 'ENOENT') return { events: [], skipped: 0 };
+    if (err?.code === 'ENOENT') return { events: [], skipped: 0, parsed: 0 };
     throw wrapIoError(`read ${file}`, err);
   }
   const events = [];
   let skipped = 0;
+  let parsedCount = 0;
   // 尾部 \n 让 split 产生末尾空元素——那是文件结尾不是坏行，先剥掉；
   // 其余空行/纯空白行视为损坏内容（计入 skipped），一律跳过不中断。
   const lines = raw.split('\n');
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-  for (const line of lines) {
-    const trimmed = line.trim();
+  // 从文件尾反向扫描（append-only：新事件在尾部；limit 集齐即停，头部行不解析）。
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const trimmed = lines[i].trim();
     if (trimmed.length === 0) {
       skipped += 1;
       continue;
     }
+    parsedCount += 1;
     let parsed;
     try {
       parsed = JSON.parse(trimmed);
@@ -266,9 +287,13 @@ export async function readTopicActivity({ stateRoot, scopeId, fs = fsp } = {}) {
       continue;
     }
     if (scopeId !== undefined && parsed.scopeId !== scopeId) continue;
+    if (kind !== undefined && parsed.kind !== kind) continue;
     events.push(parsed);
+    if (limit !== undefined && events.length >= limit) break;
   }
-  return { events, skipped };
+  // 反向扫描收集序为新 → 旧；reverse 还原为旧实现同款返回口径（旧 → 新）。
+  events.reverse();
+  return { events, skipped, parsed: parsedCount };
 }
 
 /**

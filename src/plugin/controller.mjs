@@ -592,7 +592,14 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
               title: item.title,
               summary: item.summary,
               scopeId: item.scopeId ?? scopeId,
-              score: 0,
+              // 0.5-10（债 12）：冷卡检索（cold-search）是整串字面包含匹配——
+              // 任一命中即入选、按 id 稳定排序，本身不产排序信号。硬编码
+              // score:0 会与 topic 冷条目的词法命中分（score=命中词数，恒 ≥1）
+              // 在同一 matches 列表里混淆（0 看起来像一次真实测量）。改为显式
+              // 无分：score:null + scoreKind:"spark-cold"，两种来源在 mixed
+              // 列表中可区分（描述见 tools.mjs memory_search）。
+              score: null,
+              scoreKind: "spark-cold",
               state: "archived",
             }));
           };
@@ -1996,7 +2003,7 @@ export async function createShioriPluginController(ctx, rawSettings, dependencie
       if (settings.stateRoot === null) return false;
       const softChars = settings.budgets.core.softChars;
       if (!(typeof softChars === "number" && softChars > 0)) return false;
-      const entries = await state.readWaterline(settings.stateRoot, scopeId);
+      const entries = await state.readWaterline(scopeId);
       const last = entries.length > 0 ? entries[entries.length - 1] : null;
       return last !== null && typeof last.l1Chars === "number" && last.l1Chars >= softChars;
     },

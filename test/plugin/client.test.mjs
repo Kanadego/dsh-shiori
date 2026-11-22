@@ -2804,6 +2804,71 @@ test("B-Q3 回归：全部 RemoteError 出口的 details 恒为对象——经 g
   assert.equal(exits["invalid-session"].details.code, "shiori/invalid-session");
 });
 
+// 0.5-10（债 1①）：details.reason 此前只有管理层直调用例（management.test.mjs 直调
+// recordTemperatureChange），RPC 层只有上面的通用 details 往返（合成 management）。
+// 这里补一条真端到端：真 management（createManagement 直构，active + 真盘根）+
+// 真 mountShioriRpc，参数未生效时失败，断 wire 回执（gateway JSON 往返后）携带
+// details.reason === "parameters-not-effective"——面板按此分支提示的语义全链路可达。
+test("债1① E2E：真 management + 真 mountShioriRpc，参数未生效时 wire 回执 details.reason === parameters-not-effective", async () => {
+  const base = mkdtempSync(join(tmpdir(), "shiori-debt1-e2e-"));
+  try {
+    const dataRoot = join(base, "data");
+    const stateRoot = join(base, "state");
+    mkdirSync(join(dataRoot, "scopes", "global", "topics"), { recursive: true });
+    mkdirSync(stateRoot, { recursive: true });
+    // 真实管理层（直构口径对齐 management.test.mjs temperatureFixture）：live 取
+    // settings.temperature（= 默认值），提交值偏移 s0Days → mismatchedKeys 非空。
+    const { createManagement } = await import(pathToFileURL(join(WORKQ, "src", "plugin", "management.mjs")).href);
+    const { createStateStore } = await import(pathToFileURL(join(WORKQ, "src", "plugin", "state.mjs")).href);
+    const { normalizeForgetPolicy } = await import(pathToFileURL(join(WORKQ, "src", "forgetting", "decay.mjs")).href);
+    const { DEFAULT_TEMPERATURE_PARAMS } = await import(pathToFileURL(join(WORKQ, "src", "forgetting", "params.mjs")).href);
+    const settings = {
+      mode: "active", allowActive: true,
+      dataRoot, stateRoot,
+      rootsSource: { dataRoot: "explicit", stateRoot: "explicit" },
+      ownerId: "local", defaultPersona: "amber",
+      sessionPersonas: [], workspacePersonas: [],
+      budgets: { persona: { maxChars: 12000 }, core: { targetChars: 2000, hardCapChars: 4000 } },
+      l2: { enabled: false }, organize: { enabled: true },
+      forgetting: { enabled: true, policy: normalizeForgetPolicy({}) },
+      temperature: { ...DEFAULT_TEMPERATURE_PARAMS },
+    };
+    const { management } = createManagement({
+      settings, dataRoot, state: createStateStore({ stateRoot }),
+      resourcesFor: async () => { throw new Error("not used"); },
+      isStarted: () => true,
+      generation: () => 1,
+      registerGrant: () => ({}),
+      executeToolForScope: async () => ({}),
+      nowIso: () => "2026-11-22T00:00:00.000Z",
+    });
+    const ctx = fakeCtx();
+    const rpc = await mountShioriRpc(ctx, management, { mode: "active", dataRoot, stateRoot });
+    const service = ctx.get("shiori.panel");
+    const target = { ...DEFAULT_TEMPERATURE_PARAMS, s0Days: DEFAULT_TEMPERATURE_PARAMS.s0Days + 1 };
+    let caught;
+    try {
+      await callAs(ctx, service, "recordTemperatureChange", { payload: { params: target, operationId: "op-not-applied" } });
+    } catch (error) { caught = error; }
+    await rpc.stop();
+    assert.ok(caught, "settings 未生效必须以 RemoteError 出线");
+    // wire 回执：经 gatewayRpcFailure 搬运 + JSON 往返（宿主客户端真实判据链）。
+    const parsed = clientParseFailure(wireRoundTrip(caught));
+    assert.equal(parsed.error.code, "INVALID_STATE");
+    assert.equal(parsed.error.details.reason, "parameters-not-effective",
+      "wire 回执携带 details.reason（面板按此分支提示的语义全链路可达）");
+    assert.deepEqual(parsed.error.details.mismatchedKeys, ["s0Days"],
+      "mismatchedKeys 随 details 一并过线");
+    assert.ok(typeof parsed.error.details.current === "object" && typeof parsed.error.details.target === "object",
+      "current/target 快照随 details 一并过线");
+    // 失败发生在落账前：stateRoot 不出现 topic-activity.jsonl（账本零新增的盘面实证）。
+    assert.equal(existsSync(join(stateRoot, "topic-activity.jsonl")), false,
+      "失败路径零落账（账本文件不出现）");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("B-Q3 回归：rpc-stopped 出口 details 为对象且携带 method；INVALID_INPUT violations 经 JSON 往返后客户端仍可达", async () => {
   const ctx = fakeCtx();
   const rpc = await mountShioriRpc(ctx, NOOP_MANAGEMENT(), { mode: "shadow", dataRoot: null, stateRoot: null });

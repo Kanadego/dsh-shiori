@@ -51,9 +51,12 @@ import {
 import { parseTopicFile } from "../storage/frontmatter.mjs";
 import { parseGroupsFile } from "../core/groups.mjs";
 import { readTopicActivity } from "../storage/topic-activity.mjs";
-import { isCanonicalIso, readFileOrNull, sha256Buffer } from "../storage/fsutil.mjs";
+import { isCanonicalIso, sha256Buffer } from "../storage/fsutil.mjs";
 // 0.5 批次 8-4：readTopics 的越根链接检查与 store 快照共用同一实现（同一个
 // 管理根身份 realpath 后逐级 lstat），不再各写一份符号链接判定。
+// 0.5 批次 10-2：越根检查的 lstat/realpath 与管理根 realpath、groups.json 读
+// 一并收进 deps.fs 注入面（assertNoEscapeViaSymlink 第三参透传，可选注入、
+// 缺省 node:fs/promises），假 fs 用例可驱动链接判定。
 import { assertNoEscapeViaSymlink } from "../storage/paths.mjs";
 
 /**
@@ -86,7 +89,9 @@ export const AUTO_OP_KINDS = Object.freeze(["archive-topic", "unarchive-topic"])
 /** 触发/评估来源（autoStore.lastEvaluatedBy 与 run.trigger 的取值域）。 */
 export const AUTO_TRIGGERS = Object.freeze(["manual", "human-turn", "soft-watermark"]);
 
-/** run 记录保留上限（滚动裁旧；撤销窗口内足够，超出按最旧丢弃）。 */
+/** run 记录保留上限（滚动裁旧；撤销窗口内足够，超出按最旧丢弃）。
+ * state.mjs createStateStore({ autoRunKeepLimit }) 可注入缩小窗口（测试用，
+ * 验「逐出后同 operationId 重跑」）；缺省与本常量同源（50）。 */
 export const AUTO_RUN_KEEP = 50;
 
 /** 熔断/观察期原因码（诊断与 wire 输出的稳定取值）。 */
@@ -592,7 +597,10 @@ export function assertRunShape(run) {
  * @param {object} deps
  * @param {string|null} deps.dataRoot 业务数据根（null → 全空装配）。
  * @param {string|null} deps.stateRoot 状态根（null → 账本空读）。
- * @param {object} [deps.fs] fs 注入（缺省 node:fs/promises）。
+ * @param {object} [deps.fs] fs 注入（缺省 node:fs/promises）。readdir/readFile
+ *   必须提供；realpath/lstat（0.5 批次 10-2）可选、缺省 node:fs/promises——
+ *   管理根 realpath、越根链接检查（assertNoEscapeViaSymlink）与 groups.json
+ *   读取都走注入面，测试可用假实现驱动链接判定。
  * @returns {{readTopics: (scopeId: string) => Promise<{rows: Array, skipped: number}>,
  *   readGroups: (scopeId: string) => Promise<Array>,
  *   readLedger: () => Promise<{events: Array, skipped: number, error: string|null}>}}
@@ -601,7 +609,21 @@ export function createAutoReplaySource({ dataRoot, stateRoot, fs = fsp } = {}) {
   if (typeof fs?.readdir !== "function" || typeof fs?.readFile !== "function") {
     throw invalidInput("fs 注入必须提供 readdir 与 readFile");
   }
+  // 0.5 批次 10-2：realpath/lstat 收进注入面（可选，缺省 fsp）——管理根身份、
+  // 越根链接检查与 readGroups 的文件读取全部经 ioFs；删注入（写死 fsp）时
+  // 新增的注入用例必须红。
+  const ioFs = {
+    readdir: fs.readdir,
+    readFile: fs.readFile,
+    realpath: typeof fs?.realpath === "function" ? fs.realpath : fsp.realpath,
+    lstat: typeof fs?.lstat === "function" ? fs.lstat : fsp.lstat,
+  };
   const root = typeof dataRoot === "string" && dataRoot.length > 0 ? dataRoot : null;
+
+  // 悬空/循环链接（realpath 失败 ENOENT/ELOOP）不是越界：按坏文件降级——
+  // 单文件级计 skipped / 返回空清单，目录级视为空集合（readTopics/readGroups
+  // 各调用点同判）。
+  const degradableLinkError = (error) => error?.code === "ENOENT" || error?.code === "ELOOP";
 
   /** topics 只读装配（global 先、active 覆盖，与本仓 FileStore.effectiveView 同口径）。 */
   async function readTopics(scopeId) {
@@ -617,10 +639,10 @@ export function createAutoReplaySource({ dataRoot, stateRoot, fs = fsp } = {}) {
     // 悬空链接（lstat 成功但 realpath 失败）不是越界：ENOENT/ELOOP 按坏文件
     // 降级——单文件计入 skipped，目录级视为该 scope 无 topics（continue），
     // 兑现本函数「坏文件跳过不拖垮评估」的承诺；其余错误照旧上抛。
-    const degradableLinkError = (error) => error?.code === "ENOENT" || error?.code === "ELOOP";
+    // 批次 10-2：realpath/lstat 与 readdir/readFile 同走注入面（ioFs）。
     let rootReal;
     try {
-      rootReal = await fsp.realpath(root);
+      rootReal = await ioFs.realpath(root);
     } catch (error) {
       if (error?.code === "ENOENT") return { rows: [], skipped: 0 };
       throw error;
@@ -631,14 +653,14 @@ export function createAutoReplaySource({ dataRoot, stateRoot, fs = fsp } = {}) {
     for (const sid of scopes) {
       const dir = path.join(rootReal, "scopes", sid, "topics");
       try {
-        await assertNoEscapeViaSymlink(rootReal, dir);
+        await assertNoEscapeViaSymlink(rootReal, dir, ioFs);
       } catch (error) {
         if (degradableLinkError(error)) continue;
         throw error;
       }
       let names;
       try {
-        names = await fs.readdir(dir);
+        names = await ioFs.readdir(dir);
       } catch (error) {
         if (error?.code === "ENOENT" || error?.code === "ENOTDIR") continue;
         throw error;
@@ -649,14 +671,14 @@ export function createAutoReplaySource({ dataRoot, stateRoot, fs = fsp } = {}) {
         const key = name.slice(0, -3);
         const file = path.join(dir, name);
         try {
-          await assertNoEscapeViaSymlink(rootReal, file);
+          await assertNoEscapeViaSymlink(rootReal, file, ioFs);
         } catch (error) {
           if (error?.code === "INVALID_INPUT" || degradableLinkError(error)) { skipped += 1; continue; }
           throw error;
         }
         let raw;
         try {
-          raw = await fs.readFile(file);
+          raw = await ioFs.readFile(file);
         } catch (error) {
           if (error?.code === "ENOENT") { skipped += 1; continue; }
           throw error;
@@ -690,14 +712,41 @@ export function createAutoReplaySource({ dataRoot, stateRoot, fs = fsp } = {}) {
     return { rows: [...byKey.values()], skipped };
   }
 
-  /** 组清单只读解析（缺失或坏 JSON 按空清单降级）。 */
+  /**
+   * 组清单只读解析（0.5 批次 10-2 对齐 store 口径，与 storage/groups.mjs
+   * readGroups 同族错误码）：管理根先 realpath（缺失 ENOENT → 空清单降级，
+   * 与 readTopics 同判），再对 groups.json 全链做越根 symlink/junction 检查
+   * （assertNoEscapeViaSymlink，注入 fs）——groups.json 或其任一祖先目录指向
+   * 根外 → INVALID_INPUT 直接拒（与 store 同判，绝不静默读根外内容）；
+   * 悬空/ELOOP 链接按坏文件降级返回 []（不拖垮评估）；文件缺失（ENOENT）或
+   * 坏 JSON → 空清单降级。全部 I/O（realpath/lstat/readFile）走注入面。
+   */
   async function readGroups(scopeId) {
     if (root === null) return [];
     if (typeof scopeId !== "string" || scopeId.length === 0) {
       throw invalidInput("readGroups 的 scopeId 必须是非空字符串");
     }
-    const raw = await readFileOrNull(path.join(root, "scopes", scopeId, "groups.json"));
-    if (raw === null) return [];
+    let rootReal;
+    try {
+      rootReal = await ioFs.realpath(root);
+    } catch (error) {
+      if (error?.code === "ENOENT") return [];
+      throw error;
+    }
+    const file = path.join(rootReal, "scopes", scopeId, "groups.json");
+    try {
+      await assertNoEscapeViaSymlink(rootReal, file, ioFs);
+    } catch (error) {
+      if (degradableLinkError(error)) return [];
+      throw error;
+    }
+    let raw;
+    try {
+      raw = await ioFs.readFile(file);
+    } catch (error) {
+      if (error?.code === "ENOENT") return [];
+      throw error;
+    }
     try {
       return parseGroupsFile(raw, `groups.json(${scopeId})`).groups;
     } catch {
@@ -1034,7 +1083,11 @@ export function createAutoEngine(deps = {}) {
 
     /**
      * 执行一轮（仅 mode=auto）：评估 → 逐条执行（CAS + operationId）→ run 记录。
-     * operationId 幂等：同 operationId 重放返回首次结果，不二次执行。
+     * operationId 重放口径（0.5 批次 10-2 注释纠正，与实现一致）：run 账本只
+     * 保留最近 AUTO_RUN_KEEP 轮（state.mjs recordRun 滚动裁旧），同 operationId
+     * 仅在窗口内重放首次结果；被逐出窗口后会重跑——单操作自身的幂等不靠 run
+     * 查重，靠底层 journal 的 operationId（service.mutate 幂等重放）。重放命中
+     * 还必须 scopeId 一致（getRunByOperationId 过滤），跨 scope 同 opId 不串。
      */
     async apply({ scopeId, trigger, operationId }) {
       if (typeof scopeId !== "string" || scopeId.length === 0) {
@@ -1052,8 +1105,9 @@ export function createAutoEngine(deps = {}) {
       }
       assertWritableForAuto("apply");
       const ledgerStore = requireStore("apply");
-      // operationId 幂等先于一切派生（与 analyze 的重放短路同序）。
-      const prior = await ledgerStore.getRunByOperationId(operationId);
+      // operationId 重放判据先于一切派生（与 analyze 的重放短路同序）；scopeId
+      // 过滤防跨 scope 同 opId 串号——窗口内命中才重放，逐出后按新执行处理。
+      const prior = await ledgerStore.getRunByOperationId(operationId, scopeId);
       if (prior !== null) {
         assertRunShape(prior);
         return applyView(prior, true);

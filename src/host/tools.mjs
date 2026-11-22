@@ -388,7 +388,7 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
     // ── L2/L3 检索 ────────────────────────────────────────────────────────
     {
       name: "memory_search",
-      description: "Keyword search over visible topics; archived (cold) topics are included by default but return summary-level entries only (state='archived', score = lexical hit count kept for ranking, listed after active hits) — never full text; use memory_read(topic) for full text. Returns keys, titles and summaries only. Lexical search, not semantic matching.",
+      description: "Keyword search over visible topics; archived (cold) topics are included by default but return summary-level entries only (state='archived', score = lexical hit count kept for ranking, listed after active hits) — never full text; use memory_read(topic) for full text. Returns keys, titles and summaries only. Lexical search, not semantic matching. With includeArchived=true, spark cold cards are appended after topic hits: they are literal-containment matches from the cold store with score=null and scoreKind='spark-cold' (cold-store search has no ranking signal, so score is explicitly absent — score===null identifies a spark cold card, while archived topic entries always carry a positive hit count).",
       inputSchema: {
         query: { type: "string", required: true, description: "Keywords or a short question." },
         limit: { type: "integer", description: "Maximum results, 1–20 (default 5)." },
@@ -419,9 +419,14 @@ export function createCompatTools({ service, getSessionInfo, config, now, readon
             );
           }
           const archived = await service.searchArchived(query);
+          // 0.5-10（债 12）：score 缺省 null——真实 spark 冷卡带 score:null +
+          // scoreKind:"spark-cold"（spread 后者覆盖缺省），与 topic 冷条目
+          // （score=词法命中数）同列可区分。缺省不能是 0：0 会与「命中 0 词」的
+          // 测量值混淆（description 口径：score===null 才标识 spark 冷卡），
+          // legacy/假 service 返回不带 score 的冷卡时显式 null 作答。
           const merged = [
             ...result.matches,
-            ...(Array.isArray(archived) ? archived : []).map((m) => ({ score: 0, ...m, state: "archived" })),
+            ...(Array.isArray(archived) ? archived : []).map((m) => ({ score: null, ...m, state: "archived" })),
           ];
           result.matches = merged.slice(0, limit);
         }

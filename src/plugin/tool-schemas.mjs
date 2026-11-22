@@ -74,7 +74,12 @@ const matchEntry = {
     title: { oneOf: [{ type: "string" }, { type: "null" }] },
     summary: { oneOf: [{ type: "string" }, { type: "null" }] },
     scopeId: { oneOf: [{ type: "string" }, { type: "null" }] },
-    score: { type: "integer", required: true },
+    // 0.5-10（债 12）：两种来源同列一个 matches——topic 冷条目 score = 词法命中
+    // 词数（恒 ≥1，零命中不入列）；spark 冷卡（includeArchived）经冷库字面包含
+    // 匹配入选、本身无排序信号，score 显式为 null + scoreKind:"spark-cold"。
+    // score 是 required：两种来源都必带该键（null 也是明确作答，不是缺省）。
+    score: { oneOf: [{ type: "integer" }, { type: "null" }], required: true },
+    scoreKind: { type: "string" },
     state: { oneOf: [{ type: "string" }, { type: "null" }] },
   },
 };

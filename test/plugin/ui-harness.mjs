@@ -266,7 +266,7 @@ function flowChildHeight(child) {
   return flowHeightOf(child);
 }
 function flowHeightOf(el) {
-  // fragment 占位（renderVNodeToDom 对 null/boolean/数组的降级产物）按透明容器计：
+  // fragment 占位（expandVNode 对 null/boolean/数组的降级产物）按透明容器计：
   // 高度 = 子项之和，不按自身计 1——「open ? 弹层 : null」的 null 分支不该占布局。
   if (String(el.tagName || "").toUpperCase() === "FRAGMENT") {
     let height = 0;
@@ -396,26 +396,50 @@ function collectDomText(el) {
   return out + (el._text || "");
 }
 
-// ── vnode → element 渲染器 ──────────────────────────────────────────────
-function renderVNodeToDom(vnode, doc) {
-  if (Array.isArray(vnode)) {
-    const frag = makeElement("fragment");
-    for (const child of vnode) frag.appendChild(renderVNodeToDom(child, doc));
-    return frag;
+// ── vnode 展开 → element 渲染器（两段式，§9 债 4② / 10-3 改造）────────────────
+//
+// expandVNode 先把组件树完全展开（函数组件就地执行，产出不含函数节点的纯数据
+// 树），buildDomFromExpanded 再把展开树落成 fake DOM。拆成两段是为了 rerender 的
+// diff 调和：组件函数只执行一次（游标推进与旧单段渲染逐字同序——父先执行、子按
+// 文档序深度优先），DOM 构建与调和共用同一份展开树。
+//
+// 展开节点形状：
+//   { kind: "element",  tag, props, children }
+//   { kind: "fragment", children }
+//   { kind: "text",     text }
+// element/fragment 的展开子节点与落成 DOM 的 children 严格 1:1（每槽恰好一个
+// DOM 节点），这是 diff 逐槽调和与并行刷新事件闭包的前提。
+function expandVNode(node) {
+  if (Array.isArray(node)) {
+    return { kind: "fragment", children: node.map(expandVNode) };
   }
-  if (vnode === null || vnode === undefined || typeof vnode === "boolean") return makeElement("fragment");
-  if (typeof vnode !== "object") return doc.createTextNode(vnode);
-  const { type, props, children } = vnode;
+  if (node === null || node === undefined || typeof node === "boolean") {
+    return { kind: "fragment", children: [] };
+  }
+  if (typeof node !== "object") {
+    return { kind: "text", text: String(node) };
+  }
+  const { type, props, children } = node;
   if (type === "fragment") {
-    const frag = makeElement("fragment");
-    if (children) for (const child of children) frag.appendChild(renderVNodeToDom(child, doc));
-    return frag;
+    return { kind: "fragment", children: (children || []).map(expandVNode) };
   }
-  if (typeof type === "function") return renderVNodeToDom(type(props || {}), doc);
-  const el = doc.createElement(type);
-  const p = props || {};
-  for (const key of Object.keys(p)) {
-    const value = p[key];
+  if (typeof type === "function") {
+    return expandVNode(type(props || {}));
+  }
+  return {
+    kind: "element",
+    tag: type,
+    props: props || {},
+    children: (children || []).map(expandVNode),
+  };
+}
+
+// props 落 DOM（全量构建与 diff patch 共用同一条实现，语义与旧单段渲染器逐字
+// 一致）：className 直写、children 跳过、style 对象并入 el.style、ref 接线、
+// on* 挂小写事件槽、其余 setAttribute。
+function applyVNodeProps(el, props = {}) {
+  for (const key of Object.keys(props)) {
+    const value = props[key];
     if (key === "className") el.className = String(value);
     else if (key === "children") { /* children 走 children 参数 */ }
     else if (key === "style" && value && typeof value === "object") {
@@ -425,16 +449,179 @@ function renderVNodeToDom(vnode, doc) {
       Object.assign(el.style, value);
     }
     else if (key === "ref" && value && typeof value === "object") {
-      // 5D：ref 接线（真实 React 语义）。此前 ref 被当 attribute 序列化丢弃，
-      // 组件里 ref.current 永远 null；接线后 FlashbackActions 才能拿到按钮元素
+      // 5D：ref 接线（真实 React 语义）。接线后 FlashbackActions 才能拿到按钮元素
       // 调 getBoundingClientRect 做浮层 fixed 定位。
       value.current = el;
     }
     else if (/^on[A-Z]/.test(key) && typeof value === "function") el[key.toLowerCase()] = value;
     else el.setAttribute(key, value);
   }
-  if (children) for (const child of children) el.appendChild(renderVNodeToDom(child, doc));
+}
+
+function buildDomFromExpanded(exp) {
+  if (exp.kind === "text") return globalThis.document.createTextNode(exp.text);
+  if (exp.kind === "fragment") {
+    const frag = makeElement("fragment");
+    for (const child of exp.children) frag.appendChild(buildDomFromExpanded(child));
+    return frag;
+  }
+  const el = makeElement(exp.tag);
+  applyVNodeProps(el, exp.props);
+  for (const child of exp.children) el.appendChild(buildDomFromExpanded(child));
   return el;
+}
+
+// ── diff 调和（§9 债 4② / 10-3）：rerender 与 render 的语义分界 ─────────────
+// render = expand → 全新 DOM 树（全量重建，语义不变）；rerender = expand → 与上次
+// 展开树逐槽比较：
+//   * 等价子树（同种类/同标签 + 非函数 props 逐值相等 + 子树逐槽等价）→ 原样复用
+//     DOM（事件闭包每轮新建但捕获同一 state 槽位，仅把新闭包刷回元素）；
+//   * 同标签元素 → 就地 patch 属性（旧有今无的属性摘除，对齐全新元素终态） +
+//     子节点逐槽调和；
+//   * 同为文本 → textContent 就地更新（文本节点身份保留）；
+//   * 结构性差异（换标签/换种类/子节点数变化）→ 重建该槽并替换到父槽位。
+// 守护用例 H5（ui-harness.test.mjs）：退回全量重建时 DOM 身份断言红；退回
+// no-op（不重执行组件）时文本变化断言红。
+
+function propsEqualForReuse(a, b) {
+  // 事件闭包（函数值）不参与等价判定——每轮新闭包不算结构差异（复用后刷新引用）；
+  // 其余值 !== 时退化成 JSON 串比较（覆盖 style 对象这类每轮新建的容器；循环
+  // 引用 stringify 抛错按不等处理 → 该槽重建，安全降级为全量语义）。
+  const ka = Object.keys(a).filter((k) => k !== "children");
+  const kb = Object.keys(b).filter((k) => k !== "children");
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+    const va = a[k];
+    const vb = b[k];
+    if (typeof va === "function" || typeof vb === "function") {
+      if (typeof va !== "function" || typeof vb !== "function") return false;
+      continue;
+    }
+    if (va === vb) continue;
+    try {
+      if (JSON.stringify(va) !== JSON.stringify(vb)) return false;
+    } catch { return false; }
+  }
+  return true;
+}
+
+function expandedEqual(a, b) {
+  if (a === b) return true;
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "text") return a.text === b.text;
+  if (a.kind === "fragment") {
+    if (a.children.length !== b.children.length) return false;
+    for (let i = 0; i < a.children.length; i++) {
+      if (!expandedEqual(a.children[i], b.children[i])) return false;
+    }
+    return true;
+  }
+  if (a.tag !== b.tag) return false;
+  if (!propsEqualForReuse(a.props, b.props)) return false;
+  if (a.children.length !== b.children.length) return false;
+  for (let i = 0; i < a.children.length; i++) {
+    if (!expandedEqual(a.children[i], b.children[i])) return false;
+  }
+  return true;
+}
+
+// 复用子树上刷新事件闭包：on* props 逐个把新闭包刷回元素的小写事件槽（展开树与
+// DOM 树 1:1，并行下钻）。
+function refreshEventHandlers(dom, exp) {
+  if (exp.kind === "element") {
+    for (const key of Object.keys(exp.props)) {
+      const value = exp.props[key];
+      if (/^on[A-Z]/.test(key) && typeof value === "function") dom[key.toLowerCase()] = value;
+    }
+    for (let i = 0; i < exp.children.length; i++) refreshEventHandlers(dom.children[i], exp.children[i]);
+  } else if (exp.kind === "fragment") {
+    for (let i = 0; i < exp.children.length; i++) refreshEventHandlers(dom.children[i], exp.children[i]);
+  }
+}
+
+function replaceInParent(parent, oldDom, fresh) {
+  if (!parent) return; // 根替换由调用方直接换 dom 引用
+  const i = parent.children.indexOf(oldDom);
+  if (i < 0) return; // 1:1 不变量下不可达；防御性不炸
+  parent.children[i] = fresh;
+  fresh.parentNode = parent;
+  oldDom.parentNode = null;
+}
+
+function reconcileChildren(parentDom, oldChildren, newChildren) {
+  const shared = Math.min(oldChildren.length, newChildren.length);
+  for (let i = 0; i < shared; i++) {
+    parentDom.children[i] = patchExpanded(parentDom, oldChildren[i], newChildren[i], parentDom.children[i]);
+  }
+  for (let i = oldChildren.length - 1; i >= newChildren.length; i--) {
+    parentDom.removeChild(parentDom.children[i]);
+  }
+  for (let i = shared; i < newChildren.length; i++) {
+    parentDom.appendChild(buildDomFromExpanded(newChildren[i]));
+  }
+}
+
+function patchElement(oldExp, newExp, el) {
+  const oldProps = oldExp.props;
+  const newProps = newExp.props;
+  // 现存属性逐个落一遍（语义与 applyVNodeProps 同款：有就写，style 先清后并入，
+  // 与「全新元素」终态对齐）。
+  for (const key of Object.keys(newProps)) {
+    const value = newProps[key];
+    if (key === "children") continue;
+    if (key === "className") { el.className = String(value); continue; }
+    if (key === "style" && value && typeof value === "object") {
+      for (const k of Object.keys(el.style)) delete el.style[k];
+      Object.assign(el.style, value);
+      continue;
+    }
+    if (key === "ref" && value && typeof value === "object") { value.current = el; continue; }
+    if (/^on[A-Z]/.test(key) && typeof value === "function") { el[key.toLowerCase()] = value; continue; }
+    el.setAttribute(key, value);
+  }
+  // 旧有今无的属性摘除（对齐全量重建的全新元素终态：attributes 归位、派生字段
+  // 复位、ref 断链、事件槽清空）。
+  for (const key of Object.keys(oldProps)) {
+    if (key === "children" || Object.prototype.hasOwnProperty.call(newProps, key)) continue;
+    const oldValue = oldProps[key];
+    if (key === "style" && oldValue && typeof oldValue === "object") {
+      for (const k of Object.keys(el.style)) delete el.style[k];
+    } else if (key === "className") {
+      el.className = "";
+    } else if (key === "ref" && oldValue && typeof oldValue === "object") {
+      if (oldValue.current === el) oldValue.current = null;
+    } else if (/^on[A-Z]/.test(key) && typeof oldValue === "function") {
+      delete el[key.toLowerCase()];
+    } else {
+      delete el.attributes[key];
+      if (key === "id") el.id = "";
+    }
+  }
+  reconcileChildren(el, oldExp.children, newExp.children);
+}
+
+function patchExpanded(parent, oldExp, newExp, oldDom) {
+  // 返回该槽位最终 DOM（可能复用 oldDom 或新建；根槽 parent=null 由调用方换引用）。
+  if (expandedEqual(oldExp, newExp)) {
+    refreshEventHandlers(oldDom, newExp);
+    return oldDom;
+  }
+  if (oldExp.kind === "text" && newExp.kind === "text") {
+    oldDom.textContent = newExp.text;
+    return oldDom;
+  }
+  if (oldExp.kind === "fragment" && newExp.kind === "fragment") {
+    reconcileChildren(oldDom, oldExp.children, newExp.children);
+    return oldDom;
+  }
+  if (oldExp.kind === "element" && newExp.kind === "element" && oldExp.tag === newExp.tag) {
+    patchElement(oldExp, newExp, oldDom);
+    return oldDom;
+  }
+  const fresh = buildDomFromExpanded(newExp);
+  replaceInParent(parent, oldDom, fresh);
+  return fresh;
 }
 
 function serializeDom(el) {
@@ -504,11 +691,13 @@ export function createUiHarness(options = {}) {
     return { mod, renderSlot, sectionVNode, registered };
   }
 
-  // 共享渲染循环（mount / mountSlot 复用）：renderOnce() 由调用方执行组件函数并
-  // 返回落 DOM 的 vnode，循环负责光标复位（必须在组件函数执行前）、click/find/
-  // change 交互、flush（effect → 微任务排空 → 真实重渲染路径）与 unmount 清理。
-  function makeRenderLoop(host, renderOnce) {
+  // 共享渲染循环（mount / mountSlot 复用）：renderVNode() 由调用方复位光标后执行
+  // 组件函数并返回「未落 DOM 的 vnode」，循环负责光标复位（必须在组件函数执行前）、
+  // 展开/渲染、click/find/change 交互、flush（effect → 微任务排空 → 真实重渲染
+  // 路径）与 unmount 清理。render 全量重建；rerender 走 diff 调和（§9 债 4②）。
+  function makeRenderLoop(host, renderVNode) {
     let dom = null;
+    let lastExpanded = null;
 
     function resetCursors() {
       host.cursor.v = 0;
@@ -518,12 +707,21 @@ export function createUiHarness(options = {}) {
 
     function render() {
       resetCursors();
-      dom = renderOnce();
+      lastExpanded = expandVNode(renderVNode());
+      dom = buildDomFromExpanded(lastExpanded);
       return dom;
     }
     function rerender() {
       resetCursors();
-      dom = renderOnce();
+      const next = expandVNode(renderVNode());
+      if (lastExpanded === null) {
+        // rerender 先于 render 调用的防御路径：无上次树可比较，按全量渲染收场。
+        lastExpanded = next;
+        dom = buildDomFromExpanded(next);
+        return dom;
+      }
+      dom = patchExpanded(null, lastExpanded, next, dom);
+      lastExpanded = next;
       return dom;
     }
     function text() { return collectDomText(dom); }
@@ -553,9 +751,14 @@ export function createUiHarness(options = {}) {
 
     function change(selector, value) {
       const el = find(selector);
-      if (!el || typeof el.onchange !== "function") return false;
-      el.onchange({ target: { value } });
-      return true;
+      if (!el) return false;
+      // 真实 DOM 语义：输入先触发 input、提交再触发 change——两个事件都带
+      // { target: { value } }；元素上任一 handler 存在即算命中（无 handler 返回
+      // false，语义与旧实现一致）。
+      let fired = false;
+      if (typeof el.oninput === "function") { el.oninput({ target: { value } }); fired = true; }
+      if (typeof el.onchange === "function") { el.onchange({ target: { value } }); fired = true; }
+      return fired;
     }
 
     function textOf(selector) {
@@ -591,6 +794,7 @@ export function createUiHarness(options = {}) {
       // 单一清理路径：unmount 直接复用 restore（R3）。
       restore();
       dom = null;
+      lastExpanded = null;
     }
 
     return { render, rerender, unmount, text, html, click, flush, host, find, findAll, change, textOf, textOfEl };
@@ -608,7 +812,7 @@ export function createUiHarness(options = {}) {
     const sectionProps = { dsh, ...(mountProps.slotProps || {}) };
     const prefill = mountProps.prefillStates;
 
-    function renderOnce() {
+    function renderVNode() {
       if (prefill) {
         host.states.length = 0;
         for (const v of prefill) host.states.push(v);
@@ -620,9 +824,9 @@ export function createUiHarness(options = {}) {
         if (!(3 in host.states) || host.states[3] === undefined) host.states[3] = null;
         if (!(4 in host.states) || host.states[4] === undefined) host.states[4] = mountProps.modeStatus ?? { mode: "active" };
       }
-      return renderVNodeToDom(sectionVNode.type(sectionProps), globalThis.document);
+      return sectionVNode.type(sectionProps);
     }
-    return makeRenderLoop(host, renderOnce);
+    return makeRenderLoop(host, renderVNode);
   }
 
   // 5D：按插槽名挂载非面板组件（如 conversation.chat.assistant-actions 的
@@ -643,16 +847,16 @@ export function createUiHarness(options = {}) {
       : {};
     const slotProps = { dsh, ...injected, ...(mountProps.slotProps || {}) };
     const prefill = mountProps.prefillStates;
-    function renderOnce() {
+    function renderVNode() {
       if (Array.isArray(prefill)) {
         host.states.length = 0;
         for (const v of prefill) host.states.push(v);
       }
-      // comp.render(slotProps) 返回组件 vnode；renderVNodeToDom 遇 function 类型
-      // 会执行组件函数本体（光标已在 makeRenderLoop.render 里复位）。
-      return renderVNodeToDom(comp.render(slotProps), globalThis.document);
+      // comp.render(slotProps) 返回组件 vnode（可含嵌套函数组件，交给
+      // makeRenderLoop 的 expandVNode 执行；光标已在 render/rerender 里复位）。
+      return comp.render(slotProps);
     }
-    const loop = makeRenderLoop(host, renderOnce);
+    const loop = makeRenderLoop(host, renderVNode);
     return { ...loop, comp, slotProps };
   }
 

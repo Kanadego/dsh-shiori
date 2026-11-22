@@ -6465,8 +6465,14 @@ window.__ModuleLoader__.load({
               refreshFailed = true;
             }
             if (refreshFailed) {
-              setTempSave({ busy: false, error: { code: "ui/refresh", message: "参数与审计已保存；读取最新状态失败，请重新打开本页。" }, ok: null });
-              shioriToast("warn", "参数与审计已保存，但读取最新状态失败");
+              // 0.5-10（债 1④）：刷新失败分支的文案按回执拼——审计确实落账
+              //（recorded:true）才说「参数与审计已保存」；recorded:false / replay
+              // （未新增审计）只说「参数已保存」，不夸大。toast 同口径。
+              var auditSaved = !!(receipt && receipt.recorded === true);
+              var refreshMessage = (auditSaved ? "参数与审计已保存" : "参数已保存")
+                + "；读取最新状态失败，请重新打开本页。";
+              setTempSave({ busy: false, error: { code: "ui/refresh", message: refreshMessage }, ok: null });
+              shioriToast("warn", (auditSaved ? "参数与审计已保存" : "参数已保存") + "，但读取最新状态失败");
             } else {
               setTempSave({ busy: false, error: null, ok: okMessage });
               shioriToast("ok", "记忆整理参数已保存");
@@ -6730,6 +6736,11 @@ window.__ModuleLoader__.load({
                       + " · cool " + String(tempPreview.data.candidate && tempPreview.data.candidate.tiers ? tempPreview.data.candidate.tiers.cool : 0)
                       + " · cold " + String(tempPreview.data.candidate && tempPreview.data.candidate.tiers ? tempPreview.data.candidate.tiers.cold : 0)
                       + " · frozen " + String(tempPreview.data.candidate && tempPreview.data.candidate.tiers ? tempPreview.data.candidate.tiers.frozen : 0)),
+                    // 0.5-10（债 14e）：服务端跳过告警（已跳过 N 个无法读取的 topic 文件…）
+                    // 必须渲染进预览块——预览少算时用户有权知道。无 warning 不出空节点。
+                    typeof tempPreview.data.warning === "string" && tempPreview.data.warning !== ""
+                      ? h("div", { className: "dshi_warn", "data-role": "temperature-preview-warning" }, "⚠ " + tempPreview.data.warning)
+                      : null,
                     h("div", { className: "dshi_bgroup", "data-role": "temperature-cooling" },
                       h("div", { className: "dshi_cardTitle" }, "会冷却（" + tempCooling.length + "）"),
                       tempCooling.length > 0

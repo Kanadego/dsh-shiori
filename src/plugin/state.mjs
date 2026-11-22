@@ -128,9 +128,19 @@ function createLedger({ file, empty, lockRoot }) {
  *   <stateRoot>/diagnostics/<scopeId hex>.json     0.5-4D · L2 投递诊断账本（每轮一条，7 天滚动）
  *   <stateRoot>/auto-organize.json                 0.5-5A · auto 冷却/恢复记账（评估锚 + run 审计）
  */
-export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
+export function createStateStore({ stateRoot, now = () => new Date(), autoRunKeepLimit } = {}) {
   if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) {
     fail("INVALID_INPUT", "state store requires an absolute stateRoot", {});
+  }
+  // 0.5 批次 10-2：run 滚动窗口上限可注入——测试把窗口缩到 1 验证「逐出后同
+  // operationId 重跑」；缺省仍取 AUTO_RUN_KEEP_LIMIT（与 forgetting/auto.mjs 的
+  // AUTO_RUN_KEEP 同源常量）。
+  // 滚动上限与 forgetting/auto.mjs 的 AUTO_RUN_KEEP 同源常量（复制数值 + 注释
+  // 互指，避免 storage 层反向 import plugin 层）。
+  const AUTO_RUN_KEEP_LIMIT = 50;
+  const runKeepLimit = autoRunKeepLimit === undefined ? AUTO_RUN_KEEP_LIMIT : autoRunKeepLimit;
+  if (!Number.isInteger(runKeepLimit) || runKeepLimit < 1) {
+    fail("INVALID_INPUT", `autoRunKeepLimit must be an integer >= 1, got ${JSON.stringify(autoRunKeepLimit)}`, { autoRunKeepLimit });
   }
   // 可注入时钟（waterline 采样节流测试用）；生产缺省取真实时间。
   const nowDate = () => {
@@ -915,9 +925,8 @@ export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
   // ------------------------------------------------------------------
 
   const AUTO_STATE_VERSION = 1;
-  // 滚动上限与 forgetting/auto.mjs 的 AUTO_RUN_KEEP 同源常量（复制数值 + 注释
-  // 互指，避免 storage 层反向 import plugin 层）。
-  const AUTO_RUN_KEEP_LIMIT = 50;
+  // run 滚动上限常量 AUTO_RUN_KEEP_LIMIT 在工厂开头声明（紧邻 autoRunKeepLimit
+  // 注入口），此处注释互指：与 forgetting/auto.mjs 的 AUTO_RUN_KEEP 同源。
 
   const autoLedger = createLedger({
     file: path.join(stateRoot, "auto-organize.json"),
@@ -978,7 +987,7 @@ export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
       });
     },
 
-    /** 追加 run 审计记录（滚动保留最近 AUTO_RUN_KEEP_LIMIT 条）。 */
+    /** 追加 run 审计记录（滚动保留最近 runKeepLimit 条；缺省 AUTO_RUN_KEEP_LIMIT）。 */
     async recordRun(run) {
       if (run === null || typeof run !== "object" || Array.isArray(run)) {
         fail("INVALID_INPUT", "autoStore.recordRun requires a run object", {});
@@ -990,8 +999,8 @@ export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
         state.version = AUTO_STATE_VERSION;
         if (!Array.isArray(state.runs)) state.runs = [];
         state.runs.push(run);
-        if (state.runs.length > AUTO_RUN_KEEP_LIMIT) {
-          state.runs = state.runs.slice(state.runs.length - AUTO_RUN_KEEP_LIMIT);
+        if (state.runs.length > runKeepLimit) {
+          state.runs = state.runs.slice(state.runs.length - runKeepLimit);
         }
         return state;
       });
@@ -1004,11 +1013,21 @@ export function createStateStore({ stateRoot, now = () => new Date() } = {}) {
       return state.runs.find((run) => run?.runId === runId) ?? null;
     },
 
-    /** 按 operationId 查 run（apply 幂等重放判据）。 */
-    async getRunByOperationId(operationId) {
+    /** 按 operationId + scopeId 查 run（apply 幂等重放判据）。scopeId 过滤防跨
+     * scope 同 opId 串号——run 账本是全局一份，重放命中必须同时绑定触发 scope；
+     * 两参都必填（fail-fast）。被逐出滚动窗口的 run 查不到（返回 null），引擎
+     * 按新执行处理——同 opId 只在窗口内重放，逐出后重跑（单操作幂等靠底层
+     * journal 的 operationId，见 forgetting/auto.mjs apply 注释）。 */
+    async getRunByOperationId(operationId, scopeId) {
+      if (typeof operationId !== "string" || operationId.length === 0) {
+        fail("INVALID_INPUT", "autoStore.getRunByOperationId requires a non-empty operationId", {});
+      }
+      if (typeof scopeId !== "string" || scopeId.length === 0) {
+        fail("INVALID_INPUT", "autoStore.getRunByOperationId requires a non-empty scopeId", {});
+      }
       const { state, error } = await this.read();
       if (state === null) fail("INVALID_STATE", `auto-organize.json 不可读，run 查询失败：${error}`, {});
-      return state.runs.find((run) => run?.operationId === operationId) ?? null;
+      return state.runs.find((run) => run?.operationId === operationId && run?.scopeId === scopeId) ?? null;
     },
 
     /** 置 undoneAt（一键撤销完成标记）。run 不存在 → NOT_FOUND（幂等闸由引擎侧把守）。 */

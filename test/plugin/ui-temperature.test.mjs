@@ -63,10 +63,12 @@ const TEMPERATURE_DTO = Object.freeze({
 
 const TEMP_KEYS = Object.keys(TEMPERATURE_DTO.specs);
 
-// 批次 8-3 漂移守卫：TEMPERATURE_DTO 夹具此前与 src/forgetting/params.mjs 无同源校验——
-// params.mjs 加参数/改默认值忘了同步夹具不会红。这里锁「键集合（数量+逐 key）」与
-// 「默认值逐键一致」。说明文案（description）两侧允许措辞差异，不逐字比对。
-test("夹具同源守卫：TEMPERATURE_DTO 的参数键集合 ≡ PARAM_SPECS（数量+逐 key），defaults ≡ DEFAULT_TEMPERATURE_PARAMS", () => {
+// 批次 8-3 漂移守卫 + 0.5-10（债 13）：TEMPERATURE_DTO 夹具此前与 src/forgetting/params.mjs
+// 无同源校验——params.mjs 加参数/改默认值忘了同步夹具不会红。这里锁「键集合（数量+逐 key）」
+// 与「默认值逐键一致」，并（债 13：旧守卫只锁键集合+defaults，改 min/unit/integer 不红）
+// 逐 key deepEqual {min,max,unit,integer}——范围/单位/整数约束任一位漂移必红。
+// 说明文案（description）两侧允许措辞差异，不逐字比对（面板展示以 DTO 为准）。
+test("夹具同源守卫：TEMPERATURE_DTO 的参数键集合 ≡ PARAM_SPECS（数量+逐 key），defaults ≡ DEFAULT_TEMPERATURE_PARAMS，specs 逐 key {min,max,unit,integer} ≡ PARAM_SPECS", () => {
   const srcKeys = Object.keys(PARAM_SPECS);
   assert.equal(TEMP_KEYS.length, srcKeys.length,
     `参数数量一致（DTO ${TEMP_KEYS.length} / PARAM_SPECS ${srcKeys.length}）——params.mjs 加了参数必须同步夹具`);
@@ -75,6 +77,12 @@ test("夹具同源守卫：TEMPERATURE_DTO 的参数键集合 ≡ PARAM_SPECS（
   for (const key of TEMP_KEYS) {
     assert.ok(Object.hasOwn(PARAM_SPECS, key), `DTO 键 ${key} 在 PARAM_SPECS 中存在`);
     assert.ok(Object.hasOwn(DEFAULT_TEMPERATURE_PARAMS, key), `DTO 键 ${key} 在 DEFAULT_TEMPERATURE_PARAMS 中存在`);
+    const dto = TEMPERATURE_DTO.specs[key];
+    const src = PARAM_SPECS[key];
+    assert.deepEqual(
+      { min: dto.min, max: dto.max, unit: dto.unit, integer: dto.integer },
+      { min: src.min, max: src.max, unit: src.unit, integer: src.integer },
+      `DTO specs.${key} 与 PARAM_SPECS.${key} 的 {min,max,unit,integer} 逐值一致——改范围/单位/整数约束必须同步夹具（债 13 变异面）`);
   }
   assert.deepEqual({ ...TEMPERATURE_DTO.defaults }, { ...DEFAULT_TEMPERATURE_PARAMS },
     "DTO defaults 与 DEFAULT_TEMPERATURE_PARAMS 逐键逐值一致——改默认值必须同步夹具");
@@ -128,7 +136,7 @@ function makeScope(initialTemperature, order) {
   return state;
 }
 
-function makeDsh({ scopeState, audit, order, recordBehavior, recordReceipt, refreshFailsAfterRecord } = {}) {
+function makeDsh({ scopeState, audit, order, recordBehavior, recordReceipt, refreshFailsAfterRecord, previewWarning } = {}) {
   const calls = [];
   const auditRef = audit ?? [];
   let recordAttempts = 0;
@@ -158,7 +166,9 @@ function makeDsh({ scopeState, audit, order, recordBehavior, recordReceipt, refr
           error.code = "INVALID_INPUT";
           throw error;
         }
-        return clone(PREVIEW_DTO);
+        const preview = clone(PREVIEW_DTO);
+        if (previewWarning !== undefined) preview.warning = previewWarning;
+        return preview;
       }
       if (method === "recordTemperatureChange") {
         recordAttempts += 1;
@@ -464,6 +474,33 @@ test("热度参数面板：record 成功后刷新失败 → 如实提示「参�
   }
 });
 
+test("热度参数面板：recorded:false 且刷新失败 → 文案按回执只说「参数已保存」，不出现「审计」字样", async () => {
+  // 0.5-10（债 1④）：回执 recorded:false（未落审计）+ 刷新失败——旧行为无条件
+  // 写「参数与审计已保存」，夸大事实；改后按 receipt.recorded 拼文案。
+  const order = [];
+  const scopeState = makeScope(TEMPERATURE_DTO.defaults, order);
+  const { dsh } = makeDsh({
+    scopeState,
+    order,
+    recordBehavior: () => ({ recorded: false, replay: false, changes: [] }),
+    refreshFailsAfterRecord: true,
+  });
+  const panel = await mountBudgets(dsh);
+  try {
+    panel.change('input[data-temp-input="coolThreshold"]', "30");
+    await settle(panel);
+    panel.click('[data-role="temperature-save"]');
+    await settle(panel, { advanceMs: 350 });
+
+    const errorText = panel.textOf('[data-role="temperature-save-error"]');
+    assert.ok(errorText.includes("参数已保存；读取最新状态失败，请重新打开本页"), "未落审计时只说「参数已保存」");
+    assert.equal(errorText.includes("审计"), false, "不再出现「审计」字样（改坏实现必红：无条件旧文案含「审计」）");
+    assert.equal(panel.find('[data-role="temperature-saved"]'), null, "刷新失败不显示成功文案");
+  } finally {
+    panel.unmount();
+  }
+});
+
 test("热度参数面板：机器可读 details.reason=parameters-not-effective 时即使文案不同也重试", async () => {
   const order = [];
   const scopeState = makeScope(TEMPERATURE_DTO.defaults, order);
@@ -493,6 +530,44 @@ test("热度参数面板：机器可读 details.reason=parameters-not-effective 
     assert.equal(auditEntries(panel).length, 1, "审计入库一条");
   } finally {
     panel.unmount();
+  }
+});
+
+test("热度参数面板：预览渲染服务端 warning（有 warning 可见，无 warning 不出空节点）", async () => {
+  // 0.5-10（债 14e）：simulateTemperature 跳过坏 topic 文件时回执带 warning
+  //（「已跳过 N 个无法读取的 topic 文件…」），预览块此前只渲染
+  // tiers/cooling/restoring/l1DeltaChars，告警被吞——预览少算用户无从知晓。
+  const order = [];
+  const scopeState = makeScope(TEMPERATURE_DTO.defaults, order);
+  const { dsh } = makeDsh({
+    scopeState,
+    order,
+    previewWarning: "已跳过 2 个无法读取的 topic 文件（损坏或越根链接），预览结果未计入它们",
+  });
+  const panel = await mountBudgets(dsh);
+  try {
+    panel.change('input[data-temp-input="coolThreshold"]', "30");
+    await settle(panel);
+    assert.ok(panel.find('[data-role="temperature-preview-warning"]'), "有 warning 时预览块出现告警行");
+    const warningText = panel.textOf('[data-role="temperature-preview-warning"]');
+    assert.ok(warningText.includes("⚠"), "告警行带 ⚠ 前缀（与其余降级告警同款样式）");
+    assert.ok(warningText.includes("已跳过 2 个无法读取的 topic 文件"), "告警行逐字渲染服务端 warning");
+    assert.ok(panel.find('[data-role="temperature-preview"]'), "预览块照常在");
+  } finally {
+    panel.unmount();
+  }
+
+  // 无 warning：不渲染告警节点（不出空行）。
+  const scopeState2 = makeScope(TEMPERATURE_DTO.defaults, []);
+  const { dsh: dsh2 } = makeDsh({ scopeState: scopeState2, order: [] });
+  const panel2 = await mountBudgets(dsh2);
+  try {
+    panel2.change('input[data-temp-input="coolThreshold"]', "30");
+    await settle(panel2);
+    assert.equal(panel2.find('[data-role="temperature-preview-warning"]'), null, "无 warning 时不出告警节点");
+    assert.ok(panel2.find('[data-role="temperature-preview"]'), "预览块照常在");
+  } finally {
+    panel2.unmount();
   }
 });
 

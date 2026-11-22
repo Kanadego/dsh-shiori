@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -1984,6 +1984,14 @@ test("0.5 交错防线：force 重建持闸期间增量只标 dirty（索引零�
   await controller.stop();
 });
 
+// §9 债 15a/15b（10-3）：写后 flush 收场门控的上限抽成具名常量——waitFor 的
+// 时限与断言消息里的「门控上限 Ns」同源插值，不再各写一份字面量（变异改常量
+// 后消息数字必须跟着变）。上限取 10000ms：本机实测（10-3 单，2026-11-22）
+// 该 flush 空载三次收场耗时 45ms / 75ms / 14ms（waitFor 轮询步长 20ms 起步，
+// 读数含轮询量化），即便并行负载放大一个量级也远离 10s——余量 ≈ 最差实测的
+// 130 倍，同时比原 30s 上限把「flush 永不收场」的红灯等待缩短 20s。
+const FLUSH_GATE_MS = 10000;
+
 test("0.5 启动差集兜底：重启后索引与卡片漂移（过期 revision + 幽灵残留）在 scope 首开索引时后台修复", async (t) => {
   const roots = await tempRoots();
   t.after(roots.cleanup);
@@ -2055,7 +2063,7 @@ test("0.5 启动差集兜底：重启后索引与卡片漂移（过期 revision 
     lastInc = ((await controller2.management.getStatus(trustedContext, {}))
       .diagnostics.semantic.incremental) ?? {};
     return (lastInc.flushes ?? 0) > flushesBaseline && lastInc.running === false;
-  }, 30000), `新卡写后 flush 应收场（flushes 基线 ${flushesBaseline}，门控上限 30s；`
+  }, FLUSH_GATE_MS), `新卡写后 flush 应收场（flushes 基线 ${flushesBaseline}，门控上限 ${FLUSH_GATE_MS / 1000}s；`
     + `实际 flushes=${lastInc.flushes} pending=${lastInc.pending} `
     + `startupSyncs=${lastInc.startupSyncs} running=${lastInc.running}）`
     + `——flushes 在 saveIfDirty 之后自增才是收场信号（pending 轮次开始即清零）`);
@@ -2569,4 +2577,127 @@ test("pre-step auto 调度：评估失败静默计数（autoStore 损坏 → 记
   const autoDiag = (await controller.management.getStatus({ session: { id: "s-1" }, source: "panel-rpc" }, {})).diagnostics.auto;
   assert.ok(autoDiag.failures >= 1);
   assert.ok(autoDiag.lastError !== null, "最近错误如实留痕");
+});
+
+
+test("债12 mixed 端到端：真 controller 下 topic 冷条目 score=词法命中数、spark 冷卡 score=null + scoreKind=spark-cold 同列可区分", async (t) => {
+  // 0.5-10（债 12）：searchArchived 映射（serviceForTools）把冷卡硬编码 score:0
+  // 改为显式无分（score:null + scoreKind:"spark-cold"）。这里用真 controller +
+  // 真 spark store + 真 topic 文件断端到端：memory_search includeArchived 的
+  // matches 里两种来源可区分——topic 冷条目 score 为正整数命中数、无 scoreKind；
+  // spark 冷卡 score===null 且 scoreKind==="spark-cold"。
+  const roots = await tempRoots();
+  t.after(roots.cleanup);
+  const controller = await createShioriPluginController(fakeCtx(), activeSettings(roots), { bindings: fakeBindingsFactory() });
+  await controller.start();
+  const trustedContext = rpcContext();
+  const scopeId = pinScope({
+    settings: { ...activeSettings(roots), sessionPersonas: [], workspacePersonas: [] },
+    sessionId: "s-panel", workspace: null, generation: 1, source: "panel-rpc",
+  }).scopeId;
+
+  // ① 归档 topic：直接落盘（serializeTopicFile 支持 archivedAt；scopeId 与
+  //    pinScope 推导一致）。
+  const { serializeTopicFile } = await import("../../src/storage/frontmatter.mjs");
+  const topicsDir = path.join(roots.dataRoot, "scopes", scopeId, "topics");
+  await mkdir(topicsDir, { recursive: true });
+  await writeFile(path.join(topicsDir, "cold-topic.md"),
+    serializeTopicFile({
+      key: "cold-topic", title: "排障冷专题", summary: "归档冷版",
+      updated: "2026-10-01T00:00:00.000Z", scopeId,
+      retention: "historical", archivedAt: "2026-11-01T00:00:00.000Z",
+    }, "cold topic body"), "utf8");
+
+  // ② spark 冷卡：save 后 forget(archive) 软归档（history 保留、进冷库）。
+  const saved = await controller.management.executeTool(trustedContext, {
+    name: "spark_save", args: { title: "排障冷卡", content: "冷卡正文", triggers: [], vitality: "ephemeral" },
+  });
+  assert.equal(saved.ok, true, "卡片落库");
+  const forgotten = await controller.management.executeTool(trustedContext, {
+    name: "spark_forget", args: { id: saved.id, mode: "archive" },
+  });
+  assert.equal(forgotten.ok, true, "卡片软归档");
+
+  // ③ mixed 检索：query 分词后各来源独立匹配——topic 侧 score=命中词数（1），
+  //    spark 侧整串字面包含命中、score 显式 null。
+  const found = await controller.management.executeTool(trustedContext, {
+    name: "memory_search", args: { query: "排障", includeArchived: true },
+  });
+  assert.ok(Array.isArray(found.matches) && found.matches.length >= 2, `mixed 命中两类来源（实际 ${found.matches?.length} 条）`);
+  const topicHit = found.matches.find((m) => m.key === "cold-topic");
+  const sparkHit = found.matches.find((m) => m.key === saved.id);
+  assert.ok(topicHit, "topic 冷条目在列");
+  assert.ok(sparkHit, "spark 冷卡在列");
+  assert.equal(topicHit.state, "archived");
+  assert.equal(Number.isInteger(topicHit.score) && topicHit.score >= 1, true,
+    `topic 冷条目 score=词法命中数（实际 ${topicHit.score}）`);
+  assert.equal(topicHit.scoreKind, undefined, "topic 冷条目不带 scoreKind（来源标记只属于 spark 冷卡）");
+  assert.equal(sparkHit.state, "archived");
+  assert.equal(sparkHit.score, null, "spark 冷卡 score 显式 null（不再硬编码 0）");
+  assert.equal(sparkHit.scoreKind, "spark-cold", "spark 冷卡带来源标记");
+  assert.ok(!("body" in topicHit) && !("body" in sparkHit), "不回正文");
+  // 不带 includeArchived 时 spark 冷卡不出列（门面语义不回归）。
+  const plain = await controller.management.executeTool(trustedContext, {
+    name: "memory_search", args: { query: "排障" },
+  });
+  assert.equal(plain.matches.some((m) => m.key === saved.id), false, "默认不搜 spark 冷卡");
+  await controller.stop();
+});
+
+// ---------------------------------------------------------------------------
+// §9 债 10b（10-3）：soft-watermark 的 controller 级集成用例。此前只有
+// test/forgetting/auto.test.mjs:110-116 的纯函数用例（shouldTriggerAutoEvaluation
+// 直调），controller 侧「waterline 侧表武装 → watermark 回调返回 true → onHumanTurn
+// 透传 armed → trigger=soft-watermark 记账」的整条装配链（src/plugin/controller.mjs
+// watermark 回调 + src/forgetting/auto.mjs onHumanTurn）零覆盖。变异：把 auto.mjs
+// onHumanTurn 里的 softWatermark: armed === true 改成 false 后本用例必红——第二轮
+// 评估不再触发（not-due），evaluations 停在 1，lastEvaluatedBy/trigger 停在 human-turn。
+// ---------------------------------------------------------------------------
+
+test("pre-step auto 调度：L1 超软水位武装 → 人类轮顺带触发 soft-watermark 评估（lastEvaluatedBy/trigger 留痕）", async (t) => {
+  // autoMode 选 "auto"：trigger 落盘进 runs 记录只在执行记账（apply→recordRun）
+  // 时发生，suggest 的纯评估只写 lastEvaluatedBy 不记 run——要同时断
+  // lastEvaluatedBy 与 lastRuns[].trigger 两个留痕，必须在 auto 档。
+  const { controller, bindings, stateRoot } = await autoPreStepFixture(t, { autoMode: "auto" });
+  const preStep = bindings.registered.preStep;
+  const agent = { session: { id: "s-1" } };
+  const next = async () => ({ kind: "enter", messages: [] });
+
+  // 第一轮人类轮：first-run 基线评估（trigger=human-turn）——lastEvaluatedAt 落到
+  // 当前时刻，6h 评估周期未满，排除 elapsed 通道（后续触发的唯一来源是软水位）。
+  await preStep({ agent, messages: [autoHumanMessage("m-sw-1")] }, next);
+  const first = await waitForAutoState(controller, stateRoot);
+  assert.equal(first.scopes.amber.lastEvaluatedBy, "human-turn",
+    "首轮为 first-run 基线评估（对照：未武装时评估归 human-turn）");
+
+  // 构造 L1 超过软水位：向水位采样侧表写一条 l1Chars 超软水位的采样（文件名/形状
+  // 对齐 src/plugin/state.mjs readWaterline：<stateRoot>/waterline/<scopeId hex>.json，
+  // entries 末条 l1Chars ≥ softChars 即武装）。默认预算 hardCapChars=10000 派生
+  // softChars（src/plugin/config.mjs normalizeBudgets），l1Chars 给 10 倍硬顶量级，
+  // 任何默认 softChars 都必然命中。
+  const waterlineDir = path.join(stateRoot, "waterline");
+  await autoMkdir(waterlineDir, { recursive: true });
+  const waterlineFile = path.join(waterlineDir, `${Buffer.from("amber", "utf8").toString("hex")}.json`);
+  await autoWriteFile(waterlineFile, JSON.stringify({
+    entries: [{ at: new Date().toISOString(), l1Chars: 100000, zone: "over-soft" }],
+  }));
+
+  // 第二轮人类轮前先断指示位：侧表 l1Chars 超线 → getAutoStatus().nextTrigger.
+  // softWatermarkArmed 必须为 true（controller.mjs watermark 实参顺序修复后才
+  // 第一次可能为 true——修复前恒 false，评审答复②要求显式断言）。
+  const armedStatus = await controller.management.getAutoStatus({ session: { id: "s-1" }, source: "panel-rpc" }, {});
+  assert.equal(armedStatus.nextTrigger.softWatermarkArmed, true,
+    "L1 超软水位后 nextTrigger.softWatermarkArmed 应为 true（watermark 回调读侧表武装）");
+
+  // 第二轮人类轮：距首轮评估不满 6h（elapsed 不触发），软水位已武装 →
+  // shouldTriggerAutoEvaluation 走 soft-watermark 分支 → apply 以
+  // trigger=soft-watermark 记账（auto-run 诊断在 recordRun + markEvaluated 落盘
+  // 之后发出，runs 计数到位即 auto-organize.json 已定，随后读面板 status 做终判）。
+  await preStep({ agent, messages: [autoHumanMessage("m-sw-2")] }, next);
+  await awaitAutoDiag(controller, "runs", 2);
+  const status = await controller.management.getAutoStatus({ session: { id: "s-1" }, source: "panel-rpc" }, {});
+  assert.equal(status.lastEvaluatedBy, "soft-watermark",
+    "软水位武装后人类轮顺带触发的评估以 soft-watermark 记账");
+  assert.equal(status.lastRuns[0].trigger, "soft-watermark",
+    "最近一轮 run 的 trigger 为 soft-watermark");
 });

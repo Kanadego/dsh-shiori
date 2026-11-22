@@ -34,6 +34,26 @@ const LAYER_DIRS = [
 /** 发版门禁层专属目录：仅 test:release 收集。 */
 const RELEASE_DIRS = ["release"];
 
+// ---------------------------------------------------------------------------
+// 串行池（§9 债 16 / 10-3）：重网络回环文件不与其它文件并发。
+//
+// 背景：node --test 的并行单位是文件，acceptance 里 loopback-capture（8MiB body +
+// AbortSignal.timeout(8000) 等真实回环 HTTP 用例）与 matrix（runAcceptanceMatrix
+// 的 local-loopback cases + 跨进程重放）对 127.0.0.1 连接挤压最敏感；此前只靠
+// 文件内的跨进程车道锁「尽量错开」（两文件互相错开，但仍与其余全部文件并行抢
+// 回环与 CPU），批次 8 抓到的连接层 flake（fetch failed 同族）根因未除。
+//
+// 实现方式：选层后把文件集一分为二——串行池内文件用第二条 node --test
+// --test-concurrency=1 单独跑（文件间串行、且与本轮其它所有文件物理错开前后两
+// 个进程批次，不是「失败重试洗绿」）；其余文件照旧一条 node --test 默认并发跑。
+// 两批顺序执行、退出码合并（任一批非零即整体非零）。车道锁保留：串行池内两
+// 文件仍靠它互斥，且防 test:p1 等绕过本运行器的直跑路径漏网。
+// ---------------------------------------------------------------------------
+const SERIAL_POOL_FILES = [
+  "acceptance/loopback-capture.test.mjs",
+  "acceptance/matrix.test.mjs",
+];
+
 const mode = process.argv[2];
 const rawArgs = process.argv.slice(3);
 const collectOnly = rawArgs.includes("--collect-only");
@@ -148,8 +168,27 @@ if (collectOnly) {
   process.exit(0);
 }
 
-const res = spawnSync(process.execPath, ["--test", ...files.map((rel) => join(TEST_ROOT, rel))], {
-  stdio: "inherit",
-  cwd: ROOT,
-});
-process.exit(res.status ?? 1);
+const poolFiles = files.filter((rel) => SERIAL_POOL_FILES.includes(rel));
+const restFiles = files.filter((rel) => !SERIAL_POOL_FILES.includes(rel));
+if (poolFiles.length > 0) {
+  console.error(`[run-tests] 串行池：${poolFiles.length} 个重网络文件单批 --test-concurrency=1 后跑（${poolFiles.join(", ")}），其余 ${restFiles.length} 个文件先行默认并发`);
+}
+
+const spawnTests = (extraArgs, rels) => {
+  const r = spawnSync(process.execPath, [...extraArgs, ...rels.map((rel) => join(TEST_ROOT, rel))], {
+    stdio: "inherit",
+    cwd: ROOT,
+  });
+  return r.status ?? 1;
+};
+
+let exitStatus = 0;
+if (restFiles.length > 0) {
+  exitStatus = spawnTests(["--test"], restFiles);
+}
+if (poolFiles.length > 0) {
+  // 串行池无论前批结果如何都跑完（红跑也给全量诊断），退出码取首个非零。
+  const poolStatus = spawnTests(["--test", "--test-concurrency=1"], poolFiles);
+  if (exitStatus === 0) exitStatus = poolStatus;
+}
+process.exit(exitStatus);

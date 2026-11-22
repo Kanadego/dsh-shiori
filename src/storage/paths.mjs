@@ -172,8 +172,11 @@ export async function assertNoCaseCollision(dirPath, filename) {
  * - 逐级 lstat：任何 symlink/junction 组件 → realpath 解析后必须仍在 rootReal 内；
  * - 完全不存在的后缀段跳过（将由创建动作落盘，均为普通目录/文件）；
  * - 根内链接解析后继续沿真实路径检查。
+ * - fs（0.5 批次 10-2）：可选 fs 注入（须提供 lstat/realpath），缺省 node:fs/promises——
+ *   只读装配层（forgetting/auto.mjs 回放源）把 deps.fs 一路传进来，让越根检查
+ *   与 readdir/readFile 同走注入面（缺省行为不变，既有调用零影响）。
  */
-export async function assertNoEscapeViaSymlink(rootReal, targetPath) {
+export async function assertNoEscapeViaSymlink(rootReal, targetPath, fs = fsp) {
   const rel = path.relative(rootReal, targetPath);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
     throw invalidInput('目标路径越出管理根', { targetPath, root: rootReal });
@@ -184,13 +187,13 @@ export async function assertNoEscapeViaSymlink(rootReal, targetPath) {
     probe = path.join(probe, part);
     let st;
     try {
-      st = await fsp.lstat(probe);
+      st = await fs.lstat(probe);
     } catch (err) {
       if (err.code === 'ENOENT') break; // 后续段不存在，停止向上检查
       throw err;
     }
     if (st.isSymbolicLink()) {
-      const real = await fsp.realpath(probe);
+      const real = await fs.realpath(probe);
       const realRel = path.relative(rootReal, real);
       if (realRel.startsWith('..') || path.isAbsolute(realRel)) {
         throw invalidInput('检测到越出管理根的 symlink/junction，拒绝访问', {

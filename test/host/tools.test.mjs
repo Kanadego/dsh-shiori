@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHostBridge } from "../../src/host/index.mjs";
+import { TOOL_OUTPUT_SCHEMAS } from "../../src/plugin/tool-schemas.mjs";
 import { isCodedError } from "../../src/host/errors.mjs";
 import { ACTIVE_CONFIG, createFakeHost, createFakeService } from "./helpers.mjs";
 
@@ -216,6 +217,71 @@ test("memory_search：归档摘要条目原样透传（state=archived、score=0�
   // limit=1 只保留未归档首条：归档条目永远排在未归档之后
   const limited = await host.tools.get("memory_search").execute({ query: "排障", limit: 1 });
   assert.deepEqual(limited.matches.map((m) => m.key), ["warm"]);
+  await bridge.stop();
+});
+
+test("债12 schema 守卫（review-rework a2 R1）：memory_search.matches.items 的 score 放宽为 integer|null 且必填，scoreKind 可选", () => {
+  // 纯静态断言：交叉变异 M10（score 回退 integer-only 并删 scoreKind）曾全绿
+  // 存活——冷卡 score:null 的实现（controller 映射 + tools 合并保留）依赖此
+  // schema 形状，这里把它锁住。只 deepEqual score / scoreKind 两个属性描述符，
+  // 不锁整个 matchEntry（注释文案会正常漂移，不参与守卫）。
+  const items = TOOL_OUTPUT_SCHEMAS.memory_search.properties.matches.items;
+  assert.deepEqual(items.properties.score.oneOf, [{ type: "integer" }, { type: "null" }],
+    "score 放宽为 integer|null：spark 冷卡的 null 是 schema 明确许可值，不是缺省 0");
+  assert.equal(items.properties.score.required, true,
+    "score 必填：两种来源都必带该键（null 也是明确作答，不是缺省）");
+  assert.deepEqual(items.properties.scoreKind, { type: "string" },
+    "scoreKind 存在、类型 string、未标 required（冷卡来源标记，可选字段）");
+});
+
+test("memory_search mixed：topic 冷条目（score=词法命中数）与 spark 冷卡（score=null + scoreKind=spark-cold）同列可区分", async () => {
+  // 0.5-10（债 12）：includeArchived=true 把两类冷条目 map 进同一 matches——
+  // topic 侧 score 是「命中词数」实测值，spark 侧是冷库字面包含匹配（无排序
+  // 信号），score 显式 null + scoreKind 标记来源。合并逻辑必须原样保留两侧
+  // score/scoreKind（不吞 null、不给 spark 卡补 0），调用方按 score===null
+  // 与 scoreKind 即可区分来源。
+  const { host, service, bridge } = await activeBridge();
+  service.search = async () => [
+    { key: "warm", title: "热专题", summary: "排障热版", scopeId: "amber", score: 2 },
+    // topic 冷条目：命中 1 个词（query 只有 1 词）→ score=1，恒 ≥1
+    { key: "cold-topic", title: "冷专题一", summary: "排障冷版一", scopeId: "amber", score: 1, state: "archived" },
+  ];
+  service.searchArchived = async () => [
+    { key: "spark-cold-1", title: "冷卡一", summary: "排障冷卡一", scopeId: "amber", score: null, scoreKind: "spark-cold", state: "archived" },
+    { key: "spark-cold-2", title: "冷卡二", summary: "排障冷卡二", scopeId: "amber", score: null, scoreKind: "spark-cold", state: "archived" },
+  ];
+  const found = await host.tools.get("memory_search").execute({ query: "排障", includeArchived: true });
+  assert.deepEqual(found.matches.map((m) => [m.key, m.score, m.scoreKind ?? null, m.state ?? null]), [
+    ["warm", 2, null, null],
+    ["cold-topic", 1, null, "archived"],   // topic 冷条目：score=命中词数、无 scoreKind
+    ["spark-cold-1", null, "spark-cold", "archived"], // spark 冷卡：score=null + scoreKind
+    ["spark-cold-2", null, "spark-cold", "archived"],
+  ], "两种来源同列可区分：topic 冷条目 score 为正整数命中数，spark 冷卡 score=null + scoreKind=spark-cold");
+  assert.ok(found.matches.every((m) => "score" in m), "score 是 required：两种来源都必带该键（null 也是明确作答）");
+  // 极限截断：limit 压到 spark 卡区间时同样原样保留 null 口径
+  const trimmed = await host.tools.get("memory_search").execute({ query: "排障", includeArchived: true, limit: 3 });
+  assert.deepEqual(trimmed.matches.map((m) => [m.key, m.score]), [
+    ["warm", 2], ["cold-topic", 1], ["spark-cold-1", null],
+  ], "limit 截断不改变 score 语义");
+  await bridge.stop();
+});
+
+test("memory_search mixed：不带 score 的 spark 冷卡（legacy 假 service）出线 score===null（review-rework a2 R3）", async () => {
+  // 合并缺省 null 的守卫：legacy/假 service 的冷卡可能不带 score 字段——缺省
+  // 若是 0 会与「命中 0 词」的测量值混淆，且与 description「score===null 才标识
+  // spark 冷卡」冲突；出线必须显式 null（scoreKind 原样透传不被吞）。
+  const { host, service, bridge } = await activeBridge();
+  service.search = async () => [
+    { key: "warm", title: "热专题", summary: "排障热版", scopeId: "amber", score: 2 },
+  ];
+  service.searchArchived = async () => [
+    { key: "spark-legacy", title: "旧冷卡", summary: "排障旧冷卡", scopeId: "amber", scoreKind: "spark-cold" },
+  ];
+  const found = await host.tools.get("memory_search").execute({ query: "排障", includeArchived: true });
+  assert.deepEqual(found.matches.map((m) => [m.key, m.score, m.scoreKind ?? null, m.state ?? null]), [
+    ["warm", 2, null, null],
+    ["spark-legacy", null, "spark-cold", "archived"],
+  ], "不带 score 的 spark 冷卡出线 score===null + scoreKind=spark-cold（缺省 0 会伪装成测量值）");
   await bridge.stop();
 });
 

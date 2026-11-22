@@ -7,21 +7,26 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { symlink as fsSymlink } from "node:fs/promises";
 
 import {
   AUTO_ARCHIVE_ORIGIN,
   AUTO_FUSE_CODES,
   AUTO_MODES,
   AUTO_OP_KINDS,
+  AUTO_RUN_KEEP,
   assertRunShape,
   autoIdentityKey,
   buildUndoOps,
   computeAutoFuse,
+  createAutoEngine,
   createAutoReplaySource,
   deriveAutoCandidates,
   planAutoOps,
   shouldTriggerAutoEvaluation,
 } from "../../src/forgetting/auto.mjs";
+// 批次 10-2：operationId 重放口径（scopeId 过滤 / 滚动窗口注入）需要真账本。
+import { createStateStore } from "../../src/plugin/state.mjs";
 import { evaluateTopics } from "../../src/forgetting/topic-temperature.mjs";
 import {
   DEFAULT_TEMPERATURE_PARAMS,
@@ -447,6 +452,28 @@ test("常量契约：三档模式 / 两类可逆操作 / 归档来源标记", ()
   assert.equal(AUTO_ARCHIVE_ORIGIN, "auto-inactive");
 });
 
+// ── 批次 10-2：symlink/junction 构造 helper（收敛全文件 4 处 catch→t.skip）────
+// 有符号链接权限的环境必须真跑（skip 就是换机盲区——链接构造不出来时越根/悬空
+// 用例全空转，问题发现不了）；只有构造不了链接的环境（Windows 非管理员且未开
+// 开发者模式等）才允许 skip，且打一行带原因与环境信息的日志，方便换机排查与
+// 核对「0 skipped」。
+
+function linkEnvInfo() {
+  return `platform=${process.platform} node=${process.version}（Windows 构造符号链接需管理员或开发者模式）`;
+}
+
+/** 构造 symlink/junction；失败时打环境日志并 t.skip（返回 false，调用方据此 return）。 */
+async function createLinkOrSkip(t, target, linkPath, type) {
+  try {
+    await fsSymlink(target, linkPath, type);
+    return true;
+  } catch (error) {
+    console.warn(`[skip] ${type} 链接构造失败：${error?.code ?? "?"} ${error?.message ?? ""}；环境：${linkEnvInfo()}——相关越根/悬空用例跳过，本环境结论不代表有权限环境的结论`);
+    t.skip(`当前环境不允许创建${type === "junction" ? "目录链接" : "文件符号链接"}（${error?.code ?? error?.message}）`);
+    return false;
+  }
+}
+
 // ── 装配源（只读；用临时目录验证坏文件降级与 global/active 覆盖）────────────
 
 test("createAutoReplaySource：dataRoot null 全空装配；坏文件跳过计数；global 先、active 覆盖", async () => {
@@ -482,7 +509,7 @@ test("createAutoReplaySource：dataRoot null 全空装配；坏文件跳过计�
 // ── 批次 8-4：readTopics 的越根链接口径与 store/listTopics 对齐 ────────────────
 
 test("createAutoReplaySource：单文件越根 symlink 跳过并计数（与 listTopics 同集合）", async (t) => {
-  const { mkdtemp, mkdir, writeFile, rm, symlink } = await import("node:fs/promises");
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const path = await import("node:path");
   const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-escape-"));
@@ -496,13 +523,7 @@ test("createAutoReplaySource：单文件越根 symlink 跳过并计数（与 lis
   const body = (key, scope, updated) => `---\nkey: ${key}\nscopeId: ${scope}\ntitle: ${key}\nsummary: s\nupdated: ${updated}\n---\n\nbody\n`;
   await writeFile(path.join(topicsDir, "good.md"), body("good", "amber", iso(1)));
   await writeFile(path.join(outsideDir, "evil.md"), body("evil", "amber", iso(1)));
-  try {
-    await symlink(path.join(outsideDir, "evil.md"), path.join(topicsDir, "evil.md"), "file");
-  } catch (error) {
-    // Windows 非开发者模式/无符号链接权限：无法构造越根单文件链接，明确跳过而不假绿。
-    t.skip(`当前环境不允许创建文件符号链接（${error?.code ?? error?.message}）`);
-    return;
-  }
+  if (!(await createLinkOrSkip(t, path.join(outsideDir, "evil.md"), path.join(topicsDir, "evil.md"), "file"))) return;
   const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
   const { rows, skipped } = await live.readTopics("amber");
   assert.deepEqual(rows.map((r) => r.key), ["good"], "越根链接不得进入回放装配（预览少算的根因）");
@@ -510,7 +531,7 @@ test("createAutoReplaySource：单文件越根 symlink 跳过并计数（与 lis
 });
 
 test("createAutoReplaySource：目录级越根 junction 直接拒绝（与 store 快照同口径 INVALID_INPUT）", async (t) => {
-  const { mkdtemp, mkdir, writeFile, rm, symlink } = await import("node:fs/promises");
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const path = await import("node:path");
   const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-escape-dir-"));
@@ -522,12 +543,7 @@ test("createAutoReplaySource：目录级越根 junction 直接拒绝（与 store
   await mkdir(scopeDir, { recursive: true });
   await mkdir(outsideDir, { recursive: true });
   await writeFile(path.join(outsideDir, "evil.md"), `---\nkey: evil\nscopeId: amber\ntitle: evil\nsummary: s\nupdated: ${iso(1)}\n---\n\nbody\n`);
-  try {
-    await symlink(outsideDir, path.join(scopeDir, "topics"), process.platform === "win32" ? "junction" : "dir");
-  } catch (error) {
-    t.skip(`当前环境不允许创建目录链接（${error?.code ?? error?.message}）`);
-    return;
-  }
+  if (!(await createLinkOrSkip(t, outsideDir, path.join(scopeDir, "topics"), process.platform === "win32" ? "junction" : "dir"))) return;
   const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
   await assert.rejects(
     () => live.readTopics("amber"),
@@ -537,7 +553,7 @@ test("createAutoReplaySource：目录级越根 junction 直接拒绝（与 store
 });
 
 test("createAutoReplaySource：悬空单文件 symlink 按坏文件降级（跳过计数，不抛）", async (t) => {
-  const { mkdtemp, mkdir, writeFile, rm, symlink } = await import("node:fs/promises");
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const path = await import("node:path");
   const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-dangling-"));
@@ -546,13 +562,8 @@ test("createAutoReplaySource：悬空单文件 symlink 按坏文件降级（跳�
   await mkdir(topicsDir, { recursive: true });
   await writeFile(path.join(topicsDir, "good.md"),
     `---\nkey: good\nscopeId: amber\ntitle: good\nsummary: s\nupdated: ${iso(1)}\n---\n\nbody\n`);
-  try {
-    // 目标不存在 = 悬空链接（lstat 成功、realpath ENOENT），不得把预览/评估拖垮。
-    await symlink(path.join(base, "missing-target.md"), path.join(topicsDir, "dangling.md"), "file");
-  } catch (error) {
-    t.skip(`当前环境不允许创建文件符号链接（${error?.code ?? error?.message}）`);
-    return;
-  }
+  // 目标不存在 = 悬空链接（lstat 成功、realpath ENOENT），不得把预览/评估拖垮。
+  if (!(await createLinkOrSkip(t, path.join(base, "missing-target.md"), path.join(topicsDir, "dangling.md"), "file"))) return;
   const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
   const { rows, skipped } = await live.readTopics("amber");
   assert.deepEqual(rows.map((r) => r.key), ["good"], "悬空链接不进入装配");
@@ -560,7 +571,7 @@ test("createAutoReplaySource：悬空单文件 symlink 按坏文件降级（跳�
 });
 
 test("createAutoReplaySource：悬空 topics 目录 junction 视为空集合（不抛）", async (t) => {
-  const { mkdtemp, mkdir, rm, symlink } = await import("node:fs/promises");
+  const { mkdtemp, mkdir, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const path = await import("node:path");
   const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-dangling-dir-"));
@@ -568,17 +579,336 @@ test("createAutoReplaySource：悬空 topics 目录 junction 视为空集合（�
   const outside = await mkdtemp(path.join(tmpdir(), "shiori-auto-dangling-target-"));
   t.after(() => rm(outside, { recursive: true, force: true }));
   await mkdir(path.join(base, "scopes", "amber"), { recursive: true });
-  try {
-    await symlink(outside, path.join(base, "scopes", "amber", "topics"), process.platform === "win32" ? "junction" : "dir");
-  } catch (error) {
-    // 构造不出悬空 junction 时如实跳过；本机实测 junction 可用（失败码 EPERM/EACCES）。
-    t.skip(`当前环境不允许创建目录链接（${error?.code ?? error?.message}）`);
-    return;
-  }
+  if (!(await createLinkOrSkip(t, outside, path.join(base, "scopes", "amber", "topics"), process.platform === "win32" ? "junction" : "dir"))) return;
   // 删目标 = 悬空 junction（lstat 成功、realpath ENOENT）。
   await rm(outside, { recursive: true, force: true });
   const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
   const { rows, skipped } = await live.readTopics("amber");
   assert.deepEqual(rows, [], "悬空目录视为该 scope 无 topics");
   assert.equal(skipped, 0, "目录级悬空不计单文件跳过");
+});
+
+// ── 批次 10-2：readGroups 对齐 store 口径（根 realpath + 越根拒 + 悬空降级）────
+
+/** 合法 groups.json 内容（core/groups.mjs validateGroupsData 口径：version 1 + 四字段条目）。 */
+const validGroupsJson = (keys) => JSON.stringify({
+  version: 1,
+  groups: keys.map((key, index) => ({ key, title: `组-${key}`, summary: "s", order: index + 1 })),
+});
+
+test("createAutoReplaySource：readGroups 正常读取 groups.json（根 realpath + 越根检查不误伤正常文件）", async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-groups-"));
+  try {
+    await mkdir(path.join(base, "scopes", "amber"), { recursive: true });
+    await writeFile(path.join(base, "scopes", "amber", "groups.json"), validGroupsJson(["g1"]));
+    const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
+    const groups = await live.readGroups("amber");
+    assert.deepEqual(groups.map((g) => g.key), ["g1"], "正常 groups.json 照常解析（10-2 改动不误伤）");
+    // 无 groups.json 的 scope → 空清单降级（与改前 readFileOrNull 口径一致）。
+    assert.deepEqual(await live.readGroups("global"), []);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("createAutoReplaySource：readGroups 越根（groups.json 指向根外）直接拒（对齐 store 口径 INVALID_INPUT）", async (t) => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-groups-esc-"));
+  const outsideBase = await mkdtemp(path.join(tmpdir(), "shiori-auto-groups-out-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  t.after(() => rm(outsideBase, { recursive: true, force: true }));
+  await mkdir(path.join(base, "scopes", "amber"), { recursive: true });
+  // 根外放一份内容完全合法的 groups.json：证明拒绝原因是越根链接而非坏内容。
+  await writeFile(path.join(outsideBase, "groups.json"), validGroupsJson(["evil"]));
+  if (!(await createLinkOrSkip(t, path.join(outsideBase, "groups.json"), path.join(base, "scopes", "amber", "groups.json"), "file"))) return;
+  const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
+  await assert.rejects(
+    () => live.readGroups("amber"),
+    (error) => error.code === "INVALID_INPUT" && /越出管理根/.test(error.message),
+    "groups.json 指向根外时与 store readGroups（storage/groups.mjs）同判：拒绝，绝不静默读根外内容",
+  );
+});
+
+test("createAutoReplaySource：readGroups 悬空 groups.json 按空清单降级（不抛）", async (t) => {
+  const { mkdtemp, mkdir, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-groups-dang-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await mkdir(path.join(base, "scopes", "amber"), { recursive: true });
+  // 目标不存在 = 悬空链接（lstat 成功、realpath ENOENT）→ 坏文件降级。
+  if (!(await createLinkOrSkip(t, path.join(base, "missing-groups-target.json"), path.join(base, "scopes", "amber", "groups.json"), "file"))) return;
+  const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
+  const groups = await live.readGroups("amber");
+  assert.deepEqual(groups, [], "悬空 groups.json 按空清单降级，不拖垮评估");
+});
+
+test("createAutoReplaySource：readGroups 的 groups.json 自指循环链接（ELOOP）按空清单降级（不抛）", async (t) => {
+  const { mkdtemp, mkdir, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-groups-eloop-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await mkdir(path.join(base, "scopes", "amber"), { recursive: true });
+  // groups.json → groups.json 自指循环（lstat 成功、realpath 报 ELOOP；Windows
+  // 实测自指链接 realpath 报 ELOOP，互指循环报 ENOENT）——readGroups 的
+  // ELOOP→[] 分支（degradableLinkError 命中）独立成用例，不靠 topics 用例顺带。
+  if (!(await createLinkOrSkip(t, path.join(base, "scopes", "amber", "groups.json"), path.join(base, "scopes", "amber", "groups.json"), "file"))) return;
+  const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
+  const groups = await live.readGroups("amber");
+  assert.deepEqual(groups, [], "ELOOP groups.json 按空清单降级：不抛、不拖垮评估");
+});
+
+test("createAutoReplaySource：ELOOP 循环链接按坏文件降级（skipped 计数，不抛）", async (t) => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-eloop-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const topicsDir = path.join(base, "scopes", "amber", "topics");
+  await mkdir(topicsDir, { recursive: true });
+  await writeFile(path.join(topicsDir, "good.md"),
+    `---\nkey: good\nscopeId: amber\ntitle: good\nsummary: s\nupdated: ${iso(1)}\n---\n\nbody\n`);
+  // 自指循环链接：loop.md → loop.md（lstat 成功、realpath ELOOP；Windows 实测
+  // 自指链接 realpath 报 ELOOP）。
+  if (!(await createLinkOrSkip(t, path.join(topicsDir, "loop.md"), path.join(topicsDir, "loop.md"), "file"))) return;
+  const live = createAutoReplaySource({ dataRoot: base, stateRoot: null });
+  const { rows, skipped } = await live.readTopics("amber");
+  assert.deepEqual(rows.map((r) => r.key), ["good"], "循环链接不进入装配，其余文件照常读出");
+  assert.equal(skipped, 1, "ELOOP 命中 degradableLinkError → 计 skipped，不抛");
+});
+
+// ── 批次 10-2：deps.fs 注入面（realpath/lstat/readGroups 全走注入，删注入必须红）────
+
+test("createAutoReplaySource：deps.fs 注入生效——假 realpath 报 ENOENT 按空装配降级（管理根 realpath 走注入面）", async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  // 真盘存在且内容齐全：若实现写死 fsp.realpath（真根存在），本用例会拿到非空
+  // rows 而 fail——红即证明管理根 realpath 走注入面。
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-inj-root-"));
+  try {
+    await mkdir(path.join(base, "scopes", "amber", "topics"), { recursive: true });
+    await writeFile(path.join(base, "scopes", "amber", "topics", "good.md"),
+      `---\nkey: good\nscopeId: amber\ntitle: good\nsummary: s\nupdated: ${iso(1)}\n---\n\nbody\n`);
+    const real = await import("node:fs/promises");
+    const realpathCalls = [];
+    const fakeFs = {
+      readdir: real.readdir,
+      readFile: real.readFile,
+      lstat: real.lstat,
+      realpath: async (p) => {
+        realpathCalls.push(p);
+        const error = new Error("fake ENOENT");
+        error.code = "ENOENT";
+        throw error;
+      },
+    };
+    const live = createAutoReplaySource({ dataRoot: base, stateRoot: null, fs: fakeFs });
+    const { rows, skipped } = await live.readTopics("amber");
+    assert.deepEqual(rows, [], "注入的 realpath 报 ENOENT → 与真盘缺失同口径：空装配降级");
+    assert.equal(skipped, 0);
+    assert.deepEqual(realpathCalls, [base], "realpath 注入被调用且收到 dataRoot（管理根身份走注入面）");
+    // readGroups 的管理根 realpath 同走注入面（同款降级）：清空采集后单独断言
+    // readGroups 的调用确实经过注入 realpath——若实现把 readGroups 的根 realpath
+    // 写死 fsp.realpath（真根存在、readGroups 照样返回 []），这段断言即红（评审 R1，
+    // 交叉变异自证）。清空后断言精确 [base]，未来新增调用也会被立刻暴露。
+    realpathCalls.length = 0;
+    assert.deepEqual(await live.readGroups("amber"), []);
+    assert.deepEqual(realpathCalls, [base], "readGroups 的管理根 realpath 走注入面且收到 dataRoot（写死 fsp.realpath 必红）");
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("createAutoReplaySource：deps.fs 注入生效——假 lstat/realpath 报告越根链接时拒绝（逐级链接判定走注入面）", async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  // 真盘无任何链接：若实现写死 fsp.lstat/fsp.realpath（真盘判定：无链接不越根），
+  // 本用例会正常读出 rows 而 fail——红即证明越根检查走注入面。
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-inj-link-"));
+  try {
+    await mkdir(path.join(base, "scopes", "amber", "topics"), { recursive: true });
+    await writeFile(path.join(base, "scopes", "amber", "topics", "good.md"),
+      `---\nkey: good\nscopeId: amber\ntitle: good\nsummary: s\nupdated: ${iso(1)}\n---\n\nbody\n`);
+    const topicsDir = path.join(base, "scopes", "amber", "topics");
+    // 假实现：topics 目录是符号链接，解析到工作根之外（tmpdir 下与 base 平级的目录）。
+    const escapeTarget = path.join(path.dirname(base), "outside-escape");
+    const real = await import("node:fs/promises");
+    const fakeFs = {
+      readdir: real.readdir,
+      readFile: real.readFile,
+      lstat: async (p) => ({ isSymbolicLink: () => p === topicsDir }),
+      realpath: async (p) => (p === topicsDir ? escapeTarget : p),
+    };
+    const live = createAutoReplaySource({ dataRoot: base, stateRoot: null, fs: fakeFs });
+    await assert.rejects(
+      () => live.readTopics("amber"),
+      (error) => error.code === "INVALID_INPUT" && /越出管理根/.test(error.message),
+      "注入假实现报告 topics 目录越根 → 与真链接同判拒绝（assertNoEscapeViaSymlink 吃注入 fs）",
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("createAutoReplaySource：readGroups 走注入 fs——真盘无文件、假 readFile 提供内容才能解析（写死 readFileOrNull 则红）", async () => {
+  const { mkdtemp, mkdir, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-inj-groups-"));
+  try {
+    await mkdir(path.join(base, "scopes", "amber"), { recursive: true });
+    const groupsPath = path.join(base, "scopes", "amber", "groups.json");
+    const real = await import("node:fs/promises");
+    const fakeFs = {
+      readdir: real.readdir,
+      lstat: real.lstat,
+      realpath: async (p) => p, // 恒等：规避 tmpdir 短名/大小写差异，保证路径比较一致
+      readFile: async (p) => {
+        if (p === groupsPath) {
+          return Buffer.from(validGroupsJson(["g1"]), "utf8");
+        }
+        const error = new Error("fake ENOENT");
+        error.code = "ENOENT";
+        throw error;
+      },
+    };
+    const live = createAutoReplaySource({ dataRoot: base, stateRoot: null, fs: fakeFs });
+    const groups = await live.readGroups("amber");
+    assert.deepEqual(groups.map((g) => g.key), ["g1"], "readGroups 的文件读取走注入面：真盘无此文件，只有注入 fs 能提供内容");
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+// ── 批次 10-2：operationId 重放口径（scopeId 过滤 + 滚动窗口）────────────────
+
+/** 引擎/账本用例的最小 run 形状（apply 产物字段对齐）。 */
+function dummyRun(overrides = {}) {
+  return {
+    runId: "r",
+    at: NOW,
+    scopeId: "amber",
+    trigger: "human-turn",
+    mode: "auto",
+    operationId: "op",
+    undoneAt: null,
+    ops: [],
+    ...overrides,
+  };
+}
+
+/** 建临时 stateRoot + createStateStore（autoRunKeepLimit 可注入）。 */
+async function withTempState(t, { autoRunKeepLimit } = {}) {
+  const { mkdtemp, mkdir, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const base = await mkdtemp(path.join(tmpdir(), "shiori-auto-opid-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const stateRoot = path.join(base, "state");
+  await mkdir(stateRoot, { recursive: true });
+  const options = autoRunKeepLimit === undefined ? {} : { autoRunKeepLimit };
+  return createStateStore({ stateRoot, ...options });
+}
+
+test("autoStore.getRunByOperationId：scopeId 过滤——跨 scope 同 opId 不串；两参必填 fail-fast", async (t) => {
+  const store = await withTempState(t);
+  await store.autoStore.recordRun(dummyRun({ runId: "r-amber", operationId: "op-x", scopeId: "amber" }));
+  const hit = await store.autoStore.getRunByOperationId("op-x", "amber");
+  assert.equal(hit?.runId, "r-amber", "本 scope 同 opId 命中");
+  assert.equal(await store.autoStore.getRunByOperationId("op-x", "delta"), null, "跨 scope 同 opId 不得命中别人的 run");
+  assert.equal(await store.autoStore.getRunByOperationId("op-y", "amber"), null, "未知 opId 不命中");
+  await assert.rejects(() => store.autoStore.getRunByOperationId("op-x"), (e) => e.code === "INVALID_INPUT", "缺 scopeId fail-fast");
+  await assert.rejects(() => store.autoStore.getRunByOperationId("", "amber"), (e) => e.code === "INVALID_INPUT");
+  await assert.rejects(() => store.autoStore.getRunByOperationId("op-x", ""), (e) => e.code === "INVALID_INPUT");
+});
+
+test("autoStore.recordRun：缺省滚动窗口与 AUTO_RUN_KEEP 同源（第 51 条逐出最旧）", async (t) => {
+  const store = await withTempState(t);
+  for (let i = 0; i < AUTO_RUN_KEEP; i += 1) {
+    await store.autoStore.recordRun(dummyRun({ runId: `r-${String(i).padStart(2, "0")}`, operationId: `op-${i}` }));
+  }
+  const full = await store.autoStore.read();
+  assert.equal(full.state.runs.length, AUTO_RUN_KEEP, "窗口上限 = AUTO_RUN_KEEP");
+  await store.autoStore.recordRun(dummyRun({ runId: "r-new", operationId: "op-new" }));
+  const after = await store.autoStore.read();
+  assert.equal(after.state.runs.length, AUTO_RUN_KEEP);
+  assert.equal(after.state.runs[0].runId, "r-01", "最旧被裁");
+  assert.equal(await store.autoStore.getRunByOperationId("op-0", "amber"), null, "被逐出的 opId 查不到（窗口外）");
+  assert.equal((await store.autoStore.getRunByOperationId("op-49", "amber"))?.runId, "r-49", "窗口内 opId 照常命中");
+});
+
+test("createStateStore：autoRunKeepLimit 注入生效（整数 ≥1，非法拒绝）", async (t) => {
+  const store = await withTempState(t, { autoRunKeepLimit: 2 });
+  await store.autoStore.recordRun(dummyRun({ runId: "r-1", operationId: "op-1" }));
+  await store.autoStore.recordRun(dummyRun({ runId: "r-2", operationId: "op-2" }));
+  await store.autoStore.recordRun(dummyRun({ runId: "r-3", operationId: "op-3" }));
+  const read = await store.autoStore.read();
+  assert.deepEqual(read.state.runs.map((r) => r.runId), ["r-2", "r-3"], "注入窗口 2 → 只留最近两条");
+  await assert.rejects(() => withTempState(t, { autoRunKeepLimit: 0 }), (e) => e.code === "INVALID_INPUT");
+  await assert.rejects(() => withTempState(t, { autoRunKeepLimit: 1.5 }), (e) => e.code === "INVALID_INPUT");
+});
+
+// ── 批次 10-2：apply 重放口径（窗口内重放 / 逐出重跑 / 跨 scope 不串）────────────
+
+/** 引擎用例的空装配回放源（无候选 → 不触执行路径）+ 一条远古种子事件（不熔断）。 */
+function emptyReplaySource() {
+  return {
+    readTopics: async () => ({ rows: [], skipped: 0 }),
+    readGroups: async () => [],
+    readLedger: async () => ({
+      events: [{ at: iso(90), scopeId: "amber", kind: "search_hit", topicKey: "__seed__" }],
+      skipped: 0,
+      error: null,
+    }),
+  };
+}
+
+function engineFor(store) {
+  return createAutoEngine({
+    nowIso: () => NOW,
+    mode: () => "auto",
+    params: () => params(),
+    replaySource: emptyReplaySource(),
+    serviceFor: async () => {
+      throw new Error("本用例无候选，serviceFor 不应被调用");
+    },
+    store: store.autoStore,
+  });
+}
+
+test("auto apply：窗口内同 operationId 重放首次结果；逐出窗口后重跑（autoRunKeepLimit=1）", async (t) => {
+  const store = await withTempState(t, { autoRunKeepLimit: 1 });
+  const engine = engineFor(store);
+  const first = await engine.apply({ scopeId: "amber", trigger: "human-turn", operationId: "op-w" });
+  assert.equal(first.replay, false);
+  assert.equal(first.applied, 0);
+  const second = await engine.apply({ scopeId: "amber", trigger: "human-turn", operationId: "op-w" });
+  assert.equal(second.replay, true, "窗口内命中 → 重放首次结果");
+  assert.equal(second.runId, first.runId, "重放返回同一 run");
+  // keep=1：一条新 run 即把 op-w 的 run 逐出窗口 → 同 opId 按新执行重跑。
+  await store.autoStore.recordRun(dummyRun({ runId: "r-other", operationId: "op-other", scopeId: "delta" }));
+  const third = await engine.apply({ scopeId: "amber", trigger: "human-turn", operationId: "op-w" });
+  assert.equal(third.replay, false, "run 被逐出滚动窗口后同 opId 重跑（注释口径：单操作幂等靠底层 journal）");
+  assert.notEqual(third.runId, first.runId, "重跑产生新 run");
+});
+
+test("auto apply：跨 scope 同 operationId 不串（重放命中必须 scopeId 一致）", async (t) => {
+  const store = await withTempState(t);
+  const engine = engineFor(store);
+  const amberRun = await engine.apply({ scopeId: "amber", trigger: "human-turn", operationId: "op-shared" });
+  assert.equal(amberRun.replay, false);
+  const deltaRun = await engine.apply({ scopeId: "delta", trigger: "human-turn", operationId: "op-shared" });
+  assert.equal(deltaRun.replay, false, "delta 不得重放 amber 的 run（旧实现全量 scan 会串）");
+  assert.notEqual(deltaRun.runId, amberRun.runId);
+  const deltaAgain = await engine.apply({ scopeId: "delta", trigger: "human-turn", operationId: "op-shared" });
+  assert.equal(deltaAgain.replay, true, "delta 自己的窗口内重放照常命中");
+  assert.equal(deltaAgain.runId, deltaRun.runId);
 });
