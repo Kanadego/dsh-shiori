@@ -88,8 +88,11 @@ test("Config 是原生 Schemastery schema 且可解析缺省输入", () => {
   assert.deepEqual(parsed.budgets.get(), PLUGIN_DEFAULT_BUDGETS);
   assert.equal(parsed.l2.enabled, false);
   assert.equal(parsed.organize.enabled, false);
-  assert.equal(parsed.forgetting.enabled, false);
-  assert.deepEqual(parsed.forgetting.policy, { baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 });
+  // 0.5 批次 13 起 forgetting 整块打了 .volatile()：宿主把值换成 cosmokit 引用对象
+  // （同 budgets，经 configValue 解包），判据不变。
+  const forgettingDefault = configValue(parsed.forgetting);
+  assert.equal(forgettingDefault.enabled, false);
+  assert.deepEqual(forgettingDefault.policy, { baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 });
   // null-able 字段缺省时被 schema 省略；normalize 权威补 null。
   // defaultPersona 打了 volatile 后，schemastery 的可空缺省路径会把它包成
   // get()===undefined 的引用（显式 null 才得到 null），normalize 两种都归一成 null。
@@ -145,6 +148,40 @@ test("Config schema：sessionPersonas / workspacePersonas / semantic 标记为 v
   // 落盘根仍不可热写：这两个字段改了要重新装配才有意义。
   assert.equal(isVolatilePath(Config, ["dataRoot"]), false);
   assert.equal(isVolatilePath(Config, ["stateRoot"]), false);
+});
+
+// 宿主 dsh-settings write() 的拒绝文案原型：非 volatile 路径直接报
+// `Config field "<path>" is not volatile`（code=settings/rejected）。复刻拒绝行为，
+// 断言面板三档切换写 forgetting 时不会被它挡下——去掉 .volatile() 即变红（回归钉）。
+function hostRejectIfNotVolatile(schema, path) {
+  if (isVolatilePath(schema, path)) return;
+  const error = new Error(`Config field "${path.join(".")}" is not volatile`);
+  error.code = "settings/rejected";
+  throw error;
+}
+
+test("0.5 批次 13：forgetting 整块 volatile（schema meta + 引用对象 + 宿主放行判据三层）", () => {
+  // 真机缺陷：面板顶部「建议 / 自动 / 关闭」三档切换写 forgetting.autoMode 被宿主拒
+  // —— settings/rejected  Config field "forgetting.autoMode" is not volatile。
+  // 与 semantic / temperature 同款：叶子单独标仍会被同段未标字段挡下，故整块标记。
+  const writePaths = [
+    ["forgetting"],
+    ["forgetting", "autoMode"],
+    ["forgetting", "policy", "baseHalfLifeDays"],
+  ];
+  // 第一层：schema meta 整块标记为 volatile。
+  assert.equal(Config.dict.forgetting.meta.volatile, true, "forgetting 的 schema meta 必须带 volatile");
+  // 第二层：解析后给出带 cosmokit.volatile.write 标记的引用对象。
+  const parsed = Config({});
+  const ref = parsed.forgetting;
+  assert.equal(typeof ref.get, "function", "forgetting 应被替换成 cosmokit 引用对象");
+  assert.ok(VOLATILE_WRITE in ref, "forgetting 引用对象应带 cosmokit.volatile.write 标记");
+  assert.deepEqual(configValue(ref), { enabled: false, autoMode: "suggest", policy: { baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 } });
+  // 第三层：宿主放行判据命中 + 复刻 write() 三路径都不抛「is not volatile」。
+  for (const path of writePaths) {
+    assert.equal(isVolatilePath(Config, path), true, `写入路径 ${path.join(".")} 必须命中 volatile`);
+    assert.doesNotThrow(() => hostRejectIfNotVolatile(Config, path), `宿主不应拒绝 ${path.join(".")}`);
+  }
 });
 
 test("Config schema 序列化为 JSON Schema 形状且接受显式 null 与完整样例", () => {

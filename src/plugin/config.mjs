@@ -277,6 +277,13 @@ export const Config = z.object({
     clustersVersion: z.natural().default(1),
   }).default({ enabled: false, clustersVersion: 1 }).description("L2 闪回自动投递开关（含闪回图谱分簇规则版本）"),
   organize: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }).description("整理（候选/计划/执行）开关"),
+  // volatile：0.5 批次 13 起「设置 → 记忆整理」面板顶部的「建议 / 自动 / 关闭」三档
+  // 切换直接写 forgetting.autoMode（连同 policy/enabled 一并热写）。宿主 dsh-settings
+  // write() 只放行 schema 里 meta.volatile 的路径，非 volatile 路径直接报
+  // Config field "forgetting.autoMode" is not volatile——与 budgets / semantic /
+  // temperature 同款理由，故整块标记（叶子单独标会被 "Config field
+  // forgetting.enabled is not volatile" 挡下）。标记后值以 cosmokit volatile 引用
+  // 交给插件，normalize 处经 unwrapVolatile 解包。
   forgetting: z.object({
     enabled: z.boolean().default(false).description("遗忘（分析/计划/执行）开关；显式 includeArchived 冷搜不受此开关限制"),
     // 0.5 批次 5 · A 线（§7 / §11.2.3 三档模式）：off 只记账不计算；suggest 只出
@@ -288,7 +295,7 @@ export const Config = z.object({
       maxHalfLifeDays: z.number().default(240),
       archiveScore: z.number().default(0.25),
     }).default({ baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 }),
-  }).default({ enabled: false, autoMode: "suggest", policy: { baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 } }).description("双轨遗忘"),
+  }).default({ enabled: false, autoMode: "suggest", policy: { baseHalfLifeDays: 30, maxHalfLifeDays: 240, archiveScore: 0.25 } }).volatile().description("双轨遗忘"),
   // volatile：0.5 批次 4 起「设置 → 记忆整理」面板要整块热写这 12 项（§11.2.6，
   // 先预览后应用）。宿主 dsh-settings 只收纳「schema 里至少一个 meta.volatile 字段」
   // 的命名空间、write() 对非 volatile 路径直接拒绝——与 budgets / semantic 同款理由，
@@ -753,7 +760,9 @@ export function normalizePluginConfig(raw, { profileRoot } = {}) {
   const budgets = normalizeBudgets(unwrapVolatile(raw.budgets));
   const l2 = normalizeL2(raw.l2);
   const organize = normalizeSwitch(raw.organize, "organize");
-  const forgetting = normalizeForgetting(raw.forgetting);
+  // forgetting 整块打了 volatile（0.5 批次 13）：宿主交过来的是 cosmokit 引用对象，
+  // 先解包再校验（与 budgets / semantic / temperature 同款）。
+  const forgetting = normalizeForgetting(unwrapVolatile(raw.forgetting));
   // semantic 整块打了 volatile：宿主交过来的是 cosmokit 引用对象，先解包再校验。
   const semantic = normalizeSemantic(unwrapVolatile(raw.semantic));
   // temperature 整块打了 volatile（0.5 批次 4 · A 线）：同样先解包，再经唯一源头
