@@ -27,7 +27,7 @@ export function checkPackageJson(pkg) {
   expect(pkg.name === "dsh-shiori", `name should be dsh-shiori, got ${pkg.name}`);
   // 版本号只认 package.json 这一处真源：这里只校验 semver 形状，不再钉死某个数字
   // （钉死会让每次发版都要改脚本，2026-11-02 发 v0.2.0 时踩过一次）。
-  expect(/^\d+\.\d+\.\d+$/.test(pkg.version), `version must be plain semver, got ${pkg.version}`);
+  expect(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(pkg.version), `version must be semver (prerelease allowed), got ${pkg.version}`);
   expect(pkg.private === undefined, "private must be gone (the package is published)");
   expect(pkg.type === "module", "type must be module");
   expect(pkg.main === "index.mjs", "main must be index.mjs");

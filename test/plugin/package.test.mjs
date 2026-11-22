@@ -71,8 +71,8 @@ const pSubmission = findLatestPSubmission();
 
 test("package.json：包名/版本/license 如实标注（公开发布态）", () => {
   assert.equal(pkg.name, "dsh-shiori");
-  // 版本号以 package.json 为真源，这里只校验 semver 形状（发版不用再改测试）
-  assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
+  // 版本号以 package.json 为真源，这里只校验 semver 形状（发版不用再改测试；允许 -beta.N 这类预发布后缀）
+  assert.match(pkg.version, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
   assert.equal(pkg.private, undefined, "publishing requires the private flag to be gone");
   assert.equal(pkg.license, "CC-BY-NC-SA-4.0", "license is CC BY-NC-SA 4.0, matching the LICENSE file");
   assert.equal(pkg.type, "module");
