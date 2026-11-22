@@ -1,11 +1,13 @@
-// 0.5-13-4：人设与核心（soul）新页测试。
+// 0.5-13-4 / 13-5：人设与核心（soul）页测试。
 // 证据级别与 ui-memory / ui-budget 一致：真实执行 client/index.js（ui-harness 的
 // fake window.__ModuleLoader__ + 有状态 react stub + 真实宿主 zod），直接渲染
 // SoulTab 组件函数（SYNTHETIC，非浏览器实机）。
 //
 // 覆盖：
-// - 三段结构（选卡 / 编辑 / 每轮注入的顺序）；
-// - 选卡：工作区 select / 会话 select / 当前生效卡徽标 / 默认人设卡 select + 保存回调；
+// - 页面结构（13-5 去重）：选卡整卡已撤（工作区 / 会话 / 当前生效卡 / 默认人设卡
+//   全在壳条），本页只剩编辑 + 每轮注入顺序；
+// - 「正在编辑」选择器：选项来自 getStatus.personas、选中项 = getStatus.scope；
+//   换选调用 props.onSwitchPersona（壳层 personaWrite 链路）并重载 getMemoryView；
 // - 注入顺序五行：数字全部来自 DTO（换 DTO 数字随之变化、取不到写「—」）；
 // - 编辑：核心记忆保存带 expectedRevision；冲突提示「记忆已在别处更新」且保留草稿；
 //   对比改动 / 恢复上一版。
@@ -50,10 +52,11 @@ function memoryView(l1Text, extra = {}) {
 }
 
 // SoulTab useState 顺序（面板 9 个之后）：status / view / loadError / editKind /
-// drafts / busy / saveError / saveOk / diffOpen / guard。
-const SOUL_STATES = 10;
+// drafts / busy / saveError / saveOk / diffOpen / guard / switchBusy / switchError /
+// switchOk（13-5 追加的后三个）。
+const SOUL_STATES = 13;
 
-async function mountSoulTab() {
+async function locateSoulTab() {
   const host = makeStatefulReact();
   const { sectionVNode } = await applyPanel(host);
   host.states.length = 0;
@@ -61,21 +64,9 @@ async function mountSoulTab() {
   host.cursor.v = 0;
   const sectionTree = sectionVNode.type(sectionVNode.props);
   const soulTab = flattenVNode(sectionTree)
-    .find((n) => typeof typeof n.type === "function" && n.type.name === "SoulTab");
+    .find((n) => typeof n.type === "function" && n.type.name === "SoulTab");
   assert.ok(soulTab, "SoulTab reached through real slot render");
-  return (props) => {
-    host.states.length = Math.max(host.states.length, PANEL_STATES + SOUL_STATES);
-    host.cursor.v = PANEL_STATES;
-    return soulTab.type(Object.assign({
-      sessionId: "session-A",
-      sessions: [{ sessionId: "session-A", title: "会话 A" }, { sessionId: "session-B", title: "会话 B" }],
-      workspaces: [{ workspaceId: "ws-1", title: "项目甲", path: "D:/proj/a" }],
-      workspaceId: "ws-1",
-      defaultPersonaValue: "amber",
-      defaultPersonaOptions: ["amber", "engine"],
-      readOnly: false,
-    }, props));
-  };
+  return { host, soulTab };
 }
 
 function statefulRender(host, render) {
@@ -97,58 +88,101 @@ function baseDsh(onCall) {
   };
 }
 
-test("Soul：三段结构 + 选卡（工作区/会话/当前生效卡/默认卡保存回调）", async () => {
-  const host = makeStatefulReact();
-  const { sectionVNode } = await applyPanel(host);
-  host.states.length = 0;
-  host.states.push("soul", "session-A", "", null, { mode: "active" });
-  host.cursor.v = 0;
-  const sectionTree = sectionVNode.type(sectionVNode.props);
-  const soulTab = flattenVNode(sectionTree).find((n) => typeof n.type === "function" && n.type.name === "SoulTab");
-  let saved = 0;
+test("Soul：13-5 去重后只剩编辑 + 注入顺序；选卡整卡与默认卡保存控件已撤", async () => {
+  const { host, soulTab } = await locateSoulTab();
+  host.states.length = Math.max(host.states.length, PANEL_STATES + SOUL_STATES);
   host.states[PANEL_STATES] = statusDto();
   host.states[PANEL_STATES + 1] = memoryView("CORE BODY");
   host.cursor.v = PANEL_STATES;
-  const tree = soulTab.type({
-    sessionId: "session-A",
-    dsh: baseDsh(),
-    sessions: [{ sessionId: "session-A", title: "会话 A" }, { sessionId: "session-B", title: "会话 B" }],
-    workspaces: [{ workspaceId: "ws-1", title: "项目甲", path: "D:/proj/a" }],
-    workspaceId: "ws-1",
-    defaultPersonaValue: "amber",
-    defaultPersonaOptions: ["amber", "engine"],
-    onSaveDefaultPersona: () => { saved += 1; },
-    readOnly: false,
-  });
+  const tree = soulTab.type({ sessionId: "session-A", dsh: baseDsh(), readOnly: false });
   const flat = flattenVNode(tree);
-  for (const role of ["soul-select-card", "soul-edit-card", "soul-order-card"]) {
-    assert.ok(flat.some((n) => n.props && n.props["data-role"] === role), "三段结构：" + role);
+  for (const role of ["soul-edit-card", "soul-order-card"]) {
+    assert.ok(flat.some((n) => n.props && n.props["data-role"] === role), "保留的卡片：" + role);
   }
-  const workspaceSelect = flat.find((n) => n.props && n.props["data-role"] === "soul-workspace-select");
-  assert.ok(workspaceSelect && workspaceSelect.type === "select", "工作区 select 存在");
-  assert.deepEqual(flattenVNode(workspaceSelect).filter((c) => c.type === "option").map((o) => collectText(o)),
-    ["所有工作区", "项目甲"], "工作区选项来自宿主列表");
-  const sessionSelect = flat.find((n) => n.props && n.props["data-role"] === "soul-session-select");
-  assert.ok(sessionSelect && sessionSelect.type === "select", "会话 select 存在");
-  assert.equal(sessionSelect.props.value, "session-A", "会话 select 回显当前会话");
-  const badge = flat.find((n) => n.props && n.props["data-role"] === "soul-current-badge");
-  assert.equal(badge.children.join(""), "amber", "当前生效卡徽标来自 getStatus.scope");
-  const defaultSelect = flat.find((n) => n.props && n.props["data-role"] === "soul-default-select");
-  assert.equal(defaultSelect.props.value, "amber", "默认人设卡 select 回显");
-  const saveBtn = flat.find((n) => n.props && n.props["data-role"] === "soul-save-default");
-  assert.ok(saveBtn, "保存默认卡按钮");
-  saveBtn.props.onClick();
-  assert.equal(saved, 1, "保存默认卡复用既有写入回调");
+  // 整卡撤除的新形态：选卡卡与四个壳条同源控件都不在本页。
+  assert.equal(flat.some((n) => n.props && n.props["data-role"] === "soul-select-card"), false, "选卡整卡不再渲染");
+  for (const role of ["soul-workspace-select", "soul-session-select", "soul-session-input",
+    "soul-current-badge", "soul-default-select", "soul-save-default"]) {
+    assert.equal(flat.some((n) => n.props && n.props["data-role"] === role), false, "选卡卡内控件已撤：" + role);
+  }
+
+  // 「正在编辑」选择器：选项来自 getStatus.personas，选中项 = getStatus.scope。
+  const personaSelect = flat.find((n) => n.props && n.props["data-role"] === "soul-edit-persona-select");
+  assert.ok(personaSelect && personaSelect.type === "select", "正在编辑选择器存在");
+  assert.equal(personaSelect.props.value, "amber", "选中项 = getStatus.scope");
+  const optionValues = flattenVNode(personaSelect).filter((c) => c.type === "option").map((o) => o.props.value);
+  assert.deepEqual(optionValues, ["", "amber", "engine"], "选项来自 getStatus.personas（含当前卡占位项）");
+  assert.ok(collectText(flattenVNode(personaSelect).find((c) => c.type === "option")) .includes("当前：amber"), "占位项标明当前卡");
+});
+
+test("Soul：换选「正在编辑」→ 调用 onSwitchPersona 并重载 getMemoryView（编辑器换成新卡正文）", async () => {
+  const { host, soulTab } = await locateSoulTab();
+  const calls = [];
+  let viewText = "PERSONA A";
+  let switchCalls = 0;
+  const dsh = baseDsh((method) => {
+    calls.push(method);
+    if (method === "getStatus") return statusDto();
+    if (method === "getMemoryView") {
+      return { l0: { text: viewText, revision: "r", chars: viewText.length, budget: 12000, stale: false }, l1: { text: "", body: "", revision: "r1", chars: 0, budget: 8000, hardCap: 14000 } };
+    }
+    return undefined;
+  });
+  const render = (props = {}) => {
+    host.cursor.v = PANEL_STATES;
+    return soulTab.type(Object.assign({ sessionId: "session-A", dsh, readOnly: false }, props));
+  };
+  host.states.length = Math.max(host.states.length, PANEL_STATES + SOUL_STATES);
+  host.states[PANEL_STATES] = statusDto();
+  host.states[PANEL_STATES + 1] = memoryView("CORE A");
+  let tree = render({
+    onSwitchPersona: async (name) => { switchCalls += 1; assert.equal(name, "engine", "onSwitchPersona 收到新卡名"); viewText = "PERSONA B"; return { ok: true }; }
+  });
+  const before = flattenVNode(tree).find((n) => n.type === "textarea");
+  assert.equal(before.props.value, "PERSONA", "初始编辑器取当前卡（L0）正文");
+
+  const select = flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "soul-edit-persona-select");
+  const viewCallsBefore = calls.filter((m) => m === "getMemoryView").length;
+  select.props.onChange({ target: { value: "engine" } });
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  tree = render();
+  assert.equal(switchCalls, 1, "换选一次调用一次 onSwitchPersona");
+  assert.ok(calls.filter((m) => m === "getMemoryView").length > viewCallsBefore, "成功后重取 getMemoryView（编辑器换新卡正文）");
+  const after = flattenVNode(tree).find((n) => n.type === "textarea");
+  assert.equal(after.props.value, "PERSONA B", "编辑器已换成新卡正文");
+  assert.ok(collectText(tree).includes("已切换到「engine」"), "成功反馈可见");
+});
+
+test("Soul：换卡失败 → ErrorBox 口径显示错误且不重载视图", async () => {
+  const { host, soulTab } = await locateSoulTab();
+  const calls = [];
+  const dsh = baseDsh((method) => {
+    calls.push(method);
+    if (method === "getStatus") return statusDto();
+    return undefined;
+  });
+  const render = () => {
+    host.cursor.v = PANEL_STATES;
+    return soulTab.type({ sessionId: "session-A", dsh, readOnly: false, onSwitchPersona: async () => ({ ok: false, error: { code: "shiori/ui-persona-conflict", message: "切换失败：冲突" } }) });
+  };
+  host.states.length = Math.max(host.states.length, PANEL_STATES + SOUL_STATES);
+  host.states[PANEL_STATES] = statusDto();
+  host.states[PANEL_STATES + 1] = memoryView("CORE BODY");
+  let tree = render();
+  const select = flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "soul-edit-persona-select");
+  select.props.onChange({ target: { value: "engine" } });
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  tree = render();
+  const text = collectText(tree);
+  assert.ok(text.includes("切换失败：冲突"), "失败原因可见");
+  assert.ok(text.includes("shiori/ui-persona-conflict"), "错误码按既有 ErrorBox 口径透出");
+  assert.equal(calls.includes("getMemoryView"), false, "失败不重载视图（不冒充成功）");
 });
 
 test("Soul：每轮注入顺序五行的数字来自 DTO（不写死；取不到写「—」）", async () => {
-  const host = makeStatefulReact();
-  const { sectionVNode } = await applyPanel(host);
-  host.states.length = 0;
-  host.states.push("soul", "session-A", "", null, { mode: "active" });
-  host.cursor.v = 0;
-  const sectionTree = sectionVNode.type(sectionVNode.props);
-  const soulTab = flattenVNode(sectionTree).find((n) => typeof n.type === "function" && n.type.name === "SoulTab");
+  const { host, soulTab } = await locateSoulTab();
 
   const renderWith = (status, view) => {
     host.states.length = Math.max(host.states.length, PANEL_STATES + SOUL_STATES);
@@ -182,13 +216,7 @@ test("Soul：每轮注入顺序五行的数字来自 DTO（不写死；取不到
 });
 
 test("Soul：核心记忆保存带 expectedRevision；冲突保留草稿并提示；对比改动 / 恢复上一版", async () => {
-  const host = makeStatefulReact();
-  const { sectionVNode } = await applyPanel(host);
-  host.states.length = 0;
-  host.states.push("soul", "session-A", "", null, { mode: "active" });
-  host.cursor.v = 0;
-  const sectionTree = sectionVNode.type(sectionVNode.props);
-  const soulTab = flattenVNode(sectionTree).find((n) => typeof n.type === "function" && n.type.name === "SoulTab");
+  const { host, soulTab } = await locateSoulTab();
   const calls = [];
   const dsh = baseDsh((method, sessionId, payload) => {
     if (method === "executeTool") {
@@ -199,6 +227,7 @@ test("Soul：核心记忆保存带 expectedRevision；冲突保留草稿并提�
     }
     return undefined;
   });
+  host.states.length = Math.max(host.states.length, PANEL_STATES + SOUL_STATES);
   host.states[PANEL_STATES] = statusDto();
   host.states[PANEL_STATES + 1] = memoryView("CORE BODY");
   const render = (extra = {}) => {

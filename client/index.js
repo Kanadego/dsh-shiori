@@ -212,6 +212,10 @@ window.__ModuleLoader__.load({
 ".dshi_selectorRow{display:flex;align-items:flex-end;gap:var(--dshi-space-sm);flex-wrap:wrap}" +
 ".dshi_selectorRow .dshi_btn,.dshi_selectorRow .dshi_input,.dshi_selectorRow .dshi_select{height:28px;box-sizing:border-box}" +
 ".dshi_selectorRow .dshi_btn{padding-top:0;padding-bottom:0}" +
+".dshi_personaDefault{max-width:100%}" +
+".dshi_personaDefaultRow{display:flex;align-items:flex-end;gap:var(--dshi-space-sm);flex-wrap:wrap}" +
+".dshi_personaDefaultRow .dshi_btn,.dshi_personaDefaultRow .dshi_input,.dshi_personaDefaultRow .dshi_select{height:28px;box-sizing:border-box}" +
+".dshi_personaDefaultRow .dshi_btn{padding-top:0;padding-bottom:0}" +
     // S2 侧边栏 main 槽位全屏容器（与 client/shiori.css 末尾两条规则逐字一致，
     // client.test.mjs 压缩比对）：仅 props.workbench 时追加，详情页窄卡片不回归；
     // box-sizing:border-box 显式写（根元素不吃 .dshi_root * 通配重置，content-box
@@ -1323,13 +1327,15 @@ window.__ModuleLoader__.load({
 
     // rows 切片：返回 { items, total, totalPages, page }；page 越界自动钳回
     // 1..totalPages（列表刷新变短后旧页码不丢状态、不空白）。rows 非数组按空处理。
-    function paginateRows(rows, page) {
+    // size 缺省沿用全局 LIST_PAGE_SIZE；闪回两列表传专属 FLASHBACK_PAGE_SIZE。
+    function paginateRows(rows, page, size) {
+      var pageSize = Number.isInteger(size) && size > 0 ? size : LIST_PAGE_SIZE;
       var list = Array.isArray(rows) ? rows : [];
-      var totalPages = Math.max(1, Math.ceil(list.length / LIST_PAGE_SIZE));
+      var totalPages = Math.max(1, Math.ceil(list.length / pageSize));
       var current = Math.min(Math.max(1, page || 1), totalPages);
-      var start = (current - 1) * LIST_PAGE_SIZE;
+      var start = (current - 1) * pageSize;
       return {
-        items: list.slice(start, start + LIST_PAGE_SIZE),
+        items: list.slice(start, start + pageSize),
         total: list.length,
         totalPages: totalPages,
         page: current
@@ -1337,8 +1343,9 @@ window.__ModuleLoader__.load({
     }
 
     // 统一页码条：上一页 / 1..N 页码 / 下一页 / 页码提示。goTo(n) 收 1 起页码；
-    // totalPages<=1 返回 null（调用方不渲染）。
-    function pageBar(page, totalPages, goTo, busy) {
+    // totalPages<=1 返回 null（调用方不渲染）。size 与 paginateRows 同口径。
+    function pageBar(page, totalPages, goTo, busy, size) {
+      var pageSize = Number.isInteger(size) && size > 0 ? size : LIST_PAGE_SIZE;
       var current = Math.min(Math.max(1, page || 1), Math.max(1, totalPages));
       if (!totalPages || totalPages <= 1) return null;
       var nums = [];
@@ -1363,7 +1370,7 @@ window.__ModuleLoader__.load({
           onClick: function () { goTo(current + 1); }
         }, "下一页"),
         h("span", { className: "dshi_hint" },
-          "第 " + current + " / " + totalPages + " 页（每页 " + LIST_PAGE_SIZE + " 条）"));
+          "第 " + current + " / " + totalPages + " 页（每页 " + pageSize + " 条）"));
     }
 
     // ── S4 脱敏：专题索引导航里的机器串（updated 时间戳 + rev shiori-r1.<token>）──
@@ -3076,27 +3083,10 @@ window.__ModuleLoader__.load({
           // 不随卡片形态切换丢失，不藏不吞，注明可重试。
           showWrites && obWarning ? h("div", { className: "dshi_hint", "data-role": "onboarding-warning" }, "⚠ " + obWarning) : null,
           // （能力标签块在「健康状况」之前，见上方 capability-card。）
-          // F1b：语义召回只读状态 + 重建向量；S5：+ 下载模型（数据全部来自
-          // diagnostics.semantic；旧服务端没有该字段时整块不渲染，不报错）。
-          // 渲染走 SemanticRecallCard（与设置页「向量召回」子页同一份实现）；
-          // 本轮状态页这份保留不动（页签重组在下一单）。
-          showWrites && semantic ? SemanticRecallCard({
-            semantic: semantic,
-            dlView: dlView,
-            dlRunning: dlRunning,
-            rebuildRunning: rebuildRunning,
-            rebuildProgress: rebuildProgress,
-            manualDirDraft: manualDirDraft,
-            dlUiError: dlUiError,
-            copyFeedback: copyFeedback,
-            configScopeNow: configScopeNow,
-            onStartDownload: startDownload,
-            onCancelDownload: cancelDownload,
-            onStartRebuild: startRebuild,
-            onManualDirChange: setManualDirDraft,
-            onSaveManualDir: saveManualDir,
-            onCopyInstallHint: copyInstallHint
-          }) : null,
+          // 13-5：语义召回卡（下载模型 / 重建向量 / 进度）已从本页裁撤，全客户端
+          // 只在设置页「向量召回」子页保留一处。下面这些 semantic / 下载 / 重建
+          // 状态槽与动作函数保留不再可达，只为冻结既有 useState 下标（多个外部
+          // 测试按位预置 StatusTab 状态），不要再接回渲染。
           // 0.5 批次 4 · B 线：冷热分布（simulateTemperature base.tiers）。
           // 0.5 批次 5 · B 线：上次评估 / 下次触发 / 保护期改由下方 auto 卡用
           // getAutoStatus 真实数据展示——原先的「尚未评估」占位行与
@@ -3207,312 +3197,6 @@ window.__ModuleLoader__.load({
           showReadonly ? h("details", null,
             h("summary", { className: "dshi_hint" }, "完整 DTO（服务端原样返回）"),
             h("pre", { className: "dshi_pre" }, stableStringify(status))) : null)
-        : null);
-    }
-
-    // 0.3：记忆占用上限的常量兜底（仅当 DTO 连 hardCap / budget 都没带时才用）。
-    // L1 与状态页同口径按硬顶显示（getStatus occupancy.l1HardCap 的服务端默认
-    // 环境即 14000）；L0 维持人设卡 maxChars 的历史常量。
-    var MEMORY_L1_HARDCAP_FALLBACK = 14000;
-    var MEMORY_L0_BUDGET_FALLBACK = 12000;
-
-    function MemoryTab(props) {
-      var state = useState(null);
-      var view = state[0];
-      var setView = state[1];
-      var errorState = useState(null);
-      var error = errorState[0];
-      var setError = errorState[1];
-      // R7 追加：L0/L1 手动编辑。新 state 一律追加在既有 state 之后，
-      // 保持 test/plugin/client.test.mjs 预置的 states 下标不变。
-      var editingState = useState(null);   // null | "l0" | "l1"
-      var editing = editingState[0];
-      var setEditing = editingState[1];
-      // 草稿按层保留（{l0:"...", l1:"..."}）：取消编辑不落盘也不清空已输入的
-      // 内容，重进编辑时若该层已有草稿则继续用草稿，不回填服务端版本。
-      var draftState = useState(null);
-      var draft = draftState[0];
-      var setDraft = draftState[1];
-      var busyState = useState(false);
-      var busy = busyState[0];
-      var setBusy = busyState[1];
-      var okState = useState(null);
-      var okText = okState[0];
-      var setOk = okState[1];
-      var saveErrorState = useState(null);
-      var saveError = saveErrorState[0];
-      var setSaveError = saveErrorState[1];
-      // P1-2：本 tab 的会话守卫 holder（新 state 一律追加在既有 state 之后）。
-      var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
-      var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
-      tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
-      // F7：只读态（另一实例在写）写按钮置灰 + 页内黄字说明原因。
-      var ro = props.readOnly === true;
-      var load = async function () {
-        var origin = tabGuard.mark();
-        setError(null);
-        try {
-          var result = await props.dsh.call("getMemoryView", props.sessionId, {});
-          if (tabGuard.isStale(origin)) return; // P1-2：会话已切换，丢弃旧响应
-          setView(result);
-        } catch (e) {
-          if (tabGuard.isStale(origin)) return;
-          setView(null); if (!reportSessionUnavailable(e, props, setError)) setError(e);
-        }
-      };
-      useEffect(function () { load(); }, [props.sessionId, props.refreshToken]);
-      var l0 = view && (view.l0 || view.persona);
-      var l1 = view && (view.l1 || view.core);
-      var budgets = (view && view.budgets) || props.budgets || {};
-      // 0.3：占用上限与状态页同源同口径——统一按硬顶显示。getMemoryView DTO
-      // （src/plugin/management.mjs getMemoryView）在 l1 上带 hardCap（=
-      // settings.budgets.core.hardCapChars，与 getStatus occupancy.l1HardCap 同一
-      // 真值）；旧宿主 DTO 缺字段时按 l1.budget → budgets.core.hardCapChars →
-      // 常量兜底。不再用 budgets.core.targetChars（软目标，状态页不显示它，
-      // 之前正是两页 14000 / 8000 对不上的根因）。L0 同理取 l0.budget，不再走
-      // budgets.persona 兜底。
-      var l0BudgetOf = function (layer) {
-        var value = layer && typeof layer === "object" ? layer.budget : undefined;
-        return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : MEMORY_L0_BUDGET_FALLBACK;
-      };
-      var l1HardCapOf = function (layer) {
-        var hardCap = layer && typeof layer === "object" ? layer.hardCap : undefined;
-        if (typeof hardCap === "number" && Number.isFinite(hardCap) && hardCap > 0) return hardCap;
-        var budget = layer && typeof layer === "object" ? layer.budget : undefined;
-        if (typeof budget === "number" && Number.isFinite(budget) && budget > 0) return budget;
-        var core = budgets && budgets.core ? budgets.core : {};
-        if (typeof core.hardCapChars === "number" && Number.isFinite(core.hardCapChars) && core.hardCapChars > 0) return core.hardCapChars;
-        return MEMORY_L1_HARDCAP_FALLBACK;
-      };
-
-      // 编辑初值：L1 的 text 是服务端渲染视图（core 正文 + 派生主题索引），整段写回
-      // 会把索引固化进 core，必须用 body（磁盘正文）。L0 没有派生部分，照旧用 text。
-      var initialDraftFor = function (kind, layer) {
-        if (kind === "l1" && layer && typeof layer.body === "string") return layer.body;
-        if (typeof layer === "string") return layer;
-        return String((layer && (layer.text ?? layer.content)) ?? "");
-      };
-      var draftFor = function (kind) {
-        return draft && typeof draft[kind] === "string" ? draft[kind] : "";
-      };
-      var beginEdit = function (kind) {
-        if (!view) return;   // 数据未加载不进编辑，避免对着空壳误写
-        var layer = kind === "l0" ? l0 : l1;
-        setEditing(kind);
-        setOk(null);
-        setSaveError(null);
-        // 草稿按层保留：取消后重进编辑不清空用户已输入的内容，
-        // 只在该层还没有草稿时才回填服务端当前版本。
-        if (!draft || typeof draft[kind] !== "string") {
-          var patch = {};
-          patch[kind] = initialDraftFor(kind, layer);
-          setDraft(Object.assign({}, draft, patch));
-        }
-      };
-      // 取消：退出编辑、不落盘、不清空草稿（用户已输入的内容保留）。
-      var cancelEdit = function () { setEditing(null); setOk(null); setSaveError(null); };
-      // 保存复用 executeTool（与面板其它写操作同一条链路）：L0 走 soul_update，
-      // L1 走 core_write 并始终带 expectedRevision 做 CAS——revision 过期服务端报
-      // REVISION_CONFLICT，不静默覆盖别人的修改；冲突时停在编辑态、草稿原样保留。
-      var save = async function () {
-        if (!editing) return;
-        var kind = editing;
-        var text = draftFor(kind);
-        setBusy(true);
-        setSaveError(null);
-        setOk(null);
-        try {
-          if (kind === "l0") {
-            await props.dsh.call("executeTool", props.sessionId, { name: "soul_update", args: { content: text } });
-          } else {
-            // core_write 的 expectedRevision 是硬性要求（string，或首次创建时的
-            // null）；拿不到 revision 时传 null 让服务端拒绝，绝不静默覆盖。
-            var args = {
-              content: text,
-              expectedRevision: (l1 && l1.revision !== undefined && l1.revision !== null) ? l1.revision : null
-            };
-            await props.dsh.call("executeTool", props.sessionId, { name: "core_write", args: args });
-          }
-          var cleared = {};
-          cleared[kind] = "";
-          setDraft(Object.assign({}, draft, cleared));
-          setEditing(null);
-          setOk(kind === "l0" ? "人设卡已保存（下一轮对话即生效）" : "记忆核心已保存");
-          await load();
-        } catch (e) {
-          // 冲突/失败都不丢草稿：停在编辑态，已输入的内容原样保留在文本框里。
-          setSaveError(e);
-        } finally {
-          setBusy(false);
-        }
-      };
-      // ── 预览态：markdown 安全子集渲染 ─────────────────────────────────
-      // 只支持：标题（# ~ ###）、无序/有序列表、引用块、粗体、行内代码、围栏
-      // 代码块。全部经 DOM API（React 元素 + 文本节点）构建，绝不 innerHTML——
-      // 记忆内容只会以字符串子节点的形式出现，<script>/<img onerror> 之类
-      // 一律按字面显示；不支持的语法（#### 四级标题、未闭合的 ** / ` 等）
-      // 按原样文本显示，不吞内容。
-      var mdInline = function (text) {
-        var out = [];
-        var rest = String(text);
-        var buf = "";
-        var flush = function () { if (buf !== "") { out.push(buf); buf = ""; } };
-        while (rest.length > 0) {
-          var tick = rest.indexOf("`");
-          var star = rest.indexOf("**");
-          if (tick < 0 && star < 0) { buf += rest; break; }
-          if (tick >= 0 && (star < 0 || tick < star)) {
-            var endTick = rest.indexOf("`", tick + 1);
-            if (endTick < 0) { buf += rest; break; }   // 未闭合：按字面输出
-            flush();
-            out.push(h("code", { key: out.length, className: "dshi_mdCode" }, rest.slice(tick + 1, endTick)));
-            rest = rest.slice(endTick + 1);
-          } else {
-            var endStar = rest.indexOf("**", star + 2);
-            if (endStar < 0) { buf += rest; break; }   // 未闭合：按字面输出
-            flush();
-            out.push(h("strong", { key: out.length, className: "dshi_mdBold" }, rest.slice(star + 2, endStar)));
-            rest = rest.slice(endStar + 2);
-          }
-        }
-        flush();
-        return out;
-      };
-      var mdBlocks = function (text) {
-        var lines = String(text).split(/\r\n|\n|\r/);
-        var blocks = [];
-        var i = 0;
-        var isBlockStart = /^(#{1,3}\s|[-*]\s|\d+[.)]\s|>|```)/;
-        while (i < lines.length) {
-          var line = lines[i];
-          if (/^\s*```/.test(line)) {
-            // 围栏代码块：内容整体作为单个文本节点，不做任何行内解析。
-            var codeLines = [];
-            i += 1;
-            while (i < lines.length && !/^\s*```/.test(lines[i])) { codeLines.push(lines[i]); i += 1; }
-            if (i < lines.length) i += 1;   // 跳过闭合围栏；未闭合到结尾也照常收块
-            blocks.push(h("pre", { key: blocks.length, className: "dshi_mdPre" }, codeLines.join("\n")));
-            continue;
-          }
-          var heading = line.match(/^(#{1,3})\s+(.*)$/);
-          if (heading) {
-            blocks.push(h("div", { key: blocks.length, className: "dshi_mdH" + heading[1].length }, mdInline(heading[2])));
-            i += 1;
-            continue;
-          }
-          if (/^\s*>\s?/.test(line)) {
-            var quoteLines = [];
-            while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
-              quoteLines.push(lines[i].replace(/^\s*>\s?/, ""));
-              i += 1;
-            }
-            blocks.push(h("blockquote", { key: blocks.length, className: "dshi_mdQuote" }, mdInline(quoteLines.join("\n"))));
-            continue;
-          }
-          if (/^\s*[-*]\s+/.test(line)) {
-            var ulItems = [];
-            while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
-              ulItems.push(h("li", { key: ulItems.length }, mdInline(lines[i].replace(/^\s*[-*]\s+/, ""))));
-              i += 1;
-            }
-            blocks.push(h("ul", { key: blocks.length, className: "dshi_mdList" }, ulItems));
-            continue;
-          }
-          if (/^\s*\d+[.)]\s+/.test(line)) {
-            var olItems = [];
-            while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
-              olItems.push(h("li", { key: olItems.length }, mdInline(lines[i].replace(/^\s*\d+[.)]\s+/, ""))));
-              i += 1;
-            }
-            blocks.push(h("ol", { key: blocks.length, className: "dshi_mdList" }, olItems));
-            continue;
-          }
-          if (line.trim() === "") { i += 1; continue; }
-          var paraLines = [line];
-          i += 1;
-          while (i < lines.length && lines[i].trim() !== "" && !isBlockStart.test(lines[i])) {
-            paraLines.push(lines[i]);
-            i += 1;
-          }
-          blocks.push(h("div", { key: blocks.length, className: "dshi_mdP" }, mdInline(paraLines.join("\n"))));
-        }
-        return blocks;
-      };
-      var layerRawText = function (layer) {
-        if (typeof layer === "string") return layer;
-        return String((layer && (layer.text ?? layer.content ?? layer.rendered)) ?? "");
-      };
-      // 空状态：说明记忆怎么组织、从哪里开始写第一条、需要先配置什么，不留白。
-      var renderEmptyLayer = function (kind, title) {
-        var guide = kind === "l0"
-          ? "人设卡（L0）还是空的。记忆按层组织：L0 是每轮对话常驻注入的身份与规则卡，L1 是记忆核心，更细的事实记录在 L2/L3（由记忆工具与候选整理维护）。写第一条：点下方「编辑」，写下这份人设的身份、语气与边界，保存后下一轮对话即生效。开始前请先确认面板处于 active 模式，并在「记忆预算」里设置人设卡最大字符数。"
-          : "记忆核心（L1）还是空的。它是长期记忆的正文区，服务端渲染时会自动在正文后附加主题索引，不用手写。写第一条：点下方「编辑」，用一段话记录值得长期记住的事实或偏好，保存即生效。开始前请先确认面板处于 active 模式，并在「记忆预算」里设置记忆核心的目标字符数与硬上限。";
-        return h("div", { className: "dshi_card" },
-          h("div", { className: "dshi_row" },
-            h("span", { className: "dshi_cardTitle" }, title),
-            h("span", { style: { flex: 1 } }),
-            h("button", { className: "dshi_btn", disabled: ro, onClick: function () { beginEdit(kind); } }, "编辑")),
-          h("div", { className: "dshi_empty" }, guide));
-      };
-      var renderLayer = function (kind, title, layer, hint) {
-        var isEditing = editing === kind;
-        var rawText = layerRawText(layer);
-        // 空状态：层缺数据或正文为空时给引导文案（编辑中除外，编辑态照常给文本框）。
-        if ((!layer || rawText.trim() === "") && !isEditing) return renderEmptyLayer(kind, title);
-        // revision 是 shiori-r1.<base64>.<sha256> 的长 token，直接铺在标题行会顶出屏幕：
-        // 只显示前缀，完整值放 title 属性，需要时悬停看。
-        var revisionText = layer && layer.revision !== undefined && layer.revision !== null ? "rev " + shortRev(layer.revision) : "";
-        return h("div", { className: "dshi_card" },
-          h("div", { className: "dshi_row" },
-            h("span", { className: "dshi_cardTitle" }, title),
-            revisionText ? h("span", { className: "dshi_badgeDim dshi_badge", title: "完整版本号：" + String(layer.revision) }, revisionText) : null,
-            layer && layer.stale === true ? h("span", { className: "dshi_badge dshi_badgeWarn" }, "磁盘已被外部修改") : null,
-            h("span", { style: { flex: 1 } }),
-            isEditing
-              ? h(fragment, null,
-                h("button", { className: "dshi_btn dshi_btnPrimary", disabled: busy || ro, onClick: save }, busy ? "保存中…" : "保存"),
-                h("button", { className: "dshi_btn", disabled: busy, onClick: cancelEdit }, "取消"))
-              : h("button", { className: "dshi_btn", disabled: ro, onClick: function () { beginEdit(kind); } }, "编辑")),
-          hint ? h("div", { className: "dshi_hint" }, hint) : null,
-          isEditing
-            ? h("textarea", {
-                className: "dshi_textarea dshi_memEditor",
-                value: draftFor(kind),
-                onChange: function (event) {
-                  var value = event && event.target ? event.target.value : "";
-                  setDraft(function (prev) {
-                    var next = Object.assign({}, prev);
-                    next[kind] = value;
-                    return next;
-                  });
-                }
-              })
-            : h("div", { className: "dshi_mdPreview" }, mdBlocks(rawText)));
-      };
-
-      return h("div", null,
-        h("div", { className: "dshi_row", style: { marginBottom: 8 } },
-          h("span", { className: "dshi_cardTitle" }, "记忆内容 L0 / L1"),
-          h("button", { className: "dshi_btn", onClick: load }, "刷新")),
-        ErrorBox(error),
-        ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
-        saveError ? ErrorBox(saveError) : null,
-        saveError && saveError.code === "REVISION_CONFLICT"
-          ? h("div", { className: "dshi_conflict" },
-            "记忆已在别处更新，请重新加载后再改。你的草稿仍保留在编辑框里，点上方「刷新」取回最新版本后再保存，已输入的内容不会丢失。")
-          : null,
-        okText ? h("div", { className: "dshi_ok" }, okText) : null,
-        view ? h(fragment, null,
-          h("div", { className: "dshi_grid2" },
-            Bar("人设卡 L0（UTF-16）", l0 && (l0.chars ?? l0.length ?? (l0.text ? l0.text.length : 0)), l0BudgetOf(l0)),
-            Bar("记忆核心 L1（UTF-16）", l1 && (l1.chars ?? l1.length ?? (l1.text ? l1.text.length : 0)), l1HardCapOf(l1))),
-          renderLayer("l0", "人设卡（L0 persona）", l0,
-            "每轮对话常驻的身份与规则。编辑后保存立即生效；上限由「记忆预算」的人设卡最大字符数决定。"),
-          renderLayer("l1", "记忆核心（L1 core）", l1,
-            "上方预览是完整渲染结果（正文 + 派生主题索引）；点编辑后文本框里只有磁盘正文，主题索引由服务端自动生成，不用手写。保存带 revision 校验，若别处刚改过会提示冲突，刷新后重试。"),
-          h("details", null,
-            h("summary", { className: "dshi_hint" }, "完整 DTO"),
-            h("pre", { className: "dshi_pre" }, stableStringify(view))))
         : null);
     }
 
@@ -5070,6 +4754,12 @@ window.__ModuleLoader__.load({
       var memberPageState = useState(1);
       var memberPage = memberPageState[0];
       var setMemberPage = memberPageState[1];
+      // 13-5：专题整理页二级页签（记忆整理 / 候选审阅与执行）。追加在既有 state
+      // 之后；两个窗格同时挂载、只切显隐——切页签不重新取数、不丢 auto 卡勾选与
+      // 本轮评估结果（同一个 StatusTab 实例，不各 new 一份 RPC）。默认停「记忆整理」。
+      var organizeSubtabState = useState("organize");
+      var organizeSubtab = organizeSubtabState[0] === "candidates" ? "candidates" : "organize";
+      var setOrganizeSubtab = organizeSubtabState[1];
       // F7：只读态（另一实例在写）——analyze / review / preview / execute 与合并
       // 流程全部置灰（服务端 assertHostWritable 同口径），页内黄字说明原因。
       var ro = props.readOnly === true;
@@ -5745,11 +5435,58 @@ window.__ModuleLoader__.load({
         if (!rowVisible(item, candidate)) return;
         visibleRows.push(renderCandidateRow(item, index, candidate));
       });
+      // 二级页签按钮：形态与设置页子页签同款（同一份内联样式对象，不新增 CSS 规则）。
+      var organizeSubtabButton = function (id, label) {
+        var onPage = organizeSubtab === id;
+        return h("button", {
+          key: id, type: "button",
+          style: {
+            border: "1px solid " + (onPage ? "var(--dshi-warn)" : "transparent"),
+            background: onPage ? "var(--dshi-bg-card)" : "none",
+            color: onPage ? "var(--dshi-text)" : "var(--dshi-text-dim)",
+            font: "inherit", fontSize: "12px", borderRadius: "6px",
+            padding: "4px 12px", cursor: "pointer",
+            fontWeight: onPage ? 600 : 400
+          },
+          "data-role": id === "candidates" ? "organize-subtab-candidates" : "organize-subtab-organize",
+          "aria-pressed": onPage ? "true" : "false",
+          onClick: function () { setOrganizeSubtab(id); }
+        }, label);
+      };
+      // 两个窗格同时渲染、只切 display：StatusTab 实例与 auto 卡勾选/评估结果在切换
+      // 中不卸载，天然不重取数（切页签不触发任何 effect 依赖变化）。
+      var organizePaneStyle = function (active) {
+        return active
+          ? { display: "flex", flexDirection: "column", gap: "12px" }
+          : { display: "none" };
+      };
       return h("div", { "data-role": "organize-tab" },
-        // 0.5-13-4：写操作集中地——整张记忆整理 auto 卡、整理向导、启用卡、向量
-        // 召回与危险操作都由 StatusTab 的 organize 视图渲染在本页顶部（评审口径：
-        // 概览页只读）。下方保留候选 / 专题索引归档 / 分组管理。
-        h(StatusTab, { dsh: props.dsh, sessionId: props.sessionId, view: "organize", onSessionUnavailable: props.onSessionUnavailable }),
+        h("div", {
+          style: {
+            display: "flex", gap: "4px", flexWrap: "wrap",
+            border: "1px solid var(--dsw-alias-border-l2,#dce2eb)",
+            background: "var(--dsw-alias-bg-layer-2,transparent)",
+            borderRadius: "8px", padding: "4px"
+          },
+          "data-role": "organize-subtabs"
+        },
+          organizeSubtabButton("organize", "记忆整理"),
+          organizeSubtabButton("candidates", "候选审阅与执行")),
+        // 窗格一 · 记忆整理：启用卡、整理向导、auto 卡（含本轮候选勾选与执行）、
+        // 危险操作——全部由 StatusTab 的 organize 视图渲染。
+        h("div", {
+          "data-role": "organize-pane-organize",
+          "aria-hidden": organizeSubtab === "organize" ? "false" : "true",
+          style: organizePaneStyle(organizeSubtab === "organize")
+        },
+          h(StatusTab, { dsh: props.dsh, sessionId: props.sessionId, view: "organize", onSessionUnavailable: props.onSessionUnavailable })),
+        // 窗格二 · 候选审阅与执行：周期提示 + 队列卡 + 候选列表与预览执行 +
+        // 专题索引归档 + 分组管理。
+        h("div", {
+          "data-role": "organize-pane-candidates",
+          "aria-hidden": organizeSubtab === "candidates" ? "false" : "true",
+          style: organizePaneStyle(organizeSubtab === "candidates")
+        },
         h("div", { className: "dshi_hint", "data-role": "organize-period-note" },
           "整理功能才启用不到 30 天，现在只做冷归档、不自动恢复。"),
         h("div", { className: "dshi_row", style: { marginBottom: 8 } },
@@ -5970,7 +5707,7 @@ window.__ModuleLoader__.load({
             h("div", { className: "dshi_items" }, archivedPlans.map(renderPlanRow))) : null),
         ) : null,
         previewError ? ErrorBox(previewError) : null,
-        showBottomPreview ? renderPreviewCard("preview-bottom") : null);
+        showBottomPreview ? renderPreviewCard("preview-bottom") : null));
     }
 
     // ── L3：主题（topic）记忆管理 ────────────────────────────────────────────
@@ -7121,8 +6858,9 @@ window.__ModuleLoader__.load({
           onClick: function () { setSettingsPageRaw(id); }
         }, SETTINGS_SUBPAGE_LABELS[id]);
       };
-      // 预算子页：现有预算输入全保留（现有测试按默认渲染的 11 个 input 冻结），
-      // 另加 L0「不计入水位」说明与四色占用条（budgetPreviewBar 内）。
+      // 预算子页：只留 L0 上限 + L1 硬顶/软水位/硬水位，另加 L0「不计入水位」
+      // 说明与四色占用条（budgetPreviewBar 内）。L2 闪回 5 个字段归「闪回卡片」
+      // 子页独占（13-5 去重，同一字段不再铺两遍）。
       var budgetPageBody = h("form", {
         className: "dshi_card",
         onSubmit: function (event) { event.preventDefault(); save(); }
@@ -7142,13 +6880,6 @@ window.__ModuleLoader__.load({
             integerField("core.hardCapChars"),
             waterField("softChars", "软水位", "core.softChars（旧 core.softRatio，保存时清除）", "超过这个长度就不再原样接受新增内容，开始压缩着写。"),
             waterField("hardChars", "硬水位（硬闸）", "core.hardChars（旧 core.hardRatio，保存时清除）", "越过这道闸就不再接受新增内容，只能删减。")
-          ]),
-          groupCard("L2", "闪回卡片", "小张的独立记忆卡，按触发词召回后作为附件投递；逐项说明见「闪回卡片」子页。", [
-            integerField("spark.maxChars"),
-            integerField("spark.inlineMaxChars"),
-            integerField("spark.maxCards"),
-            integerField("spark.seedCount"),
-            integerField("spark.linkCount")
           ])) : h("div", { className: "dshi_loading" }, snapshot && snapshot.status !== "ready" ? "设置命名空间不可用（服务端未注册 shiori 命名空间？）" : "加载中…"),
         errorCount > 0 ? h("div", { className: "dshi_blockError" },
           "有 " + errorCount + " 处越界，已禁用保存：", Object.keys(fieldErrors).map(function (path) {
@@ -7481,6 +7212,9 @@ window.__ModuleLoader__.load({
       if (days < 0) days = 0;
       return "存续 " + days + " 天";
     }
+    // 13-5：闪回页「从未命中 / 最近命中」两个列表统一每页 5 条（全局
+    // LIST_PAGE_SIZE=10 不动——最近变更时间线仍按 10 条切片显示）。
+    var FLASHBACK_PAGE_SIZE = 5;
     function FlashbacksTab(props) {
       var dataState = useState(null);
       var data = dataState[0];
@@ -7495,15 +7229,14 @@ window.__ModuleLoader__.load({
       var tabGuardState = useState({ sessionId: props.sessionId, gen: 0 });
       var tabGuard = makeTabSessionGuard(props, tabGuardState[0]);
       tabGuard.track(); // 每次渲染同步：会话一换，在途响应即刻过期
-      // S4 列表④：闪回「从未命中」卡片前端分页（每页 10 条，统一页码条）。
+      // 闪回「从未命中」前端分页（13-5 起每页 5 条，统一页码条）。
       var neverHitPageState = useState(1);
       var neverHitPage = neverHitPageState[0];
       var setNeverHitPage = neverHitPageState[1];
-      // 0.5-13-4：最近命中前端分页（每页 8 条；不足一页不显示页码条）。
+      // 最近命中前端分页（与从未命中同口径每页 5 条；不足一页不显示页码条）。
       var hitPageState = useState(1);
       var hitPage = hitPageState[0];
       var setHitPage = hitPageState[1];
-      var HIT_PAGE_SIZE = 8;
       var load = async function () {
         var origin = tabGuard.mark();
         setError(null);
@@ -7549,9 +7282,10 @@ window.__ModuleLoader__.load({
         if (b.hitCount !== a.hitCount) return b.hitCount - a.hitCount;
         return String(a.id) < String(b.id) ? -1 : 1;
       });
-      var hitTotalPages = Math.max(1, Math.ceil(hitList.length / HIT_PAGE_SIZE));
-      var hitCurrentPage = Math.min(Math.max(1, hitPage || 1), hitTotalPages);
-      var hitPageRows = hitList.slice((hitCurrentPage - 1) * HIT_PAGE_SIZE, hitCurrentPage * HIT_PAGE_SIZE);
+      var hitPageData = paginateRows(hitList, hitPage, FLASHBACK_PAGE_SIZE);
+      var hitTotalPages = hitPageData.totalPages;
+      var hitCurrentPage = hitPageData.page;
+      var hitPageRows = hitPageData.items;
       var l2Off = caps !== null && caps.l2 !== true;
       var total = stats && Number.isInteger(stats.totalDelivered) && stats.totalDelivered >= 0 ? stats.totalDelivered : null;
       var unique = stats && Number.isInteger(stats.uniqueCards) && stats.uniqueCards >= 0 ? stats.uniqueCards : null;
@@ -7575,8 +7309,8 @@ window.__ModuleLoader__.load({
           h("div", { className: "dshi_bgroup" },
             h("div", { className: "dshi_cardTitle" }, "从未命中（" + neverHit.length + " 张）"),
             neverHit.length > 0 ? (function () {
-              // S4 列表④：从未命中卡片前端分页（每页 10 条，统一页码条）。
-              var pageData = paginateRows(neverHit, neverHitPage);
+              // 从未命中卡片前端分页（每页 5 条，统一页码条）。
+              var pageData = paginateRows(neverHit, neverHitPage, FLASHBACK_PAGE_SIZE);
               return h("div", null,
                 h("div", { className: "dshi_items" }, pageData.items.map(function (node) {
                   return h("div", { key: node.id, className: "dshi_item" },
@@ -7584,7 +7318,7 @@ window.__ModuleLoader__.load({
                       h("span", null, typeof node.title === "string" && node.title !== "" ? node.title : String(node.id))),
                     h("span", { className: "dshi_hint" }, fbDaysText(node.createdAt)));
                 })),
-                pageBar(pageData.page, pageData.totalPages, setNeverHitPage, false));
+                pageBar(pageData.page, pageData.totalPages, setNeverHitPage, false, FLASHBACK_PAGE_SIZE));
             })() : h("div", { className: "dshi_empty" },
               nodes.length === 0
                 ? "当前 scope 还没有 active 卡片：先用 spark_save 保存几张带触发词的卡片，再来看看命中情况。"
@@ -7613,7 +7347,7 @@ window.__ModuleLoader__.load({
                   onClick: function () { setHitPage(hitCurrentPage + 1); }
                 }, "下一页"),
                 h("span", { className: "dshi_hint", "data-role": "flashback-hits-pageinfo" },
-                  "第 " + hitCurrentPage + " / " + hitTotalPages + " 页（每页 " + HIT_PAGE_SIZE + " 条）")) : null)
+                  "第 " + hitCurrentPage + " / " + hitTotalPages + " 页（每页 " + FLASHBACK_PAGE_SIZE + " 条）")) : null)
               : h("div", { className: "dshi_empty" },
                 "还没有任何卡片进入过投递包：卡片触发词与你的输入匹配后才会随投递包进入对话。")),
           h("div", { className: "dshi_bgroup" },
@@ -7683,6 +7417,17 @@ window.__ModuleLoader__.load({
         guard.sessionId = props.sessionId;
         guard.gen += 1;
       }
+      // 13-5：「正在编辑」选择器换卡的一次性反馈（追加在既有 state 之后，
+      // 老测试预置的前 10 个下标不变）。
+      var switchBusyState = useState(false);
+      var switchBusy = switchBusyState[0];
+      var setSwitchBusy = switchBusyState[1];
+      var switchErrorState = useState(null);
+      var switchError = switchErrorState[0];
+      var setSwitchError = switchErrorState[1];
+      var switchOkState = useState("");
+      var switchOk = switchOkState[0];
+      var setSwitchOk = switchOkState[1];
       var ro = props.readOnly === true;
       var load = async function () {
         var gen = guard.gen;
@@ -7706,7 +7451,9 @@ window.__ModuleLoader__.load({
           if (!reportSessionUnavailable(e, props, setLoadError)) setLoadError(e);
         }
       };
-      useEffect(function () { load(); }, [props.sessionId]);
+      // refreshToken：壳条切卡成功后自增，让本页重取 getMemoryView 换新卡正文
+      //（与「正在编辑」选择器的换卡路径共用同一条刷新语义）。
+      useEffect(function () { load(); }, [props.sessionId, props.refreshToken]);
       var l0 = view && (view.l0 || view.persona);
       var l1 = view && (view.l1 || view.core);
       var l0Text = l0 && typeof l0.text === "string" ? l0.text : "";
@@ -7764,73 +7511,47 @@ window.__ModuleLoader__.load({
       };
       var statusScope = status ? statusScopeText(status.scope) : "";
       var personas = personaOptionsFrom(status);
-      var defaultOptions = personaSelectValues(Array.isArray(props.defaultPersonaOptions) ? props.defaultPersonaOptions : personas, String(props.defaultPersonaValue || ""));
-      var workspaceOptions = Array.isArray(props.workspaces) ? props.workspaces : null;
-      var sessionOptions = Array.isArray(props.sessions) ? props.sessions : null;
+      var personaEditOptions = personaSelectValues(personas, statusScope);
       var occupancy = status && status.occupancy && typeof status.occupancy === "object" ? status.occupancy : null;
       var indexStats = l1 ? soulIndexStats(l1.text) : null;
       var revisionText = l1 && l1.revision ? shortRev(l1.revision) : "";
       var conflict = saveError && saveError.code === "REVISION_CONFLICT";
+      // 13-5：「正在编辑」换卡——走壳层 props.onSwitchPersona（personaWrite 链路，
+      // 写本会话 sessionPersonas 单键），成功后重取 getMemoryView 把编辑器换成
+      // 新卡正文；成功 / 失败都给页内可见反馈（失败用 ErrorBox 口径）。
+      var switchEditingPersona = async function (value) {
+        var picked = String(value ?? "").trim();
+        if (picked === "" || picked === statusScope) return;
+        if (typeof props.onSwitchPersona !== "function") {
+          setSwitchError({ code: "shiori/ui-unsupported", message: "当前面板没有接入切卡通道，无法在页内换卡。" });
+          return;
+        }
+        setSwitchBusy(true);
+        setSwitchError(null);
+        setSwitchOk("");
+        try {
+          var result = await props.onSwitchPersona(picked);
+          if (result && result.ok === false) {
+            setSwitchError(result.error || { code: "shiori/ui-persona", message: "切换到「" + picked + "」失败。" });
+            return;
+          }
+          // 新卡的正文与页面草稿无关：清草稿、清旧反馈，再重取 getMemoryView。
+          setDrafts({});
+          setSaveError(null);
+          setSaveOk("");
+          setSwitchOk("已切换到「" + picked + "」，编辑器已载入该卡正文。");
+          await load();
+        } catch (e) {
+          setSwitchError(e || { code: "shiori/ui-persona", message: "切换到「" + picked + "」失败。" });
+        } finally {
+          setSwitchBusy(false);
+        }
+      };
       return h("div", { "data-role": "soul-tab" },
         ErrorBox(loadError),
-        // 卡① 选卡
-        h("div", { className: "dshi_card", "data-role": "soul-select-card" },
-          h("div", { className: "dshi_row" },
-            h("span", { className: "dshi_cardTitle" }, "选卡")),
-          h("div", { className: "dshi_row" },
-            h("label", { className: "dshi_label" }, "工作区",
-              h("select", {
-                className: "dshi_select",
-                "data-role": "soul-workspace-select",
-                value: String(props.workspaceId || ""),
-                onChange: function (event) { if (typeof props.onWorkspaceChange === "function") props.onWorkspaceChange(String(event.target.value)); }
-              },
-                h("option", { key: "__all", value: "" }, "所有工作区"),
-                (workspaceOptions || []).map(function (item) {
-                  return h("option", { key: String(item.workspaceId), value: String(item.workspaceId) }, String(item.title || item.workspaceId));
-                }))),
-            h("label", { className: "dshi_label" }, "会话",
-              sessionOptions !== null
-                ? h("select", {
-                  className: "dshi_select",
-                  "data-role": "soul-session-select",
-                  value: String(props.sessionId || ""),
-                  title: String(props.sessionId || ""),
-                  onChange: function (event) { if (typeof props.onSessionChange === "function") props.onSessionChange(String(event.target.value)); }
-                },
-                  h("option", { key: "__none", value: "" }, "请选择会话"),
-                  sessionOptions.map(function (item) {
-                    return h("option", { key: String(item.sessionId), value: String(item.sessionId), title: String(item.sessionId) }, sessionOptionLabel(item));
-                  }))
-                : h("input", {
-                  className: "dshi_input",
-                  "data-role": "soul-session-input",
-                  placeholder: "session id",
-                  value: String(props.sessionId || ""),
-                  onChange: function (event) { if (typeof props.onSessionChange === "function") props.onSessionChange(String(event.target.value)); }
-                })),
-            h("span", { className: "dshi_label" }, "当前生效卡",
-              h("span", { className: "dshi_badge", "data-role": "soul-current-badge", title: "来源：getStatus.scope（当前可信 scope）" }, statusScope || "—"))),
-          h("div", { className: "dshi_hint" }, "切卡（换整套记忆）在面板顶部「记忆卡」入口；本页只读展示当前生效卡。"),
-          h("hr", { className: "dshi_hr" }),
-          h("div", { className: "dshi_row" },
-            h("label", { className: "dshi_label" }, "默认人设卡",
-              h("select", {
-                className: "dshi_select",
-                "data-role": "soul-default-select",
-                value: String(props.defaultPersonaValue || ""),
-                onChange: function (event) { if (typeof props.onDefaultPersonaDraft === "function") props.onDefaultPersonaDraft(String(event.target.value)); }
-              },
-                String(props.defaultPersonaValue || "") === "" ? h("option", { key: "__unset", value: "" }, "请选择人设卡") : null,
-                defaultOptions.map(function (name) { return h("option", { key: name, value: name }, name); }))),
-            h("button", {
-              className: "dshi_btn dshi_btnPrimary",
-              "data-role": "soul-save-default",
-              disabled: props.defaultPersonaBusy === true || ro,
-              onClick: function () { if (typeof props.onSaveDefaultPersona === "function") props.onSaveDefaultPersona(); }
-            }, props.defaultPersonaBusy === true ? "保存中…" : "保存默认卡")),
-          props.defaultPersonaOk ? h("div", { className: "dshi_ok", "data-role": "soul-default-ok" }, props.defaultPersonaOk) : null,
-          props.defaultPersonaError ? ErrorBox(props.defaultPersonaError) : null),
+        ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
+        // 卡①「选卡」整卡已删除（13-5）：工作区 / 会话 / 当前生效卡 / 默认人设卡
+        // 全部由面板壳条顶部同一套选择器承担，本页只保留编辑与只读说明。
         // 卡② 编辑
         h("div", { className: "dshi_card", "data-role": "soul-edit-card" },
           h("div", { className: "dshi_row" },
@@ -7846,6 +7567,22 @@ window.__ModuleLoader__.load({
               onClick: function () { setEditKind("l1"); setDiffOpen(false); setSaveError(null); setSaveOk(""); setDrafts({}); }
             }, "核心记忆"),
             revisionText ? h("span", { className: "dshi_badgeDim dshi_badge", title: "完整版本号：" + String(l1 && l1.revision) }, "rev " + revisionText) : null),
+          // 正在编辑的是哪张卡：选项来自 getStatus.personas，选中项 = getStatus.scope；
+          // 换选即切本会话人设卡（下一轮对话生效），编辑器随后换成新卡正文。
+          h("label", { className: "dshi_label", "data-role": "soul-edit-persona" }, "正在编辑（换选即切本会话人设卡）",
+            h("select", {
+              className: "dshi_select",
+              "data-role": "soul-edit-persona-select",
+              value: statusScope !== "" && statusScope !== "global" ? statusScope : "",
+              disabled: ro || switchBusy || personaEditOptions.length === 0,
+              title: "选项来自 getStatus.personas；当前生效卡 = getStatus.scope",
+              onChange: function (event) { switchEditingPersona(event.target.value); }
+            },
+              h("option", { key: "__current", value: "" }, statusScope !== "" ? "当前：" + statusScope : "— 未确定当前卡 —"),
+              personaEditOptions.map(function (name) { return h("option", { key: name, value: name }, name); }))),
+          switchBusy ? h("div", { className: "dshi_hint", "data-role": "soul-edit-persona-busy" }, "正在切换人设卡…") : null,
+          switchOk ? h("div", { className: "dshi_ok", "data-role": "soul-edit-persona-ok" }, switchOk) : null,
+          switchError ? ErrorBox(switchError) : null,
           h("div", { className: "dshi_hint" }, editKind === "l0"
             ? "人设卡（L0）：整段注入每次对话，不计入记忆核心水位。"
             : "核心记忆（L1）：计水位；保存带 revision 校验，别处先改会提示冲突并保留草稿。"),
@@ -7878,7 +7615,7 @@ window.__ModuleLoader__.load({
           saveOk ? h("div", { className: "dshi_ok", "data-role": "soul-save-ok" }, saveOk) : null,
           saveError ? ErrorBox(saveError) : null,
           conflict ? h("div", { className: "dshi_conflict", "data-role": "soul-conflict" },
-            "记忆已在别处更新：你的草稿仍保留在编辑框里；点上方「刷新」或回到「专题记忆」页取回最新版本后再保存。") : null),
+            "记忆已在别处更新：你的草稿仍保留在编辑框里；点下方「刷新」取回最新版本后再保存。") : null),
         // 卡③ 每轮注入的顺序（数字来自 DTO，取不到写 —）
         h("div", { className: "dshi_card", "data-role": "soul-order-card" },
           h("div", { className: "dshi_row" },
@@ -9065,18 +8802,22 @@ var personaScopeTarget = personaScopeExplicit
           }, true, { readRevision: function () { return scopeRevisionOf(personaScopeRead()); } });
           // 「记忆已随人设卡切换」提示：组件内状态，只出一次（评审 D：不落 localStorage）；
           // 切会话时探测 effect 重写 availability，提示随之复位。
-          // viewToken 自增：MemoryTab 的加载 effect 依赖它，切卡后重新 getMemoryView，
-          // 让「记忆内容」里的人设卡（L0）跟着换成新卡。壳条与 MemoryTab 是两个组件，
-          // 这里调不到 tab 内的 load()，只能靠 prop 触发。
+          // viewToken 自增：人设与核心页（SoulTab）的加载 effect 依赖它，切卡后
+          // 重新 getMemoryView，让编辑器里的人设卡（L0）跟着换成新卡。壳条与
+          // SoulTab 是两个组件，这里调不到 tab 内的 load()，只能靠 prop 触发。
           setPersonaUi({ switched: true, open: false, busy: false, viewToken: (Number(personaUi.viewToken) || 0) + 1 });
           // 成功后刷一次 getStatus，让壳条按钮的当前卡名回显跟上（评审 C）。
           props.dsh.call("getStatus", sessionId, {}).then(function (status) {
             if (status && typeof status === "object") setModeStatus(status);
           }, function () { /* 回显刷新失败不打断：下一轮探测会再拉 */ });
+          return { ok: true };
         } catch (e) {
           // 失败把错误原文显示出来，不许静默吞掉（评审 C）；cause 存在时追
-          // 加「（原因：…）」（B2）。
-          setPersonaUi({ busy: false, error: { code: (e && e.code) || "shiori/ui-persona", message: (isClear ? "清除专属卡失败：" : "切换失败：") + ((e && e.message) || String(e)) + causeNoteOf(e) } });
+          // 加「（原因：…）」（B2）。同时把结构化错误返回给调用方（SoulTab 的
+          // 「正在编辑」选择器据 result.ok=false + error 渲染 ErrorBox）。
+          var failure = { code: (e && e.code) || "shiori/ui-persona", message: (isClear ? "清除专属卡失败：" : "切换失败：") + ((e && e.message) || String(e)) + causeNoteOf(e) };
+          setPersonaUi({ busy: false, error: failure });
+          return { ok: false, error: failure };
         }
       };
       // 切卡：输入框 trim，空串直接拒并提示「卡名不能为空」（评审 C）。
@@ -9184,7 +8925,6 @@ var personaScopeTarget = personaScopeExplicit
         }
         visibleSessions = filteredSessions;
       }
-      var budgets = props.budgets;
       // S2：main 槽位全屏模式——slots.register 的 inject 下发 workbench:true 时，
       // 根容器追加 scope class（.dshi_rootMain，见 shiori.css 末尾）并标 data-main。
       // 详情页 plugins.bundle.config 槽位没有该 prop，布局保持 860px 窄卡片不回归。
@@ -9258,7 +8998,7 @@ var personaScopeTarget = personaScopeExplicit
             // S2-3 工作区默认卡：与「选工作区」「选会话」同一水平行；人员卡列表
             // （getStatus.personas）非空时是下拉，空列表退回手填输入框（不锁死）。
             h("label", {
-              className: "dshi_label",
+              className: "dshi_label dshi_personaDefault",
               "data-role": "default-persona",
               title: personaScopeTarget === "workspace"
                 ? "只在当前工作区生效（workspacePersonas，服务端按路径最长前缀解析）"
@@ -9285,42 +9025,45 @@ var personaScopeTarget = personaScopeExplicit
                   personaScopeTarget === "workspace" && workspaceTargetPath !== ""
                     ? "当前工作区的默认人设卡"
                     : "所有工作区共用的默认人设卡")),
+              // 卡名控件 + 保存按钮包进同一条内层行：两者始终同一水平线，窄屏
+              // 换行时按钮跟着自己的输入框一起走（13-5 修「按钮错半行 / 飘到行外」）。
               // 有候选 → 下拉直接点选（末尾留一个「自定义」出口，选中换手输框）；
               // 没候选 → 直接手输。早前纯 select 只有一张卡时把手输锁死（实机反馈
               // 「ctrl+a 输入预设名立刻被回弹」），datalist 又没有可点的下拉感，两头都
               // 不满足。这个形态两种都能走。
-              defaultPersonaCustom
-                ? h("input", {
-                    className: "dshi_input",
-                    "data-role": "default-persona-input",
-                    value: workspacePersonaValue,
-                    placeholder: "手输卡名（如 amber）",
-                    autoComplete: "off",
-                    onChange: function (event) { setPersonaUi({ defaultDraft: event.target.value }); }
-                  })
-                : h("select", {
-                    className: "dshi_select",
-                    "data-role": "default-persona-select",
-                    value: workspacePersonaValue,
-                    onChange: function (event) {
-                      var picked = String(event.target.value ?? "");
-                      if (picked === CUSTOM_PERSONA_OPTION) {
-                        setPersonaUi({ defaultCustom: true, defaultDraft: "" });
-                        return;
+              h("div", { className: "dshi_personaDefaultRow" },
+                defaultPersonaCustom
+                  ? h("input", {
+                      className: "dshi_input",
+                      "data-role": "default-persona-input",
+                      value: workspacePersonaValue,
+                      placeholder: "手输卡名（如 amber）",
+                      autoComplete: "off",
+                      onChange: function (event) { setPersonaUi({ defaultDraft: event.target.value }); }
+                    })
+                  : h("select", {
+                      className: "dshi_select",
+                      "data-role": "default-persona-select",
+                      value: workspacePersonaValue,
+                      onChange: function (event) {
+                        var picked = String(event.target.value ?? "");
+                        if (picked === CUSTOM_PERSONA_OPTION) {
+                          setPersonaUi({ defaultCustom: true, defaultDraft: "" });
+                          return;
+                        }
+                        setPersonaUi({ defaultCustom: false, defaultDraft: picked });
                       }
-                      setPersonaUi({ defaultCustom: false, defaultDraft: picked });
-                    }
-                  },
-                    workspacePersonaOptionList.map(function (name) {
-                      return h("option", { key: name, value: name }, name);
-                    }),
-                    h("option", { key: CUSTOM_PERSONA_OPTION, value: CUSTOM_PERSONA_OPTION }, "自定义（手输卡名）"))),
-            h("button", {
-              className: "dshi_btn",
-              "data-role": "default-persona-save",
-              disabled: defaultPersonaBusy || !workspacePersonaScope,
-              onClick: saveWorkspacePersona
-            }, defaultPersonaBusy ? "保存中…" : "保存默认卡")),
+                    },
+                      workspacePersonaOptionList.map(function (name) {
+                        return h("option", { key: name, value: name }, name);
+                      }),
+                      h("option", { key: CUSTOM_PERSONA_OPTION, value: CUSTOM_PERSONA_OPTION }, "自定义（手输卡名）")),
+                h("button", {
+                  className: "dshi_btn",
+                  "data-role": "default-persona-save",
+                  disabled: defaultPersonaBusy || !workspacePersonaScope,
+                  onClick: saveWorkspacePersona
+                }, defaultPersonaBusy ? "保存中…" : "保存默认卡")))),
           // 选卡行（展开时）：输入卡名即切（scope 名 = persona 名，切卡=换整套记忆）；
           // 「清除专属卡」把本会话条目的 persona 写成 null（回落默认解析链）。
           personaCardOpen && sessionId !== "" ? h("div", { className: "dshi_personaRow", "data-role": "persona-card-row" },
@@ -9409,12 +9152,10 @@ var personaScopeTarget = personaScopeExplicit
                     ? h("div", { className: "dshi_loading" }, "能力探测中…") : null,
                   activeTab !== "overview" && activeTab !== "budgets" && modeStatus !== undefined && mode !== "active"
                     ? ModePlaceholder(mode) : null,
-                  // 专题记忆 = 原「记忆内容」+「专题」同页两段（核心记忆预览/编辑 + 专题索引）。
-                  // 旧 id memory 走别名落在这里；TopicsTab 同时挂载，两段内容同时可见。
+                  // 专题记忆 = 专题索引（旧 id memory 走别名落在这里）。L0/L1 编辑段
+                  // 已并入「人设与核心」页；本页不再挂载记忆内容编辑（13-5 收口）。
                   activeTab === "topics" && (modeStatus === null || mode === "active")
                     ? h("div", { "data-role": "topic-view", key: "topic-view" },
-                        h("div", { "data-role": "topic-view-memory" },
-                          h(MemoryTab, { dsh: props.dsh, sessionId: sessionId, budgets: budgets, refreshToken: Number(personaUi.viewToken) || 0, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow })),
                         h("div", { "data-role": "topic-view-index" },
                           h(TopicsTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow, focusTarget: jumpRef.current && jumpRef.current.tab === "topics" ? jumpRef.current : null })))
                     : null,
@@ -9427,29 +9168,22 @@ var personaScopeTarget = personaScopeExplicit
                         h("div", { "data-role": "flashback-view-hits" },
                           h(FlashbacksTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow })))
                     : null,
-                  // 专题整理（原「遗忘」）：写操作集中地——顶部挂整张 auto 卡、
-                  // 整理向导、启用卡、向量召回与危险操作（见 CandidatesTab 内的 StatusTab
-                  // view="organize"）；下方保留候选 / 归档 / 分组。
+                  // 专题整理（原「遗忘」）：页内二级页签——「记忆整理」= 启用卡 /
+                  // 整理向导 / auto 卡 / 危险操作（StatusTab view="organize"）；「候选
+                  // 审阅与执行」= 队列 / 候选 / 归档 / 分组。
                   activeTab === "candidates" && (modeStatus === null || mode === "active") ? h(CandidatesTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable, readOnly: readonlyNow }) : null,
                   // 人设与核心（新页）：选卡 / 编辑 / 每轮注入顺序三张卡。
                   activeTab === "soul" && (modeStatus === null || mode === "active")
                     ? h(SoulTab, {
                       dsh: props.dsh,
                       sessionId: sessionId,
-                      sessions: sessions,
-                      workspaces: workspaces,
-                      workspaceId: workspaceId,
-                      onWorkspaceChange: setWorkspaceId,
-                      onSessionChange: setSessionId,
                       onSessionUnavailable: noteSessionUnavailable,
                       readOnly: readonlyNow,
-                      defaultPersonaValue: workspacePersonaValue,
-                      defaultPersonaOptions: workspacePersonaOptions,
-                      defaultPersonaBusy: defaultPersonaBusy,
-                      defaultPersonaOk: defaultPersonaOk,
-                      defaultPersonaError: defaultPersonaError,
-                      onDefaultPersonaDraft: function (value) { setPersonaUi({ defaultDraft: value }); },
-                      onSaveDefaultPersona: saveWorkspacePersona
+                      // 壳条切卡成功后 viewToken 自增 → 本页重取 getMemoryView。
+                      refreshToken: Number(personaUi.viewToken) || 0,
+                      // 「正在编辑」换卡复用壳层同一条 personaWrite 链路（写本会话
+                      // sessionPersonas 单键，CAS 重试一次）；返回 {ok,error} 供页内反馈。
+                      onSwitchPersona: function (name) { return personaWrite(name, false); }
                     }) : null,
                   // 0.5-4D：投递体检（数据源 getStatus.diagnostics.delivery；页面无写操作按钮）。
                   activeTab === "delivery" && (modeStatus === null || mode === "active") ? h(DeliveryCheckupTab, { dsh: props.dsh, sessionId: sessionId, onSessionUnavailable: noteSessionUnavailable }) : null,

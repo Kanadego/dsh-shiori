@@ -1113,8 +1113,15 @@ test("R6 追加回归：shadow / inert 模式下数据 tab 呈现未配置占位
     const flat = flattenVNode(tree);
     assert.ok(!flat.some((n) => typeof n.type === "function" && n.type.name === "CandidatesTab"),
       `${mode}: CandidatesTab must not mount`);
+    // 13-5：专题记忆页不再有 MemoryTab（记忆编辑已并入「人设与核心」页，专题页
+    // 只保留索引）。等价替换：同模式下专题页与灵魂页也都不挂载。
     assert.ok(!flat.some((n) => typeof n.type === "function" && n.type.name === "MemoryTab"),
-      `${mode}: MemoryTab must not mount`);
+      `${mode}: MemoryTab no longer exists`);
+    const topicsFlat = flattenVNode(renderSection(["topics", "session-A", "", null, { mode, configured: mode === "shadow" }]));
+    assert.ok(!topicsFlat.some((n) => typeof n.type === "function" && n.type.name === "TopicsTab"),
+      `${mode}: TopicsTab must not mount`);
+    assert.ok(!topicsFlat.some((n) => n.props && n.props["data-role"] === "topic-view-memory"),
+      `${mode}: topic-view-memory wrapper removed`);
     assert.ok(!flat.some((n) => typeof n.type === "function" && n.type.name === "GraphTab"),
       `${mode}: GraphTab must not mount`);
     const text = collectText(tree);
@@ -1699,30 +1706,31 @@ async function mountBudgetsTab() {
   return { mount, render, setField, submitNow, submitButton, mutations, scope, state, host };
 }
 
-test("预算 tab（U2 标杆页）：三层九字段、界面名主位、技术名进 tooltip、后果描述 + 实时水位条", async () => {
+test("预算 tab（U2 标杆页）：两层四字段、界面名主位、技术名进 tooltip、后果描述 + 实时水位条", async () => {
   const { mount } = await mountBudgetsTab();
   const mounted = mount();
-  // 九个可编辑字段；水位字段各渲染「滑杆 + 数字框」两个 input，故 input 共 11 个。
-  assert.equal(mounted.inputs.length, 11, "11 inputs (9 fields, water fields have slider + number)");
+  // 13-5：L2 闪回卡片组（5 个 spark 字段）已从预算页裁撤，只剩 L0 人设卡 1 个
+  // 整数框 + L1 记忆核心 1 个整数框 + 软/硬两条水位（各「滑杆 + 数字框」），
+  // 故 input 共 6 个（4 个字段，2 条水位各多一个滑杆）。
+  assert.equal(mounted.inputs.length, 6, "6 inputs (4 fields, 2 water sliders render as range + number)");
   assert.equal(mounted.inputs.filter((n) => String(n.props.className) === "dshi_slider").length, 2, "两条水位滑杆");
+  const mountedPaths = new Set(mounted.inputs.map((n) => n.props["data-path"]));
+  for (const gone of ["spark.maxChars", "spark.inlineMaxChars", "spark.maxCards", "spark.seedCount", "spark.linkCount"]) {
+    assert.ok(!mountedPaths.has(gone), "L2 spark 字段已裁撤: " + gone);
+  }
 
   const expected = {
     "persona.maxChars": ["人设卡最大字符数", "persona.maxChars", "写入会被拒绝"],
     "core.hardCapChars": ["硬顶", "core.hardCapChars", "不能越过的总长度上限"],
     "core.softChars": ["软水位", "core.softChars", "开始压缩着写"],
     "core.hardChars": ["硬水位（硬闸）", "core.hardChars", "只能删减"],
-    "spark.maxChars": ["单次投递长度上限", "spark.maxChars", "发不出去"],
-    "spark.inlineMaxChars": ["直接带全文的门槛", "spark.inlineMaxChars", "只发摘要"],
-    "spark.maxCards": ["单次最多卡片数", "spark.maxCards", "防止刷屏"],
-    "spark.seedCount": ["召回种子数", "spark.seedCount", "种子素材条数"],
-    "spark.linkCount": ["关联链接数", "spark.linkCount", "1 跳关联"],
   };
   const labelsByPath = new Map();
   for (const label of flattenVNode(mounted.tree).filter((n) => n.type === "label" && n.props && n.props.className === "dshi_label")) {
     const input = flattenVNode(label).find((n) => n.type === "input" && n.props && n.props["data-path"]);
     if (input) labelsByPath.set(input.props["data-path"], label);
   }
-  assert.equal(labelsByPath.size, 9, "九个字段各有 label");
+  assert.equal(labelsByPath.size, 4, "四个字段各有 label");
   const wholeText = collectText(mounted.tree);
   for (const [path, parts] of Object.entries(expected)) {
     const label = labelsByPath.get(path);
@@ -1736,9 +1744,13 @@ test("预算 tab（U2 标杆页）：三层九字段、界面名主位、技术�
   const renderedPaths = new Set(mounted.inputs.map((n) => n.props["data-path"]));
   assert.ok(!renderedPaths.has("core.targetChars"), "targetChars 不渲染（D3）");
   assert.ok(!renderedPaths.has("core.softRatio"), "旧 softRatio 不在面板");
-  // 三组分卡（L0 人设卡 / L1 记忆核心 / L2 闪回卡片）
+  // 分卡：L0 人设卡 / L1 记忆核心（L2 闪回卡片整组裁撤，不得残留组头/空容器）
   const text = collectText(mounted.tree);
-  for (const part of ["人设卡", "记忆核心", "闪回卡片"]) assert.ok(text.includes(part), "group card: " + part);
+  for (const part of ["人设卡", "记忆核心"]) assert.ok(text.includes(part), "group card: " + part);
+  const budgetPage = flattenVNode(mounted.tree).find((n) => n.props && n.props["data-role"] === "settings-page-budget");
+  assert.ok(budgetPage, "预算子页容器存在");
+  assert.ok(!collectText(budgetPage).includes("闪回卡片"), "L2 闪回卡片组已整组裁撤，预算页内不留组头");
+  assert.ok(!flattenVNode(budgetPage).some((n) => n.props && n.props["data-role"] === "settings-spark"), "预算页内无闪回卡片空容器");
   // 实时预览条（本页灵魂）：有占用刻度文案即为渲染成功
   const preview = flattenVNode(mounted.tree).find((n) => n.props && String(n.props.className).includes("dshi_preview"));
   assert.ok(preview, "水位预览条渲染");
@@ -1755,7 +1767,8 @@ test("预算 tab：草稿取 value.budgets；旧 softRatio/hardRatio 按硬顶�
   assert.equal(values.get("core.hardChars"), "9000", "0.9 × 10000 换算");
   assert.equal(values.get("core.hardChars.num"), "9000");
   assert.equal(values.get("persona.maxChars"), "12000");
-  assert.equal(values.get("spark.maxCards"), "5");
+  // 13-5：L2 spark 组裁撤后，预算页不再渲染任何 spark 字段。
+  assert.equal([...values.keys()].filter((p) => p.indexOf("spark.") === 0).length, 0, "无 spark 字段");
 });
 
 test("预算 tab：空输入就地中文报错并禁用保存，绝不写 0（HEAD 老回归）", async () => {
@@ -1780,13 +1793,16 @@ test("预算 tab：非法数字就地中文报错并中止整批写入（HEAD �
   const { mount, setField, submitButton, submitNow, mutations } = await mountBudgetsTab();
   mount();
   // 非数字：草稿里保留原文（不是 NaN、不是 0），校验判非法。
-  const tree = setField("spark.maxCards", "五");
+  const tree = setField("persona.maxChars", "五");
   const text = collectText(tree);
-  assert.ok(text.includes("单次最多卡片数必须是正整数"), "非数字报错点名可见字段名");
+  assert.ok(text.includes("人设卡最大字符数必须是正整数"), "非数字报错点名可见字段名");
   assert.equal(submitButton(tree).props.disabled, true, "非法数字禁用保存");
   // 就算绕过 disabled 直接提交，save() 里的 errorCount 双保险也要拦住整批写入。
   await submitNow();
   assert.equal(mutations.length, 0, "非法数字不得发出任何 budgets 写入");
+  // 13-5：旧用例拿 spark.maxCards 当非法输入源，字段已裁撤；断言预算页
+  // 连渲染入口都不再有，这类越界输入无从产生。
+  assert.ok(!flattenVNode(tree).some((n) => n.type === "input" && n.props && String(n.props["data-path"] || "").indexOf("spark.") === 0), "spark 输入框已不存在");
 
   mount();
   const floatTree = setField("core.hardCapChars", "10000.5");
@@ -1804,14 +1820,12 @@ test("预算 tab：上限与联动校验——中文就地提示，越界即禁�
   assert.equal(submitButton(tree).props.disabled, true);
 
   mount();
-  tree = setField("spark.maxChars", "700");
-  assert.ok(collectText(tree).includes("超过上限 600"), "spark 上限");
-  assert.equal(submitButton(tree).props.disabled, true);
-
-  mount();
   tree = setField("core.hardCapChars", "abc");
   assert.ok(collectText(tree).includes("硬顶必须是正整数"), "非数字硬顶");
   assert.equal(submitButton(tree).props.disabled, true);
+  // 13-5：旧用例的「spark.maxChars 上限 600」路径随 L2 组裁撤，改为断言该组
+  // 在预算页没有任何渲染入口（越界上限只可能来自残留字段）。
+  assert.ok(!flattenVNode(mount().tree).some((n) => collectText(n).includes("单次投递长度上限")), "spark 组已整组裁撤");
 
   // 软/硬水位联动钳制：硬顶下调后硬水位 ≤ 硬顶-1、软水位 ≤ 硬水位-1，不留越界态
   mount();
@@ -2018,7 +2032,7 @@ test("Q 槽健壮性 A：5 个候选全部不可用 → 保持占位项、sessio
   const text = collectText(tree);
   assert.ok(text.includes("未选择会话"), "面板显示「未选择会话」占位");
   assert.ok(text.includes("已跳过 5 个宿主不可用的会话"));
-  for (const name of ["StatusTab", "MemoryTab", "GraphTab", "CandidatesTab", "BudgetsTab"]) {
+  for (const name of ["StatusTab", "SoulTab", "GraphTab", "CandidatesTab", "BudgetsTab", "TopicsTab"]) {
     assert.equal(findComponent(tree, name), undefined, name + " 不渲染（避免继续刷错误）");
   }
   await cleanup();
@@ -2063,16 +2077,17 @@ test("Q 槽健壮性 B：tab 内的 session/writer-held 不进 ErrorBox，改为
   await bootPanel(host, sectionVNode);
   assert.equal(host.states[1], "session-A");
 
-  host.states[0] = "memory";
+  // 13-5：记忆编辑搬到「人设与核心」页（SoulTab 取 getMemoryView）。
+  host.states[0] = "soul";
   host.runEffects.v = false;
   host.cursor.v = 0;
   const firstPaint = sectionVNode.type(sectionVNode.props);
-  const memoryTab = findComponent(firstPaint, "MemoryTab");
-  assert.ok(memoryTab, "未 blocked 时记忆 tab 正常挂载");
-  await runTab(host, memoryTab);
+  const soulTab = findComponent(firstPaint, "SoulTab");
+  assert.ok(soulTab, "未 blocked 时人设与核心 tab 正常挂载");
+  await runTab(host, soulTab);
 
-  // MemoryTab 的 state 从 PANEL_STATES 起：view / error。
-  assert.equal(host.states[PANEL_STATES + 1], null, "会话级错误不写入 tab 的 error 状态（ErrorBox 不渲染）");
+  // SoulTab 的 state 从 PANEL_STATES 起：status / view / loadError / ...
+  assert.equal(host.states[PANEL_STATES + 2], null, "会话级错误不写入 tab 的 loadError 状态（ErrorBox 不渲染）");
   assert.equal(host.states[5].blocked, true, "面板层缓存会话级失败");
   assert.equal(host.states[5].error.code, "session/writer-held");
   assert.equal(host.states[5].sessionId, "session-A");
@@ -2084,7 +2099,7 @@ test("Q 槽健壮性 B：tab 内的 session/writer-held 不进 ErrorBox，改为
   assert.ok(text.includes("（session/writer-held）"), "提示展示错误码");
   assert.ok(text.includes("已跳过 1 个宿主不可用的会话"));
   assert.equal(findErrorBoxes(after).length, 0, "不再出现红色 ErrorBox");
-  assert.equal(findComponent(after, "MemoryTab"), undefined, "blocked 后暂停该会话的数据请求");
+  assert.equal(findComponent(after, "SoulTab"), undefined, "blocked 后暂停该会话的数据请求");
   await cleanup();
 });
 
@@ -2092,6 +2107,7 @@ test("R7：记忆核心编辑初值取磁盘正文 body，而不是含派生索�
   // 服务端 getMemoryView 的 l1.text 是「core 正文 + 派生主题索引」的渲染结果，
   // core_write 不剥离索引 —— 草稿若取 text，保存后索引会被固化进 core。这里钉住
   // 客户端必须用 l1.body 作为编辑初值。
+  // 13-5：编辑区从专题记忆页（MemoryTab）搬到「人设与核心」页（SoulTab）。
   const services = {
     "remote.session": { list: async () => ({ ok: true, value: { items: [{ sessionId: "session-A" }] } }) },
     "remote.shiori": {
@@ -2117,26 +2133,25 @@ test("R7：记忆核心编辑初值取磁盘正文 body，而不是含派生索�
   await bootPanel(host, sectionVNode);
   assert.equal(host.states[1], "session-A");
 
-  host.states[0] = "memory";
+  host.states[0] = "soul";
   host.cursor.v = 0;
   host.runEffects.v = false;
   const tree = sectionVNode.type(sectionVNode.props);
-  const memoryTab = findComponent(tree, "MemoryTab");
-  assert.ok(memoryTab, "MemoryTab mounted");
-  await runTab(host, memoryTab);
+  const soulTab = findComponent(tree, "SoulTab");
+  assert.ok(soulTab, "SoulTab mounted");
+  await runTab(host, soulTab);
 
   host.cursor.v = PANEL_STATES;
-  let painted = memoryTab.type(memoryTab.props);
-  const editButtons = flattenVNode(painted).filter((n) => n.type === "button" && n.children.includes("编辑"));
-  assert.equal(editButtons.length, 2, "L0 and L1 both expose an edit button");
-  assert.ok(collectText(painted).includes("主题记忆索引"), "预览仍展示完整渲染视图（含派生索引）");
-
-  editButtons[1].props.onClick();   // L1
+  let painted = soulTab.type(soulTab.props);
+  assert.equal(flattenVNode(painted).find((n) => n.type === "textarea").props.value, "PERSONA", "默认编辑 L0，初值取人设卡正文");
+  const l1Tab = flattenVNode(painted).find((n) => n.type === "button" && n.props && n.props["data-role"] === "soul-edit-tab-l1");
+  l1Tab.props.onClick();   // L1
   host.cursor.v = PANEL_STATES;
-  painted = memoryTab.type(memoryTab.props);
+  painted = soulTab.type(soulTab.props);
   const textarea = flattenVNode(painted).find((n) => n.type === "textarea");
   assert.ok(textarea, "L1 editor opened");
   assert.equal(textarea.props.value, "CORE BODY", "编辑初值取 body，不含派生索引");
+  assert.ok(!String(textarea.props.value).includes("主题记忆索引"), "草稿不带派生索引行");
   await cleanup();
 });
 
@@ -2154,7 +2169,7 @@ test("Q 槽健壮性 C：同一会话缓存失败——切 tab 不重复 RPC，�
         calls.push({ method: "getMemoryView" });
         memoryAttempts += 1;
         if (memoryAttempts === 1) return { ok: false, error: { code: "session/writer-held", message: "held" } };
-        return { ok: true, value: { l0: "L0 内容", l1: "L1 内容" } };
+        return { ok: true, value: { scope: "amber", l0: { text: "L0 内容", revision: "r0", chars: 5, budget: 12000 }, l1: { text: "L1 内容", body: "L1 内容", revision: "r1", chars: 5, budget: 10000 } } };
       },
       getGraph: async () => {
         calls.push({ method: "getGraph" });
@@ -2166,17 +2181,18 @@ test("Q 槽健壮性 C：同一会话缓存失败——切 tab 不重复 RPC，�
   const { host, sectionVNode, cleanup } = await mountPanel(services);
   await bootPanel(host, sectionVNode);
 
-  // 1) 记忆 tab 首次数据 RPC 命中 session/writer-held
-  host.states[0] = "memory";
+  // 1) 人设与核心 tab 首次数据 RPC 命中 session/writer-held（13-5：原 MemoryTab 职责）
+  host.states[0] = "soul";
   host.runEffects.v = false;
   host.cursor.v = 0;
   let tree = sectionVNode.type(sectionVNode.props);
-  const memoryTab = findComponent(tree, "MemoryTab");
-  assert.ok(memoryTab);
-  await runTab(host, memoryTab);
+  const soulTab = findComponent(tree, "SoulTab");
+  assert.ok(soulTab);
+  await runTab(host, soulTab);
   assert.equal(memoryAttempts, 1);
   assert.equal(host.states[5].blocked, true);
-  assert.equal(countOf("getStatus"), 1, "自动选中只探测一次");
+  const statusCallsAfterFirst = countOf("getStatus");
+  assert.ok(statusCallsAfterFirst >= 1, "面板探测 + tab 载入都会走 getStatus");
 
   // 2) 切图谱：blocked 会话不再发任何数据 RPC
   host.states[0] = "graph";
@@ -2185,12 +2201,13 @@ test("Q 槽健壮性 C：同一会话缓存失败——切 tab 不重复 RPC，�
   assert.equal(findComponent(tree, "GraphTab"), undefined, "blocked 时不挂载 GraphTab");
   assert.equal(countOf("getGraph"), 0, "切 tab 不发已判失败的会话数据 RPC");
 
-  // 3) 切回记忆：同一 sessionId 不重发同一 RPC
-  host.states[0] = "memory";
+  // 3) 切回人设与核心：同一 sessionId 不重发同一 RPC
+  host.states[0] = "soul";
   host.cursor.v = 0;
   tree = sectionVNode.type(sectionVNode.props);
-  assert.equal(findComponent(tree, "MemoryTab"), undefined);
+  assert.equal(findComponent(tree, "SoulTab"), undefined);
   assert.equal(memoryAttempts, 1, "同一 sessionId 的会话级失败被缓存，不再发 RPC");
+  assert.equal(countOf("getStatus"), statusCallsAfterFirst, "blocked 期间切 tab 不再探测/载入");
 
   // 4) 点「刷新」→ 清缓存、强制重新探测 → 成功后 tab 重新挂载并重试
   findButton(tree, "刷新").props.onClick();
@@ -2200,17 +2217,17 @@ test("Q 槽健壮性 C：同一会话缓存失败——切 tab 不重复 RPC，�
   for (const effect of host.effects.splice(0).slice(1)) effect();
   await settle();
   host.runEffects.v = false;
-  assert.equal(countOf("getStatus"), 2, "刷新强制重新探测会话");
+  assert.ok(countOf("getStatus") > statusCallsAfterFirst, "刷新强制重新探测会话");
   assert.equal(host.states[5].blocked, false, "探测成功后清除 blocked 缓存");
 
   host.cursor.v = 0;
   tree = sectionVNode.type(sectionVNode.props);
-  const retryTab = findComponent(tree, "MemoryTab");
+  const retryTab = findComponent(tree, "SoulTab");
   assert.ok(retryTab, "缓存清除后 tab 重新挂载");
   await runTab(host, retryTab);
   assert.equal(memoryAttempts, 2, "刷新后可重试同一会话的 RPC");
-  assert.equal(host.states[PANEL_STATES + 1], null, "重试成功后无错误");
-  assert.equal(host.states[PANEL_STATES].l0, "L0 内容");
+  assert.equal(host.states[PANEL_STATES + 2], null, "重试成功后无 loadError");
+  assert.equal(host.states[PANEL_STATES + 1].l0.text, "L0 内容");
   await cleanup();
 });
 
@@ -3298,12 +3315,29 @@ async function mountTabByIdRefAware(mod, host, tabId, tabName) {
 
 // P1-1（重建轮询串会话）：轮询每轮比对渲染体同步的 sessionId 镜像 ref，卸载
 // cleanup 置停——旧实现比对创建闭包里的 props，切换会话后恒等、永不停止。
+// 13-5：语义召回卡全客户端只剩设置页「向量召回」子页一处，本用例改为直接渲染
+// 该子页的受控实现（SemanticRecallPanel，经设置页 BudgetsTab 取出）。
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 test("P1-1：重建轮询——发起后切换会话，旧会话的轮询停止（getStatus 不再增长）", async () => {
   const host = makeRefAwareReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderStatus = await mountTabByIdRefAware(mod, host, "status", "StatusTab");
+  const renderBudgets = await mountTabByIdRefAware(mod, host, "budgets", "BudgetsTab");
+  const scope = {
+    getSnapshot: () => ({
+      status: "ready",
+      revision: 1,
+      value: {
+        budgets: {
+          core: { hardCapChars: 10000, softChars: 7500, hardChars: 9000, targetChars: 8000 },
+          persona: { maxChars: 12000 },
+          spark: { maxChars: 600, inlineMaxChars: 100, maxCards: 5, seedCount: 3, linkCount: 2 },
+        },
+        temperature: {},
+      },
+    }),
+    mutate: async () => true,
+  };
   const statusCalls = [];
   const pendingStatus = []; // getStatus 挂起队列（手工控制响应时序）
   const semanticDto = (running) => ({
@@ -3320,33 +3354,52 @@ test("P1-1：重建轮询——发起后切换会话，旧会话的轮询停止�
       // executeTool（semantic_rebuild）：立即成功
       return { ok: true };
     },
+    configScope: () => scope,
   };
 
-  // 挂载：初始 getStatus 挂起 → 放行（idle），「重建向量」按钮可点
+  // 设置页打开「向量召回」子页：BudgetsTab 的 settingsPage 占 state[9]；
+  // 子页自己的 state 从 10 起（status / error / rebuildProgress / dlProgress /
+  // manualDirDraft / dlUiError / copyFeedback）。
   host.states.length = 0;
-  host.states.push(null, null, null);
-  let tree = renderStatus(dsh, "session-A", { effects: true });
-  for (const effect of host.effects.splice(0)) effect();
-  await settle();
+  host.states[0] = scope.getSnapshot();
+  host.states[9] = "recall";
+  host.states[10] = semanticDto(false);
+  host.states[11] = null;
+  host.states[12] = null;
+  host.states[13] = null;
+  host.states[14] = "";
+  host.states[15] = null;
+  host.states[16] = null;
   host.runEffects.v = false;
-  pendingStatus.shift()(semanticDto(false));
-  await settle();
-  tree = renderStatus(dsh, "session-A");
-  assert.equal(statusCalls.length, 1, "one getStatus from mount load");
+  host.cursor.v = 0;
+  const budgetsTree = renderBudgets(dsh, "session-A");
+  const recallPanel = flattenVNode(budgetsTree).find((n) => typeof n.type === "function" && n.type.name === "SemanticRecallPanel");
+  assert.ok(recallPanel, "设置页向量召回子页可达");
+  const renderPanel = (sessionId) => {
+    host.cursor.v = 10;
+    host.runEffects.v = true;
+    return recallPanel.type({ dsh, sessionId, scope });
+  };
+  // 只跑挂载 effect（aliveRef=true），不跑 load（status 已预置，无需再取一次）。
+  let tree = renderPanel("session-A");
+  const aliveEffect = host.effects.splice(0)[0];
+  if (typeof aliveEffect === "function") aliveEffect();
+  host.runEffects.v = false;
+
   findButton(tree, "重建向量").props.onClick();
   await settle();
-
-  // 轮询第 1 轮的 getStatus 挂起中：此刻切换会话（重渲染即更新镜像 ref）
-  assert.equal(statusCalls.length, 2, "poll round 1 issued");
-  tree = renderStatus(dsh, "session-B");
+  // 第 1 轮 PollStatus 的 getStatus 挂起中：此刻切换会话（重渲染即更新镜像 ref）
+  assert.equal(statusCalls.length, 1, "poll round 1 issued");
+  tree = renderPanel("session-B");
+  assert.ok(tree, "切会话后重渲染");
 
   // 放行第 1 轮（仍 running → 循环继续），等待 1.5s 轮询间隔过后：
   // 旧闭包比对 ref 发现已切到 session-B → 直接退出，不再发第 2 轮
   pendingStatus.shift()(semanticDto(true));
   await sleep(1700);
   await settle();
-  assert.equal(statusCalls.length, 2, "no further getStatus after session switch");
-  assert.deepEqual(statusCalls, ["session-A", "session-A"], "both calls were for the original session");
+  assert.equal(statusCalls.length, 1, "no further getStatus after session switch");
+  assert.deepEqual(statusCalls, ["session-A"], "poll only hit the original session");
 });
 
 test("R8：tab 栏八项冻结顺序（0.5-13-4 信息架构）", async () => {
@@ -3364,7 +3417,7 @@ test("R8：tab 栏八项冻结顺序（0.5-13-4 信息架构）", async () => {
   await cleanup();
 });
 
-test("R8：L0/L1 标题行的 revision 只显示前缀，完整 token 收进 title 属性", async () => {
+test("R8：L1 标题行的 revision 只显示前缀，完整 token 收进 title 属性", async () => {
   const longRev = "shiori-r1.eyJhbWJlciI6InBlcnNvbmEifQ.0123456789abcdef0123456789abcdef0123456789abcdef";
   const services = {
     "remote.session": { list: async () => ({ ok: true, value: { items: [{ sessionId: "session-A" }] } }) },
@@ -3382,27 +3435,28 @@ test("R8：L0/L1 标题行的 revision 只显示前缀，完整 token 收进 tit
   };
   const { host, sectionVNode, cleanup } = await mountPanel(services);
   await bootPanel(host, sectionVNode);
-  host.states[0] = "memory";
+  // 13-5：记忆编辑并入「人设与核心」页，revision 徽章只剩编辑卡 L1 标题这一处
+  // （原 MemoryTab 的 L0/L1 预览双徽章随页一并裁撤）。
+  host.states[0] = "soul";
   host.cursor.v = 0;
   host.runEffects.v = false;
   const tree = sectionVNode.type(sectionVNode.props);
-  const memoryTab = findComponent(tree, "MemoryTab");
-  assert.ok(memoryTab);
-  await runTab(host, memoryTab);
+  const soulTab = findComponent(tree, "SoulTab");
+  assert.ok(soulTab);
+  await runTab(host, soulTab);
 
   host.cursor.v = PANEL_STATES;
-  const painted = memoryTab.type(memoryTab.props);
+  const painted = soulTab.type(soulTab.props);
   const text = collectText(painted);
   const badges = flattenVNode(painted).filter((n) => String((n.props && n.props.className) || "").includes("dshi_badge") && String(n.props.title || "").startsWith("完整版本号："));
-  assert.equal(badges.length, 2, "两个 badge 都带完整版本号");
+  assert.equal(badges.length, 1, "编辑卡标题行只有一处 revision 徽章");
   for (const badge of badges) {
     assert.equal(badge.props.title, "完整版本号：" + longRev);
     const shown = collectText(badge);
     assert.equal(shown, "rev shiori-r1.ey…", "标题行只显示 12 字符前缀 + 省略号");
     assert.equal(shown.includes(longRev), false, "标题行不再铺完整 token");
   }
-  // 完整值仍可从「完整 DTO」折叠区查到（排查用），所以这里只钉标题行本身。
-  assert.ok(text.includes("完整 DTO"), "原始 DTO 仍可展开查看");
+  assert.ok(!text.includes("完整 DTO"), "原 MemoryTab 的「完整 DTO」折叠区已随页删除");
   await cleanup();
 });
 

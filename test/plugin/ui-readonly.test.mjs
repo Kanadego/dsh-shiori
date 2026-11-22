@@ -120,36 +120,38 @@ const MEMORY_VIEW = {
   budgets: { persona: { maxChars: 12000 }, core: { targetChars: 8000 } },
 };
 
-async function mountMemoryTab() {
+async function mountSoulTab() {
   const host = makeStatefulReact();
   const { sectionVNode } = await applyPanel(host);
   host.states.length = 0;
-  host.states.push("memory", "session-A", "", null, { mode: "active" });
+  host.states.push("soul", "session-A", "", null, { mode: "active" });
   host.cursor.v = 0;
   const sectionTree = sectionVNode.type(sectionVNode.props);
-  const memoryTab = flattenVNode(sectionTree)
-    .find((n) => typeof n.type === "function" && n.type.name === "MemoryTab");
-  assert.ok(memoryTab, "MemoryTab reached");
+  const soulTab = flattenVNode(sectionTree)
+    .find((n) => typeof n.type === "function" && n.type.name === "SoulTab");
+  assert.ok(soulTab, "SoulTab reached");
+  // 13-5：记忆编辑从 MemoryTab 并入「人设与核心」页；状态槽：status / view / ...
   const render = (readOnly) => {
     host.states.length = Math.max(host.states.length, PANEL_STATES + 7);
-    host.states[PANEL_STATES] = MEMORY_VIEW;
+    host.states[PANEL_STATES] = null;
+    host.states[PANEL_STATES + 1] = MEMORY_VIEW;
     host.cursor.v = PANEL_STATES;
-    return memoryTab.type({ dsh: { call: async () => ({}) }, sessionId: "session-A", readOnly });
+    return soulTab.type({ dsh: { call: async () => ({}) }, sessionId: "session-A", readOnly });
   };
   return { render };
 }
 
-test("F7 置灰：只读态记忆页「编辑 / 保存」禁用并给一行原因说明；恢复后可用", async () => {
-  const { render } = await mountMemoryTab();
+test("F7 置灰：只读态记忆编辑「保存 / 恢复上一版」禁用并给一行原因说明；恢复后可用", async () => {
+  const { render } = await mountSoulTab();
   const roTree = render(true);
-  const edits = findButtons(roTree, "编辑");
-  assert.ok(edits.length >= 2, "L0/L1 编辑入口都在");
-  for (const button of edits) assert.equal(button.props.disabled, true, "只读态编辑禁用");
+  const byRole = (tree, role) => flattenVNode(tree).find((n) => n.props && n.props["data-role"] === role);
+  assert.equal(byRole(roTree, "soul-save").props.disabled, true, "只读态保存禁用");
+  assert.equal(byRole(roTree, "soul-restore").props.disabled, true, "只读态恢复上一版禁用");
+  assert.equal(byRole(roTree, "soul-edit-persona-select").props.disabled, true, "只读态换卡选择器禁用");
   assert.ok(collectText(roTree).includes("写操作已停用"), "页内说明置灰原因");
   const normalTree = render(undefined);
-  for (const button of findButtons(normalTree, "编辑")) {
-    assert.notEqual(button.props.disabled, true, "可写态编辑可用");
-  }
+  assert.equal(byRole(normalTree, "soul-save").props.disabled, false, "可写态保存可用");
+  assert.equal(byRole(normalTree, "soul-restore").props.disabled, false, "可写态恢复上一版可用");
   assert.ok(!collectText(normalTree).includes("写操作已停用"), "可写态无置灰说明");
 });
 

@@ -292,12 +292,16 @@ function memoryViewDto(l0Fields, l1Fields, budgets) {
   }, budgets === undefined ? {} : { budgets });
 }
 
-async function mountMemoryTab() {
-  const { host, tab } = await mountTabById("memory", "MemoryTab");
-  // 与 ui-memory.test.mjs 同款：view 预置进 states[0]（直接调组件，不走 load effect）
-  return (dsh, view) => {
+async function mountSoulTab() {
+  // 13-5：记忆编辑从专题记忆页（MemoryTab）并入「人设与核心」页（SoulTab）。
+  // SoulTab 的 state 顺序：status / view / loadError / editKind。
+  const { host, tab } = await mountTabById("soul", "SoulTab");
+  return (dsh, view, editKind) => {
     host.states.length = 0;
-    host.states[0] = view === undefined ? null : view;
+    host.states[0] = null;
+    host.states[1] = view === undefined ? null : view;
+    host.states[2] = null;
+    host.states[3] = editKind || "l0";
     host.cursor.v = 0;
     host.runEffects.v = false;
     return tab.type({ dsh, sessionId: "session-A" });
@@ -305,7 +309,7 @@ async function mountMemoryTab() {
 }
 
 test("0.3-3 记忆上限：L1 按硬顶显示（l1.hardCap 优先于 l1.budget），L0 用 l0.budget（不走 budgets.persona 兜底）", async () => {
-  const render = await mountMemoryTab();
+  const render = await mountSoulTab();
   const dsh = { call: async () => ({}) };
   // 真实 DTO（getMemoryView）：l1.hardCap=14000 与 l1.budget=8000 同时在——必须取 14000
   const view = memoryViewDto(
@@ -313,23 +317,26 @@ test("0.3-3 记忆上限：L1 按硬顶显示（l1.hardCap 优先于 l1.budget�
     { chars: 60, hardCap: 14000, budget: 8000 },
     { persona: { maxChars: 7777 }, core: { targetChars: 8000 } },
   );
-  const text = collectText(render(dsh, view));
-  assert.ok(text.includes("60 / 14000 UTF-16"), "L1 上限取 l1.hardCap（硬顶口径，与状态页 l1HardCap 同源）");
-  assert.ok(text.includes("12 / 9000 UTF-16"), "L0 上限取 l0.budget（不再读 budgets.persona）");
-  assert.ok(!text.includes("7777 UTF-16"), "budgets.persona 不再参与 Bar 上限兜底（DTO 明细区原样透出不算）");
+  const l0Text = collectText(render(dsh, view, "l0"));
+  assert.ok(l0Text.includes("上限 9000 字（不计入水位）"), "L0 上限取 l0.budget（不再读 budgets.persona）");
+  assert.ok(!l0Text.includes("7777 字"), "budgets.persona 不再参与上限兜底");
+  const l1Text = collectText(render(dsh, view, "l1"));
+  assert.ok(l1Text.includes("上限 14000 字（计水位）"), "L1 上限取 l1.hardCap（硬顶口径，与状态页 l1HardCap 同源）");
+  assert.ok(!l1Text.includes("上限 8000 字"), "l1.budget 在硬顶存在时不作为上限");
 });
 
-test("0.3-3 记忆上限：老宿主 DTO 无 l1.hardCap/budget 时按 budgets.core.hardCapChars → 常量 14000 兜底，口径仍与状态页一致", async () => {
-  const render = await mountMemoryTab();
+test("0.3-3 记忆上限：DTO 缺 hardCap/budget 时如实显示「—」，不再按 budgets.core.hardCapChars 或常量 14000 本地推算", async () => {
+  const render = await mountSoulTab();
   const dsh = { call: async () => ({}) };
-  // 老宿主：DTO 无 budgets、l1 只有 chars——落常量 14000（硬顶口径，不再是 targetChars 8000）
-  const bare = collectText(render(dsh, memoryViewDto({}, { chars: 60 })));
-  assert.ok(bare.includes("60 / 14000 UTF-16"), "全缺兜底常量为 14000（硬顶口径）");
-  assert.ok(!bare.includes("8000 UTF-16"), "不再按 targetChars=8000 显示");
-  // 中间层：view.budgets.core.hardCapChars 存在时优先于常量
+  // 老宿主：DTO 无 budgets、l1 只有 chars——SoulTab 只认 DTO，取不到就显示「—」。
+  const bare = collectText(render(dsh, memoryViewDto({}, { chars: 60 }), "l1"));
+  assert.ok(bare.includes("上限 — 字（计水位）"), "缺字段如实显示「—」");
+  assert.ok(!bare.includes("14000"), "不再回落常量 14000");
+  // 中间层 view.budgets.core.hardCapChars 存在也不参与：本页不做本地推算。
   const withBudgets = collectText(render(dsh, memoryViewDto({}, { chars: 60 },
-    { core: { hardCapChars: 12345 } })));
-  assert.ok(withBudgets.includes("60 / 12345 UTF-16"), "budgets.core.hardCapChars 参与兜底链");
+    { core: { hardCapChars: 12345 } }), "l1"));
+  assert.ok(withBudgets.includes("上限 — 字（计水位）"), "budgets.core.hardCapChars 不参与本页上限");
+  assert.ok(!withBudgets.includes("12345 字"), "不显示推算值");
 });
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 // 并对可控定时器、useEffect deps/cleanup、useRef 持久、useState 合并、rerender 的
 // diff 渲染语义（§9 债 4②）与表单交互钩子 find/findAll/change/textOf（§9 债 7）
 // 做判别性断言。
-// 证据级别：真实执行 client/index.js（ShioriSection → MemoryTab 组件函数真执行），
+// 证据级别：真实执行 client/index.js（ShioriSection → SoulTab 组件函数真执行），
 // harness 的 renderer 把 vnode 落地为 fake document element 树，click 触发 onClick →
 // useState 变更 → rerender 重新执行组件函数 → DOM 文本变化。非浏览器实机。
 
@@ -39,26 +39,28 @@ function makeDsh() {
 }
 
 // ── H1 真实重渲染循环 ───────────────────────────────────────────────
-test("H1 真实重渲染：挂载 memory tab → click 编辑 → rerender → DOM 文本变化", async () => {
+// 13-5：记忆编辑从 MemoryTab 并入「人设与核心」页（SoulTab），本组用 SoulTab
+// 的「对比改动」开关做状态变更锚点（textarea / 保存按钮常驻，不再有「编辑」按钮）。
+test("H1 真实重渲染：挂载 soul tab → click 对比改动 → rerender → DOM 文本变化", async () => {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const dsh = makeDsh();
 
-  const mounted = await harness.mount({ tab: "memory", dsh });
+  const mounted = await harness.mount({ tab: "soul", dsh });
   try {
     mounted.render();
     await mounted.flush();   // 跑 getMemoryView effect → setView
     mounted.rerender();      // view 就位后重渲染
 
     const before = mounted.text();
-    assert.ok(before.includes("记忆内容"), "初始渲染含 tab 标签");
-    assert.ok(before.includes("编辑"), "初始渲染含编辑按钮");
+    assert.ok(before.includes("人设与核心"), "初始渲染含 tab 标签");
+    assert.ok(before.includes("对比改动"), "初始渲染含「对比改动」按钮");
 
-    const clicked = mounted.click('button[text=编辑]');
-    assert.equal(clicked, true, "click 命中编辑按钮");
+    const clicked = mounted.click('button[data-role=soul-diff-toggle]');
+    assert.equal(clicked, true, "click 命中「对比改动」按钮");
     mounted.rerender();
 
     const after = mounted.text();
-    assert.ok(after.includes("取消"), "进编辑态后出现取消按钮");
+    assert.ok(after.includes("收起改动"), "进对比态后按钮转「收起改动」");
     assert.notEqual(after, before, "重渲染后文本与初始不同（状态变更已生效）");
   } finally {
     mounted.unmount();
@@ -268,7 +270,8 @@ test("H5 rerender 是 diff 渲染：未变子树 DOM 身份保留（退回全量
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const dsh = makeDsh();
 
-  const mounted = await harness.mount({ tab: "memory", dsh });
+  // 13-5：状态变更锚点改用 SoulTab 的「对比改动」（MemoryTab 已删除）。
+  const mounted = await harness.mount({ tab: "soul", dsh });
   try {
     mounted.render();
     await mounted.flush(); // 跑 getMemoryView effect → setView
@@ -276,12 +279,12 @@ test("H5 rerender 是 diff 渲染：未变子树 DOM 身份保留（退回全量
     const refreshBtnBefore = mounted.find('button[text=刷新]');
     assert.ok(refreshBtnBefore, "刷新按钮可定位（未变子树锚点）");
 
-    assert.equal(mounted.click('button[text=编辑]'), true, "点编辑进入编辑态");
+    assert.equal(mounted.click('button[data-role=soul-diff-toggle]'), true, "点「对比改动」展开对比区");
     const rootAfter = mounted.rerender();
     assert.equal(rootAfter, rootBefore, "rerender 后根元素复用同一引用（diff 语义；退回全量重建必红）");
     const refreshBtnAfter = mounted.find('button[text=刷新]');
     assert.equal(refreshBtnAfter, refreshBtnBefore, "未变子树（刷新按钮）保持同一 DOM 引用（退回全量重建必红）");
-    assert.ok(mounted.text().includes("取消"), "状态变更已生效（进编辑态出现取消按钮；no-op rerender 必红）");
+    assert.ok(mounted.text().includes("收起改动"), "状态变更已生效（按钮转「收起改动」；no-op rerender 必红）");
   } finally {
     mounted.unmount();
   }
@@ -293,15 +296,15 @@ test("H5 rerender 是 diff 渲染：未变子树 DOM 身份保留（退回全量
 
 test("H4a find：命中返回元素本体，selector 不匹配返回 null", async () => {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
-  const mounted = await harness.mount({ tab: "memory", dsh: makeDsh() });
+  const mounted = await harness.mount({ tab: "soul", dsh: makeDsh() });
   try {
     mounted.render();
     await mounted.flush();
     mounted.rerender();
-    const btn = mounted.find('button[text=编辑]');
-    assert.ok(btn, "命中返回元素（编辑按钮）");
+    const btn = mounted.find('button[data-role=soul-save]');
+    assert.ok(btn, "命中返回元素（保存按钮）");
     assert.equal(btn.tagName, "BUTTON", "返回的是 fake DOM 元素本体");
-    assert.equal(mounted.find('button[text=不存在的按钮]'), null, "selector 不匹配返回 null");
+    assert.equal(mounted.find('button[data-role=soul-nope]'), null, "selector 不匹配返回 null");
   } finally {
     mounted.unmount();
   }
@@ -326,27 +329,26 @@ test("H4b findAll：命中返回元素数组，不匹配返回空数组", async 
 
 test("H4c change：触发 input+change 事件（先 input 后 change 均带新值）；无命中/无 handler 返回 false", async () => {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
-  const mounted = await harness.mount({ tab: "memory", dsh: makeDsh() });
+  // 13-5：SoulTab 的编辑框常驻（不需要先进「编辑」态）。
+  const mounted = await harness.mount({ tab: "soul", dsh: makeDsh() });
   try {
     mounted.render();
     await mounted.flush();
     mounted.rerender();
-    assert.equal(mounted.click('button[text=编辑]'), true, "进入编辑态");
-    mounted.rerender();
-    assert.ok(mounted.find('textarea'), "编辑态出现 textarea（面板自带 onChange）");
+    assert.ok(mounted.find('textarea[data-role=soul-editor]'), "面板自带 soul-editor textarea（含 onChange）");
 
     // 集成位：change 触发面板 onChange → setDraft → 重渲染后 value 属性更新。
-    assert.equal(mounted.change('textarea', '新草稿内容'), true, "命中带 onChange 的元素返回 true");
+    assert.equal(mounted.change('textarea[data-role=soul-editor]', '新草稿内容'), true, "命中带 onChange 的元素返回 true");
     mounted.rerender();
-    assert.equal(mounted.find('textarea').getAttribute('value'), '新草稿内容',
+    assert.equal(mounted.find('textarea[data-role=soul-editor]').getAttribute('value'), '新草稿内容',
       "change 触发面板 onChange → draft 更新 → textarea value 跟随");
 
     // 直测事件分发：挂两个监听验证 input 先、change 后，事件均携带新值。
     const events = [];
-    const ta = mounted.find('textarea');
+    const ta = mounted.find('textarea[data-role=soul-editor]');
     ta.oninput = (e) => events.push(['input', e.target.value]);
     ta.onchange = (e) => events.push(['change', e.target.value]);
-    assert.equal(mounted.change('textarea', 'XYZ'), true);
+    assert.equal(mounted.change('textarea[data-role=soul-editor]', 'XYZ'), true);
     assert.deepEqual(events, [['input', 'XYZ'], ['change', 'XYZ']], "先 input 后 change，均带 target.value");
 
     // 无 handler：按钮只有 onclick，change 不算命中；selector 不匹配同样 false
@@ -360,13 +362,47 @@ test("H4c change：触发 input+change 事件（先 input 后 change 均带新�
 
 test("H4d textOf：取命中元素文本（含嵌套），selector 不匹配取空文本", async () => {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
-  const mounted = await harness.mount({ tab: "memory", dsh: makeDsh() });
+  const mounted = await harness.mount({ tab: "soul", dsh: makeDsh() });
   try {
     mounted.render();
     await mounted.flush();
     mounted.rerender();
-    assert.equal(mounted.textOf('button[text=编辑]'), '编辑', "取命中元素文本");
-    assert.equal(mounted.textOf('button[text=不存在的按钮]'), '', "selector 不匹配返回空文本");
+    assert.equal(mounted.textOf('button[data-role=soul-save]'), '保存', "取命中元素文本");
+    assert.equal(mounted.textOf('button[data-role=soul-nope]'), '', "selector 不匹配返回空文本");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+// 13-5 补口径（reviewer 批复要求）：保存协议不许随页面搬迁变化——
+// L0 保存打 executeTool soul_update；L1 保存打 core_write + expectedRevision。
+test("H6 SoulTab 保存协议：L0 → soul_update；L1 → core_write + expectedRevision（DTO revision）", async () => {
+  const harness = createUiHarness({ clientSource: CLIENT_SRC });
+  const dsh = makeDsh();
+  const mounted = await harness.mount({ tab: "soul", dsh });
+  try {
+    mounted.render();
+    await mounted.flush();
+    mounted.rerender();
+
+    assert.equal(mounted.click('button[data-role=soul-save]'), true, "点保存（默认 L0）");
+    await mounted.flush();
+    mounted.rerender();
+    const l0Save = dsh.calls.filter((c) => c.method === "executeTool").pop();
+    assert.ok(l0Save, "L0 保存发出 executeTool");
+    assert.equal(l0Save.payload.name, "soul_update", "L0 走 soul_update");
+    assert.equal(l0Save.payload.args.content, MEMORY_VIEW.l0.text, "L0 提交编辑框正文");
+
+    assert.equal(mounted.click('button[data-role=soul-edit-tab-l1]'), true, "切到核心记忆（L1）");
+    mounted.rerender();
+    assert.equal(mounted.click('button[data-role=soul-save]'), true, "点保存（L1）");
+    await mounted.flush();
+    mounted.rerender();
+    const l1Save = dsh.calls.filter((c) => c.method === "executeTool").pop();
+    assert.ok(l1Save, "L1 保存发出 executeTool");
+    assert.equal(l1Save.payload.name, "core_write", "L1 走 core_write");
+    assert.equal(l1Save.payload.args.expectedRevision, MEMORY_VIEW.l1.revision, "L1 带 DTO revision 做冲突校验");
+    assert.equal(l1Save.payload.args.content, MEMORY_VIEW.l1.body, "L1 提交 body 正文");
   } finally {
     mounted.unmount();
   }

@@ -177,6 +177,12 @@
 .dshi_selectorRow{display:flex;align-items:flex-end;gap:var(--dshi-space-sm);flex-wrap:wrap}
 .dshi_selectorRow .dshi_btn,.dshi_selectorRow .dshi_input,.dshi_selectorRow .dshi_select{height:28px;box-sizing:border-box}
 .dshi_selectorRow .dshi_btn{padding-top:0;padding-bottom:0}
+/* 13-5：工作区默认卡——卡名控件与「保存默认卡」收进同一内层行（同一水平线，
+   修「按钮错半行」）；窄屏换行时按钮跟随自己的输入框，不飘到行外。 */
+.dshi_personaDefault{max-width:100%}
+.dshi_personaDefaultRow{display:flex;align-items:flex-end;gap:var(--dshi-space-sm);flex-wrap:wrap}
+.dshi_personaDefaultRow .dshi_btn,.dshi_personaDefaultRow .dshi_input,.dshi_personaDefaultRow .dshi_select{height:28px;box-sizing:border-box}
+.dshi_personaDefaultRow .dshi_btn{padding-top:0;padding-bottom:0}
 /* S2 侧边栏 main 槽位全屏容器：仅 PanelView 挂到 main 槽位（props.workbench 为真）
    时追加在 .dshi_root 上；详情页窄卡片（max-width:860px）不加此类，布局不回归。
    高度 / padding / 自滚动口径照 dsh-email workbench 模板的 w-page[data-main=true]：

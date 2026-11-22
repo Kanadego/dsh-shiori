@@ -392,10 +392,10 @@ test("专题页：12 个主题分两页（每页 10 条）；第 2 页翻回第 
 });
 
 // ---------------------------------------------------------------------------
-// ④ 闪回「从未命中」：每页 10 条
+// ④ 闪回「从未命中」：每页 5 条（13-5 起与最近命中同口径）
 // ---------------------------------------------------------------------------
 
-test("闪回命中：13 张从未命中卡分两页（每页 10 条），页码可点、翻回不丢", async () => {
+test("闪回命中：13 张从未命中卡分三页（每页 5 条），页码可点、翻回不丢", async () => {
   const { host, renderTab } = await mountTabById("flashbacks", "FlashbacksTab");
   const nodes = Array.from({ length: 13 }, (_, i) => ({
     id: "s-" + String(i).padStart(2, "0"),
@@ -419,15 +419,19 @@ test("闪回命中：13 张从未命中卡分两页（每页 10 条），页码�
   tree = renderTab(dsh, "session-A");
   const neverHitRows = () => flattenVNode(tree).filter((n) => n.type === "div" && String(n.props.className || "") === "dshi_item"
     && collectText(n).includes("存续"));
-  assert.equal(neverHitRows().length, 10, "从未命中第 1 页 10 张");
-  assert.deepEqual(pageNumButtons(tree).map((p) => collectText(p)), ["1", "2"], "页码 1..2");
+  assert.equal(neverHitRows().length, 5, "从未命中第 1 页 5 张");
+  assert.deepEqual(pageNumButtons(tree).map((p) => collectText(p)), ["1", "2", "3"], "页码 1..3（13 ÷ 5）");
   assert.ok(collectText(tree).includes("从未命中（13 张）"), "总数照常显示");
+  assert.ok(collectText(tree).includes("第 1 / 3 页（每页 5 条）"), "页码口径改为每页 5 条（全局 LIST_PAGE_SIZE 不动）");
   pageNumButtons(tree)[1].props.onClick();
   tree = renderTab(dsh, "session-A");
-  assert.equal(neverHitRows().length, 3, "第 2 页 3 张");
+  assert.equal(neverHitRows().length, 5, "第 2 页 5 张");
+  pageNumButtons(tree)[2].props.onClick();
+  tree = renderTab(dsh, "session-A");
+  assert.equal(neverHitRows().length, 3, "第 3 页 3 张（13 = 5+5+3）");
   findButton(tree, "上一页").props.onClick();
   tree = renderTab(dsh, "session-A");
-  assert.equal(neverHitRows().length, 10, "翻回第 1 页（状态可回退）");
+  assert.equal(neverHitRows().length, 5, "翻回第 2 页（状态可回退）");
 });
 
 // ---------------------------------------------------------------------------

@@ -396,12 +396,21 @@ test("闪回卡片子页：5 个 budgets.spark 字段 + persona.maxChars 全接�
     const pending = panel.textOf('[data-role="spark-pending-backend"]');
     assert.ok(pending.includes("待后端提供"), "后端没有的字段（回看天数）只写待后端提供");
 
-    // 同一份草稿（评审补例）：闪回页改 maxCards → 切回预算子页同字段数值一致。
+    // 13-5 去重：预算子页只留 L0/L1，L2 五个 spark 字段只在闪回卡片子页出现一次。
+    await openPage(panel, "budget");
+    const budgetSparkInputs = panel.findAll("input")
+      .filter((el) => String(el.getAttribute("data-path") || "").startsWith("spark."));
+    assert.equal(budgetSparkInputs.length, 0, "预算子页不再重复铺 5 个 spark 字段");
+    assert.equal(panel.find('[data-role="settings-page-budget"]').children.length > 0, true, "预算页仍有 L0/L1 内容（不留空容器）");
+
+    // 草稿仍共用一份：闪回页改 maxCards → 切走再切回，改动保留（不因换页丢草稿）。
+    await openPage(panel, "spark");
     const nextMaxCards = FULL_BUDGETS.spark.maxCards - 1;
     changeInput(panel, "spark.maxCards", String(nextMaxCards));
     await settle(panel);
-    await openPage(panel, "budget");
-    assert.equal(inputValue(panel, "spark.maxCards"), String(nextMaxCards), "跨子页共用同一份草稿");
+    await openPage(panel, "temp");
+    await openPage(panel, "spark");
+    assert.equal(inputValue(panel, "spark.maxCards"), String(nextMaxCards), "切页签后草稿保留（同一份组件草稿）");
   } finally {
     panel.unmount();
   }
@@ -436,12 +445,10 @@ function clickSectionTab(panel, label) {
   tab.onclick();
 }
 
-test("语义召回块：专题整理页与设置页向量召回子页同一时刻只有一份在 DOM；渲染走同一受控实现", async () => {
+test("语义召回块：只保留设置页向量召回子页一处；专题整理页不再渲染（下载 / 重建只在设置页）", async () => {
   const { scope } = makeScope();
   const { dsh } = makeDsh({ scope });
-  // 0.5-13-4：写操作（含语义召回动作）迁到专题整理页。两台独立挂载分别验证
-  // 两个落点各自只有一份语义召回卡，且互不包含对方的容器（合成 harness 的
-  // 跨 tab 状态槽共享，不适合在同一实例里来回切）。
+  // 13-5：语义召回卡从专题整理页裁撤，全客户端只剩设置页「向量召回」子页一处。
   const settingsPanel = await mountSettings(dsh);
   try {
     assert.equal(countRole(settingsPanel, "semantic-recall"), 0, "设置页默认子页（预算）没有语义召回卡");
@@ -459,9 +466,12 @@ test("语义召回块：专题整理页与设置页向量召回子页同一时�
   const organizePanel = await harness.mount({ tab: "candidates", dsh });
   await settle(organizePanel);
   try {
-    assert.equal(countRole(organizePanel, "semantic-recall"), 1, "专题整理页有一份语义召回卡");
+    assert.equal(countRole(organizePanel, "semantic-recall"), 0, "专题整理页不再渲染语义召回卡（全客户端只剩设置页一处）");
     assert.equal(organizePanel.find('[data-role="settings-page-recall"]'), null, "专题整理页没有设置页容器");
-    assert.equal(organizePanel.findAll("button").filter((el) => organizePanel.textOfEl(el) === "重建向量").length, 1, "专题整理页同样只有一个「重建向量」可点");
+    const buttons = organizePanel.findAll("button").map((el) => organizePanel.textOfEl(el));
+    assert.equal(buttons.includes("重建向量"), false, "专题整理页不留「重建向量」残留按钮");
+    assert.equal(buttons.includes("下载模型") || buttons.includes("下载中…"), false, "专题整理页不留下载模型按钮");
+    assert.equal(organizePanel.text().includes("向量召回"), false, "专题整理页不留向量召回提示行");
   } finally {
     organizePanel.unmount();
   }
@@ -502,6 +512,121 @@ test("设置页：温度子页不再渲染 temperature-audit（审计已迁最�
     assert.equal(panel.find('[data-role="temperature-audit"]'), null, "设置页没有 temperature-audit 分组");
     assert.equal(panel.findAll('[data-role="temperature-audit-entry"]').length, 0, "设置页没有审计条目");
     assert.equal(panel.text().includes("尚无参数变更审计"), false, "旧审计空态文案不再出现在设置页");
+  } finally {
+    panel.unmount();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 13-5：专题整理二级分页（记忆整理 / 候选审阅与执行）
+// ---------------------------------------------------------------------------
+
+const ORGANIZE_STATUS_DTO = {
+  mode: "active",
+  configured: true,
+  scope: "amber",
+  personas: [],
+  capabilities: { l2: true, organize: true, forgetting: true, tools: true, sections: true },
+  occupancy: { l0Chars: 0, l1Chars: 100, l0Budget: 12000, l1HardCap: 10000 },
+  diagnostics: { semantic: clone(SEMANTIC_DTO) },
+};
+
+const ORGANIZE_AUTO_STATUS = {
+  scope: "amber",
+  enabled: true,
+  mode: "suggest",
+  lastEvaluatedAt: "2026-11-21T10:00:00.000Z",
+  lastEvaluatedBy: "human-turn",
+  nextTrigger: { dueAt: "2026-11-22T10:00:00.000Z", hoursRemaining: 24, requiresHumanTurn: true, softWatermarkArmed: false },
+  fuse: { fused: false, reasons: [], statsValid: true, statsStartedAt: "2026-11-01T00:00:00.000Z", maxEventAt: "2026-11-21T09:00:00.000Z", eventCount: 42 },
+  stats: { eventCount: 42, ledgerSkipped: 0, ledgerError: null },
+  params: { maxOpsPerRun: 3, evaluateEveryHours: 24, coolThreshold: 0.25, restoreThreshold: 0.5, minCooldownDays: 7, minRestoreGraceDays: 1 },
+  lastRuns: [],
+};
+
+const ORGANIZE_AUTO_EVAL = {
+  scope: "amber",
+  evaluatedAt: "2026-11-21T11:00:00.000Z",
+  trigger: "manual",
+  fused: false,
+  fuse: ORGANIZE_AUTO_STATUS.fuse,
+  stats: { eventCount: 42, ledgerSkipped: 0, ledgerError: null, topicRows: 2, rowsSkipped: 0 },
+  replay: { topics: 2, groups: 0, alarms: [] },
+  candidates: [
+    { operationKind: "archive-topic", key: "project-alpha", scopeId: "amber", title: "项目 α", T: 0.12, tier: "cold", ageDays: 40, reason: "自动冷却候选：T=0.12 < coolThreshold=0.25" },
+    { operationKind: "unarchive-topic", key: "topic-beta", scopeId: "amber", title: "β 专题", T: 0.61, tier: "cool", ageDays: 2, reason: "自动恢复候选：archiveOrigin=auto、T=0.61 ≥ restoreThreshold=0.5" },
+  ],
+  plan: { ops: [], truncated: false, groupRestore: [], counts: { cool: 1, restore: 1, total: 2 } },
+};
+
+test("13-5 专题整理二级分页：默认记忆整理；切到候选审阅再切回，自动评估勾选与结果不丢、不重复拉取", async () => {
+  const { scope } = makeScope();
+  const calls = [];
+  const dsh = {
+    call: async (method, sessionId, payload) => {
+      calls.push({ method, sessionId, payload });
+      if (method === "getStatus") return ORGANIZE_STATUS_DTO;
+      if (method === "getAutoStatus") return ORGANIZE_AUTO_STATUS;
+      if (method === "runAutoEvaluation") return ORGANIZE_AUTO_EVAL;
+      if (method === "listCandidates") return { items: [], plans: [], queueRevision: 3 };
+      if (method === "getGraph") return { nodes: [] };
+      if (method === "getTemperatureSettings") return { current: null };
+      return {};
+    },
+    configScope: () => scope,
+  };
+  const panel = await harness.mount({ tab: "candidates", dsh });
+  await settle(panel);
+  try {
+    const countOf = (method) => calls.filter((c) => c.method === method).length;
+    const organizeBtn = panel.find('[data-role="organize-subtab-organize"]');
+    const candidatesBtn = panel.find('[data-role="organize-subtab-candidates"]');
+    assert.ok(panel.find('[data-role="organize-subtabs"]'), "顶部二级页签容器存在");
+    assert.ok(organizeBtn && candidatesBtn, "两个二级页签按钮齐备");
+    assert.equal(organizeBtn.getAttribute("aria-pressed"), "true", "默认选「记忆整理」");
+    assert.equal(candidatesBtn.getAttribute("aria-pressed"), "false");
+    assert.equal(panel.find('[data-role="organize-pane-organize"]').getAttribute("aria-hidden"), "false", "记忆整理窗格可见");
+    assert.equal(panel.find('[data-role="organize-pane-candidates"]').getAttribute("aria-hidden"), "true", "候选审阅窗格隐藏（仅 display 切换）");
+
+    // 记下初始 RPC 次数，随后做一次评估并取消一条勾选。
+    const autoStatusBefore = countOf("getAutoStatus");
+    const listBefore = countOf("listCandidates");
+    assert.equal(panel.click("[data-role=auto-evaluate]"), true, "点「立即评估」");
+    await settle(panel);
+    assert.ok(panel.find('[data-role="auto-eval-result"]'), "评估结果渲染");
+    assert.equal(panel.findAll('[data-role="auto-candidate"]').length, 2, "两条候选");
+    const evalBefore = countOf("runAutoEvaluation");
+    assert.equal(evalBefore, 1, "恰发一次 runAutoEvaluation");
+
+    let boxes = panel.findAll('[data-role="auto-candidate-pick"]');
+    assert.equal(boxes.length, 2);
+    boxes[0].onchange({ target: { value: boxes[0].getAttribute("value") } });
+    await settle(panel);
+    boxes = panel.findAll('[data-role="auto-candidate-pick"]');
+    assert.equal(boxes[0].getAttribute("checked"), "false", "取消勾选第一条");
+    assert.equal(boxes[1].getAttribute("checked"), "true", "第二条仍勾选");
+
+    // 切到「候选审阅与执行」：只切 display，不卸载记忆整理窗格。
+    candidatesBtn.onclick();
+    await settle(panel);
+    assert.equal(panel.find('[data-role="organize-subtab-candidates"]').getAttribute("aria-pressed"), "true", "切到候选审阅");
+    assert.equal(panel.find('[data-role="organize-pane-organize"]').style.display, "none", "记忆整理窗格隐藏");
+    assert.equal(panel.find('[data-role="organize-pane-candidates"]').style.display, "flex", "候选审阅窗格显示");
+    assert.ok(panel.find('[data-role="organize-period-note"]'), "30 天周期说明在候选审阅窗格内");
+    assert.equal(panel.findAll('[data-role="auto-card"]').length, 1, "隐藏窗格仍挂载（auto 卡未卸载）");
+
+    // 切回「记忆整理」：勾选状态与评估结果仍在，且没有重复拉取自动状态/队列。
+    panel.find('[data-role="organize-subtab-organize"]').onclick();
+    await settle(panel);
+    assert.equal(panel.find('[data-role="organize-pane-organize"]').getAttribute("aria-hidden"), "false", "切回记忆整理");
+    boxes = panel.findAll('[data-role="auto-candidate-pick"]');
+    assert.equal(boxes[0].getAttribute("checked"), "false", "切回后取消勾选仍保留");
+    assert.equal(boxes[1].getAttribute("checked"), "true", "另一条勾选仍保留");
+    assert.ok(panel.find('[data-role="auto-eval-result"]'), "切回后评估结果仍在");
+    assert.equal(panel.findAll('[data-role="auto-card"]').length, 1, "auto 卡只有一份实例（单一 StatusTab）");
+    assert.equal(countOf("runAutoEvaluation"), 1, "切页签不重新评估");
+    assert.equal(countOf("getAutoStatus"), autoStatusBefore + 1, "仅挂载时取一次自动状态，切页签不重取");
+    assert.equal(countOf("listCandidates"), listBefore, "切页签不重取候选队列");
   } finally {
     panel.unmount();
   }

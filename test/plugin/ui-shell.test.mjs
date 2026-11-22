@@ -291,7 +291,8 @@ test("U8 tab：八项 label 逐字一致、顺序固定，每项带图标（伪�
 test("U8 tab 别名：status/memory/graph 旧 id 仍挂载对应页（概览 / 专题记忆 / 闪回），高亮落在新 id", async () => {
   const cases = [
     { tab: "status", components: ["StatusTab"], label: "概览" },
-    { tab: "memory", components: ["MemoryTab", "TopicsTab"], label: "专题记忆" },
+    // 13-5：专题记忆页只剩专题索引（记忆内容编辑段已并入人设与核心页）。
+    { tab: "memory", components: ["TopicsTab"], label: "专题记忆" },
     { tab: "graph", components: ["GraphTab", "FlashbacksTab"], label: "闪回" },
   ];
   for (const entry of cases) {
@@ -304,6 +305,10 @@ test("U8 tab 别名：status/memory/graph 旧 id 仍挂载对应页（概览 / �
         assert.ok(flat.some((n) => typeof n.type === "function" && n.type.name === name),
           entry.tab + " 别名渲染 " + name);
       }
+      assert.equal(flat.some((n) => n.props && n.props["data-role"] === "topic-view-memory"), false,
+        entry.tab + "：不再挂载 topic-view-memory（13-5 去重）");
+      assert.equal(flat.some((n) => typeof n.type === "function" && n.type.name === "MemoryTab"), false,
+        entry.tab + "：MemoryTab 已删除，不再渲染");
       const onTab = flat.find((n) => n.type === "button" && String(n.props.className).includes("dshi_tabOn"));
       assert.ok(onTab, entry.tab + "：有且仅有一个高亮 tab");
       assert.equal(collectText(onTab), entry.label, entry.tab + " 高亮落在 " + entry.label);
@@ -1090,16 +1095,17 @@ test("S2-3 工作区默认卡：personas 为空 → 手填输入框回退（不�
 
 // 2026-11-15 实机反馈：切卡只刷 getStatus 会出现「壳条显示新卡、人设卡（L0）还是旧卡」，
 // 所以切卡成功后必须重取一次 getMemoryView（L0/L1 是按当前选卡解析的）。
-test("S4 切卡：成功后 refreshToken 自增，MemoryTab 重取 getMemoryView（L0 跟着换）", async () => {
+// 13-5：展示 L0 的页面从 MemoryTab 收敛到人设与核心页（SoulTab），刷新令牌照旧透传。
+test("S4 切卡：成功后 refreshToken 自增，人设与核心页重取 getMemoryView（编辑器换新卡）", async () => {
   const calls = [];
   const mutations = [];
   const scope = makeScopeForPersona({ mode: "active", allowActive: true, defaultPersona: "amber", sessionPersonas: [] }, mutations);
-  const { render, cleanup } = await mountSectionStateful(s4PanelPreset({ tab: "memory" }), { calls, scope });
-  const memoryTab = (tree) => flattenVNode(tree).find((n) => typeof n.type === "function" && n.type.name === "MemoryTab") || null;
+  const { render, cleanup } = await mountSectionStateful(s4PanelPreset({ tab: "soul" }), { calls, scope });
+  const soulTab = (tree) => flattenVNode(tree).find((n) => typeof n.type === "function" && n.type.name === "SoulTab") || null;
   try {
     let tree = render();
-    const before = memoryTab(tree);
-    assert.ok(before, "memory tab 已挂载");
+    const before = soulTab(tree);
+    assert.ok(before, "人设与核心页已挂载");
     const tokenBefore = before.props.refreshToken;
     personaButton(tree).props.onClick();
     tree = render();
@@ -1107,9 +1113,11 @@ test("S4 切卡：成功后 refreshToken 自增，MemoryTab 重取 getMemoryView
     tree = render();
     findButton(personaRow(tree), "切换").props.onClick();
     await flush(20);
-    const after = memoryTab(render());
+    const after = soulTab(render());
     assert.equal(after.props.refreshToken, tokenBefore + 1, "切卡成功后 refreshToken 自增一次");
     assert.equal(after.props.sessionId, "session-A", "会话没变（只是选卡变了）");
+    // 13-5：页内「正在编辑」换卡与壳条共用同一条 personaWrite 链路（函数透传）。
+    assert.equal(typeof after.props.onSwitchPersona, "function", "SoulTab 拿到壳层 onSwitchPersona");
   } finally {
     await cleanup();
   }

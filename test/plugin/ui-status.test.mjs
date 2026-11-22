@@ -1053,7 +1053,63 @@ test("0.4 B1/B2：personaWrite（清除专属卡）两次 mutate 都抛 shiori/u
 // S5 模型下载（0.4）：状态页「下载模型」按钮（未安装高亮）+ 进度条 + 取消 +
 // 双源失败报错卡片（手动目录输入框 + 可复制安装提示词）。数据全部来自
 // diagnostics.semantic.download（前端轮询既有 getStatus 读，不新增 RPC）。
+// 13-5：语义召回卡已从状态页裁撤，全客户端只剩设置页「向量召回」子页一处；
+// 本组用例改为直接渲染该子页（BudgetsTab → SemanticRecallPanel），断言不变。
 // ---------------------------------------------------------------------------
+
+// 设置页「向量召回」子页：BudgetsTab 的 state 0..9（settingsPage 在 9），
+// 子页自己的 state 10..16（status / error / rebuildProgress / dlProgress /
+// manualDirDraft / dlUiError / copyFeedback）。
+async function mountRecallPanel(dto, scope, calls = []) {
+  const host = makeStatefulReact();
+  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
+  let renderSlot = null;
+  await mod.apply({
+    remote: { $mount: async () => () => {} },
+    slots: {
+      inject: (name, fn) => fn(),
+      register: (meta, render) => { renderSlot = render; return () => {}; },
+    },
+  });
+  const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
+  host.states.length = 0;
+  host.states.push("budgets", "session-A", "", null, { mode: "active" });
+  host.cursor.v = 0;
+  const sectionTree = sectionVNode.type(sectionVNode.props);
+  const budgetsTab = flattenVNode(sectionTree).find((n) => typeof n.type === "function" && n.type.name === "BudgetsTab");
+  assert.ok(budgetsTab, "BudgetsTab reached through real slot render");
+  const scopeObj = scope || fakeConfigScope({ mode: "active", allowActive: true, defaultPersona: "amber" }, []);
+  let currentDto = dto;
+  const dsh = {
+    call: async (method, sid, payload) => {
+      calls.push({ method, sid, payload });
+      return currentDto;
+    },
+    configScope: () => scopeObj,
+  };
+  host.states.length = 0;
+  host.states[0] = scopeObj.getSnapshot();
+  host.states[9] = "recall";
+  host.states[10] = dto;
+  host.states[11] = null;
+  host.states[12] = null;
+  host.states[13] = null;
+  host.states[14] = "";
+  host.states[15] = null;
+  host.states[16] = null;
+  const render = () => {
+    host.states[10] = currentDto;
+    host.cursor.v = 0;
+    host.runEffects.v = false;
+    const budgetsTree = budgetsTab.type({ dsh, sessionId: "session-A" });
+    // 预算页只返回 <SemanticRecallPanel .../> 的函数节点；vnode 层断言需把它展开。
+    const panel = flattenVNode(budgetsTree).find((n) => typeof n.type === "function" && n.type.name === "SemanticRecallPanel");
+    assert.ok(panel, "向量召回子页面板已挂载");
+    return panel.type({ dsh, sessionId: "session-A", scope: scopeObj });
+  };
+  const setDto = (next) => { currentDto = next; };
+  return { host, render, setDto, dsh };
+}
 
 function s5SemanticDto(download, semanticExtra = {}) {
   const dto = realPStatusDto();
@@ -1076,10 +1132,8 @@ const s5IdleDownload = {
 };
 
 test("S5 下载按钮：未安装时高亮（主按钮）、「重建向量」并存；旧 DTO（无 download/modelDir）不炸", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderStatus = await mountStatusPanel(mod, host);
-  const tree = renderStatusWithDto(host, renderStatus, s5SemanticDto(s5IdleDownload));
+  const { render, setDto } = await mountRecallPanel(s5SemanticDto(s5IdleDownload));
+  const tree = render();
   const download = findButton(tree, "下载模型");
   assert.ok(download, "「下载模型」按钮存在");
   assert.ok(String(download.props.className).includes("dshi_btnPrimary"), "未安装 → 高亮主按钮");
@@ -1090,24 +1144,36 @@ test("S5 下载按钮：未安装时高亮（主按钮）、「重建向量」�
   // 旧服务端 DTO：diagnostics.semantic 只有老字段（无 download/modelDir/modelInstalled）
   const oldDto = realPStatusDto();
   oldDto.diagnostics.semantic = { provider: "local", enabled: true, ready: true, model: "m", rebuild: { running: false, phase: "idle" } };
-  const oldTree = renderStatusWithDto(host, renderStatus, oldDto);
+  setDto(oldDto);
+  const oldTree = render();
   const oldDownload = findButton(oldTree, "下载模型");
   assert.ok(oldDownload, "旧 DTO 也渲染下载按钮（不炸）");
   assert.equal(String(oldDownload.props.className).includes("dshi_btnPrimary"), false,
     "modelInstalled 未知时不高亮（只有确认未安装才高亮）");
   assert.ok(collectText(oldTree).includes("已就绪"), "旧 DTO ready 文本不回归");
+  // 13-5 新形态：状态页（含 legacy 全量视图）不再渲染语义召回卡，下载/重建入口
+  // 全客户端只有设置页「向量召回」一处。
+  const statusHost = makeStatefulReact();
+  const statusMod = registrations[0].factory((n) => (n === "react" ? statusHost.react : zod));
+  const renderStatus = await mountStatusPanel(statusMod, statusHost);
+  statusHost.states.length = 0;
+  statusHost.states.push(s5SemanticDto(s5IdleDownload), null);
+  statusHost.runEffects.v = false;
+  const statusTree = renderStatus({ call: async () => ({}) });
+  assert.equal(flattenVNode(statusTree).filter((n) => n.props && n.props["data-role"] === "semantic-recall").length, 0,
+    "状态页不再渲染 semantic-recall 卡");
+  assert.equal(findButton(statusTree, "下载模型"), null, "状态页无下载入口");
+  assert.equal(findButton(statusTree, "重建向量"), null, "状态页无重建入口");
 });
 
 test("S5 下载中：进度文本（百分比 + MB + 文件数 + 源）、进度条 aria、取消按钮出现且下载禁点", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderStatus = await mountStatusPanel(mod, host);
-  const tree = renderStatusWithDto(host, renderStatus, s5SemanticDto({
+  const { render } = await mountRecallPanel(s5SemanticDto({
     ...s5IdleDownload,
     running: true, phase: "downloading", percent: 42,
     loadedBytes: 44_040_192, totalBytes: 104_857_600,
     filesDone: 1, filesTotal: 3, source: "https://hf-mirror.com/",
   }));
+  const tree = render();
   const text = collectText(tree);
   assert.ok(text.includes("42%"), "百分比显示");
   assert.ok(text.includes("42.0MB / 100.0MB"), "已下载字节 / 总字节（MB）");
@@ -1118,7 +1184,8 @@ test("S5 下载中：进度文本（百分比 + MB + 文件数 + 源）、进度
   assert.equal(bars.length, 1, "下载进度条恰好一条");
   assert.equal(bars[0].props["aria-valuenow"], 42);
   assert.equal(bars[0].props["aria-valuemax"], 100);
-  assert.ok(statusBars(tree), "L0/L1 水位条不回归");
+  assert.equal(Object.prototype.hasOwnProperty.call(bars[0].props, "data-dshi-bar"), false,
+    "下载进度条不复用 L0/L1 水位条的 data-dshi-bar 锚点");
   const download = findButton(tree, "下载中…");
   assert.equal(download.props.disabled, true, "下载中按钮禁点");
   assert.ok(findButton(tree, "取消"), "取消按钮出现");
@@ -1138,7 +1205,7 @@ test("S5 双源失败报错卡片：错误原因、手动目录输入框、安�
     error: "全部下载源均失败（共 2 个）。源 https://hf-mirror.com/：ENOTFOUND；源 https://huggingface.co/：ETIMEDOUT",
     installHint: "请把 HuggingFace 模型 Xenova/bge-small-zh-v1.5 安装到本机以下目录（目录结构必须保持「<缓存根>/<org>/<model>/」）：\nC:\\Users\\tester\\.dsh\\shiori-data\\models\\Xenova\\bge-small-zh-v1.5\n可用任一下载源：\nhttps://hf-mirror.com/\nhttps://huggingface.co/\n",
   };
-  const { render } = await mountS1Status(s5SemanticDto(errDownload), scope, calls);
+  const { render } = await mountRecallPanel(s5SemanticDto(errDownload), scope, calls);
   let tree = render();
   const card = flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "download-error");
   assert.ok(card, "报错卡片渲染");
@@ -1168,10 +1235,7 @@ test("S5 双源失败报错卡片：错误原因、手动目录输入框、安�
 });
 
 test("S5 复审 P1：依赖缺失归因（code=DOWNLOAD_DEPENDENCY_MISSING）→ 报错卡片不再说「网络原因」", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderStatus = await mountStatusPanel(mod, host);
-  const tree = renderStatusWithDto(host, renderStatus, s5SemanticDto({
+  const { render, setDto } = await mountRecallPanel(s5SemanticDto({
     ...s5IdleDownload,
     running: false, phase: "error",
     code: "DOWNLOAD_DEPENDENCY_MISSING",
@@ -1179,27 +1243,26 @@ test("S5 复审 P1：依赖缺失归因（code=DOWNLOAD_DEPENDENCY_MISSING）→
       + "无需检查下载源——请在插件目录执行 npm i @huggingface/transformers 后重试。",
     installHint: null,
   }));
+  const tree = render();
   const text = collectText(tree);
   assert.ok(text.includes("缺少可选依赖"), "服务端依赖缺失原文可见");
   assert.ok(text.includes("不是网络问题"), "归因文案按 code 切换为依赖缺失说明");
   assert.equal(text.includes("网络原因"), false, "不再把依赖缺失误归因为网络故障");
   // 网络 case 的归因文案不回归（默认分支仍讲网络原因）。
-  const netTree = renderStatusWithDto(host, renderStatus, s5SemanticDto({
+  setDto(s5SemanticDto({
     ...s5IdleDownload,
     running: false, phase: "error",
     code: null,
     error: "全部下载源均失败（共 2 个）。",
   }));
+  const netTree = render();
   assert.ok(collectText(netTree).includes("网络原因"), "网络 case 归因不回归");
 });
 
 // 0.4 收账遗留 1：报错卡片按 dl.code 分三支（缺依赖 / 加载失败 / 其余网络）。
 // 加载失败支的文案必须明确「不是网络问题」，且不复用缺依赖那句。
 test("0.4 收账：code=DOWNLOAD_RUNTIME_LOAD_FAILED → 报错卡片明确「不是网络问题」，不复用缺依赖文案", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderStatus = await mountStatusPanel(mod, host);
-  const tree = renderStatusWithDto(host, renderStatus, s5SemanticDto({
+  const { render } = await mountRecallPanel(s5SemanticDto({
     ...s5IdleDownload,
     running: false, phase: "error",
     code: "DOWNLOAD_RUNTIME_LOAD_FAILED",
@@ -1208,6 +1271,7 @@ test("0.4 收账：code=DOWNLOAD_RUNTIME_LOAD_FAILED → 报错卡片明确「�
       + "（原始错误：EACCES: permission denied, open '<插件目录>/node_modules/@huggingface/transformers/dist/transformers.mjs'）",
     installHint: null,
   }));
+  const tree = render();
   const card = flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "download-error");
   assert.ok(card, "报错卡片渲染");
   const text = collectText(tree);
@@ -1228,10 +1292,7 @@ test("0.4 收账：code=DOWNLOAD_RUNTIME_LOAD_FAILED → 报错卡片明确「�
 // S2-5：缺可选依赖不是故障——卡片走中性 warn 样式，文案说明「可选能力、
 // 只影响语义召回、其余功能不受影响」；其余失败仍用红色报错样式。
 test("S2-5 缺依赖提示：卡片用中性 warn 样式（不再是红色 ErrorBox），文案点明可选能力/只影响语义召回", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderStatus = await mountStatusPanel(mod, host);
-  const tree = renderStatusWithDto(host, renderStatus, s5SemanticDto({
+  const { render, setDto } = await mountRecallPanel(s5SemanticDto({
     ...s5IdleDownload,
     running: false, phase: "error",
     code: "DOWNLOAD_DEPENDENCY_MISSING",
@@ -1239,6 +1300,7 @@ test("S2-5 缺依赖提示：卡片用中性 warn 样式（不再是红色 Error
       + "无需检查下载源——请在插件目录执行 npm i @huggingface/transformers 后重试。",
     installHint: null,
   }));
+  const tree = render();
   const card = flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "download-error");
   assert.ok(card, "提示卡片渲染");
   assert.ok(String(card.props.className).includes("dshi_warn"), "缺依赖卡片用 dshi_warn 中性样式");
@@ -1251,32 +1313,32 @@ test("S2-5 缺依赖提示：卡片用中性 warn 样式（不再是红色 Error
     "说明其余功能不受影响");
   assert.equal(text.includes("网络原因"), false, "不说成网络原因");
   // 对照：运行时加载失败仍走红色报错卡片（不是可选能力缺失）。
-  const runtimeTree = renderStatusWithDto(host, renderStatus, s5SemanticDto({
+  setDto(s5SemanticDto({
     ...s5IdleDownload,
     running: false, phase: "error",
     code: "DOWNLOAD_RUNTIME_LOAD_FAILED",
     error: "可选依赖已安装但运行时加载失败。",
     installHint: null,
   }));
+  const runtimeTree = render();
   const runtimeCard = flattenVNode(runtimeTree).find((n) => n.props && n.props["data-role"] === "download-error");
   assert.ok(String(runtimeCard.props.className).includes("dshi_error"), "加载失败仍用红色报错样式");
   assert.notEqual(runtimeCard.props["data-tone"], "warn", "加载失败不标 warn");
 });
 
 test("S5 done/cancelled 相：完成提示指向「重建向量」；取消提示状态回到未就绪", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderStatus = await mountStatusPanel(mod, host);
-  const doneTree = renderStatusWithDto(host, renderStatus, s5SemanticDto({
+  const { render, setDto } = await mountRecallPanel(s5SemanticDto({
     ...s5IdleDownload, running: false, phase: "done", percent: 100,
     loadedBytes: 104_857_600, totalBytes: 104_857_600, filesDone: 3, filesTotal: 3,
   }));
+  const doneTree = render();
   const doneText = collectText(doneTree);
   assert.ok(doneText.includes("已通过维度与文件校验"), "完成提示含校验语义");
   assert.ok(doneText.includes("重建向量"), "完成提示指向建索引");
-  const cancelTree = renderStatusWithDto(host, renderStatus, s5SemanticDto({
+  setDto(s5SemanticDto({
     ...s5IdleDownload, running: false, phase: "cancelled",
   }));
+  const cancelTree = render();
   const cancelText = collectText(cancelTree);
   assert.ok(cancelText.includes("已取消"), "取消相提示");
   assert.ok(cancelText.includes("未就绪"), "取消后状态回到未就绪的说明");
@@ -1291,7 +1353,7 @@ test("S5 面板重开接续：本地无快照（dlProgress null）时直接显�
     mode: "active", allowActive: true, defaultPersona: "amber",
     semantic: { provider: "local", local: { model: "Xenova/bge-small-zh-v1.5", dims: 512, dtype: "q8", cacheDir: "", mirror: "https://hf-mirror.com/" } },
   }, mutations);
-  const { render, dsh } = await mountS1Status(s5SemanticDto({
+  const { render } = await mountRecallPanel(s5SemanticDto({
     ...s5IdleDownload,
     running: true, phase: "downloading", percent: 7, loadedBytes: 7_340_032,
     totalBytes: 104_857_600, filesDone: 0, filesTotal: 3, source: "https://huggingface.co/",

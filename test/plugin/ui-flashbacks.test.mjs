@@ -177,7 +177,7 @@ test("F2 面板：三组数据齐备——从未命中标题+存续天数、最�
   assert.ok(text.indexOf("高频卡") < text.indexOf("中频卡"), "最近命中按 lastHitAt 倒序");
   assert.ok(text.indexOf("中频卡") < text.indexOf("老投递卡"), "无 lastHitAt 的卡片排最后");
   assert.ok(text.includes("最近进入投递包："), "最近命中时间行");
-  // 不足一页（3 < 8）不显示页码条。
+  // 不足一页（3 < 5）不显示页码条。
   assert.equal(flattenVNode(tree).some((n) => n.props && n.props["data-role"] === "flashback-hits-page"), false, "不足一页不显示页码");
   // ③ 投递吞吐：总投递张数 / 轮次 / 重复投递率（1 - 6/10 = 40%）。
   assert.ok(text.includes("总投递张数10"), "总投递张数");
@@ -188,7 +188,7 @@ test("F2 面板：三组数据齐备——从未命中标题+存续天数、最�
   assert.equal(text.includes("使用了"), false, "严禁把 hitCount 说成「使用了 N 次」");
 });
 
-test("F2 面板：最近命中每页 8 条，页码边界（上一页/下一页/第 N/M 页）与平局排序", async () => {
+test("F2 面板：最近命中每页 5 条，页码边界（上一页/下一页/第 N/M 页）与平局排序", async () => {
   const host = makeStatefulReact();
   const sectionTree = await mountSection(host, ["flashbacks", "session-A", "", null, { mode: "active" }]);
   const tab = findComponent(sectionTree, "FlashbacksTab");
@@ -209,12 +209,12 @@ test("F2 面板：最近命中每页 8 条，页码边界（上一页/下一页/
   const render = () => { host.cursor.v = 0; return tab.type({ dsh: { call: async () => ({}) }, sessionId: "session-A" }); };
   let tree = render();
   const rows = (t) => flattenVNode(t).filter((n) => n.props && n.props["data-role"] === "flashback-hit-row");
-  assert.equal(rows(tree).length, 8, "第 1 页 8 条");
+  assert.equal(rows(tree).length, 5, "第 1 页 5 条");
   let text = collectText(tree);
   assert.ok(text.includes("最近命中（16 张）"), "总计数 14 + 2 平局");
-  assert.ok(text.includes("第 1 / 2 页（每页 8 条）"), "页码信息");
+  assert.ok(text.includes("第 1 / 4 页（每页 5 条）"), "页码信息（16 张 ÷ 5 = 4 页）");
   assert.ok(text.indexOf("平局高") < text.indexOf("卡3"), "同 lastHitAt 按 hitCount 降序（平局高 19 > 卡3 17）");
-  assert.ok(text.indexOf("卡3") < text.indexOf("平局低"), "同 lastHitAt 低 hitCount 排后（卡3 17 > 平局低 16）");
+  assert.ok(text.includes("卡3"), "第 1 页含卡3（排在平局高之后）");
   const prev = flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "flashback-hits-prev");
   const next = flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "flashback-hits-next");
   assert.equal(prev.props.disabled, true, "第 1 页「上一页」禁用");
@@ -222,11 +222,21 @@ test("F2 面板：最近命中每页 8 条，页码边界（上一页/下一页/
   next.props.onClick();
   tree = render();
   text = collectText(tree);
-  assert.equal(rows(tree).length, 8, "第 2 页 8 条（共 16 条）");
-  assert.ok(text.includes("第 2 / 2 页（每页 8 条）"), "翻页后页码信息");
+  assert.equal(rows(tree).length, 5, "第 2 页 5 条（共 16 条）");
+  assert.ok(text.includes("第 2 / 4 页（每页 5 条）"), "翻页后页码信息");
+  assert.ok(text.indexOf("平局低") > -1 && text.indexOf("平局低") > text.indexOf("卡3"), "平局后半段（平局低）排到第 2 页");
   assert.equal(flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "flashback-hits-prev").props.disabled, false, "第 2 页「上一页」可点");
+  assert.equal(flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "flashback-hits-next").props.disabled, false, "第 2 页「下一页」仍可点");
+  // 翻到末页：只剩 1 条，下一页禁用。
+  flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "flashback-hits-next").props.onClick();
+  tree = render();
+  flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "flashback-hits-next").props.onClick();
+  tree = render();
+  text = collectText(tree);
+  assert.equal(rows(tree).length, 1, "第 4 页只剩 1 条（16 = 5+5+5+1）");
+  assert.ok(text.includes("第 4 / 4 页（每页 5 条）"), "末页页码信息");
   assert.equal(flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "flashback-hits-next").props.disabled, true, "末页「下一页」禁用");
-  assert.equal(text.includes("卡0"), false, "第 2 页不渲染第 1 页的卡片");
+  assert.equal(text.includes("卡0"), false, "末页不渲染第 1 页的卡片");
 });
 
 // 0.5-13-4：合并页（闪回 = 图谱 + 命中）与图谱 460 画布 / 适应画布按钮。
