@@ -32,6 +32,20 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKQ = join(HERE, "..", "..");
 const CLIENT_SRC = join(WORKQ, "client", "index.js");
 
+// applyAutoChanges 幂等键格式：生产 newId()（client/index.js:561-566）优先
+// crypto.randomUUID()，无 crypto 时回退 op-<base36 时间>-<8 位随机>。二选一即可。
+const OPERATION_ID_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const OPERATION_ID_FALLBACK = /^op-[a-z0-9]+-[a-z0-9]{8}$/;
+
+function assertOperationIdShape(value, label) {
+  assert.equal(typeof value, "string", `${label} 为非空字符串（幂等键）`);
+  assert.ok(value.length >= 8 && value.length <= 128, `${label} 长度在 1..128 约束内`);
+  assert.ok(
+    OPERATION_ID_UUID.test(value) || OPERATION_ID_FALLBACK.test(value),
+    `${label} 格式合理（UUID 或 op-<base36>-<8 位随机>）：实际 ${JSON.stringify(value)}`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // 服务端 DTO 假桩（字段口径对齐 src/plugin/protocol.mjs auto 四方法的 outputSchema
 // 与 forgetting/auto.mjs 的 status/evaluationView/applyView 实际产物）
@@ -402,7 +416,7 @@ test("A2 建议模式：立即评估 → runAutoEvaluation → 候选清单/回�
 });
 
 // ── A3 执行本轮（auto 模式）─────────────────────────────────────────────────
-test("A3 auto 模式：执行本轮 → 就地二次确认 → applyAutoChanges（operationId）→ 回执逐条 ops + runId；replay 回执同口径", async () => {
+test("A3 auto 模式：执行本轮 → 就地二次确认 → applyAutoChanges（operationId）→ 回执逐条 ops + runId；replay 回执同口径；两次执行 operationId 严格不等", async () => {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld({ mode: "auto" });
   const dsh = makeDsh(world);
@@ -428,8 +442,7 @@ test("A3 auto 模式：执行本轮 → 就地二次确认 → applyAutoChanges�
     const applyCalls = dsh.calls.filter((c) => c.method === "applyAutoChanges");
     assert.equal(applyCalls.length, 1, "恰发一次 applyAutoChanges");
     const operationId = applyCalls[0].payload && applyCalls[0].payload.operationId;
-    assert.equal(typeof operationId, "string", "operationId 为非空字符串（幂等键）");
-    assert.ok(operationId.length >= 8 && operationId.length <= 128, "operationId 长度在 1..128 约束内");
+    assertOperationIdShape(operationId, "首次执行 operationId");
 
     const receipt = mounted.find("[data-role=auto-apply-result]");
     assert.ok(receipt, "执行回执渲染");
@@ -455,6 +468,35 @@ test("A3 auto 模式：执行本轮 → 就地二次确认 → applyAutoChanges�
       mounted.textOfEl(mounted.find("[data-role=auto-apply-result]")).includes("重复提交：回放首次执行结果"),
       "replay 回执口径",
     );
+
+    // ── 两次独立执行：operationId 必须严格不等 ──────────────────────────────
+    // 完整再走一遍「执行本轮」→「确认执行」，world 回正常回执（replay:false）。
+    // 生产若把 newId() 写死成常量 / 复用同一 id，下面的 notEqual 即变红。
+    world.applyResult = autoApplyDto();
+    assert.equal(mounted.click("[data-role=auto-apply]"), true, "第二次干净执行：点「执行本轮」");
+    await settle(mounted);
+    assert.equal(
+      dsh.calls.filter((c) => c.method === "applyAutoChanges").length,
+      2,
+      "第二轮确认前零新增执行调用（仍是首次 + replay 两次）",
+    );
+    assert.equal(mounted.click("[data-role=auto-apply-confirm]"), true, "第二次干净执行：确认执行");
+    await settle(mounted);
+
+    const allApplyCalls = dsh.calls.filter((c) => c.method === "applyAutoChanges");
+    assert.equal(allApplyCalls.length, 3, "共三次 applyAutoChanges（首次 + replay 轮 + 干净第二轮）");
+    // 每次调用各自独立 payload：逐个核 operationId 格式与长度，不只看最后一个。
+    for (const [i, call] of allApplyCalls.entries()) {
+      assertOperationIdShape(call.payload && call.payload.operationId, `第 ${i + 1} 次执行 operationId`);
+    }
+    const secondOperationId = allApplyCalls[2].payload.operationId;
+    assert.notEqual(secondOperationId, operationId, "两次独立执行的 operationId 必须严格不等（幂等键不可复用）");
+    const distinctIds = new Set(allApplyCalls.map((c) => c.payload.operationId));
+    assert.equal(distinctIds.size, 3, "三次执行各自独立 payload：operationId 两两不同");
+
+    const secondReceiptText = mounted.textOfEl(mounted.find("[data-role=auto-apply-result]"));
+    assert.ok(secondReceiptText.includes("执行完成。"), "干净第二轮出正常执行回执");
+    assert.ok(!secondReceiptText.includes("重复提交：回放首次执行结果"), "干净第二轮回执不是 replay 口径");
   } finally {
     mounted.unmount();
   }

@@ -753,7 +753,9 @@ test("controller 接线：pre-step 每轮落账（不含正文）→ getStatus.d
     async () => ({ kind: "enter", messages: [humanMessage("m-1", "今天切洋葱了吗")] }),
   );
   const file = await diagnosticsFile(stateRoot, "amber");
-  assert.ok(await waitForFile(file), "fire-and-forget 落账应在短时间内出现");
+  // 6B-2 去墙钟：完成信号门控——计数在 appendRecord 的 .then 里更新，
+  // counter==1 ⇒ 第一轮记录已写盘，再读文件断言内容。
+  await awaitCounter(controller, "deliveryDiagAppended", 1);
   const first = JSON.parse(await readFile(file, "utf8")).records;
   assert.equal(first.length, 1);
   assert.deepEqual(first[0].deliveredIds, [saved.id]);
@@ -765,19 +767,17 @@ test("controller 接线：pre-step 每轮落账（不含正文）→ getStatus.d
     { agent, messages: [humanMessage("m-2", "今天天气不错")] },
     async () => ({ kind: "enter", messages: [humanMessage("m-2", "今天天气不错")] }),
   );
-  const deadline = Date.now() + 3000;
-  let second = null;
-  while (Date.now() < deadline) {
-    const records = JSON.parse(await readFile(file, "utf8")).records;
-    if (records.length >= 2) { second = records; break; }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  assert.ok(second, "第二轮记录应在短时间内出现");
+  // 6B-2 去墙钟：第二轮同样以完成信号门控——counter==2 ⇒ 文件已有两条记录
+  // （写盘 resolve 后计数才 +1），不再墙钟轮询文件。
+  await awaitCounter(controller, "deliveryDiagAppended", 2);
+  const second = JSON.parse(await readFile(file, "utf8")).records;
+  assert.equal(second.length, 2, "counter==2 ⇒ 文件应有恰好两条记录");
   assert.deepEqual(second[1].deliveredIds, []);
   assert.equal(second[1].literalHits, 0);
   assert.equal(second[1].rejectReasons.literal_miss, 1, "唯一一张卡该轮无信号 → literal_miss 基线");
 
-  // 计数器（controller 侧写成功口径；评审 R21：计数在 .then 里更新，轮询等待）。
+  // 计数器（controller 侧写成功口径；评审 R21：计数在 .then 里更新——两轮
+  // 门控已前置，此处复核仍为 2、未出现第三次落账）。
   await awaitCounter(controller, "deliveryDiagAppended", 2);
   const d = controller.diagnostics();
   assert.equal(d.counters.deliveryDiagFailed, 0);
