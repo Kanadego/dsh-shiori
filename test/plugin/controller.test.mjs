@@ -2032,11 +2032,33 @@ test("0.5 启动差集兜底：重启后索引与卡片漂移（过期 revision 
     semanticIncrementalDebounceMs: 20,
   });
   await controller2.start();
+  // 批次 9-1（R1）：保存新卡前先取 flushes 基线——写后 flush 收场才 +1
+  // （src/semantic/incremental.mjs runFlushCycle：flushes 在 saveIfDirty(:385)
+  // 之后自增、running 置 false 之前；启动差集轮只加 startupSyncs 不加 flushes），
+  // 它是「新卡已嵌入并落盘」的真正收场信号；pending 在轮次开始 :369-370 就清零，
+  // 不可作门控。
+  const flushesBaseline = ((await controller2.management.getStatus(trustedContext, {}))
+    .diagnostics.semantic.incremental ?? {}).flushes ?? 0;
   const saved2 = await controller2.management.executeTool(trustedContext, {
     name: "spark_save",
     args: { title: "会议室", content: "打印报销单", triggers: [], vitality: "evergreen" },
   });
   assert.equal(saved2.ok, true);
+  // 批次 9-1（R1）：新卡入索引由这轮写后 flush 负责——事件门控等它真正收场
+  // （flushes > 基线 && running === false），不再赌 6s 墙钟。上一版把门控挂在
+  // startupSyncs 上无效：spark_save 自己首开向量索引就 kick 了一轮启动差集
+  // （那轮 active 卡只有旧卡），跑完 startupSyncs 就 +1；新卡要等之后的防抖
+  // flush 才嵌入，不在 startupSyncs 里。下方 awaitStartupSync 门控与
+  // waitFor(...,6000) 兜底原样保留，原有断言零删改，这里只追加新门控。
+  let lastInc = {};
+  assert.ok(await waitFor(async () => {
+    lastInc = ((await controller2.management.getStatus(trustedContext, {}))
+      .diagnostics.semantic.incremental) ?? {};
+    return (lastInc.flushes ?? 0) > flushesBaseline && lastInc.running === false;
+  }, 30000), `新卡写后 flush 应收场（flushes 基线 ${flushesBaseline}，门控上限 30s；`
+    + `实际 flushes=${lastInc.flushes} pending=${lastInc.pending} `
+    + `startupSyncs=${lastInc.startupSyncs} running=${lastInc.running}）`
+    + `——flushes 在 saveIfDirty 之后自增才是收场信号（pending 轮次开始即清零）`);
   // 同步手段（0.5 批次 8-1 去墙钟，照 0.5 批次 7-1 awaitAutoDiag 先例）：先等
   // 启动差集完成信号（startupSyncs 在补嵌/剔除并落盘后才 +1，见 awaitStartupSync
   // 注释），再读索引做最终断言——判据与断言零改动，只是不再赌 6s 墙钟内后台

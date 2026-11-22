@@ -54,7 +54,17 @@ try {
         if (Number.isInteger(holder) && holder > 0 && holderAlive && age < LANE_STALE_MS) steal = false;
       } catch { /* pid 文件缺失/读失败 → 视为可接管 */ }
       if (steal) {
-        try { rmSync(LANE_DIR, { recursive: true, force: true }); } catch { /* 接管失败下轮重试 */ }
+        let cleared = true;
+        try { rmSync(LANE_DIR, { recursive: true, force: true }); } catch { cleared = false; }
+        if (cleared) continue;
+        // 批次 9-1（R2）：接管清理失败原先裸 continue——不 sleep 不查 deadline，
+        // 锁目录一直删不掉时会忙空转挂死。改为失败后睡一小段并查 deadline，
+        // 超时走 best-effort 放行（打说明行照跑用例，绝不 skip / fail / 少跑）。
+        if (Date.now() >= laneDeadline) {
+          console.error(`[loopback-lane] 接管清理失败且已等超 ${LANE_WAIT_MS}ms，放行照跑（best-effort，不改变判据）`);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 40));
         continue;
       }
       if (Date.now() >= laneDeadline) {
