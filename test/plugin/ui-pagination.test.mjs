@@ -512,50 +512,6 @@ test("脱敏：updated 时间戳 + rev token 不进正文——只显示友好�
 });
 
 // ---------------------------------------------------------------------------
-// ⑤ 候选列表：每页 10 条（统一口径）
+// ⑤ 候选列表分页已随「候选审阅」整块下线（0.5.0 转正）；专题索引导航分页
+// 保留在上方用例。
 // ---------------------------------------------------------------------------
-
-test("候选列表：12 条待审分两页（每页 10 条）；页码可点、翻回不丢", async () => {
-  const { host, renderTab } = await mountTabById("candidates", "CandidatesTab");
-  const data = {
-    queueRevision: 5,
-    items: Array.from({ length: 12 }, (_, i) => ({
-      candidate: {
-        id: "card-" + String(i).padStart(2, "0"),
-        kind: "isolated",
-        scopeId: "default",
-        sources: [{ id: "card-" + String(i).padStart(2, "0") }],
-        evidence: { ignoredRetiredTargets: [] },
-      },
-      status: "pending",
-    })),
-    plans: [],
-  };
-  host.states.length = 0;
-  host.states.push(data, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  const graph = { nodes: data.items.map((it, i) => ({ id: it.candidate.id, title: "孤卡" + i })), edges: [] };
-  const dsh = {
-    call: async (method, session, payload) => {
-      if (method === "listCandidates") return data;
-      if (method === "getGraph") return graph;
-      return {};
-    },
-  };
-  const render = () => {
-    host.cursor.v = 0;
-    host.runEffects.v = false;
-    return renderTab(dsh, "session-A");
-  };
-  let tree = render();
-  // 候选行不依赖额外拉取（标题映射拉不到就退化短 id），列表立即可见。
-  const candidateRows = () => flattenVNode(flattenVNode(tree).find((n) => n.type === "div" && collectText(n).includes("候选（")))
-    .filter((n) => n.type === "div" && String(n.props.className || "") === "dshi_item");
-  assert.equal(candidateRows().length, 10, "候选第 1 页 10 条");
-  assert.deepEqual(pageNumButtons(tree).map((p) => collectText(p)), ["1", "2"], "页码 1..2");
-  pageNumButtons(tree)[1].props.onClick();
-  tree = render();
-  assert.equal(candidateRows().length, 2, "候选第 2 页 2 条");
-  findButton(tree, "上一页").props.onClick();
-  tree = render();
-  assert.equal(candidateRows().length, 10, "翻回第 1 页（状态可回退）");
-});

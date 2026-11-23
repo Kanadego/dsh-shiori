@@ -229,7 +229,9 @@ test("U8 壳层：选择器行与 tab 栏包进壳条、壳条不吸顶（S2-4 �
     assert.ok(rowInside.some((n) => n.props && n.props["data-role"] === "default-persona"), "工作区默认卡控件在选择器行内");
     const css = styleTextOf(fake);
     // S2-4：壳条整体不吸顶——不再有 position:sticky/top/z-index 遮挡组合。
-    assert.ok(css.includes(".dshi_sticky{display:flex;flex-direction:column;"),
+    // 0.5.0 转正：壳条补 flex:none（长内容不再压扁 hero），断言只认布局块+不吸顶。
+    const stickyRule = css.split(".dshi_sticky{")[1].split("}")[0];
+    assert.ok(stickyRule.includes("display:flex") && stickyRule.includes("flex-direction:column"),
       "壳条保留布局块样式（不吸顶）");
     assert.equal(css.includes(".dshi_sticky{position:sticky"), false,
       "壳条不再 position:sticky（取消吸顶遮挡）");
@@ -707,9 +709,11 @@ test("S2 样式：全屏容器 scope class 与侧边栏图标 CSS 声明存在�
     // 收缩（1440 与 900 宽都不横向溢出的样式保证）。
     assert.ok(css.includes(".dshi_rootMain{box-sizing:border-box;max-width:none;width:100%;height:100%;"), "全屏容器显式 border-box（根元素不吃 .dshi_root * 重置，100% 宽高叠 padding 不再溢出）");
     // S2-4：底部补 max(28px, bottom-clearance)（侧边栏入口打开时首尾不再被裁）。
+    // 0.5.0 转正：宿主没给 --dsh-frame-top-clearance 时 24px 不够，hero 顶部会被
+    // 宿主顶栏压掉约 40px；顶部保留 max(64px, 24px+clearance) 兜底。
     assert.ok(
-      css.includes("padding:calc(24px + var(--dsh-frame-top-clearance,0px)) 28px max(28px,var(--dsh-frame-bottom-clearance,0px)) max(28px,var(--dsh-frame-leading-clearance,0px))"),
-      "全屏容器上下左右留白（frame clearance 口径 + 底部留白）",
+      css.includes("padding:max(64px,calc(24px + var(--dsh-frame-top-clearance,0px))) 28px max(28px,var(--dsh-frame-bottom-clearance,0px)) max(28px,var(--dsh-frame-leading-clearance,0px))"),
+      "全屏容器上下左右留白（frame clearance 口径 + 顶部兜底 + 底部留白）",
     );
     assert.ok(css.includes("overflow:auto}"), "全屏容器自滚动");
     // S2-4：壳条整体不吸顶后，让出框架顶部的 sticky 覆盖规则不再存在。

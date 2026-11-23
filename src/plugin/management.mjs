@@ -675,6 +675,8 @@ export function createManagement(deps) {
           l2: settings.l2.enabled,
           organize: settings.organize.enabled,
           forgetting: currentLiveForgetting().enabled,
+          // 语义召回：配置里的 semantic.provider 不是 none 即视为已启用（本期只有 local 实现）。
+          semantic: Boolean(settings.semantic && settings.semantic.provider !== "none"),
           tools: !isInert && settings.mode === "active",
           sections: !isInert && settings.mode === "active",
         },

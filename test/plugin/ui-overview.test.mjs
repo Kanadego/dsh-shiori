@@ -90,20 +90,22 @@ test("概览：能力标签五项，开启=橙色实心、关闭=灰色且不可
   }
 });
 
-test("概览：冷热分布中文化「热 N · 温 N · 冷 N · 冻结 N」+ 每类一句解释", async () => {
+test("概览：冷热分布四块磁贴——中文分级名 + tiers 数字 + 每类一句解释", async () => {
   const panel = await harness.mount({ tab: "overview", dsh: makeDsh({ tiers: { active: 7, cool: 5, cold: 2, frozen: 1 } }) });
   await settle(panel);
   try {
     const card = findRole(panel, "temperature-status-card");
     assert.ok(card, "冷热分布卡存在");
-    const text = panel.textOfEl(card);
-    assert.ok(text.includes("热 7 · 温 5 · 冷 2 · 冻结 1"), "四类中文计数取自 tiers");
-    assert.equal(text.includes("active "), false, "不再出现英文分级名");
-    for (const [key, cn] of [["active", "热"], ["cool", "温"], ["cold", "冷"], ["frozen", "冻结"]]) {
+    assert.ok(findRole(panel, "temperature-tiers"), "磁贴网格存在");
+    for (const [key, cn, n] of [["active", "热", 7], ["cool", "温", 5], ["cold", "冷", 2], ["frozen", "冻结", 1]]) {
+      const tile = findRole(panel, "temperature-tier-" + key);
+      assert.ok(tile, "磁贴存在：" + key);
+      const tileText = panel.textOfEl(tile);
+      assert.ok(tileText.includes(cn), "磁贴含中文分级名：" + key);
+      assert.ok(tileText.includes(String(n)), "磁贴数字取自 tiers：" + key);
       const note = findRole(panel, "temperature-tier-note-" + key);
       assert.ok(note, "解释行存在：" + key);
-      assert.ok(panel.textOfEl(note).includes(cn + "（" + key + "）"), "解释行标注中文名与英文键：" + key);
-      assert.ok(panel.textOfEl(note).length > ("（" + cn + key + "）").length + 8, "每类附一句解释：" + key);
+      assert.ok(panel.textOfEl(note).length > 10, "每类附一句解释：" + key);
     }
   } finally {
     panel.unmount();
@@ -136,11 +138,12 @@ test("概览：零写操作——auto 卡/整理向导/启用卡/语义召回/�
     for (const label of forbidden) {
       assert.equal(texts.includes(label), false, "概览页没有写操作按钮：" + label);
     }
-    // 只读块仍在：能力标签 + 健康状况 + 冷热分布 + 技术细节。
+    // 只读块仍在：能力标签 + 健康状况 + 冷热分布；技术细节 / 完整 DTO 已裁撤。
     assert.ok(findRole(panel, "capability-card"), "能力标签在");
     assert.ok(findRole(panel, "health-card"), "健康状况在");
     assert.ok(findRole(panel, "temperature-status-card"), "冷热分布在");
-    assert.ok(panel.text().includes("技术细节"), "技术细节折叠在");
+    assert.equal(panel.text().includes("技术细节"), false, "技术细节折叠已裁撤");
+    assert.equal(panel.text().includes("完整 DTO"), false, "完整 DTO 折叠已裁撤");
   } finally {
     panel.unmount();
   }

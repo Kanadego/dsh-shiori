@@ -45,7 +45,7 @@ const FULL_BUDGETS = {
 };
 
 const SPARK_FIELDS = ["maxChars", "inlineMaxChars", "maxCards", "seedCount", "linkCount"];
-const SETTINGS_PAGES = ["budget", "temp", "spark", "recall"];
+const SETTINGS_PAGES = ["budget", "temp", "spark", "recall", "danger"];
 
 // 温度 12 项的中文主名（任务书对照表；测试内独立一份，面板改名必须同步这里）。
 const TEMPERATURE_LABELS = {
@@ -177,7 +177,7 @@ function changeInput(panel, path, value) {
 // 子页骨架
 // ---------------------------------------------------------------------------
 
-test("子页切换：四按钮 + 默认预算页；每页至少一个可见 data-role；未知 id 回落预算页", async () => {
+test("子页切换：五按钮 + 默认预算页；每页至少一个可见 data-role；未知 id 回落预算页", async () => {
   const { scope } = makeScope();
   const { dsh } = makeDsh({ scope });
   const panel = await mountSettings(dsh);
@@ -212,6 +212,19 @@ test("子页切换：四按钮 + 默认预算页；每页至少一个可见 data
     assert.ok(panel.find('[data-role="semantic-recall"]'), "向量召回页可见 data-role=semantic-recall");
     assert.ok(panel.findAll("button").some((el) => panel.textOfEl(el) === "重建向量"), "重建向量按钮在场");
     assert.ok(panel.find('[data-role="settings-page-budget"]') === null, "切走后预算页不再渲染");
+
+    // 数据与卸载子页：危险操作卡（0.5.0 从整理页折叠里搬出来，不再深藏）。
+    await openPage(panel, "danger");
+    assert.ok(panel.find('[data-role="settings-page-danger"]'), "数据与卸载页容器");
+    assert.ok(panel.find('[data-role="settings-head-danger"]'), "数据与卸载页头");
+    // 回归：settingsPageNode(id, body) 只收一个 body 节点——多段内容没包 fragment 时
+    // StatusTab 会被静默丢掉，整页只剩说明句（真实 UI 白屏过）。
+    const dangerText = panel.textOf('[data-role="settings-page-danger"]');
+    // 合成 dsh 的 getStatus 不回显 dataRoot → StatusTab 出「加载中…」占位；两者都证明
+    // 内嵌的 StatusTab 没被 settingsPageNode 丢掉。
+    assert.ok(dangerText.includes("只删 dataRoot") || dangerText.includes("加载中…"),
+      "danger 页内嵌 StatusTab 的危险操作卡可见（或加载中占位）");
+    assert.ok(panel.find('[data-role="destroy-data-card"]') || dangerText.includes("加载中…"), "危险操作卡本体（或加载中占位）在");
 
     // 回预算页。
     await openPage(panel, "budget");
@@ -377,7 +390,7 @@ test("ErrorBox 两行口径不变：已知码人话在前 + 原文次要行；�
 // 闪回卡片子页
 // ---------------------------------------------------------------------------
 
-test("闪回卡片子页：5 个 budgets.spark 字段 + persona.maxChars 全接线（共用草稿），后端没有的只写「待后端提供」", async () => {
+test("闪回卡片子页：5 个 budgets.spark 字段全接线（共用草稿），后端没有的只写「待后端提供」；persona.maxChars 只属预算页", async () => {
   const { scope } = makeScope();
   const { dsh } = makeDsh({ scope });
   const panel = await mountSettings(dsh);
@@ -388,9 +401,8 @@ test("闪回卡片子页：5 个 budgets.spark 字段 + persona.maxChars 全接�
       assert.equal(inputValue(panel, "spark." + key), String(FULL_BUDGETS.spark[key]),
         "接线 budgets.spark." + key);
     }
-    assert.equal(inputValue(panel, "persona.maxChars"), String(FULL_BUDGETS.persona.maxChars),
-      "接线 budgets.persona.maxChars");
-    assert.ok(panel.find('[data-role="spark-persona-note"]'), "人设卡注明属 L0 / 不计入水位");
+    // 0.5.0 转正：persona.maxChars 是 L0 字段，不再混进 L2 的闪回卡片子页。
+    assert.equal(panel.find('[data-path="persona.maxChars"]'), null, "闪回卡片子页不再出现 L0 的 persona.maxChars");
     const text = panel.textOf('[data-role="settings-page-spark"]');
     assert.ok(text.includes("种子数 + 关联数不得超过单次最多卡片数"), "seedCount/linkCount 与 maxCards 的关系有说明");
     const pending = panel.textOf('[data-role="spark-pending-backend"]');
@@ -401,6 +413,8 @@ test("闪回卡片子页：5 个 budgets.spark 字段 + persona.maxChars 全接�
     const budgetSparkInputs = panel.findAll("input")
       .filter((el) => String(el.getAttribute("data-path") || "").startsWith("spark."));
     assert.equal(budgetSparkInputs.length, 0, "预算子页不再重复铺 5 个 spark 字段");
+    assert.equal(inputValue(panel, "persona.maxChars"), String(FULL_BUDGETS.persona.maxChars),
+      "persona.maxChars 归预算页接线（L0 只出现一次）");
     assert.equal(panel.find('[data-role="settings-page-budget"]').children.length > 0, true, "预算页仍有 L0/L1 内容（不留空容器）");
 
     // 草稿仍共用一份：闪回页改 maxCards → 切走再切回，改动保留（不因换页丢草稿）。

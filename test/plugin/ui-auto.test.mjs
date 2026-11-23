@@ -553,7 +553,7 @@ test("A4 一键撤销：最近执行记录出撤销按钮 → undoAutoRun({runId
       applied: 2,
       undoneAt: null,
     }];
-    assert.equal(mounted.click("[data-role=auto-refresh]"), true, "点「刷新」回读最近执行记录");
+    assert.equal(mounted.click("[data-role=status-refresh]"), true, "点「刷新」回读最近执行记录");
     await settle(mounted);
 
     const runRows = mounted.findAll("[data-role=auto-run-row]");
@@ -579,7 +579,7 @@ test("A4 一键撤销：最近执行记录出撤销按钮 → undoAutoRun({runId
 
     // 服务端 undoneAt 回读后：按钮消失，变「已撤销」文本。
     world.lastRuns[0].undoneAt = "2026-11-21T11:10:00.000Z";
-    assert.equal(mounted.click("[data-role=auto-refresh]"), true, "刷新回读 undoneAt");
+    assert.equal(mounted.click("[data-role=status-refresh]"), true, "刷新回读 undoneAt");
     await settle(mounted);
     assert.equal(mounted.find("[data-role=auto-undo]"), null, "已撤销 run 不再有撤销按钮");
     assert.ok(mounted.textOfEl(mounted.findAll("[data-role=auto-run-row]")[0]).includes("已撤销"), "行内显示已撤销时间");
@@ -624,7 +624,7 @@ test("A5 模式开关：写 forgetting.autoMode（configForms CAS）→ 服务�
 
     // 服务端热提交后：手动「刷新」也能收口 pending + 当前档高亮。
     world.mode = "auto";
-    assert.equal(mounted.click("[data-role=auto-refresh]"), true, "点「刷新」");
+    assert.equal(mounted.click("[data-role=status-refresh]"), true, "点「刷新」");
     await settle(mounted);
     assert.equal(mounted.find("[data-role=auto-mode-pending]"), null, "pending 提示收口");
     const autoBtn = mounted.find("[data-role=auto-mode-auto]");
@@ -636,7 +636,7 @@ test("A5 模式开关：写 forgetting.autoMode（configForms CAS）→ 服务�
 });
 
 // ── A6 熔断 ─────────────────────────────────────────────────────────────────
-test("A6 保护期：fuse.fused=true → 保护期徽章 + 判定明细行（技术细节折叠）+ 双执行入口禁用并带 title 说明", async () => {
+test("A6 保护期：fuse.fused=true → 保护期徽章 + 双执行入口禁用并带 title 说明", async () => {
   const harness = createUiHarness({ clientSource: CLIENT_SRC });
   const world = makeWorld({
     mode: "auto",
@@ -666,10 +666,8 @@ test("A6 保护期：fuse.fused=true → 保护期徽章 + 判定明细行（技
     assert.equal(mounted.textOfEl(badge), "保护期", "徽章文案");
     assert.ok(String(badge.className).includes("dshi_badgeWarn"), "徽章警示样式");
 
-    const reasons = mounted.find("[data-role=auto-fuse-reasons]");
-    assert.ok(reasons, "判定明细行渲染");
-    assert.ok(mounted.textOfEl(reasons).includes("[LEDGER_DAMAGED]"), "明细带 code");
-    assert.ok(mounted.textOfEl(reasons).includes("坏行"), "明细带 detail");
+    // 0.5.0 转正：判定明细（原始 reasons）随技术细节一起裁撤，只留徽章与状态行。
+    assert.equal(mounted.find("[data-role=auto-fuse-reasons]"), null, "判定明细行已裁撤");
 
     // 0.5 第三波：双执行入口在熔断时都禁用（禁用条件含熔断），title 说明熔断口径。
     const applySelectedBtn = mounted.find("[data-role=auto-apply-selected]");
@@ -729,8 +727,8 @@ test("A8 getAutoStatus 失败（shadow / 未启动 / 模块关）：整卡静默
 
     assert.equal(mounted.find("[data-role=auto-card]"), null, "auto 卡不渲染");
     assert.ok(!mounted.text().includes("记忆整理（自动冷却 / 恢复）"), "标题不出现在任何位置");
-    // 专题整理页其余部分不受牵连：候选审阅本体与整理说明照常渲染。
-    assert.ok(mounted.text().includes("专题整理：候选审阅与执行"), "专题整理页本体不受牵连");
+    // 专题整理页其余部分不受牵连：索引与分组窗格与整理说明照常渲染。
+    assert.ok(mounted.find("[data-role=organize-pane-candidates]"), "专题整理页本体不受牵连");
     assert.ok(mounted.text().includes("整理功能才启用不到 30 天"), "整理说明句照常回显");
   } finally {
     mounted.unmount();

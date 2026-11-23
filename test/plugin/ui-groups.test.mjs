@@ -108,10 +108,25 @@ async function mountCandidates(data) {
   host.states.length = 0;
   host.states.push(...CANDIDATE_BASE_STATES(data));
   // states 预置一次后跨渲染保留（异步 setGroups / setMigration 等在重渲染时可见）。
-  const render = (dsh) => {
+  const renderRaw = (dsh) => {
     host.cursor.v = 0;
     host.runEffects.v = false;
     return tab.type({ dsh, sessionId: "session-A", readOnly: false });
+  };
+  // 0.5.0 转正：索引归档 / 分组管理改互斥手风琴（默认只开归档块）。本文件只测分组
+  // 管理，挂载后自动点开「分组管理」块；之后状态保留，重渲染仍是展开态。
+  let groupsAutoOpened = false;
+  const render = (dsh) => {
+    let tree = renderRaw(dsh);
+    if (!groupsAutoOpened && !findCard(tree, "group-manage")) {
+      const head = findCard(tree, "organize-acc-head-groups");
+      if (head && head.props && typeof head.props.onClick === "function") {
+        head.props.onClick();
+        groupsAutoOpened = true;
+        tree = renderRaw(dsh);
+      }
+    }
+    return tree;
   };
   return { host, render };
 }
@@ -376,7 +391,10 @@ test("删非空组：先弹迁移确认（列成员 + 目标组下拉来自现�
   assert.equal(findCard(tree, "group-migration"), null, "迁移确认卡关闭");
   assert.equal(groupCalls(calls).filter((c) => c.args.action === "list").length >= 2, true, "迁移删除后刷新组清单");
   // 迁移删除后专题列表一并刷新（confirmMigration 里 loadGroups()+loadTopics()）：
-  // 归档卡还能正常拉清单、渲染出成员 topic，不是空壳。
+  // 归档卡还能正常拉清单、渲染出成员 topic，不是空壳。归档块在另一只手风琴里，
+  // 先切过去再拉清单。
+  flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "organize-acc-head-archive").props.onClick();
+  tree = render(dsh);
   assert.notEqual(findButton(tree, "载入 / 刷新专题"), null, "迁移删除后归档专题卡仍在");
   findButton(tree, "载入 / 刷新专题").props.onClick();
   await flush();

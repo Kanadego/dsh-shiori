@@ -85,9 +85,9 @@ async function mountStatusPanel(mod, host) {
   const sectionTree = sectionVNode.type(sectionVNode.props);
   const statusTab = flattenVNode(sectionTree).find((n) => typeof n.type === "function" && n.type.name === "StatusTab");
   assert.ok(statusTab, "StatusTab reached through real slot render");
-  return (dsh, sessionId = "session-A") => {
+  return (dsh, sessionId = "session-A", view) => {
     host.cursor.v = 0;
-    return statusTab.type({ dsh, sessionId });
+    return statusTab.type({ dsh, sessionId, view });
   };
 }
 
@@ -182,33 +182,24 @@ test("U3 旧可读文本保留：occupancyText 的 used / limit（百分比）�
 // d) 「技术细节」折叠区：默认收起；展开内容字段齐全；能力徽章保持现状
 // ---------------------------------------------------------------------------
 
-test("U3 折叠区默认收起，summary 与原始字段齐全；能力徽章不动", async () => {
+test("U3 技术细节与完整 DTO 已裁撤；能力徽章与健康卡不动", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderStatus = await mountStatusPanel(mod, host);
   const tree = renderStatusWithDto(host, renderStatus, realPStatusDto());
 
-  const details = flattenVNode(tree).filter((n) => n.type === "details");
-  assert.ok(details.length >= 2, "技术细节 + 完整 DTO 两个折叠区都在");
-  for (const d of details) {
-    assert.notEqual(d.props.open, true, "details 默认收起（无 open 属性）");
-  }
   const summaries = flattenVNode(tree).filter((n) => n.type === "summary").map((n) => collectText(n));
-  assert.ok(summaries.some((s) => s.includes("技术细节")), "技术细节 summary 在");
-  assert.ok(summaries.some((s) => s.includes("完整 DTO")), "完整 DTO summary 在");
-
-  // 展开后字段与值一个不少（mode / scope / diagnostics 三类原始字段）
+  assert.equal(summaries.some((s) => s.includes("技术细节")), false, "技术细节 summary 已裁撤");
+  assert.equal(summaries.some((s) => s.includes("完整 DTO")), false, "完整 DTO summary 已裁撤");
   const text = collectText(tree);
-  assert.ok(text.includes("mode: active"), "mode 字段");
-  assert.ok(text.includes("scope: amber"), "scope 字段");
-  assert.ok(text.includes('ownerId: "local"'), "diagnostics.ownerId");
-  assert.ok(text.includes("generation: 1"), "diagnostics.generation");
-  assert.ok(text.includes("started: true"), "diagnostics.started");
+  assert.equal(text.includes("mode: active"), false, "不再铺原始字段 mode");
+  assert.equal(text.includes('ownerId: "local"'), false, "不再铺 diagnostics 原始字段");
 
   // 能力徽章保持现状（渲染与文案不动）
   assert.ok(text.includes("已启用的能力"), "能力卡标题在");
   assert.ok(text.includes("闪回二级记忆：已开启"), "l2 徽章文案（0.5-13-4 按产品名改名）");
   assert.ok(text.includes("遗忘归档：已开启"), "forgetting 徽章文案不变");
+  assert.ok(text.includes("记忆正在参与对话"), "健康卡可读文本在");
 });
 
 // ---------------------------------------------------------------------------
@@ -406,7 +397,7 @@ function enableCardOf(tree) {
   return flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "enable-card") || null;
 }
 
-async function mountS1Status(dto, scope, calls, dtoFor) {
+async function mountS1Status(dto, scope, calls, dtoFor, view) {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
   const renderStatus = await mountStatusPanel(mod, host);
@@ -423,7 +414,7 @@ async function mountS1Status(dto, scope, calls, dtoFor) {
   const render = () => {
     host.runEffects.v = false;
     host.cursor.v = 0;
-    return renderStatus(dsh, "session-A");
+    return renderStatus(dsh, "session-A", view);
   };
   return { host, render, dsh };
 }
@@ -1389,7 +1380,7 @@ function destroyCardOf(tree) {
 test("S6 危险按钮：dataRoot 已知时渲染「卸载并清除数据」卡，文案写清只删 dataRoot", async () => {
   const calls = [];
   const dto = s1StatusDto("configured", { dataRoot: String.raw`C:\Users\tester\.dsh\shiori-data`, stateRoot: String.raw`C:\Users\tester\.dsh\shiori-state` });
-  const { render } = await mountS1Status(dto, null, calls);
+  const { render } = await mountS1Status(dto, null, calls, undefined, "danger");
   const tree = render();
   const card = destroyCardOf(tree);
   assert.ok(card, "状态页渲染危险按钮卡");
@@ -1404,7 +1395,7 @@ test("S6 二次确认：输入与 dataRoot 原文不一致 → 不发 RPC（按�
   const calls = [];
   const dataRoot = String.raw`C:\Users\tester\.dsh\shiori-data`;
   const dto = s1StatusDto("configured", { dataRoot, stateRoot: String.raw`C:\Users\tester\.dsh\shiori-state` });
-  const { render } = await mountS1Status(dto, null, calls);
+  const { render } = await mountS1Status(dto, null, calls, undefined, "danger");
   let tree = render();
   findButton(tree, "卸载并清除数据").props.onClick();
   tree = render(); // setDestroyStage 落 state 后重渲染
@@ -1437,7 +1428,7 @@ test("S2-6 二次确认：输入完整 dataRoot（前后带空白）→ 按钮�
   const calls = [];
   const dataRoot = String.raw`C:\Users\tester\.dsh\shiori-data`;
   const dto = s1StatusDto("configured", { dataRoot, stateRoot: String.raw`C:\Users\tester\.dsh\shiori-state` });
-  const { render } = await mountS1Status(dto, null, calls);
+  const { render } = await mountS1Status(dto, null, calls, undefined, "danger");
   let tree = render();
   findButton(tree, "卸载并清除数据").props.onClick();
   tree = render();
@@ -1458,7 +1449,7 @@ test("S2-6 二次确认：输入完整 dataRoot（前后带空白）→ 按钮�
   assert.ok(destroyCall, "匹配后发出 destroyData");
   assert.deepEqual(destroyCall.payload, { confirm: dataRoot }, "confirm 回传服务端原文（不受首尾空白影响）");
   // 错误输入：中间字符不同 → 仍禁用 + 不一致提示
-  const second = await mountS1Status(dto, null, []);
+  const second = await mountS1Status(dto, null, [], undefined, "danger");
   let tree2 = second.render();
   findButton(tree2, "卸载并清除数据").props.onClick();
   tree2 = second.render();
@@ -1474,7 +1465,7 @@ test("S6 二次确认：输入 dataRoot 原文 → 发 destroyData（confirm=原
   const calls = [];
   const dataRoot = String.raw`C:\Users\tester\.dsh\shiori-data`;
   const dto = s1StatusDto("configured", { dataRoot, stateRoot: String.raw`C:\Users\tester\.dsh\shiori-state` });
-  const { render, dsh } = await mountS1Status(dto, null, calls);
+  const { render, dsh } = await mountS1Status(dto, null, calls, undefined, "danger");
   let tree = render();
   findButton(tree, "卸载并清除数据").props.onClick();
   tree = render();
@@ -1501,7 +1492,7 @@ test("S6 失败显示错误码：destroyData 被拒时错误码如实可见", as
   const { render } = await mountS1Status(dto, null, calls, (n) => {
     if (n === 1) throw Object.assign(new Error("destroyData requires active mode"), { code: "UNSUPPORTED" });
     return failingDto;
-  });
+  }, "danger");
   let tree = render();
   findButton(tree, "卸载并清除数据").props.onClick();
   tree = render();

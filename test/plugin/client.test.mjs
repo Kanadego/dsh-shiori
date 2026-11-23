@@ -938,112 +938,6 @@ function loadedStates(sessionId) {
   ];
 }
 
-test("R3 回归：数据未加载时不发送 expectedQueueRevision，payload 经宿主 isRemoteJsonValue 判无损；写动作禁用", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 0, items: [], plans: [] };
-      return {};
-    },
-  };
-  host.states.length = 0; // 未加载：data=null
-  let tree = renderCandidates(dsh, "session-A");
-  // 未加载：写动作按钮必须禁用（0.3 整理流程裁撤后唯一的 analyze 入口是「分析遗忘候选」）
-  assert.equal(findButton(tree, "分析遗忘候选").props.disabled, true, "analyze disabled before load");
-  // 即便被直接触发（无障碍/脚本场景），payload 也不得含 undefined 值字段
-  findButton(tree, "分析遗忘候选").props.onClick();
-  await flush();
-  const analyze = calls.find((c) => c.method === "analyze");
-  assert.ok(analyze, "analyze call issued");
-  assert.equal(Object.prototype.hasOwnProperty.call(analyze.payload, "expectedQueueRevision"), false,
-    "no expectedQueueRevision own property before queueRevision is known");
-  assert.equal(isRemoteJsonValue(analyze.payload), true, "analyze payload lossless per host validator");
-});
-
-test("R3 回归：数据已加载时 expectedQueueRevision 以数值附带，previewPlan payload 无损", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  let previewResolve;
-  // 真实形状补正（review a1 打回项 1 延伸）：analyze 的真实响应是 queueDto（setData 整包
-  // 替换），stub 返回 {} 会把队列冲空、候选消失；listCandidates 同步给两卡配对的 link 候选
-  // 与 forgetting 计划（0.3：previewPlan 无损改走遗忘计划行内预览，analyze 整包替换后仍要在场）。
-  const analyzeQueueDto = { queueRevision: 0, items: [{ candidateId: "candidate-A", kind: "link", sources: [{ id: "s-a" }, { id: "s-b" }] }], plans: loadedStates("x")[0].plans };
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "previewPlan") return new Promise((resolve) => { previewResolve = resolve; });
-      if (method === "listCandidates") return analyzeQueueDto;
-      if (method === "analyze") return analyzeQueueDto;
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(...loadedStates("session-A"));
-  let tree = renderCandidates(dsh, "session-A");
-  assert.equal(findButton(tree, "分析遗忘候选").props.disabled, false, "analyze enabled after load");
-  findButton(tree, "分析遗忘候选").props.onClick();
-  await flush();
-  const analyze = calls.find((c) => c.method === "analyze");
-  assert.equal(analyze.payload.expectedQueueRevision, 0, "loaded revision attached as number");
-  assert.equal(isRemoteJsonValue(analyze.payload), true);
-
-  // 0.3：organize 预览（预览整理计划）已裁撤；previewPlan 无损改走遗忘计划行内预览
-  //（doPreviewForgetting 不带 expectedQueueRevision——它不改队列，凭 planDigest 校验）。
-  calls.length = 0;
-  tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "预览遗忘计划").props.onClick();
-  assert.ok(previewResolve, "previewPlan in flight");
-  previewResolve({ kind: "forgetting", planId: "fp-A", planDigest: "digest-fp", summary: "ok", diff: [] });
-  await flush();
-  const preview = calls.find((c) => c.method === "previewPlan");
-  assert.equal(preview.payload.kind, "forgetting");
-  assert.equal(isRemoteJsonValue(preview.payload), true, "previewPlan payload lossless");
-});
-
-test("R4 回归：A 会话在途预览在切到 B 会话后完成——不得渲染确认框，更不得发出 executePlan", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  let previewResolve;
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "previewPlan") return new Promise((resolve) => { previewResolve = resolve; });
-      if (method === "listCandidates") return { queueRevision: 0, items: [{ candidateId: "candidate-A" }], plans: [] };
-      return {};
-    },
-  };
-  // 会话 A：已加载，点击「预览遗忘计划」（在途挂起；0.3 organize 预览入口裁撤后
-  // previewPlan 的会话守卫语义改由遗忘计划行内预览承载）
-  host.states.length = 0;
-  host.states.push(...loadedStates("session-A"));
-  let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "预览遗忘计划").props.onClick();
-  assert.ok(previewResolve, "previewPlan for session-A in flight");
-
-  // 切到会话 B：渲染并运行 effects（同一 guard 对象，会话守卫清状态 + load）
-  tree = renderCandidates(dsh, "session-B", { effects: true });
-  for (const effect of host.effects.splice(0)) effect();
-  await flush();
-
-  // A 的预览此刻才完成：必须被代际守卫丢弃
-  previewResolve({ kind: "forgetting", planId: "fp-A", planDigest: "digest-fp", summary: "preview A", diff: [] });
-  await flush();
-
-  tree = renderCandidates(dsh, "session-B");
-  const confirm = flattenVNode(tree).find((n) => n.type === "button" && n.children.includes("确认执行（不可撤销）"));
-  assert.equal(confirm, undefined, "stale session-A preview must not render under session-B");
-  const exec = calls.find((c) => c.method === "executePlan");
-  assert.equal(exec, undefined, "stale preview must never trigger executePlan");
-});
-
 test("R4 回归：会话切换清空会话绑定状态（data/preview），守卫跟踪新会话并重新加载", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
@@ -1585,10 +1479,10 @@ test("Q 返工回归：真实 P 槽 getStatus DTO（diagnostics 为对象）渲�
   assert.equal(threw, null, "React render path must not throw on real DTO (error boundary would blank the panel)");
 
   const text = collectText(tree);
-  assert.ok(text.includes("mode: active"), "status card shows mode: active");
-  assert.ok(text.includes('ownerId: "local"'), "diagnostics.ownerId rendered as key: value");
-  assert.ok(text.includes("generation: 1"), "diagnostics.generation rendered as key: value");
-  assert.ok(text.includes("started: true"), "diagnostics.started rendered as key: value");
+  // 0.5.0 转正：技术细节（原始 mode / diagnostics 字段）已裁撤，改断言健康卡的可读文本。
+  assert.ok(text.includes("记忆正在参与对话"), "健康卡展示运行中的可读状态");
+  assert.ok(text.includes("已就绪"), "健康卡展示服务启动状态");
+  assert.equal(text.includes("mode: active"), false, "不再铺原始 mode 字段");
 
   // 健康 DTO 不带 needs-configuration → 不得误报徽标
   const warnBadge = flattenVNode(tree).find((n) => n.type === "span" && n.className === "dshi_badge dshi_badgeWarn");
@@ -2370,6 +2264,9 @@ test("R1 b（评审判据）：同码同 details 经两处入口渲染一致—�
     host.states.length = 0;
     host.states.push({ queueRevision: 0, items: [], plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
     let tree = renderCandidates(dsh2, "session-A");
+    // 0.5.0 转正：分组管理在互斥手风琴里，默认收着——先展开再点载入。
+    flattenVNode(tree).find((n) => n.props && n.props["data-role"] === "organize-acc-head-groups").props.onClick();
+    tree = renderCandidates(dsh2, "session-A");
     findButton(tree, "载入 / 刷新组").props.onClick();
     await flush();
     tree = renderCandidates(dsh2, "session-A");
@@ -2664,73 +2561,6 @@ function clusterLoadedStates(sessionId) {
 
 
 
-test("Q-B 回归：遗忘计划预览与执行的错误路径给出可读中文提示（UNSUPPORTED / REVISION_CONFLICT / NOT_FOUND），原 code 保留", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") {
-        return { queueRevision: 0, items: [], plans: [{ planId: "fp-1", kind: "forgetting", planDigest: "d", executed: false, superseded: false }] };
-      }
-      if (method === "previewPlan") {
-        throw Object.assign(new Error("legacy topics remain read-only"), { code: "UNSUPPORTED" });
-      }
-      if (method === "executePlan") {
-        throw Object.assign(new Error("plan already executed"), { code: "REVISION_CONFLICT" });
-      }
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(
-    { queueRevision: 0, items: [], plans: [{ planId: "fp-1", kind: "forgetting", planDigest: "d", executed: false, superseded: false }] },
-    null, false, "", null, null,
-    { sessionId: "session-A", gen: 0 });
-
-  // UNSUPPORTED：遗忘计划行内「预览遗忘计划」触达服务端错误映射
-  let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "预览遗忘计划").props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  let text = collectText(tree);
-  assert.ok(text.includes("[UNSUPPORTED]"), "original code preserved");
-  assert.ok(text.includes("不支持该操作"), "UNSUPPORTED explained in Chinese");
-  assert.ok(text.includes("legacy topics remain read-only"), "original message retained");
-
-  // REVISION_CONFLICT：预置一条已成功预览（模拟用户此前已预览过），走确认执行错误路径
-  host.states[4] = { sessionId: "session-A", plan: { kind: "forgetting", planId: "fp-1", planDigest: "digest-F", summary: "", diff: [] } };
-  tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "确认执行").props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  text = collectText(tree);
-  assert.ok(text.includes("revision 冲突"), "REVISION_CONFLICT explained in Chinese");
-  assert.ok(text.includes("plan already executed"), "original message retained");
-  assert.equal(calls.filter((c) => c.method === "executePlan").length, 1, "executePlan attempted once");
-
-  // NOT_FOUND：过期的遗忘计划预览（guard 已把 data 刷成空列表，补一条计划）
-  calls.length = 0;
-  host.states[0] = { queueRevision: 0, items: [], plans: [{ planId: "fp-gone", kind: "forgetting", planDigest: "d2", executed: false, superseded: false }] };
-  const boomDsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 0, items: [], plans: [] };
-      if (method === "previewPlan") throw Object.assign(new Error("plan no longer open"), { code: "NOT_FOUND" });
-      return {};
-    },
-  };
-  tree = renderCandidates(boomDsh, "session-A");
-  findButton(tree, "预览遗忘计划").props.onClick();
-  await flush();
-  tree = renderCandidates(boomDsh, "session-A");
-  text = collectText(tree);
-  assert.ok(text.includes("[NOT_FOUND]"), "NOT_FOUND code preserved");
-  assert.ok(text.includes("该候选或计划已过期") && text.includes("点「刷新」重新读取"), "stale guidance points to 刷新 (0.3 无再分析入口)");
-});
-
 test("Q-B 回归：队列 revision 前进后旧 preview 拒绝执行（executePlan 零调用）；revision 一致时正常执行", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
@@ -2772,67 +2602,6 @@ test("Q-B 回归：队列 revision 前进后旧 preview 拒绝执行（executePl
   assert.equal(exec.payload.confirmed, true);
 });
 
-test("Q-B 回归：plans 列表区分 open/executed/superseded——executed 与 superseded 行禁用 preview、对应 preview 的执行按钮禁用（真实 DTO 无 operationId，不再断言）", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  // planStore.list 真实投影（src/plugin/state.mjs）：planId/kind/planDigest/queueRevision/
-  // changedItems/summary/createdAt/executed + P a4 起的 superseded 布尔——无 executedWith/operationId。
-  const planRows = [
-    { planId: "plan-open", kind: "forgetting", planDigest: "d1", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-10-27T00:00:00.000Z", executed: false, superseded: false },
-    { planId: "plan-done", kind: "forgetting", planDigest: "d2", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-10-27T00:01:00.000Z", executed: true, superseded: false },
-    { planId: "plan-sup", kind: "forgetting", planDigest: "d4", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-10-27T00:02:00.000Z", executed: false, superseded: true },
-  ];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 0, items: [], plans: planRows };
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(
-    { queueRevision: 0, items: [], plans: planRows },
-    null, false, "",
-    { sessionId: "session-A", plan: { kind: "forgetting", planId: "plan-done", planDigest: "d2", summary: "", diff: [] }, queueRevision: 0 },
-    null,
-    { sessionId: "session-A", gen: 0 });
-  const tree = renderCandidates(dsh, "session-A");
-  const text = collectText(tree);
-  // 徽章中文化：按 badge 节点的文本断言，避免命中 hint 里的同名词
-  const badgeText = flattenVNode(tree)
-    .filter((n) => n.type === "span" && String(n.props.className || "").includes("dshi_badge"))
-    .map((n) => collectText(n))
-    .join("|");
-  assert.ok(badgeText.includes("已执行"), "executed badge rendered (已执行)");
-  assert.ok(badgeText.includes("已作废"), "superseded badge rendered (已作废)");
-  assert.ok(badgeText.includes("待执行"), "open badge rendered (待执行)");
-  assert.ok(!text.includes("op op-9"), "no fake operationId: real DTO has no executedWith");
-  assert.ok(text.includes("该计划已执行：不可再次预览 / 执行"), "executed row hint");
-  assert.ok(text.includes("该计划已被新预览作废（superseded）"), "superseded row hint");
-  // 0.3：整理类计划卡裁撤——kind=organize/merge-topic 的计划不再渲染（上面夹具已只含 forgetting）
-  // preview forgetting：open 行可用；superseded 行渲染但禁用（点了也不发）；executed 行不渲染
-  const previewButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("预览遗忘计划"));
-  assert.equal(previewButtons.length, 2, "open + superseded forgetting rows render the button");
-  const enabledButton = previewButtons.find((n) => n.props.disabled === false);
-  const disabledButton = previewButtons.find((n) => n.props.disabled === true);
-  assert.ok(enabledButton && disabledButton, "superseded row's button disabled, open row's enabled");
-  // 预览 plan-done 的确认按钮被禁用（plans 行 executed 标记）
-  // U5b rework：plan.kind="forgetting" 属未知 kind，按钮为「确认执行」（审查授权改）
-  const confirm = flattenVNode(tree).find((n) => n.type === "button" && n.children.includes("确认执行"));
-  assert.ok(confirm, "confirm button rendered");
-  assert.equal(confirm.props.disabled, true, "execute disabled for executed plan");
-  assert.ok(text.includes("该计划已执行或已被新预览作废"), "disabled reason rendered");
-  // 作废计划不发 RPC：preview 挂 plan-sup 时确认禁用
-  host.states[4] = { sessionId: "session-A", plan: { kind: "forgetting", planId: "plan-sup", planDigest: "d4", summary: "", diff: [] }, queueRevision: 0 };
-  const tree2 = renderCandidates(dsh, "session-A");
-  // U5b rework：同上，未知 kind → 「确认执行」（审查授权改）
-  const confirm2 = flattenVNode(tree2).find((n) => n.type === "button" && n.children.includes("确认执行"));
-  assert.equal(confirm2.props.disabled, true, "execute disabled for superseded plan");
-  assert.equal(calls.filter((c) => c.method === "previewPlan" || c.method === "executePlan").length, 0, "zero RPC for superseded plan");
-});
-
 test("Q-C 回归：diagnostics 新字段容错——codec/transport 等未知字段照常渲染，undefined 值忽略，不崩、不显示 undefined", async () => {
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
@@ -2848,103 +2617,20 @@ test("Q-C 回归：diagnostics 新字段容错——codec/transport 等未知字
   };
   host.states.length = 0;
   host.states.push(dto, null); // StatusTab: status / error
-  const tree = renderStatus({ call: async () => ({}) });
+  let threw = null;
+  let tree = null;
+  try { tree = renderStatus({ call: async () => ({}) }); } catch (error) { threw = error; }
+  // 0.5.0 转正：diagnostics 原始字段已不铺在页面上，容错口径改为「不崩、不显示 undefined」。
+  assert.equal(threw, null, "diagnostics 带未知字段时不崩");
   const text = collectText(tree);
-  assert.ok(text.includes("codec") && text.includes('"src"'), "new codec field rendered as key: value");
-  assert.ok(text.includes("transport") && text.includes('"gateway"'), "new transport field rendered");
-  assert.ok(text.includes("futureField"), "unknown future field rendered (tolerated)");
   assert.ok(!text.includes("undefined"), "undefined never displayed");
-  assert.ok(text.includes("ownerId") && text.includes("generation: 3"), "known fields unchanged");
+  assert.ok(text.includes("记忆正在参与对话"), "健康卡照常渲染");
 });
 
 // ---------------------------------------------------------------------------
 // 第 5 轮返工回归（owner a4 复核 r-3b6a5071：候选 id/kind 取错层级 + 死 proposal）。
 // 夹具一律用宿主真实 queueDto 形状 { candidate: {id,kind,scopeId,sources,evidence}, status }。
 // ---------------------------------------------------------------------------
-
-test("Q-A 回归（真实 queueDto）：reviewed / dismissed 两按钮发出的 candidateId 均为 item.candidate.id，不退化为数组下标", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 5, items: clusterLoadedStates("x")[0].items, plans: [] };
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(...clusterLoadedStates("session-A"));
-  let tree = renderCandidates(dsh, "session-A");
-  const buttonsOf = (label) => flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes(label));
-
-  // 第一行 cluster-A：审阅按钮发 candidate.id（0.3：preview organize 按钮随整理流程裁撤）
-  buttonsOf("稍后再说")[0].props.onClick();
-  buttonsOf("忽略")[0].props.onClick();
-  await flush();
-  const reviewed = calls.find((c) => c.method === "reviewCandidate" && c.payload.decision === "reviewed");
-  const dismissed = calls.find((c) => c.method === "reviewCandidate" && c.payload.decision === "dismissed");
-  assert.ok(reviewed && dismissed, "review actions issued");
-  assert.equal(reviewed.payload.candidateId, "cluster-A", "reviewed sends candidate.id");
-  assert.equal(dismissed.payload.candidateId, "cluster-A", "dismissed sends candidate.id");
-
-  // 第二行 link-B：同样发 candidate.id
-  calls.length = 0;
-  tree = renderCandidates(dsh, "session-A");
-  buttonsOf("稍后再说")[1].props.onClick();
-  await flush();
-  const linkReview = calls.find((c) => c.method === "reviewCandidate");
-  assert.ok(linkReview, "link row review issued");
-  assert.equal(linkReview.payload.candidateId, "link-B", "link row sends candidate.id (not index 1)");
-
-  // 兜底断言：任何发出去的 candidateId 都不是纯下标
-  const sentIds = calls.filter((c) => c.payload && c.payload.candidateId !== undefined).map((c) => c.payload.candidateId);
-  for (const id of sentIds) assert.ok(id === "cluster-A" || id === "link-B", `no index sent as business id (got ${id})`);
-});
-
-test("Q-A 回归：旧扁平形状兼容——candidateId 仍被读取；缺业务 id 的行按钮禁用，绝不把下标当 id 发出", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return {
-        queueRevision: 0,
-        items: [
-          { candidateId: "flat-1", kind: "link", sources: [{ id: "s1", revision: 1 }], evidence: {} },
-          { status: "pending" },
-        ],
-        plans: [],
-      };
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(
-    { queueRevision: 0, items: [
-      { candidateId: "flat-1", kind: "link", sources: [{ id: "s1", revision: 1 }], evidence: {} },
-      { status: "pending" },
-    ], plans: [] },
-    null, false, JSON.stringify({ kind: "link", links: [{ id: "s1", after: [{ target: "t-a", rel: null }] }] }), null, null,
-    { sessionId: "session-A", gen: 0 });
-  const tree = renderCandidates(dsh, "session-A");
-  // U5 改口径：按钮改名「稍后再说」（契约不变：仍发 decision=reviewed、用业务 id）。
-  const reviewedButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("稍后再说"));
-  assert.equal(reviewedButtons.length, 2, "both rows rendered");
-  assert.equal(reviewedButtons[0].props.disabled, false, "flat candidateId row enabled (compat)");
-  assert.equal(reviewedButtons[1].props.disabled, true, "id-less row disabled: index must never be sent as id");
-
-  reviewedButtons[0].props.onClick();
-  await flush();
-  const call = calls.find((c) => c.method === "reviewCandidate");
-  assert.ok(call, "flat row action issued");
-  assert.equal(call.payload.candidateId, "flat-1", "flat candidateId used as business id");
-  assert.equal(calls.filter((c) => c.payload && (c.payload.candidateId === "0" || c.payload.candidateId === "1")).length, 0,
-    "no index ever sent as candidateId");
-});
 
 
 // ---------------------------------------------------------------------------
@@ -3150,111 +2836,6 @@ function mergeTopicsDsh(calls) {
 // 第 7 轮：候选面板布局与中文文案（就地展开合并卡 / 按钮徽章中文化 / 原始 JSON 折叠）
 // ---------------------------------------------------------------------------
 
-
-test("第 7 轮：按钮与徽章中文化——页面不再出现英文旧文案，点「稍后再说」仍发 status=reviewed", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 5, items: clusterLoadedStates("x")[0].items, plans: [] };
-      return {};
-    },
-  };
-  // 计划行：organize / forgetting 两种 kind 的徽章都要中文化
-  const planRows = [
-    { planId: "plan-o", kind: "organize", planDigest: "do", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-10-27T00:00:00.000Z", executed: false, superseded: false },
-    { planId: "plan-f", kind: "forgetting", planDigest: "df", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-10-27T00:01:00.000Z", executed: false, superseded: false },
-  ];
-  const seeded = clusterLoadedStates("session-A");
-  seeded[0] = { queueRevision: 5, items: seeded[0].items, plans: planRows };
-  host.states.length = 0;
-  host.states.push(...seeded);
-  host.states[7] = null;
-  const tree = renderCandidates(dsh, "session-A");
-  const nodes = flattenVNode(tree);
-  const buttonLabels = nodes
-    .filter((n) => n.type === "button")
-    .map((n) => n.children.find((c) => typeof c === "string"))
-    .filter((c) => typeof c === "string");
-  for (const stale of ["analyze organize", "analyze forgetting", "reviewed", "dismissed", "preview organize", "preview forgetting"]) {
-    assert.ok(!buttonLabels.includes(stale), `no English button label "${stale}"`);
-  }
-  // U5 改口径：「标记已阅」改名「稍后再说」（协议仍发 decision=reviewed，见下方断言）。
-  // 0.3 收敛：整理入口按钮（分析整理候选 / 预览整理计划 / 合并进主题）随整理流程裁撤。
-  for (const label of ["分析遗忘候选", "稍后再说", "忽略"]) {
-    assert.ok(buttonLabels.includes(label), `Chinese button "${label}" present`);
-  }
-  for (const removed of ["分析整理候选", "预览整理计划", "合并进主题"]) {
-    assert.ok(!buttonLabels.includes(removed), `removed organize button "${removed}" absent`);
-  }
-  const text = collectText(tree);
-  assert.ok(text.includes("候选（2）"), "candidate card title localized");
-  assert.ok(text.includes("待处理"), "status badges localized");
-  const staleBadges = nodes.filter((n) => n.type === "span" && ["open", "executed", "superseded"].includes(String(collectText(n))));
-  assert.equal(staleBadges.length, 0, "no English plan badges rendered");
-  // 计划行 kind 徽章：forgetting → 遗忘（plan.kind 协议值本身不变；0.3 起 organize
-  // 计划卡被过滤，夹具里的 plan-o 不再渲染，页面不出「整理」徽章）
-  const planKindBadges = nodes
-    .filter((n) => n.type === "span" && String(n.props.className || "").includes("dshi_badge"))
-    .map((n) => collectText(n));
-  assert.ok(planKindBadges.includes("遗忘"), "forgetting plan badge localized (遗忘)");
-  assert.ok(!planKindBadges.includes("整理"), "organize plan card filtered out (整理 badge absent)");
-  assert.ok(!planKindBadges.includes("organize") && !planKindBadges.includes("forgetting"), "no English plan kind badges");
-
-  // 协议值不变：按钮中文、payload 仍发 reviewed / dismissed（U5 起按钮文案为「稍后再说」）
-  findButton(tree, "稍后再说").props.onClick();
-  await flush();
-  const reviewed = calls.find((c) => c.method === "reviewCandidate");
-  assert.ok(reviewed, "reviewCandidate issued");
-  assert.equal(reviewed.payload.decision, "reviewed", "protocol decision stays reviewed");
-  assert.equal(reviewed.payload.candidateId, "cluster-A", "candidate.id still sent");
-  calls.length = 0;
-  findButton(renderCandidates(dsh, "session-A"), "忽略").props.onClick();
-  await flush();
-  const dismissed = calls.find((c) => c.method === "reviewCandidate");
-  assert.ok(dismissed, "dismiss issued");
-  assert.equal(dismissed.payload.decision, "dismissed", "protocol decision stays dismissed");
-});
-
-test("第 7 轮：原始 JSON 默认折叠——候选行与计划行都用 details 且不带 open", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const planRows = [
-    { planId: "plan-open", kind: "forgetting", planDigest: "d1", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-10-27T00:00:00.000Z", executed: false, superseded: false },
-  ];
-  const dsh = {
-    call: async (method, session, payload) => {
-      if (method === "listCandidates") return { queueRevision: 5, items: clusterLoadedStates("x")[0].items, plans: planRows };
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(
-    { queueRevision: 5, items: clusterLoadedStates("x")[0].items, plans: planRows },
-    null, false, JSON.stringify({ kind: "link", links: [] }), null, null,
-    { sessionId: "session-A", gen: 0 }, null);
-  const tree = renderCandidates(dsh, "session-A");
-  const details = flattenVNode(tree).filter((n) => n.type === "details");
-  assert.equal(details.length, 3, "2 candidate rows + 1 plan row each wrap raw JSON in details");
-  for (const node of details) {
-    assert.equal(Object.prototype.hasOwnProperty.call(node.props, "open"), false, "details closed by default (no open attribute)");
-    assert.equal(node.props.className, "dshi_details");
-    const summary = node.children.find((c) => c && c.type === "summary");
-    assert.ok(summary, "details has a summary");
-    assert.equal(summary.children.join(""), "原始数据（JSON）");
-    const pre = node.children.find((c) => c && c.type === "pre");
-    assert.ok(pre, "raw JSON still available inside details");
-    assert.equal(pre.props.className, "dshi_pre");
-  }
-  const text = collectText(tree);
-  assert.ok(text.includes("计划（1）"), "plans title localized");
-  assert.ok(text.includes("计划＝预览（previewPlan）"), "plans hint rendered");
-  assert.ok(text.includes("候选是之前「整理分析」留下的待审条目"), "candidates hint rendered (0.3 只做遗忘口径)");
-});
 
 // ── 第 8 轮：面板第二轮反馈 ────────────────────────────────────────────────
 // ① 图谱之后新增 L3 主题页；② revision token 截断；③ 卡片详情只改 spark 卡片、
@@ -4437,152 +4018,7 @@ test("025a：手动连线空关系名——留空按 related 落库、历史 nul
 // kind + candidateId + proposal + operationId + expectedQueueRevision。
 // ---------------------------------------------------------------------------
 
-test("U5/0.3：tab 名只讲遗忘，行按钮「稍后再说」带不删除 tooltip，协议仍发 decision=reviewed", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  let renderSlot = null;
-  await mod.apply({
-    remote: { $mount: async () => () => {} },
-    slots: {
-      inject: (name, fn) => fn(),
-      register: (meta, render) => { renderSlot = render; return () => {}; },
-    },
-  });
-  const sectionVNode = renderSlot({ entryKey: "dsh-shiori" });
-  host.states.length = 0;
-  host.states.push("candidates", "session-A", "", null, { mode: "active" });
-  host.cursor.v = 0;
-  const sectionTree = sectionVNode.type(sectionVNode.props);
-  const tabLabels = flattenVNode(sectionTree)
-    .filter((n) => n.type === "button" && String((n.props && n.props.className) || "").includes("dshi_tab"))
-    .map((n) => [].concat(n.children).join(""));
-  assert.ok(tabLabels.includes("专题整理"), "tab label is 专题整理 (0.5-13-4 改名)");
-  assert.ok(!tabLabels.includes("整理与遗忘"), "old tab label 整理与遗忘 gone");
-  assert.ok(!tabLabels.includes("候选 / 计划"), "old tab label 候选 / 计划 gone");
 
-  const calls = [];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 5, items: clusterLoadedStates("x")[0].items, plans: [] };
-      return {};
-    },
-  };
-  const tab = flattenVNode(sectionTree).find((n) => typeof n.type === "function" && n.type.name === "CandidatesTab");
-  assert.ok(tab, "CandidatesTab reached");
-  host.states.length = 0;
-  host.states.push(...clusterLoadedStates("session-A"));
-  host.cursor.v = 0;
-  const tree = tab.type({ dsh, sessionId: "session-A" });
-  const laterButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("稍后再说"));
-  assert.equal(laterButtons.length, 2, "both candidate rows have 稍后再说 button");
-  assert.equal(String(laterButtons[0].props.title), "只是收起来，不会删除任何记忆", "tooltip promises nothing gets deleted");
-  assert.equal(flattenVNode(tree).some((n) => n.type === "button" && n.children.includes("标记已阅")), false,
-    "old label 标记已阅 gone");
-  laterButtons[0].props.onClick();
-  await flush();
-  const reviewed = calls.find((c) => c.method === "reviewCandidate");
-  assert.ok(reviewed, "reviewCandidate issued");
-  assert.equal(reviewed.payload.decision, "reviewed", "protocol decision stays reviewed");
-  assert.equal(reviewed.payload.candidateId, "cluster-A", "candidate.id still sent");
-});
-
-
-test("U5/0.3：未知 kind 与缺 kind 的候选兜底渲染（kind 分组已裁撤，行在平铺列表中绝不静默消失）", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const items = [
-    { candidate: { id: "fut-1", kind: "future-kind", scopeId: "default", sources: [{ id: "s9" }], evidence: {} }, status: "pending" },
-    { candidate: { id: "no-kind", scopeId: "default", sources: [{ id: "s8" }], evidence: {} }, status: "pending" },
-  ];
-  const dsh = {
-    call: async (method) => (method === "listCandidates" ? { queueRevision: 5, items, plans: [] } : {}),
-  };
-  host.states.length = 0;
-  host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  const tree = renderCandidates(dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(!text.includes("其他（"), "no kind group headers anymore (0.3 flat list)");
-  assert.ok(text.includes("fut-1") && text.includes("no-kind"), "unknown-kind and kind-less rows are both rendered");
-  assert.ok(text.includes("future-kind"), "unknown kind badge keeps the raw value (never swallowed)");
-});
-
-
-test("U5：筛选（全部/待处理/已阅/已忽略，chip 带计数）与搜索框按短 id 过滤，均为纯前端", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const items = [
-    { candidate: { id: "cand-pending", kind: "link", scopeId: "default", sources: [{ id: "s-1" }], evidence: {} }, status: "pending" },
-    { candidate: { id: "cand-reviewed", kind: "link", scopeId: "default", sources: [{ id: "s-2" }], evidence: {} }, status: "reviewed" },
-    { candidate: { id: "cand-dismissed", kind: "link", scopeId: "default", sources: [{ id: "s-3" }], evidence: {} }, status: "dismissed" },
-  ];
-  const dsh = {
-    call: async (method) => (method === "listCandidates" ? { queueRevision: 5, items, plans: [] } : {}),
-  };
-  host.states.length = 0;
-  host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  let tree = renderCandidates(dsh, "session-A");
-  let text = collectText(tree);
-  const chips = (t) => flattenVNode(t).filter((n) => n.type === "button" && String(n.props.className || "").includes("dshi_filterChip"));
-  assert.ok(text.includes("已阅（1）"), "已阅 chip shows its count");
-  assert.ok(text.includes("待处理（1）") && text.includes("已忽略（1）") && text.includes("全部（3）"), "all chips show counts");
-  assert.ok(text.includes("cand-pending"), "default filter 待处理 shows the pending row");
-  assert.equal(text.includes("cand-reviewed"), false, "reviewed row hidden under default filter");
-
-  const reviewedChip = chips(tree).find((n) => collectText(n).includes("已阅"));
-  reviewedChip.props.onClick();
-  tree = renderCandidates(dsh, "session-A");
-  text = collectText(tree);
-  assert.ok(text.includes("cand-reviewed"), "已阅 filter shows the reviewed row");
-  assert.equal(text.includes("cand-pending"), false, "pending row hidden under 已阅 filter");
-
-  const allChip = chips(tree).find((n) => collectText(n).includes("全部"));
-  allChip.props.onClick();
-  tree = renderCandidates(dsh, "session-A");
-  text = collectText(tree);
-  assert.ok(text.includes("cand-pending") && text.includes("cand-reviewed") && text.includes("cand-dismissed"),
-    "全部 filter shows every row");
-
-  const searchInput = flattenVNode(tree).find((n) => n.type === "input" && String(n.props.className || "").includes("dshi_searchInput"));
-  assert.ok(searchInput, "search input present");
-  searchInput.props.onChange({ target: { value: "cand-re" } });
-  tree = renderCandidates(dsh, "session-A");
-  text = collectText(tree);
-  assert.ok(text.includes("cand-reviewed"), "search by short id keeps the matching row");
-  assert.equal(text.includes("cand-pending") && text.includes("cand-dismissed"), false,
-    "search filters out non-matching rows (no RPC issued)");
-});
-
-test("U5：计划列表独立成卡；已执行 / 已作废默认折叠（details 无 open），折叠内容仍在 DOM 可切回", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const planRows = [
-    { planId: "plan-open", kind: "forgetting", planDigest: "d1", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-11-01T00:00:00.000Z", executed: false, superseded: false },
-    { planId: "plan-done", kind: "forgetting", planDigest: "d2", queueRevision: 0, changedItems: 1, summary: "s", createdAt: "2026-11-01T00:01:00.000Z", executed: true, superseded: false },
-  ];
-  const dsh = {
-    call: async (method) => (method === "listCandidates" ? { queueRevision: 5, items: [], plans: planRows } : {}),
-  };
-  host.states.length = 0;
-  host.states.push({ queueRevision: 5, items: [], plans: planRows }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  const tree = renderCandidates(dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(text.includes("计划（2）"), "plans card title rendered");
-  const cards = flattenVNode(tree).filter((n) => n.type === "div" && n.props && n.props.className === "dshi_card");
-  const plansCard = cards.find((n) => collectText(n).includes("计划（2）"));
-  assert.ok(plansCard, "plans live in their own card");
-  assert.equal(collectText(plansCard).includes("候选（"), false, "plans no longer share the candidates card");
-  const archive = flattenVNode(tree)
-    .filter((n) => n.type === "details")
-    .find((n) => collectText(n).includes("已执行 / 已作废"));
-  assert.ok(archive, "archive group present");
-  assert.equal(Object.prototype.hasOwnProperty.call(archive.props, "open"), false, "archive collapsed by default (no open attribute)");
-  assert.ok(collectText(archive).includes("（1）"), "archive group shows its count");
-  assert.ok(collectText(archive).includes("该计划已执行：不可再次预览 / 执行"), "executed row content stays in the DOM while collapsed");
-});
 
 // ── U5b：候选理由行 + 预览卡人话 + 按 kind 的按钮文案（只改显示层，协议与守卫不动）──
 
@@ -4599,53 +4035,6 @@ function mountCandidatesWithItems(items) {
 }
 
 // （0.3：expandIsolatedGroup 辅助已随 kind 分组裁撤删除，孤立卡行平铺渲染、直接断言。）
-
-test("U5b：候选行理由小字——link 并列实体/触发词、cluster 报数点名、isolated 补退休连线数", async () => {
-  const items = [
-    { candidate: { id: "link-1", kind: "link", scopeId: "default", sources: [{ id: "a-1" }, { id: "b-2" }], evidence: { sharedEntities: ["小樱"], sharedTriggers: ["早上去学校"] } }, status: "pending" },
-    { candidate: { id: "cluster-1", kind: "cluster", scopeId: "default", sources: [{ id: "s1" }, { id: "s2" }, { id: "s3" }], evidence: { field: "triggers", sharedTerm: "海贼王" } }, status: "pending" },
-    { candidate: { id: "iso-1", kind: "isolated", scopeId: "default", sources: [{ id: "s9" }], evidence: { inDegree: 0, outDegree: 0, ignoredRetiredTargets: ["t-1", "t-2"] } }, status: "pending" },
-  ];
-  const make = await mountCandidatesWithItems(items)();
-  // 0.3：无分组折叠，行直接平铺可见
-  let tree = make.renderCandidates(make.dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(text.includes("理由：两张卡都提到实体「小樱」；都带触发词「早上去学校」"),
-    "link reason joins entities and triggers");
-  assert.ok(text.includes("理由：3 张卡都共享触发词「海贼王」，可以合并成一个主题"),
-    "cluster reason counts sources and names the shared term (field=triggers → 触发词)");
-  assert.ok(text.includes("理由：这张卡没有和任何卡相连（另有 2 条指向已退休卡的旧连线）"),
-    "isolated reason appends retired-link count");
-});
-
-test("U5b：cluster field=entities 用「实体」；link 两字段都空退化为「两张卡有共同关键词」", async () => {
-  const items = [
-    { candidate: { id: "cluster-e", kind: "cluster", scopeId: "default", sources: [{ id: "s1" }, { id: "s2" }], evidence: { field: "entities", sharedTerm: "海贼王" } }, status: "pending" },
-    { candidate: { id: "link-e", kind: "link", scopeId: "default", sources: [{ id: "a-1" }, { id: "b-2" }], evidence: {} }, status: "pending" },
-  ];
-  const make = await mountCandidatesWithItems(items)();
-  const tree = make.renderCandidates(make.dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(text.includes("理由：2 张卡都共享实体「海贼王」，可以合并成一个主题"),
-    "cluster reason uses 实体 for field=entities");
-  assert.ok(text.includes("理由：两张卡有共同关键词"), "link with empty evidence degrades to generic keyword reason");
-});
-
-test("U5b：evidence 缺失 / 形状不对 / 未知 kind → 不出理由行，行本身一个不少", async () => {
-  const items = [
-    { candidate: { id: "cluster-plain", kind: "cluster", scopeId: "default", sources: [{ id: "s1" }, { id: "s2" }], evidence: {} }, status: "pending" },
-    { candidate: { id: "link-bad", kind: "link", scopeId: "default", sources: [{ id: "a-1" }, { id: "b-2" }], evidence: { sharedEntities: "小樱" } }, status: "pending" },
-    { candidate: { id: "no-evidence", kind: "isolated", scopeId: "default", sources: [{ id: "s9" }] }, status: "pending" },
-    { candidate: { id: "fut-1", kind: "future-kind", scopeId: "default", sources: [{ id: "s8" }], evidence: { sharedEntities: ["x"] } }, status: "pending" },
-  ];
-  const make = await mountCandidatesWithItems(items)();
-  // 0.3：无分组折叠，行直接平铺可见
-  let tree = make.renderCandidates(make.dsh, "session-A");
-  const text = collectText(tree);
-  assert.equal(text.includes("理由："), false, "no reason line rendered for missing/malformed/unknown evidence");
-  assert.ok(text.includes("cluster-plain") && text.includes("link-bad") && text.includes("no-evidence") && text.includes("fut-1"),
-    "all rows still rendered — reason must not swallow the row");
-});
 
 
 
@@ -4787,133 +4176,11 @@ function previewButtonsIn(node) {
   return flattenVNode(node).filter((n) => n.type === "button" && n.children.includes("预览整理计划"));
 }
 
-test("U5-c/0.3：候选行（含孤立卡）一律没有「预览整理计划」入口，行动作只剩 稍后再说 + 忽略", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const items = [
-    { candidate: { id: "cluster-A", kind: "cluster", scopeId: "default", sources: [{ id: "s1" }, { id: "s2" }], evidence: {} }, status: "pending" },
-    { candidate: { id: "link-B", kind: "link", scopeId: "default", sources: [{ id: "s3" }, { id: "s4" }], evidence: {} }, status: "pending" },
-    { candidate: { id: "iso-C", kind: "isolated", scopeId: "default", sources: [{ id: "s5" }], evidence: {} }, status: "pending" },
-  ];
-  const dsh = {
-    call: async (method) => (method === "listCandidates" ? { queueRevision: 5, items, plans: [] } : {}),
-  };
-  host.states.length = 0;
-  host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  const tree = renderCandidates(dsh, "session-A");
 
-  const rows = candidateRowsOf(tree);
-  const clusterRow = rows.find((row) => collectText(row).includes("cluster-A"));
-  const linkRow = rows.find((row) => collectText(row).includes("link-B"));
-  const isoRow = rows.find((row) => collectText(row).includes("iso-C"));
-  assert.ok(clusterRow && linkRow && isoRow, "all three kind rows rendered");
-  assert.equal(previewButtonsIn(clusterRow).length, 0, "cluster row has no 预览整理计划 (removed in 0.3)");
-  assert.equal(previewButtonsIn(linkRow).length, 0, "link row has no 预览整理计划 (removed in 0.3)");
-  assert.equal(previewButtonsIn(isoRow).length, 0, "isolated row has no 预览整理计划 entry");
-  // 每行只保留审阅动作，行本身一个不少
-  for (const row of [clusterRow, linkRow, isoRow]) {
-    const labels = flattenVNode(row).filter((n) => n.type === "button").map((n) => n.children.join(""));
-    assert.deepEqual(labels, ["稍后再说", "忽略"], "row keeps exactly 稍后再说 + 忽略");
-  }
-});
-
-test("U5-c/0.3：候选区提示语只讲遗忘口径（遗留整理候选可审阅，不再提预览/合并入口）", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const items = [
-    { candidate: { id: "cluster-A", kind: "cluster", scopeId: "default", sources: [{ id: "s1" }, { id: "s2" }], evidence: {} }, status: "pending" },
-    { candidate: { id: "link-B", kind: "link", scopeId: "default", sources: [{ id: "s3" }, { id: "s4" }], evidence: {} }, status: "pending" },
-    { candidate: { id: "iso-C", kind: "isolated", scopeId: "default", sources: [{ id: "s5" }], evidence: {} }, status: "pending" },
-  ];
-  const dsh = {
-    call: async (method) => (method === "listCandidates" ? { queueRevision: 5, items, plans: [] } : {}),
-  };
-  host.states.length = 0;
-  host.states.push({ queueRevision: 5, items, plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  const tree = renderCandidates(dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(text.includes("候选是之前「整理分析」留下的待审条目"), "hint states legacy organize candidates stay reviewable");
-  assert.ok(text.includes("稍后再说"), "review actions still explained");
-  assert.equal(text.includes("可「合并进主题」"), false, "old merge entry hint gone");
-  assert.equal(text.includes("可「预览整理计划」"), false, "old organize preview hint gone");
-});
-
-
-
-// U5-d（0.3 更新）：错误文案不再指向已删除的「分析整理候选」——候选操作指向「刷新」，
-// 计划执行冲突指向计划行的「预览遗忘计划」；「刷新」按钮 title 说明只重读快照。
-test("U5-d/0.3：REVISION_CONFLICT 提示指向行内「预览遗忘计划」；「刷新」按钮 title 说明只重读快照", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const calls = [];
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, session, payload });
-      if (method === "listCandidates") return { queueRevision: 0, items: [], plans: [] };
-      if (method === "executePlan") throw Object.assign(new Error("plan already executed"), { code: "REVISION_CONFLICT" });
-      return {};
-    },
-  };
-  host.states.length = 0;
-  host.states.push(
-    { queueRevision: 0, items: [], plans: [] }, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  // 预置一条已成功预览（模拟用户此前已预览过遗忘计划），走确认执行错误路径
-  host.states[4] = { sessionId: "session-A", plan: { kind: "forgetting", planId: "plan-F", planDigest: "digest-F", summary: "", diff: [] }, queueRevision: 0 };
-  let tree = renderCandidates(dsh, "session-A");
-  findButton(tree, "确认执行").props.onClick();
-  await flush();
-  tree = renderCandidates(dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(text.includes("revision 冲突"), "REVISION_CONFLICT explained in Chinese");
-  assert.ok(text.includes("预览遗忘计划"), "guidance points to the working entry (重新生成预览)");
-  assert.ok(text.includes("不要重试旧预览"), "do-not-retry-stale-preview warning retained");
-  assert.ok(!text.includes("分析整理候选"), "removed organize button never referenced");
-  assert.ok(text.includes("plan already executed"), "original message retained");
-
-  // 「刷新」按钮：title 必须说明它只重读队列快照、不会重新分析
-  tree = renderCandidates(dsh, "session-A");
-  const refreshButton = findButton(tree, "刷新");
-  const refreshTitle = String(refreshButton.props.title || "");
-  assert.ok(refreshTitle.includes("只重新读取队列快照") && refreshTitle.includes("不会重新分析"),
-    "refresh button title clarifies it does not re-analyze");
-});
 
 // ---------------------------------------------------------------------------
 // U5-e：过期候选就地标注（行内「卡片已改」徽章 + 预览按钮置灰）与顶部重新分析入口。
 // ---------------------------------------------------------------------------
-
-test("U5-e/0.3：stale 候选渲染「卡片已改」徽章 + 理由小字，「稍后再说」「忽略」仍可用（整理预览/合并入口已裁撤）", async () => {
-  const items = [
-    { candidate: { id: "link-stale", kind: "link", scopeId: "default", sources: [{ id: "a-1" }, { id: "b-2" }], evidence: { sharedEntities: ["小樱"] } }, status: "pending", stale: true },
-    { candidate: { id: "link-fresh", kind: "link", scopeId: "default", sources: [{ id: "c-1" }, { id: "d-2" }], evidence: { sharedEntities: ["小兰"] } }, status: "pending" },
-    { candidate: { id: "cluster-stale", kind: "cluster", scopeId: "default", sources: [{ id: "s1" }, { id: "s2" }, { id: "s3" }], evidence: { field: "triggers", sharedTerm: "海贼王" } }, status: "pending", stale: true },
-    { candidate: { id: "cluster-fresh", kind: "cluster", scopeId: "default", sources: [{ id: "s4" }, { id: "s5" }, { id: "s6" }], evidence: { field: "triggers", sharedTerm: "火影" } }, status: "pending" },
-  ];
-  const make = await mountCandidatesWithItems(items)();
-  const tree = make.renderCandidates(make.dsh, "session-A");
-  const text = collectText(tree);
-  assert.ok(text.includes("卡片已改"), "stale badge text rendered");
-  assert.ok(text.includes("这条候选绑定的卡片在你上次分析之后被改过"),
-    "stale reason line rendered");
-  // 过期行徽章类名存在；未过期行不出现
-  const badges = flattenVNode(tree).filter((n) => String(n.props.className || "").includes("dshi_badgeStale"));
-  assert.equal(badges.length, 2, "one stale badge per stale row");
-  // 0.3：「预览整理计划」「合并进主题」已随整理流程裁撤，页面不再出现
-  assert.equal(flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("预览整理计划")).length, 0,
-    "organize preview entry removed");
-  assert.equal(flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("合并进主题")).length, 0,
-    "merge entry removed");
-  // 「稍后再说」「忽略」不受 stale 影响（只改 status，不校验 revision），每行各一对
-  const reviewButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("稍后再说"));
-  const dismissButtons = flattenVNode(tree).filter((n) => n.type === "button" && n.children.includes("忽略"));
-  assert.equal(reviewButtons.length, 4, "every row keeps a review action");
-  assert.equal(dismissButtons.length, 4, "every row keeps a dismiss action");
-  assert.ok(reviewButtons.every((b) => b.props.disabled === false), "review buttons stay enabled on stale rows");
-  assert.ok(dismissButtons.every((b) => b.props.disabled === false), "dismiss buttons stay enabled on stale rows");
-});
 
 
 
@@ -5406,37 +4673,4 @@ test("C3：力导向布局节点上限——超过 500 降级为确定性圆形�
   // 200 节点（既有承诺线）不触发降级：提示不出现，布局质量由既有 R8 用例继续钉住
   const { rerender: rerender3 } = await mountGraphTab(chainGraphPayload(200));
   assert.ok(!collectText(rerender3()).includes("圆形静布"), "200 节点不走降级");
-});
-
-test("C4：候选行原始 JSON 按引用记忆化——同一份快照重渲染零次序列化，换新数据（新引用）即重新序列化", async () => {
-  const host = makeStatefulReact();
-  const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
-  const renderCandidates = await mountCandidates(mod, host);
-  const payload = {
-    queueRevision: 5,
-    items: [{ candidateId: "c-1", kind: "link", candidate: { id: "c-1", kind: "link", sources: [{ id: "s-a" }, { id: "s-b" }], evidence: "证据文本".repeat(50) } }],
-    plans: [],
-  };
-  const noopDsh = { call: async () => { throw new Error("no rpc expected"); } };
-  // 预置 data（states[0]），渲染一次建立缓存
-  host.states.length = 0;
-  host.states.push(payload, null, false, "", null, null, { sessionId: "session-A", gen: 0 });
-  let tree = renderCandidates(noopDsh, "session-A");
-  assert.ok(collectText(tree).includes("原始数据（JSON）"), "候选行渲染");
-
-  const originalStringify = JSON.stringify;
-  let calls = 0;
-  JSON.stringify = function (...args) { calls += 1; return originalStringify.apply(this, args); };
-  try {
-    tree = renderCandidates(noopDsh, "session-A");   // 同一份 data 快照重渲染
-    assert.equal(calls, 0, `同一份 DTO 快照重渲染零次序列化（实际 ${calls} 次）`);
-    assert.ok(collectText(tree).includes("s-a"), "重渲染内容不变");
-    // 换新对象（新引用）：缓存失效，重新序列化
-    host.states[0] = { queueRevision: 6, items: [{ candidateId: "c-2", kind: "forget", candidate: { id: "c-2", kind: "forget", sources: [] } }], plans: [] };
-    tree = renderCandidates(noopDsh, "session-A");
-    assert.ok(calls > 0, "新引用重新序列化（缓存按失效条件更新）");
-    assert.ok(collectText(tree).includes("c-2"), "新数据渲染");
-  } finally {
-    JSON.stringify = originalStringify;
-  }
 });

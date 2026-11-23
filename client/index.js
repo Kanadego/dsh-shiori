@@ -36,13 +36,12 @@ window.__ModuleLoader__.load({
     // l0/l1/l2/l3-soft 为四层标识淡色；bg-panel 与 bg-card 是两档灰底（面板底/卡片底）；
     // 圆角 / 间距 / 描边 / 字号各档一并收敛。token 本体回退到宿主 --dsw-alias 变量。
     var CSS = ".dshi_root{--dshi-accent:#e5484d;--dshi-safe:var(--dsw-alias-state-success-primary,#1a7f37);--dshi-warn:#b45309;--dshi-danger:var(--dsw-alias-state-error-primary,#f85149);--dshi-accent-a:#e5484d;--dshi-accent-b:#f5b83d;--dshi-gold-ink:#c98a1b;--dshi-l0:#e5484d;--dshi-l1:#d99a1f;--dshi-l2:#2f9e6b;--dshi-l3:#8b5cf6;--dshi-l0-soft:rgba(229,72,77,.16);--dshi-l1-soft:rgba(217,154,31,.18);--dshi-l2-soft:rgba(47,158,107,.16);--dshi-l3-soft:rgba(139,92,246,.16);--dshi-bg-panel:var(--dsw-alias-bg-layer-2,transparent);--dshi-bg-card:var(--dsw-alias-bg-layer-3,#fff);--dshi-text:var(--dsw-alias-label-primary);--dshi-text-dim:var(--dsw-alias-label-tertiary,#8b93a1);--dshi-stroke:1px solid var(--dsw-alias-border-l2,#dce2eb);--dshi-radius:10px;--dshi-radius-sm:8px;--dshi-radius-pill:999px;--dshi-space:12px;--dshi-space-sm:8px;--dshi-space-xs:4px;--dshi-font:13px;--dshi-font-sm:12px;--dshi-font-xs:11px;--dshi-font-title:14px}" +
-    ".dshi_root{max-width:860px;display:flex;flex-direction:column;gap:12px;font-size:13px;line-height:1.65;color:var(--dsw-alias-label-primary)}" +
+".dshi_root{max-width:860px;display:flex;flex-direction:column;gap:12px;font-size:13px;line-height:1.65;color:var(--dsw-alias-label-primary)}" +
 ".dshi_root *{box-sizing:border-box;min-width:0}" +
 ".dshi_title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600}" +
 ".dshi_titleSub{font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary)}" +
-    // 版式：hero 头（渐变底 + 光斑）、品牌方块、卡片标题前的主题色竖条、渐变主按钮与进度条。
-".dshi_hero{position:relative;overflow:hidden;display:flex;align-items:center;gap:var(--dshi-space);border:var(--dshi-stroke);border-radius:14px;padding:12px 14px;background:linear-gradient(120deg,rgba(229,72,77,.16),rgba(245,184,61,.13) 46%,transparent 82%)}" +
-".dshi_hero::after{content:\"\";position:absolute;right:-40px;top:-70px;width:200px;height:200px;border-radius:50%;background:radial-gradient(circle,rgba(245,184,61,.30),transparent 68%);filter:blur(6px);pointer-events:none}" +
+".dshi_hero{flex:none;position:relative;overflow:hidden;display:flex;align-items:center;gap:var(--dshi-space);border:1px solid rgba(245,184,61,.30);border-radius:14px;padding:12px 14px;background:radial-gradient(120% 160% at 0% 0%,rgba(229,72,77,.34),rgba(229,72,77,0) 58%),radial-gradient(130% 170% at 96% 10%,rgba(245,184,61,.30),rgba(245,184,61,0) 62%),linear-gradient(115deg,rgba(229,72,77,.20),rgba(139,92,246,.12) 52%,rgba(245,184,61,.20));box-shadow:0 10px 26px rgba(229,72,77,.10)}" +
+".dshi_hero::after{content:\"\";position:absolute;right:-30px;bottom:-90px;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,rgba(245,184,61,.26),transparent 70%);filter:blur(8px);pointer-events:none}" +
 ".dshi_logo{flex:none;width:36px;height:36px;border-radius:12px;display:grid;place-items:center;font-size:16px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--dshi-accent-a),var(--dshi-accent-b));box-shadow:0 6px 16px rgba(229,72,77,.34)}" +
 ".dshi_heroText{display:flex;flex-direction:column;gap:2px;min-width:0}" +
 ".dshi_tabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--dsw-alias-border-l2,#dce2eb);padding-bottom:6px}" +
@@ -97,7 +96,6 @@ window.__ModuleLoader__.load({
 ".dshi_mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;word-break:break-all}" +
 ".dshi_confirm{border:1px solid var(--dsw-alias-state-error-primary,#f85149);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}" +
 ".dshi_grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}" +
-    // U2 预算页（标杆页）：以下样式只引用 --dshi-* token，不写裸色值。
 ".dshi_bgroup{border:var(--dshi-stroke);background:var(--dshi-bg-card);background-image:linear-gradient(180deg,rgba(229,72,77,.07),transparent 42%);border-radius:14px;padding:var(--dshi-space);display:flex;flex-direction:column;gap:var(--dshi-space-sm);box-shadow:0 2px 10px rgba(15,23,42,.05)}" +
 ".dshi_layerChip{border-radius:var(--dshi-radius-pill);padding:0 8px;font-size:var(--dshi-font-xs);font-weight:600;white-space:nowrap;border:1px solid transparent}" +
 ".dshi_layerL0{background:var(--dshi-l0-soft);color:var(--dshi-l0);border-color:var(--dshi-l0)}" +
@@ -121,34 +119,25 @@ window.__ModuleLoader__.load({
 ".dshi_modBadge{border:1px solid var(--dshi-warn);color:var(--dshi-warn);border-radius:var(--dshi-radius-pill);padding:0 8px;font-size:10px;white-space:nowrap}" +
 ".dshi_fieldError{font-size:var(--dshi-font-xs);color:var(--dshi-danger)}" +
 ".dshi_blockError{border:var(--dshi-stroke);border-color:var(--dshi-danger);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm);font-size:var(--dshi-font-sm);color:var(--dshi-danger)}" +
-    // F2 闪回命中：消息底部按钮的弹出层。挂在聊天消息条里（.dshi_root 之外），
-    // token 不可用——颜色直接引用宿主 --dsw-alias 变量并带裸值回退。
 ".dshi_fbWrap{position:relative;display:inline-flex}" +
 ".dshi_fbPop{position:absolute;right:0;bottom:calc(100% + 6px);z-index:60;width:320px;max-height:300px;overflow:auto;border:1px solid var(--dsw-alias-border-l2,#dce2eb);border-radius:10px;background:var(--dsw-alias-bg-layer-3,#fff);color:var(--dsw-alias-label-primary,#1f2937);box-shadow:0 10px 28px rgba(15,23,42,.20);padding:10px 12px;display:flex;flex-direction:column;gap:8px;font-size:12px;line-height:1.6;text-align:left}" +
 ".dshi_fbItem{display:flex;flex-direction:column;gap:2px;border-bottom:1px dashed var(--dsw-alias-border-l2,#dce2eb);padding-bottom:6px}" +
 ".dshi_fbItem:last-child{border-bottom:none;padding-bottom:0}" +
 ".dshi_fbMeta{font-size:10px;color:var(--dsw-alias-label-tertiary,#8b93a1);word-break:break-word}" +
-    ".dshi_mdPreview{border:var(--dshi-stroke);background:var(--dshi-bg-panel);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm) var(--dshi-space);max-height:320px;overflow:auto;display:flex;flex-direction:column;gap:var(--dshi-space-xs);font-size:var(--dshi-font-sm)}" +
-    ".dshi_mdH1{font-size:var(--dshi-font-title);font-weight:600;margin-top:var(--dshi-space-xs)}" +
-    ".dshi_mdH2{font-size:var(--dshi-font);font-weight:600;margin-top:var(--dshi-space-xs)}" +
-    ".dshi_mdH3{font-size:var(--dshi-font-sm);font-weight:600;margin-top:var(--dshi-space-xs)}" +
-    ".dshi_mdP{white-space:pre-wrap;word-break:break-word}" +
-    ".dshi_mdList{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:2px}" +
-    ".dshi_mdQuote{margin:0;border-left:3px solid var(--dsw-alias-border-l2,#dce2eb);padding:2px 10px;color:var(--dshi-text-dim);white-space:pre-wrap;word-break:break-word}" +
-    ".dshi_mdPre{margin:0;font-family:ui-monospace,Consolas,monospace;font-size:var(--dshi-font-xs);line-height:1.6;white-space:pre-wrap;word-break:break-word;background:var(--dshi-bg-panel);border:var(--dshi-stroke);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}" +
-    ".dshi_mdCode{font-family:ui-monospace,Consolas,monospace;font-size:var(--dshi-font-xs);background:var(--dshi-bg-panel);border:var(--dshi-stroke);border-radius:var(--dshi-radius-sm);padding:0 4px;word-break:break-all}" +
-    ".dshi_mdBold{font-weight:600}" +
-    ".dshi_memEditor{min-height:320px}" +
-    ".dshi_empty{font-size:var(--dshi-font-sm);color:var(--dshi-text-dim);border:1px dashed var(--dsw-alias-border-l2,#dce2eb);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm) var(--dshi-space);line-height:1.7}" +
-    ".dshi_conflict{font-size:var(--dshi-font-sm);color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}" +
-    // U8 壳层：壳条（选择器 + tab 栏）、tab 内联 SVG 图标（CSS mask，不动按钮 DOM 形状）、
-    // toast 三态与需重启横幅（挂在 body 上，不在 .dshi_root 内，故 token 在
-    // .dshi_toasts/.dshi_restartBanner 上单独桥接一份）。
-    // S2-4：壳条整体不吸顶（去掉 position:sticky/top/z-index/投影）。理由：面板自身滚动
-    // 容器（.dshi_rootMain overflow:auto）与侧边栏入口的宿主滚动容器嵌套，sticky 只能相对
-    // 最近滚动祖先生效，实际表现为壳条悬浮压住下方卡片与 tab 内容（遮挡），且侧边栏入口
-    // 顶部被裁时 top 偏移算不准；壳条合并为单行选择器后高度已降，固定收益小于遮挡代价。
-".dshi_sticky{display:flex;flex-direction:column;gap:12px;background:var(--dshi-bg-card);border-bottom:var(--dshi-stroke);padding-bottom:var(--dshi-space-sm)}" +
+".dshi_mdPreview{border:var(--dshi-stroke);background:var(--dshi-bg-panel);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm) var(--dshi-space);max-height:320px;overflow:auto;display:flex;flex-direction:column;gap:var(--dshi-space-xs);font-size:var(--dshi-font-sm)}" +
+".dshi_mdH1{font-size:var(--dshi-font-title);font-weight:600;margin-top:var(--dshi-space-xs)}" +
+".dshi_mdH2{font-size:var(--dshi-font);font-weight:600;margin-top:var(--dshi-space-xs)}" +
+".dshi_mdH3{font-size:var(--dshi-font-sm);font-weight:600;margin-top:var(--dshi-space-xs)}" +
+".dshi_mdP{white-space:pre-wrap;word-break:break-word}" +
+".dshi_mdList{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:2px}" +
+".dshi_mdQuote{margin:0;border-left:3px solid var(--dsw-alias-border-l2,#dce2eb);padding:2px 10px;color:var(--dshi-text-dim);white-space:pre-wrap;word-break:break-word}" +
+".dshi_mdPre{margin:0;font-family:ui-monospace,Consolas,monospace;font-size:var(--dshi-font-xs);line-height:1.6;white-space:pre-wrap;word-break:break-word;background:var(--dshi-bg-panel);border:var(--dshi-stroke);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}" +
+".dshi_mdCode{font-family:ui-monospace,Consolas,monospace;font-size:var(--dshi-font-xs);background:var(--dshi-bg-panel);border:var(--dshi-stroke);border-radius:var(--dshi-radius-sm);padding:0 4px;word-break:break-all}" +
+".dshi_mdBold{font-weight:600}" +
+".dshi_memEditor{min-height:320px}" +
+".dshi_empty{font-size:var(--dshi-font-sm);color:var(--dshi-text-dim);border:1px dashed var(--dsw-alias-border-l2,#dce2eb);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm) var(--dshi-space);line-height:1.7}" +
+".dshi_conflict{font-size:var(--dshi-font-sm);color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}" +
+".dshi_sticky{flex:none;display:flex;flex-direction:column;gap:12px;background:var(--dshi-bg-card);border-bottom:var(--dshi-stroke);padding-bottom:var(--dshi-space-sm)}" +
 ".dshi_tabIco::before{content:\"\";display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1px;background-color:currentColor;-webkit-mask:var(--dshi-tab-ico) center/contain no-repeat;mask:var(--dshi-tab-ico) center/contain no-repeat}" +
 ".dshi_tabIco-status{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M1 8h3l2-5 4 10 2-5h3%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}" +
 ".dshi_tabIco-memory{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M8 1l6 3-6 3-6-3z%27/%3E%3Cpath d=%27M2 8l6 3 6-3M2 12l6 3 6-3%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}" +
@@ -168,17 +157,12 @@ window.__ModuleLoader__.load({
 ".dshi_restartBanner{position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:1001;display:flex;align-items:center;gap:10px;max-width:640px;background:var(--dshi-warn);color:#fff;border-radius:0 0 var(--dshi-radius-sm) var(--dshi-radius-sm);padding:8px 14px;font-size:var(--dshi-font-sm);line-height:1.5}" +
 ".dshi_restartText{flex:1;word-break:break-word}" +
 ".dshi_restartClose{border:1px solid currentColor;background:none;color:inherit;font:inherit;font-size:var(--dshi-font-xs);border-radius:6px;padding:2px 8px;cursor:pointer}" +
-    // F4「最近变更」tab 图标（时钟；URL 编码口径与既有图标一致，避免裸 http:// 触发
-    // 无外部资源检查）与 F7 只读黄条/置灰提示、时间线扫描截断提示的样式。
 ".dshi_tabIco-timeline{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%278%27 cy=%278%27 r=%276.2%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3Cpath d=%27M8 4.6V8l2.4 1.6%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linecap=%27round%27/%3E%3C/svg%3E')}" +
-    // 0.5-4D「投递体检」tab 图标（监护仪波形容器；URL 编码口径与既有图标一致）。
 ".dshi_tabIco-delivery{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Crect x=%271%27 y=%273%27 width=%2714%27 height=%2710%27 rx=%271.5%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27/%3E%3Cpath d=%27M3 8h2.2l1.3-2.4L9 10.4l1.3-2.4H13%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}" +
 ".dshi_roBanner{border:1px solid var(--dshi-warn);background:rgba(180,83,9,.10);color:var(--dshi-warn);border-radius:8px;padding:8px 12px;font-size:12px;line-height:1.5;word-break:break-word}" +
 ".dshi_roHint{font-size:11px;color:var(--dshi-warn);border:1px solid var(--dshi-warn);border-radius:8px;padding:4px 8px;word-break:break-word}" +
 ".dshi_tlScan{font-size:11px;color:var(--dshi-warn)}" +
 ".dshi_tlDedupe{border-color:var(--dshi-l3);color:var(--dshi-l3)}" +
-    // U5 整理与遗忘页：筛选条（chips）、搜索框、kind 分组组头、就地预览 diff 区。
-    // 只引用 --dshi-* token；diff 区最小高度 240px、可滚动、字号不小于 12px。
 ".dshi_filterBar{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap}" +
 ".dshi_filterChip{border:1px solid var(--dsw-alias-border-l2,#dce2eb);background:var(--dshi-bg-card);color:var(--dshi-text-dim);border-radius:var(--dshi-radius-pill);padding:2px 10px;font:inherit;font-size:var(--dshi-font-xs);cursor:pointer}" +
 ".dshi_filterChip:hover{color:var(--dshi-text)}" +
@@ -191,12 +175,9 @@ window.__ModuleLoader__.load({
 ".dshi_diffBox .dshi_pre{font-size:var(--dshi-font-sm)}" +
 ".dshi_kindGroup{display:flex;flex-direction:column;gap:var(--dshi-space-xs)}" +
 ".dshi_advanced{display:flex;flex-direction:column;gap:var(--dshi-space-xs);margin-top:var(--dshi-space-xs)}" +
-    // U5-e：过期候选——行内徽章（warn 色沿用 --dshi-warn）、顶部提示条与重析按钮
-    //（底色沿用 dshi_roBanner 的 rgba(180,83,9,.10)，不引入新色系）。
 ".dshi_staleBar{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap;border:1px solid var(--dshi-warn);background:rgba(180,83,9,.10);color:var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-xs) var(--dshi-space-sm);font-size:var(--dshi-font-sm)}" +
 ".dshi_staleBarBtn{border:1px solid var(--dshi-warn);background:none;color:var(--dshi-warn);font:inherit;font-size:var(--dshi-font-xs);border-radius:var(--dshi-radius-sm);padding:2px 10px;cursor:pointer}" +
 ".dshi_staleBarBtn:disabled{opacity:.5;cursor:default}" +
-    // S4 统一分页页码条 / 分组管理表单 / 迁移确认 / 选卡行（与 client/shiori.css 同步）。
 ".dshi_pageBar{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap}" +
 ".dshi_pageNum{border:1px solid var(--dsw-alias-border-l2,#dce2eb);background:var(--dshi-bg-card);color:var(--dshi-text-dim);border-radius:var(--dshi-radius-sm);min-width:26px;padding:2px 6px;font:inherit;font-size:var(--dshi-font-xs);cursor:pointer}" +
 ".dshi_pageNum:hover:not(:disabled){color:var(--dshi-text)}" +
@@ -206,9 +187,6 @@ window.__ModuleLoader__.load({
 ".dshi_migration{border:1px solid var(--dshi-warn);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm);display:flex;flex-direction:column;gap:var(--dshi-space-xs)}" +
 ".dshi_personaRow{display:flex;align-items:center;gap:var(--dshi-space-xs);flex-wrap:wrap}" +
 ".dshi_personaName{display:inline-block;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}" +
-    // S2-3：壳条顶部选择器行——「选工作区」「选会话」「工作区默认卡」同一水平行，窄屏换行。
-    // flex-end 让各控件底边（输入框底）对齐；控件统一 28px 高度，修「记忆卡：amber」
-    // 按钮与下拉高低不齐、基线错位。
 ".dshi_selectorRow{display:flex;align-items:flex-end;gap:var(--dshi-space-sm);flex-wrap:wrap}" +
 ".dshi_selectorRow .dshi_btn,.dshi_selectorRow .dshi_input,.dshi_selectorRow .dshi_select{height:28px;box-sizing:border-box}" +
 ".dshi_selectorRow .dshi_btn{padding-top:0;padding-bottom:0}" +
@@ -216,25 +194,39 @@ window.__ModuleLoader__.load({
 ".dshi_personaDefaultRow{display:flex;align-items:flex-end;gap:var(--dshi-space-sm);flex-wrap:wrap}" +
 ".dshi_personaDefaultRow .dshi_btn,.dshi_personaDefaultRow .dshi_input,.dshi_personaDefaultRow .dshi_select{height:28px;box-sizing:border-box}" +
 ".dshi_personaDefaultRow .dshi_btn{padding-top:0;padding-bottom:0}" +
-    // S2 侧边栏 main 槽位全屏容器（与 client/shiori.css 末尾两条规则逐字一致，
-    // client.test.mjs 压缩比对）：仅 props.workbench 时追加，详情页窄卡片不回归；
-    // box-sizing:border-box 显式写（根元素不吃 .dshi_root * 通配重置，content-box
-    // 下 100% 宽高叠 padding 会溢出）。
-".dshi_rootMain{box-sizing:border-box;max-width:none;width:100%;height:100%;min-height:0;padding:calc(24px + var(--dsh-frame-top-clearance,0px)) 28px max(28px,var(--dsh-frame-bottom-clearance,0px)) max(28px,var(--dsh-frame-leading-clearance,0px));overflow:auto}" +
-    // S2-4：壳条不再吸顶（见 .dshi_sticky 注释），原先让出框架顶部的 top 覆盖规则删除；
-    // 上下留白统一由 .dshi_rootMain 的 padding 承担（底部补 max(28px, bottom-clearance)，
-    // 修侧边栏入口打开时首尾被宿主框架裁切）。
+".dshi_rootMain{box-sizing:border-box;max-width:none;width:100%;height:100%;min-height:0;padding:max(64px,calc(24px + var(--dsh-frame-top-clearance,0px))) 28px max(28px,var(--dsh-frame-bottom-clearance,0px)) max(28px,var(--dsh-frame-leading-clearance,0px));overflow:auto}" +
 ".dshi_sideIcon{display:block}" +
-    // 0.5 批次 4 · B 线：「记忆整理」12 项热度参数（设置页）——两列自适应网格，
-    // 窄屏退化为单列；预览区与审计列表沿用既有 dshi_bgroup / dshi_item 形态。
 ".dshi_tempGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:var(--dshi-space-sm)}" +
 ".dshi_tempPreview{display:flex;flex-direction:column;gap:var(--dshi-space-xs);border:1px solid var(--dsw-alias-border-l2,#dce2eb);border-radius:var(--dshi-radius-sm);padding:var(--dshi-space-sm)}" +
 ".dshi_tabIco-overview{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M1 8h3l2-5 4 10 2-5h3%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%272%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27/%3E%3C/svg%3E')}" +
 ".dshi_tabIco-soul{--dshi-tab-ico:url('data:image/svg+xml,%3Csvg xmlns=%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%278%27 cy=%275%27 r=%272.5%27/%3E%3Cpath d=%27M2.5 14c0-3 2.5-4.5 5.5-4.5s5.5 1.5 5.5 4.5%27 fill=%27none%27 stroke=%27%23000%27 stroke-width=%271.5%27 stroke-linecap=%27round%27/%3E%3C/svg%3E')}" +
-".dshi_capTag{display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:2px 10px;font-size:11px;border:1px solid transparent}" +
-".dshi_capTagOn{background:var(--dshi-accent-b);color:#3a2a00;font-weight:600}" +
-".dshi_capTagOff{background:var(--dsw-alias-bg-layer-2,#eef1f5);color:var(--dsw-alias-label-tertiary,#8b93a1);cursor:default}" +
-".dshi_hr{border:none;border-top:1px solid var(--dsw-alias-border-l2,#dce2eb);margin:2px 0;width:100%}";
+".dshi_capTag{display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:2px 10px;font-size:11px;border:1px solid transparent;background:none}" +
+".dshi_capTagOn{border-color:var(--dshi-accent-b);color:var(--dshi-accent-b);font-weight:600;box-shadow:0 0 0 3px rgba(245,184,61,.10) inset}" +
+".dshi_capTagOff{border-color:var(--dsw-alias-border-l2,#dce2eb);color:var(--dsw-alias-label-tertiary,#8b93a1);cursor:default}" +
+".dshi_hr{border:none;border-top:1px solid var(--dsw-alias-border-l2,#dce2eb);margin:2px 0;width:100%}" +
+".dshi_tierGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}" +
+".dshi_tierTile{border:1px solid var(--dsw-alias-border-l2,#dce2eb);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:2px;background:linear-gradient(160deg,var(--dshi-tier-soft),transparent 78%)}" +
+".dshi_tier-active{--dshi-tier-soft:var(--dshi-l0-soft);border-color:rgba(229,72,77,.38)}" +
+".dshi_tier-cool{--dshi-tier-soft:var(--dshi-l1-soft);border-color:rgba(217,154,31,.38)}" +
+".dshi_tier-cold{--dshi-tier-soft:var(--dshi-l2-soft);border-color:rgba(47,158,107,.34)}" +
+".dshi_tier-frozen{--dshi-tier-soft:var(--dshi-l3-soft);border-color:rgba(139,92,246,.34)}" +
+".dshi_tierHead{display:flex;align-items:baseline;gap:6px;font-size:12px;font-weight:600}" +
+".dshi_tierKey{font-size:10px;font-weight:400;color:var(--dsw-alias-label-tertiary);font-family:ui-monospace,Consolas,monospace}" +
+".dshi_tierNum{font-size:22px;line-height:1.15;font-weight:700}" +
+".dshi_tierNote{font-size:11px;color:var(--dsw-alias-label-tertiary)}" +
+".dshi_organizeAcc{border:1px solid var(--dsw-alias-border-l2,#dce2eb);border-radius:10px;background:var(--dsw-alias-bg-layer-3,#fff)}" +
+".dshi_organizeAccHead{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;border-radius:10px}" +
+".dshi_organizeAccHead:hover{background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.08))}" +
+".dshi_organizeAccArrow{color:var(--dsw-alias-label-tertiary);font-size:11px;transition:transform .12s}" +
+".dshi_organizeAccBody{display:flex;flex-direction:column;gap:8px;padding:0 12px 12px}" +
+".dshi_organizeAccSub{font-size:11px;color:var(--dsw-alias-label-tertiary)}" +
+".dshi_settingsSeg{display:flex;gap:4px;flex-wrap:wrap;border:1px solid var(--dsw-alias-border-l2,#dce2eb);background:linear-gradient(120deg,var(--dshi-l0-soft),var(--dshi-l1-soft) 55%,var(--dshi-l3-soft));border-radius:10px;padding:4px}" +
+".dshi_settingsSeg .dshi_tab{border-radius:7px}" +
+".dshi_settingsSeg .dshi_tabOn{box-shadow:0 4px 14px rgba(229,72,77,.26)}" +
+".dshi_dangerZone{border:1px solid rgba(232,90,90,.5);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;background:linear-gradient(150deg,rgba(232,90,90,.10),transparent 70%)}" +
+".dshi_settingsHead{display:flex;align-items:baseline;gap:8px;padding:8px 12px;border-radius:10px;border:1px solid rgba(245,184,61,.24);background:linear-gradient(110deg,var(--dshi-l0-soft),var(--dshi-l1-soft) 60%,transparent)}" +
+".dshi_settingsHeadTitle{font-size:13px;font-weight:600}" +
+".dshi_settingsHeadSub{font-size:11px;color:var(--dsw-alias-label-tertiary)}";
     function ensureStyle() {
       try {
         if (document.getElementById("dsh-shiori-style")) return;
@@ -1155,15 +1147,18 @@ window.__ModuleLoader__.load({
     }
 
     // 状态页是给人看的，不是给调试看的：先给中文摘要（模式 / 作用域 / 占用 / 能力），
-    // 原始字段（mode / scope / diagnostics / 完整 DTO）一律收进折叠区，需要时再展开。
+    // 原始字段（mode / scope / diagnostics）不再上屏：界面只给可读结论。
     var STATUS_MODE_LABELS = { active: "运行中", inactive: "未启用", disabled: "已停用", error: "异常" };
     var STATUS_CAPABILITY_LABELS = {
       l2: "闪回二级记忆",
       organize: "候选整理",
       forgetting: "遗忘归档",
+      semantic: "语义召回",
       tools: "记忆工具",
       sections: "分区写入"
     };
+    // 能力标签固定排布顺序（服务端键序不是展示契约）：已知键按此序，未知键追加在后。
+    var STATUS_CAPABILITY_ORDER = ["l2", "organize", "forgetting", "semantic", "tools", "sections"];
 
     function statusModeText(mode) {
       if (mode === undefined || mode === null || mode === "") return "未知";
@@ -1300,6 +1295,9 @@ window.__ModuleLoader__.load({
     // ref 使用，不占渲染状态语义）；track() 在渲染体里调用（早于任何 load 发起，
     // 不依赖 effect 是否真的执行），mark() 给本次加载发戳，isStale() 判过期。
     function makeTabSessionGuard(props, holder) {
+      // holder 缺失 / 非对象（宿主 flat-state 仿真里 state 下标可能与其他组件撞位，
+      // 读到 null）时兜底：守卫只是丢失跨渲染记忆，不能让整卡崩掉。
+      if (!holder || typeof holder !== "object") holder = { sessionId: props.sessionId, gen: 0 };
       var track = function () {
         if (holder.sessionId !== props.sessionId) {
           holder.sessionId = props.sessionId;
@@ -1636,8 +1634,9 @@ window.__ModuleLoader__.load({
       // 专题整理页）。"overview"=只读部分；"organize"=写操作部分（作为
       // CandidatesTab 的顶部子块渲染）；缺省 "all" 保留旧直挂行为（仅测试直挂用，
       // 壳层永远显式传值）。
-      var statusView = props.view === "overview" || props.view === "organize" ? props.view : "all";
-      var showReadonly = statusView !== "organize";
+      // 0.5.0 转正追加 "danger"：只渲染「卸载并清除数据」一块，挂到设置页「数据与卸载」子页。
+      var statusView = props.view === "overview" || props.view === "organize" || props.view === "danger" ? props.view : "all";
+      var showReadonly = statusView === "overview" || statusView === "all";
       var showWrites = statusView !== "overview";
       var state = useState(null);
       var status = state[0];
@@ -2211,6 +2210,11 @@ window.__ModuleLoader__.load({
       var autoPicksState = useState([]);
       var autoPicks = autoPicksState[0];
       var setAutoPicks = autoPicksState[1];
+      // 0.5.0 转正：遗忘模块（forgetting.enabled）开关卡的状态。追加在 StatusTab
+      // 既有 useState 末尾，老测试按位预置的 states 下标全部不变。
+      var forgetEnableState = useState({ busy: false, error: null, done: false, pendingRestart: false });
+      var forgetEnable = forgetEnableState[0] || {};
+      var setForgetEnable = forgetEnableState[1];
       var loadAutoStatus = async function () {
         var origin = tabGuard.mark();
         setAutoStatus({ loading: true, error: null, data: null });
@@ -2547,6 +2551,55 @@ window.__ModuleLoader__.load({
           setDestroyBusy(false);
         }
       };
+      // 0.5.0 转正：危险操作从「专题整理」页底折叠里搬出来，单独成设置页子页
+      // （view="danger"）——藏得太深等于没有入口。状态与确认逻辑仍留在本组件，
+      // 保持既有 useState 下标与 RPC 行为不变。
+      var renderDestroyCard = function () {
+        if (!destroyRoot) return h("div", { className: "dshi_hint" }, "加载中…（dataRoot 由 getStatus 回显，取到后才能确认清除）");
+        return h("div", { className: "dshi_card", "data-role": "destroy-data-card" },
+            h("div", { className: "dshi_row" },
+              h("span", { className: "dshi_cardTitle" }, "卸载并清除数据"),
+              destroyStage === null ? h("button", {
+                className: "dshi_btn dshi_btnDanger",
+                disabled: destroyBusy,
+                onClick: startDestroyConfirm,
+              }, "卸载并清除数据") : null),
+            h("div", { className: "dshi_hint" },
+              "只删 dataRoot（" + destroyRoot + "）：stateRoot 与 DSH 配置不受影响。删除后全部记忆数据清空，不可恢复。"),
+            destroyDone ? h("div", { className: "dshi_ok", "data-role": "destroy-done" }, destroyDone) : null,
+            destroyError ? h("div", { className: "dshi_error", "data-role": "destroy-error" },
+              destroyError.message + "（code: " + String(destroyError.code) + "）") : null,
+            destroyStage === "confirm" ? h("div", { className: "dshi_confirm", "data-role": "destroy-confirm" },
+              h("div", null, "危险操作：将永久删除整个 dataRoot 的全部内容（目录本身一并移除）。只删 dataRoot，stateRoot 与 DSH 配置不受影响。"),
+              // 文案直说「照抄下面这串路径」并把路径整条摆出来：早前写「请输入 dataRoot
+              // 原文」，用户照字面打了 dataRoot 五个字符，按钮永远是灰的（实机反馈）。
+              h("div", { className: "dshi_hint" }, "请照抄下面这串完整路径以确认（逐字符一致才能执行，区分大小写、首尾空白忽略）："),
+              h("code", { className: "dshi_code", "data-role": "destroy-root-echo" }, destroyRoot || "（服务端未回显 dataRoot，无法清除）"),
+              h("input", {
+                className: "dshi_input",
+                "data-role": "destroy-confirm-input",
+                value: destroyDraft,
+                placeholder: destroyRoot,
+                autoComplete: "off",
+                spellCheck: false,
+                onChange: function (event) { setDestroyDraft(event.target.value); }
+              }),
+              destroyDraftText !== "" && !destroyMatches
+                ? h("div", { className: "dshi_hint", "data-role": "destroy-mismatch" },
+                    "输入与上面那串路径不一致：需要逐字符一致才能执行。")
+                : null,
+              h("div", { className: "dshi_row" },
+                h("button", {
+                  className: "dshi_btn dshi_btnDanger",
+                  disabled: destroyBusy || !destroyMatches,
+                  onClick: runDestroy
+                }, destroyBusy ? "清除中…" : "确认清除"),
+                h("button", {
+                  className: "dshi_btn",
+                  disabled: destroyBusy,
+                  onClick: cancelDestroy
+                }, "取消"))) : null);
+      };
       // ── 0.5 批次 4 · C 线：整理向导卡片（状态页；不弹窗、不打断）────────────
       // 形态：needed → 提案编辑（改名/合并/跳过/组默认与逐条 retention）+ 预览
       // + 二次确认应用；dismissed → 折叠提示 + 重新开始；其余五态（completed /
@@ -2787,6 +2840,91 @@ window.__ModuleLoader__.load({
                 onClick: function () { if (runId !== "") undoAutoRunById(runId); }
               }, autoUndoBusy && autoUndo !== null && autoUndo.runId === runId ? "撤销中…" : "一键撤销"));
       };
+      // ── 0.5.0 转正：遗忘模块开关（forgetting.enabled）─────────────────────
+      // getAutoStatus 在模块关闭时由 requireModule("forgetting") 直接拒绝，auto 卡
+      // 按既有口径整卡静默（shadow / 未启动同款），于是「专题整理 → 记忆整理」
+      // 只剩一个空壳：用户找不到任何入口知道去哪开（0.5.0-beta.1 试用反馈）。
+      // 这里补一张只在模块关闭时出现的卡：读宿主配置快照的 forgetting.enabled，
+      // 写入走与 autoMode 同一条 configForms CAS 通道，回读确认后才报成功；
+      // 自动调度首次开启仍需重启 DSH（pre-step 注册只在 start 现读）。
+      var forgettingConfigNow = function () {
+        var scope = readConfigScope();
+        var snap = scope && typeof scope.getSnapshot === "function" ? scope.getSnapshot() : null;
+        if (!snap || snap.status !== "ready" || !snap.value || typeof snap.value !== "object") {
+          return { scope: scope, ready: false, enabled: false, hasConfig: false };
+        }
+        var f = snap.value.forgetting && typeof snap.value.forgetting === "object" ? snap.value.forgetting : null;
+        return { scope: scope, ready: true, enabled: !!(f && f.enabled === true), hasConfig: f !== null };
+      };
+      var enableForgetting = async function () {
+        var cfg = forgettingConfigNow();
+        var scope = cfg.scope;
+        if (!scope || typeof scope.mutate !== "function") {
+          setForgetEnable({ busy: false, error: { code: "shiori/ui-unsupported", message: "设置命名空间不可用（configForms 缺席）：无法在面板里开启遗忘归档，请在宿主插件配置页设置 forgetting.enabled。" }, done: false, pendingRestart: false });
+          return;
+        }
+        var origin = tabGuard.mark();
+        setForgetEnable({ busy: true, error: null, done: false, pendingRestart: false });
+        try {
+          var attempt = function () {
+            var snap = scope.getSnapshot();
+            if (!snap || snap.status !== "ready" || !snap.value || typeof snap.value !== "object" || snap.revision === undefined || snap.revision === null) {
+              var bad = new Error("设置快照不可用（status=" + String(snap && snap.status) + "）。");
+              bad.code = "shiori/ui-scope";
+              throw bad;
+            }
+            return scope.mutate([{ op: "set", path: ["forgetting", "enabled"], value: true }], snap.revision);
+          };
+          await casMutate(attempt, "shiori/ui-forgetting-enable-conflict", function (ctx) {
+            return "设置刚被其他窗口修改（revision 冲突），已重试一次仍未成功；请再点一次。"
+              + (ctx.lastMessage !== "" ? "（最近错误：" + ctx.lastMessage + "）" : "");
+          }, true, { readRevision: function () { return scopeRevisionOf(scope); } });
+          if (tabGuard.isStale(origin)) return;
+          if (forgettingConfigNow().enabled !== true) {
+            setForgetEnable({ busy: false, error: { code: "shiori/ui-scope", message: "写入未确认生效——请重新打开本页核对 forgetting.enabled。" }, done: false, pendingRestart: false });
+            return;
+          }
+          // 热刷新 auto 状态：模块闸热读生效时 auto 卡立刻出现；仍被拒绝则如实
+          // 提示「已写入，重启后生效」，不谎报已经可用。
+          var fresh = await loadAutoStatus();
+          if (tabGuard.isStale(origin)) return;
+          setForgetEnable({ busy: false, error: null, done: true, pendingRestart: fresh === null });
+          if (fresh !== null) shioriToast("ok", "遗忘归档已开启");
+        } catch (e) {
+          if (tabGuard.isStale(origin)) return;
+          setForgetEnable({ busy: false, error: { code: (e && e.code) || "shiori/ui-forgetting-enable", message: "开启遗忘归档失败：" + ((e && e.message) || String(e)) + causeNoteOf(e) }, done: false, pendingRestart: false });
+        }
+      };
+      var renderForgettingEnableCard = function () {
+        if (!showWrites) return null;
+        var cfg = forgettingConfigNow();
+        if (cfg.enabled) return null; // 已开启：auto 卡接管
+        return h("div", { className: "dshi_card", "data-role": "forgetting-enable-card" },
+          h("div", { className: "dshi_row" },
+            h("span", { className: "dshi_cardTitle" }, "遗忘归档"),
+            h("span", { className: "dshi_badge dshi_badgeWarn" }, "未开启")),
+          h("div", { className: "dshi_hint" },
+            "遗忘归档关闭时，自动冷却 / 恢复、候选分析与「最近执行记录」都不可用，本页只剩运行状态。开启后这里会出现模式开关、立即评估与执行入口。"),
+          h("div", { className: "dshi_items" },
+            h("div", { className: "dshi_item dshi_mono" }, "forgetting.enabled: " + (cfg.ready ? (cfg.hasConfig ? String(cfg.enabled) : "未配置") : "—")),
+            h("div", { className: "dshi_hint" }, cfg.ready
+              ? "写入走宿主配置；自动调度的注册在重启 DSH 后才生效，面板里的「立即评估」开启后即可用。"
+              : "设置快照不可用：请在宿主插件配置页设置 forgetting.enabled。")),
+          ErrorBox(forgetEnable.error || null),
+          forgetEnable.done
+            ? h("div", { className: "dshi_ok", "data-role": "forgetting-enable-ok" },
+                forgetEnable.pendingRestart
+                  ? "已写入配置（forgetting.enabled=true）；服务端还没热生效，请重启 DSH 后再用自动整理。"
+                  : "遗忘归档已开启。")
+            : null,
+          h("div", { className: "dshi_row" },
+            h("button", {
+              className: "dshi_btn dshi_btnPrimary",
+              "data-role": "forgetting-enable",
+              disabled: forgetEnable.busy === true || !cfg.ready,
+              onClick: enableForgetting
+            }, forgetEnable.busy ? "开启中…" : "开启遗忘归档")));
+      };
       var renderAutoCard = function () {
         if (autoStatus === null || autoStatus.loading) return null;
         if (autoStatus.error !== null) return null; // shadow/未启动/模块关：整卡静默（与冷热分布卡同口径）
@@ -2852,11 +2990,7 @@ window.__ModuleLoader__.load({
             statusRow("下次触发条件", autoNextTriggerText(autoData.nextTrigger), "自动评估只在人类轮进行；「立即评估」不受限"),
             statusRow("保护期状态", fuseText),
             paramNodes.length > 0 ? statusRow("auto 参数", h("span", { className: "dshi_items" }, paramNodes), "12 项热度参数中与 auto 相关的六项（改参数去「设置」页）") : null),
-          // 原始诊断（含 [OBSERVATION_PERIOD] statsStartedAt=…）收进可折叠「技术细节」，
-          // 不在正文直接铺机器串。
-          fuseReasons !== "" ? h("details", { "data-role": "auto-fuse-details" },
-            h("summary", { className: "dshi_hint" }, "技术细节（保护期判定原始诊断）"),
-            h("div", { className: "dshi_hint", "data-role": "auto-fuse-reasons" }, "保护期判定明细：" + fuseReasons)) : null,
+          // 0.5.0 转正：保护期判定原始诊断不再铺进界面（fuseText 已给结论）。
           autoData.storeError ? h("div", { className: "dshi_warn", "data-role": "auto-store-error" }, "⚠ auto 记账存储异常（按无记账降级）：" + String(autoData.storeError)) : null,
           // 0.5 第三波：执行入口拆两条（共用同一条确认行）。禁用条件只剩 mode=off /
           // 保护期 / enabled=false / busy / 对应数量为 0——suggest 不再禁用。
@@ -2890,7 +3024,6 @@ window.__ModuleLoader__.load({
                 : undefined,
               onClick: function () { setAutoConfirm(true); setAutoConfirmChannel("all"); }
             }, autoApplyBusy && autoConfirmChannel === "all" ? "执行中…" : "一键全应用"),
-            h("button", { className: "dshi_btn", "data-role": "auto-refresh", onClick: function () { loadAutoStatus(); } }, "刷新"),
             autoModeValue === "suggest" ? h("span", { className: "dshi_hint" }, "建议模式不会自动执行：勾选候选后点「应用选中」，或直接「一键全应用」。") : null),
           autoConfirm ? h("div", { className: "dshi_confirm", "data-role": "auto-confirm" },
             // 确认文案按通道分清「选中的 N 条」与「本轮全部 M 条」。
@@ -2977,10 +3110,18 @@ window.__ModuleLoader__.load({
               + " · 失败 " + String(typeof autoUndoData.failed === "number" ? autoUndoData.failed : 0)
               + (autoUndoData.runId ? " · runId " + String(autoUndoData.runId) : ""))) : null);
       };
+      if (statusView === "danger") return renderDestroyCard();
       return h("div", { className: "dshi_card" },
         h("div", { className: "dshi_row" },
           h("span", { className: "dshi_cardTitle" }, "运行状态"),
-          h("button", { className: "dshi_btn", onClick: load }, "刷新")),
+          // 0.5.0 转正：本页只留这一个刷新入口——连同 auto / 整理状态一起重取，
+          // 不再在 auto 卡里放第二个「刷新」按钮。
+          h("button", {
+            className: "dshi_btn",
+            "data-role": "status-refresh",
+            title: "重新读取运行状态与整理状态",
+            onClick: function () { load(); if (showWrites) loadAutoStatus(); }
+          }, "刷新")),
         ErrorBox(error),
         status === null && !error ? h("div", { className: "dshi_loading" }, "加载中…") : null,
         status ? h(fragment, null,
@@ -2993,19 +3134,27 @@ window.__ModuleLoader__.load({
             : null,
           // 能力标签（概览页顶部一排）：开启=橙色实心，关闭=灰色、可读不可点（span
           // 不是 button，天然不可点）；title 说明数据来源 getStatus.capabilities。
-          showReadonly && capabilities ? h("div", { className: "dshi_card", "data-role": "capability-card" },
-            h("div", { className: "dshi_cardTitle" }, "已启用的能力"),
-            h("div", { className: "dshi_row" }, Object.keys(capabilities).map(function (key) {
-              var on = capabilities[key] === true;
-              return h("span", {
-                key: key,
-                className: "dshi_capTag " + (on ? "dshi_capTagOn" : "dshi_capTagOff"),
-                "data-role": "cap-tag-" + key,
-                "data-on": on ? "true" : "false",
-                "aria-disabled": on ? "false" : "true",
-                title: "来源：getStatus.capabilities." + key + "（" + (on ? "已开启" : "已关闭，只读展示") + "）"
-              }, (STATUS_CAPABILITY_LABELS[key] || key) + "：" + statusCapabilityText(capabilities[key]));
-            }))) : null,
+          showReadonly && capabilities ? (function () {
+            var known = STATUS_CAPABILITY_ORDER.filter(function (key) {
+              return Object.prototype.hasOwnProperty.call(capabilities, key);
+            });
+            var extra = Object.keys(capabilities).filter(function (key) {
+              return STATUS_CAPABILITY_ORDER.indexOf(key) < 0;
+            });
+            return h("div", { className: "dshi_card", "data-role": "capability-card" },
+              h("div", { className: "dshi_cardTitle" }, "已启用的能力"),
+              h("div", { className: "dshi_row" }, known.concat(extra).map(function (key) {
+                var on = capabilities[key] === true;
+                return h("span", {
+                  key: key,
+                  className: "dshi_capTag " + (on ? "dshi_capTagOn" : "dshi_capTagOff"),
+                  "data-role": "cap-tag-" + key,
+                  "data-on": on ? "true" : "false",
+                  "aria-disabled": on ? "false" : "true",
+                  title: "来源：getStatus.capabilities." + key + "（" + (on ? "已开启" : "已关闭，只读展示") + "）"
+                }, (STATUS_CAPABILITY_LABELS[key] || key) + "：" + statusCapabilityText(capabilities[key]));
+              })));
+          })() : null,
           showWrites && (needsPersona || needsActive) ? h("div", { className: "dshi_card", "data-role": "enable-card" },
             h("div", { className: "dshi_row" },
               h("span", { className: "dshi_cardTitle" }, needsPersona ? "完成初始配置：默认人设卡" : "启用记忆"),
@@ -3107,13 +3256,18 @@ window.__ModuleLoader__.load({
               h("div", { className: "dshi_row" },
                 h("span", { className: "dshi_cardTitle" }, "冷热分布")),
               tiers
-                ? h("div", { className: "dshi_items", "data-role": "temperature-tiers" },
-                    h("div", { className: "dshi_item dshi_mono" },
-                      "热 " + tierOf("active") + " · 温 " + tierOf("cool")
-                      + " · 冷 " + tierOf("cold") + " · 冻结 " + tierOf("frozen")),
+                ? h("div", { className: "dshi_tierGrid", "data-role": "temperature-tiers" },
                     tierNotes.map(function (entry) {
-                      return h("div", { key: entry[0], className: "dshi_hint", "data-role": "temperature-tier-note-" + entry[0] },
-                        entry[1] + "（" + entry[0] + "）：" + entry[2]);
+                      return h("div", {
+                        key: entry[0],
+                        className: "dshi_tierTile dshi_tier-" + entry[0],
+                        "data-role": "temperature-tier-" + entry[0]
+                      },
+                        h("div", { className: "dshi_tierHead" },
+                          h("span", null, entry[1]),
+                          h("span", { className: "dshi_tierKey" }, entry[0])),
+                        h("div", { className: "dshi_tierNum" }, tierOf(entry[0])),
+                        h("div", { className: "dshi_tierNote", "data-role": "temperature-tier-note-" + entry[0] }, entry[2]));
                     }))
                 : null,
               h("div", { className: "dshi_hint" },
@@ -3123,81 +3277,15 @@ window.__ModuleLoader__.load({
           })() : null,
           // 0.5 批次 5 · B 线：记忆整理 auto 卡（三档模式开关 / 立即评估清单 /
           // 执行本轮 / 一键撤销 / 上次评估 / 下次触发 / 保护期状态）。取数失败整卡
-          // 静默隐藏（shadow / 未启动 / 遗忘模块未开启属预期，不是错误）。
+          // 静默隐藏（shadow / 未启动属预期，不是错误）；遗忘模块未开启时由上面的
+          // enable 卡顶上（0.5.0 转正：不再让整页只剩空壳）。
+          showWrites ? renderForgettingEnableCard() : null,
           showWrites ? renderAutoCard() : null,
-          // 0.4 S6「卸载并清除数据」危险按钮：与命令行 destroy 走同一 purge
-          // 模块；二次确认必须输入 dataRoot 原文（不是点两下确认），失败如实
-          // 显示错误码。dataRoot 未知（diagnostics 缺席）时整卡不渲染。
-          // 0.5-13-4：危险入口只在「专题整理」页出现，并收进页底可折叠技术细节。
-          showWrites && destroyRoot ? h(statusView === "organize" ? "details" : fragment, null,
-            statusView === "organize" ? h("summary", { className: "dshi_hint" }, "技术细节与危险操作（卸载并清除数据）") : null,
-            h("div", { className: "dshi_card", "data-role": "destroy-data-card" },
-            h("div", { className: "dshi_row" },
-              h("span", { className: "dshi_cardTitle" }, "卸载并清除数据"),
-              destroyStage === null ? h("button", {
-                className: "dshi_btn dshi_btnDanger",
-                disabled: destroyBusy,
-                onClick: startDestroyConfirm,
-              }, "卸载并清除数据") : null),
-            h("div", { className: "dshi_hint" },
-              "只删 dataRoot（" + destroyRoot + "）：stateRoot 与 DSH 配置不受影响。删除后全部记忆数据清空，不可恢复。"),
-            destroyDone ? h("div", { className: "dshi_ok", "data-role": "destroy-done" }, destroyDone) : null,
-            destroyError ? h("div", { className: "dshi_error", "data-role": "destroy-error" },
-              destroyError.message + "（code: " + String(destroyError.code) + "）") : null,
-            destroyStage === "confirm" ? h("div", { className: "dshi_confirm", "data-role": "destroy-confirm" },
-              h("div", null, "危险操作：将永久删除整个 dataRoot 的全部内容（目录本身一并移除）。只删 dataRoot，stateRoot 与 DSH 配置不受影响。"),
-              // 文案直说「照抄下面这串路径」并把路径整条摆出来：早前写「请输入 dataRoot
-              // 原文」，用户照字面打了 dataRoot 五个字符，按钮永远是灰的（实机反馈）。
-              h("div", { className: "dshi_hint" }, "请照抄下面这串完整路径以确认（逐字符一致才能执行，区分大小写、首尾空白忽略）："),
-              h("code", { className: "dshi_code", "data-role": "destroy-root-echo" }, destroyRoot || "（服务端未回显 dataRoot，无法清除）"),
-              h("input", {
-                className: "dshi_input",
-                "data-role": "destroy-confirm-input",
-                value: destroyDraft,
-                placeholder: destroyRoot,
-                autoComplete: "off",
-                spellCheck: false,
-                onChange: function (event) { setDestroyDraft(event.target.value); }
-              }),
-              destroyDraftText !== "" && !destroyMatches
-                ? h("div", { className: "dshi_hint", "data-role": "destroy-mismatch" },
-                    "输入与上面那串路径不一致：需要逐字符一致才能执行。")
-                : null,
-              h("div", { className: "dshi_row" },
-                h("button", {
-                  className: "dshi_btn dshi_btnDanger",
-                  disabled: destroyBusy || !destroyMatches,
-                  onClick: runDestroy
-                }, destroyBusy ? "清除中…" : "确认清除"),
-                h("button", {
-                  className: "dshi_btn",
-                  disabled: destroyBusy,
-                  onClick: cancelDestroy
-                }, "取消"))) : null,
-            )) : null,
-          showReadonly ? h("details", null,
-            h("summary", { className: "dshi_hint" }, "技术细节（原始字段，一般不用看）"),
-            h("div", { className: "dshi_items" },
-              h("div", { className: "dshi_item dshi_mono" }, "mode: " + String(status.mode)),
-              h("div", { className: "dshi_item dshi_mono" }, "scope: " + String(statusScopeText(status.scope) || "—")),
-              Array.isArray(status.diagnostics) && status.diagnostics.length > 0
-                ? h("div", { className: "dshi_items" }, status.diagnostics.filter(function (item) { return item !== undefined; }).map(function (item, index) {
-                    return h("div", { key: index, className: "dshi_item dshi_mono" }, typeof item === "string" ? item : safeDtoText(item));
-                  }))
-                : null,
-              // 真实 DTO：diagnostics 是对象（ownerId / generation / started，P 后续新增
-              // codec/transport 等）——未知键照常渲染，undefined 值忽略，序列化异常降级。
-              !Array.isArray(status.diagnostics) && status.diagnostics && typeof status.diagnostics === "object"
-                ? h("div", { className: "dshi_items" }, Object.keys(status.diagnostics).filter(function (key) {
-                    return status.diagnostics[key] !== undefined;
-                  }).map(function (key) {
-                    return h("div", { key: key, className: "dshi_item dshi_mono" }, key + ": " + safeDtoText(status.diagnostics[key]));
-                  }))
-                : null)) : null,
-          showReadonly ? h("details", null,
-            h("summary", { className: "dshi_hint" }, "完整 DTO（服务端原样返回）"),
-            h("pre", { className: "dshi_pre" }, stableStringify(status))) : null)
-        : null);
+          // 0.4 S6 危险操作卡（卸载并清除数据）已迁到设置页「数据与卸载」子页
+          //（renderDestroyCard + view="danger"）；概览/整理页不再出现该入口。
+          // 0.5.0 转正：概览页不再展示「技术细节 / 完整 DTO」——原始字段对人没有信息量，
+          // 排查走 RPC 日志与命令；界面只留可读结论。
+        ) : null);
     }
 
     function normalizeGraph(value) {
@@ -4448,9 +4536,7 @@ window.__ModuleLoader__.load({
           node.revision !== undefined ? h("span", { className: "dshi_mono" }, "rev " + String(node.revision)) : null,
           h("button", { className: "dshi_btn", onClick: props.onClose }, "关闭")),
         ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
-        h("details", null,
-          h("summary", { className: "dshi_hint" }, "原始节点数据"),
-          h("pre", { className: "dshi_pre" }, stableStringify(node.raw))),
+        // 0.5.0 转正：原始节点 JSON 不再展示（人看不懂，排查走 RPC 日志）。
 
         // 关联连线：把这张卡和别的卡连起来，图谱上会画出来。
         h("div", { className: "dshi_card" },
@@ -4757,6 +4843,10 @@ window.__ModuleLoader__.load({
       // 13-5：专题整理页二级页签（记忆整理 / 候选审阅与执行）。追加在既有 state
       // 之后；两个窗格同时挂载、只切显隐——切页签不重新取数、不丢 auto 卡勾选与
       // 本轮评估结果（同一个 StatusTab 实例，不各 new 一份 RPC）。默认停「记忆整理」。
+      // 手风琴当前展开块：null=都收起 | "archive" | "groups"（追加在既有 state 之后）。
+      var organizeOpenState = useState("archive");
+      var organizeOpenCard = organizeOpenState[0];
+      var setOrganizeOpenCard = organizeOpenState[1];
       var organizeSubtabState = useState("organize");
       var organizeSubtab = organizeSubtabState[0] === "candidates" ? "candidates" : "organize";
       var setOrganizeSubtab = organizeSubtabState[1];
@@ -5453,6 +5543,23 @@ window.__ModuleLoader__.load({
           onClick: function () { setOrganizeSubtab(id); }
         }, label);
       };
+      // 0.5.0 转正：索引归档 / 分组管理互斥手风琴。同一时刻只展开一块，点另一块
+      // 自动收起当前块（再点一次当前块可收起，回到两块都折叠）。
+      var accSection = function (id, title, body) {
+        var open = organizeOpenCard === id;
+        return h("div", { className: "dshi_organizeAcc", "data-role": "organize-acc-" + id },
+          h("div", {
+            className: "dshi_organizeAccHead",
+            role: "button",
+            tabIndex: 0,
+            "aria-expanded": open ? "true" : "false",
+            "data-role": "organize-acc-head-" + id,
+            onClick: function () { setOrganizeOpenCard(open ? null : id); }
+          },
+            h("span", { className: "dshi_organizeAccArrow" }, open ? "▾" : "▸"),
+            h("span", { className: "dshi_cardTitle" }, title)),
+          open ? h("div", { className: "dshi_organizeAccBody" }, body) : null);
+      };
       // 两个窗格同时渲染、只切 display：StatusTab 实例与 auto 卡勾选/评估结果在切换
       // 中不卸载，天然不重取数（切页签不触发任何 effect 依赖变化）。
       var organizePaneStyle = function (active) {
@@ -5471,7 +5578,7 @@ window.__ModuleLoader__.load({
           "data-role": "organize-subtabs"
         },
           organizeSubtabButton("organize", "记忆整理"),
-          organizeSubtabButton("candidates", "候选审阅与执行")),
+          organizeSubtabButton("candidates", "索引与分组")),
         // 窗格一 · 记忆整理：启用卡、整理向导、auto 卡（含本轮候选勾选与执行）、
         // 危险操作——全部由 StatusTab 的 organize 视图渲染。
         h("div", {
@@ -5480,8 +5587,9 @@ window.__ModuleLoader__.load({
           style: organizePaneStyle(organizeSubtab === "organize")
         },
           h(StatusTab, { dsh: props.dsh, sessionId: props.sessionId, view: "organize", onSessionUnavailable: props.onSessionUnavailable })),
-        // 窗格二 · 候选审阅与执行：周期提示 + 队列卡 + 候选列表与预览执行 +
-        // 专题索引归档 + 分组管理。
+        // 窗格二 · 索引与分组：周期提示 + 索引归档 + 分组管理（互斥手风琴）。
+        // 0.5.0 转正：候选审阅与「计划」两块是 0.3 之前的遗留（自动评估的候选与执行
+        // 已在「记忆整理」窗格的 auto 卡里，计划也由 auto 执行回执取代），整块下线。
         h("div", {
           "data-role": "organize-pane-candidates",
           "aria-hidden": organizeSubtab === "candidates" ? "false" : "true",
@@ -5489,36 +5597,14 @@ window.__ModuleLoader__.load({
         },
         h("div", { className: "dshi_hint", "data-role": "organize-period-note" },
           "整理功能才启用不到 30 天，现在只做冷归档、不自动恢复。"),
-        h("div", { className: "dshi_row", style: { marginBottom: 8 } },
-          h("span", { className: "dshi_cardTitle" }, "专题整理：候选审阅与执行"),
-          h("button", { className: "dshi_btn", title: "只重新读取队列快照与计划列表，不会重新分析；要重新分析请点「分析遗忘候选」", onClick: load, disabled: busy }, "刷新"),
-          h("button", { className: "dshi_btn", title: "按衰减分数找出该归档的旧卡（只读分析，不改数据）", onClick: function () { doAnalyze("forgetting"); }, disabled: actionsDisabled }, "分析遗忘候选"),
-          loaded ? h("span", { className: "dshi_badgeDim dshi_badge" }, "queueRevision " + queueRevision) : null),
         ErrorBox(error),
         ro ? h("div", { className: "dshi_roHint" }, READONLY_HINT_TEXT) : null,
         data ? h(fragment, null,
-          h("div", { className: "dshi_card" },
-          h("div", { className: "dshi_cardTitle" }, "候选（" + items.length + "）"),
-          h("div", { className: "dshi_hint" }, "候选是之前「整理分析」留下的待审条目（遗忘分析不产生候选，结果直接进下方计划）。每行可「稍后再说」（只是收起来，不删除任何记忆）或「忽略」。"),
-          // U5：筛选条（状态 chips，含计数）+ 纯前端搜索框（按标题或短 id 过滤）。
-          h("div", { className: "dshi_filterBar" },
-            CANDIDATE_FILTERS.map(function (f) {
-              return h("button", { key: f[0], className: "dshi_filterChip" + (filter === f[0] ? " dshi_filterChipOn" : ""), onClick: function () { setFilter(f[0]); } }, f[1] + "（" + statusCounts[f[0]] + "）");
-            }),
-              h("input", { className: "dshi_input dshi_searchInput", placeholder: "搜索：按标题或短 id 过滤", value: search, onChange: function (event) { setSearch(event.target.value); } })),
-          // S4 分页：候选列表同样前端分页每页 10 条（统一页码条；筛选/搜索后切片）。
-          (function () {
-            if (items.length === 0 || visibleRows.length === 0) return h("div", { className: "dshi_hint" }, "（空）");
-            var pageData = paginateRows(visibleRows, candidatesPage);
-            return h(fragment, { key: "candidates-page" },
-              h("div", { className: "dshi_items" }, pageData.items),
-              pageBar(pageData.page, pageData.totalPages, setCandidatesPage, busy));
-          })()),
           // 0.3：手动归档入口（原在「合并进主题」卡里，独立成卡；连线编辑不在这里，
           // 在闪回图谱点节点打开的卡片详情里）。
-          h("div", { className: "dshi_card" },
+          // 0.5.0 转正：索引归档与分组管理改互斥手风琴（开一块自动收另一块）。
+          accSection("archive", "专题索引归档（手动）", h(fragment, null,
           h("div", { className: "dshi_row" },
-            h("span", { className: "dshi_cardTitle" }, "专题索引归档（手动）"),
             h("button", { className: "dshi_btn", disabled: busy || ro, onClick: loadTopics }, topics !== null && topics.loading ? "刷新中…" : "载入 / 刷新专题")),
           h("div", { className: "dshi_hint" }, "移出索引只影响每轮注入的 L1 索引条目，正文保留，memory_read(key) 随时可读，memory_search 仍能搜到；恢复到索引随时可逆。"),
           topics === null ? h("div", { className: "dshi_hint" }, "点「载入 / 刷新专题」列出当前 scope 的专题。") : null,
@@ -5536,12 +5622,14 @@ window.__ModuleLoader__.load({
                 h("div", { className: "dshi_hint" }, "未归档 " + unarchivedCount + " 篇，共 " + sorted.length + " 篇。"),
                 archivePageData.items.map(renderArchiveTopicRow),
                 pageBar(archivePageData.page, archivePageData.totalPages, setArchivePage, busy));
-            })()) : null),
+            })()) : null)),
           // ── S3.4 分组管理（0.4）：组清单走 group_manage 工具（list/create/update/
           // delete），挂在专题索引归档卡下方；成员浏览复用 renderArchiveTopicRow。
-          h("div", { className: "dshi_card", "data-role": "group-manage" },
+          accSection("groups", "分组管理", h("div", {
+            "data-role": "group-manage",
+            style: { display: "flex", flexDirection: "column", gap: "8px" }
+          },
             h("div", { className: "dshi_row" },
-              h("span", { className: "dshi_cardTitle" }, "分组管理"),
               h("button", { className: "dshi_btn", disabled: groupBusy, onClick: loadGroups }, groups !== null && groups.loading ? "刷新中…" : "载入 / 刷新组"),
               h("button", {
                 className: "dshi_btn", disabled: groupBusy || ro,
@@ -5691,20 +5779,7 @@ window.__ModuleLoader__.load({
                 h("button", {
                   className: "dshi_btn", disabled: migration.busy,
                   onClick: function () { setMigration(null); }
-                }, "取消"))) : null),
-          // 计划列表独立成卡（只含遗忘计划）；已执行 / 已作废默认折叠。
-          h("div", { className: "dshi_card" },
-          h("div", { className: "dshi_cardTitle" }, "计划（" + visiblePlans.length + "）"),
-          h("div", { className: "dshi_hint" }, "计划＝预览（previewPlan）生成的待执行变更，含 diff 与 planDigest；确认执行后标为「已执行」，被新预览作废的标为「已作废」。遗忘计划由「分析遗忘候选」生成，行内「预览遗忘计划」后于确认卡执行。"),
-          visiblePlans.length === 0 ? h("div", { className: "dshi_hint" }, "（空）") : null,
-          activePlans.length > 0 ? h("div", { className: "dshi_items" }, activePlans.map(renderPlanRow)) : null,
-          // 已执行 / 已作废默认折叠——原生 details（不写 open），行仍在 DOM 里，
-          // 点开即可切回来查看；组头带数量。
-          archivedPlans.length > 0 ? h("details", { className: "dshi_details" },
-            h("summary", { className: "dshi_groupHead" },
-              h("span", null, "已执行 / 已作废"),
-              h("span", { className: "dshi_groupCount" }, "（" + archivedPlans.length + "）")),
-            h("div", { className: "dshi_items" }, archivedPlans.map(renderPlanRow))) : null),
+                }, "取消"))) : null)),
         ) : null,
         previewError ? ErrorBox(previewError) : null,
         showBottomPreview ? renderPreviewCard("preview-bottom") : null));
@@ -6042,8 +6117,22 @@ window.__ModuleLoader__.load({
     // 只做页内重组：tab id 仍 budgets、tab 名仍「记忆预算」、不新增 RPC。
     // 显隐表显式覆盖四个 id；未知 id 一律回落预算页——上一版预览在这里出过
     // 「点某页空白」的 bug（显隐表漏项 → 四页全部不渲染 → 白屏）。
-    var SETTINGS_SUBPAGE_IDS = ["budget", "temp", "spark", "recall"];
-    var SETTINGS_SUBPAGE_LABELS = { budget: "预算", temp: "温度", spark: "闪回卡片", recall: "向量召回" };
+    var SETTINGS_SUBPAGE_IDS = ["budget", "temp", "spark", "recall", "danger"];
+    var SETTINGS_SUBPAGE_LABELS = { budget: "预算", temp: "温度", spark: "闪回卡片", recall: "向量召回", danger: "数据与卸载" };
+    // 子页头（与页签同一套配色）：一句话说清这页管什么，避免每页开头都是一张裸卡片。
+    var SETTINGS_SUBPAGE_META = {
+      budget: ["预算", "人设卡上限 · 记忆核心水位"],
+      temp: ["热度参数", "12 项衰减 / 冷却 / 恢复"],
+      spark: ["闪回卡片", "L2 投递与召回阈值"],
+      recall: ["向量召回", "模型、缓存与索引"],
+      danger: ["数据与卸载", "只碰插件自己的数据目录"]
+    };
+    function settingsHead(id) {
+      var meta = SETTINGS_SUBPAGE_META[id] || [SETTINGS_SUBPAGE_LABELS[id] || id, ""];
+      return h("div", { className: "dshi_settingsHead", "data-role": "settings-head-" + id },
+        h("span", { className: "dshi_settingsHeadTitle" }, meta[0]),
+        meta[1] !== "" ? h("span", { className: "dshi_settingsHeadSub" }, meta[1]) : null);
+    }
     function settingsPageOf(id) {
       var key = String(id == null ? "" : id);
       for (var i = 0; i < SETTINGS_SUBPAGE_IDS.length; i += 1) {
@@ -6070,7 +6159,7 @@ window.__ModuleLoader__.load({
     };
 
     // ── U2 预算页重写（标杆页，其他页对齐它的标准） ─────────────────────────
-    // - 命名三层分离：界面名主位；技术名进 tooltip（title）与页尾「技术细节」；
+    // - 命名三层分离：界面名主位；技术名只留在 tooltip（title）里；
     //   机制说明一律写成后果描述（例：超过这个长度就不再接受新增内容，只能删减）。
     // - 占比字段改水位：softRatio / hardRatio 不再直接编辑，改为字符数水位滑杆 +
     //   联动显示；软水位不得越过硬水位，互相钳制。
@@ -6845,14 +6934,7 @@ window.__ModuleLoader__.load({
         var onPage = settingsPage === id;
         return h("button", {
           key: id, type: "button",
-          style: {
-            border: "1px solid " + (onPage ? "var(--dshi-warn)" : "transparent"),
-            background: onPage ? "var(--dshi-bg-card)" : "none",
-            color: onPage ? "var(--dshi-text)" : "var(--dshi-text-dim)",
-            font: "inherit", fontSize: "12px", borderRadius: "6px",
-            padding: "4px 12px", cursor: "pointer",
-            fontWeight: onPage ? 600 : 400
-          },
+          className: "dshi_tab" + (onPage ? " dshi_tabOn" : ""),
           "data-role": "settings-tab-" + id,
           "aria-pressed": onPage ? "true" : "false",
           onClick: function () { setSettingsPageRaw(id); }
@@ -6891,16 +6973,10 @@ window.__ModuleLoader__.load({
           h("button", {
             className: "dshi_btn dshi_btnPrimary", type: "submit",
             disabled: !value || !draft || errorCount > 0
-          }, "保存预算")),
-        h("details", null,
-          h("summary", { className: "dshi_hint" }, "技术细节（技术名与原始值，一般不用看）"),
-          h("div", { className: "dshi_hint" },
-            "旧版占比字段（core.softRatio / core.hardRatio）已在界面隐藏，保存时自动清除、按水位生效；记忆目标长度（core.targetChars）不在界面出现，保存时自动收敛到「软水位 ~ 硬水位-1」之间并写回。",
-            snapshot ? " rev " + String(snapshot.revision) : null,
-            "。"),
-          value ? h("pre", { className: "dshi_pre" }, stableStringify(value.budgets)) : null));
-      // 闪回卡片子页：只接线后端已有字段（budgets.spark 5 项 + persona.maxChars），
-      // 与预算子页共用同一份草稿（在哪页改都同步；保存仍在预算子页一次写入）。
+          }, "保存预算")));
+      // 闪回卡片子页：只接线后端已有字段（budgets.spark 5 项），与预算子页共用
+      // 同一份草稿（在哪页改都同步；保存仍在预算子页一次写入）。persona.maxChars
+      // 属 L0，只在预算子页的「人设卡」卡里出现一次（0.5.0 转正去重）。
       var sparkPageBody = h("div", { className: "dshi_card", "data-role": "settings-spark" },
         h("div", { className: "dshi_row" },
           h("span", { className: "dshi_cardTitle" }, "闪回卡片"),
@@ -6908,9 +6984,6 @@ window.__ModuleLoader__.load({
         h("div", { className: "dshi_hint" },
           "这些值与「预算」子页共用同一份草稿：在哪页修改都会同步；保存请回「预算」子页一次写入。"),
         value && draft ? h("div", { className: "dshi_items" },
-          integerField("persona.maxChars"),
-          h("div", { className: "dshi_hint", "data-role": "spark-persona-note" },
-            "人设卡属 L0：整段注入每次对话，不计入记忆核心（L1）的水位。"),
           integerField("spark.maxChars"),
           h("div", { className: "dshi_hint" }, "一轮投递的闪回卡片文本总长超过它就发不出去（超出即改走外置摘要 / 分批）。"),
           integerField("spark.inlineMaxChars"),
@@ -6927,23 +7000,27 @@ window.__ModuleLoader__.load({
       // 显隐表：四个 id 一一对应页面容器；未知 id 已在 settingsPageOf 回落 budget，
       // 这里再以 budget 兜底，保证任何输入都不会渲染出空白页。
       var settingsPageStyle = { display: "flex", flexDirection: "column", gap: "12px" };
+      var settingsPageNode = function (id, body) {
+        return h("div", { style: settingsPageStyle, "data-role": "settings-page-" + id, key: id },
+          settingsHead(id),
+          body);
+      };
       var settingsPageElements = {
-        budget: h("div", { style: settingsPageStyle, "data-role": "settings-page-budget", key: "budget" }, budgetPageBody),
-        temp: h("div", { style: settingsPageStyle, "data-role": "settings-page-temp", key: "temp" }, temperatureCard),
-        spark: h("div", { style: settingsPageStyle, "data-role": "settings-page-spark", key: "spark" }, sparkPageBody),
-        recall: h("div", { style: settingsPageStyle, "data-role": "settings-page-recall", key: "recall" },
-          h(SemanticRecallPanel, { dsh: props.dsh, sessionId: props.sessionId, scope: scope }))
+        budget: settingsPageNode("budget", budgetPageBody),
+        temp: settingsPageNode("temp", temperatureCard),
+        spark: settingsPageNode("spark", sparkPageBody),
+        recall: settingsPageNode("recall",
+          h(SemanticRecallPanel, { dsh: props.dsh, sessionId: props.sessionId, scope: scope })),
+        // settingsPageNode(id, body) 只收一个 body 节点：多段内容必须包进 fragment，
+        // 否则后面的节点会被静默丢掉（这里曾把 StatusTab 整个吞了）。
+        danger: settingsPageNode("danger",
+          h(fragment, null,
+            h("div", { className: "dshi_hint" }, "这里的操作只动插件自己的记忆数据目录，日常用不到；平铺在这里是因为它本来就该能被找到，而不是藏在整理页的折叠里。"),
+            h(StatusTab, { dsh: props.dsh, sessionId: props.sessionId, view: "danger", onSessionUnavailable: props.onSessionUnavailable })))
       };
       return h(fragment, null,
-        h("div", {
-          style: {
-            display: "flex", gap: "4px", flexWrap: "wrap",
-            border: "1px solid var(--dsw-alias-border-l2,#dce2eb)",
-            background: "var(--dsw-alias-bg-layer-2,transparent)",
-            borderRadius: "8px", padding: "4px"
-          },
-          "data-role": "settings-seg"
-        }, SETTINGS_SUBPAGE_IDS.map(settingsTabButton)),
+        h("div", { className: "dshi_settingsSeg", "data-role": "settings-seg" },
+          SETTINGS_SUBPAGE_IDS.map(settingsTabButton)),
         settingsPageElements[settingsPage] || settingsPageElements.budget);
     }
 
@@ -7926,14 +8003,19 @@ window.__ModuleLoader__.load({
       return h("div", null,
         h("div", { className: "dshi_row", style: { marginBottom: 8 } },
           h("span", { className: "dshi_cardTitle" }, "最近变更"),
-          h("button", { className: "dshi_btn", disabled: busy, onClick: function () { load(offset); } }, busy ? "刷新中…" : "刷新"),
+          h("button", {
+            className: "dshi_btn",
+            "data-role": "timeline-refresh",
+            title: "重新读取变更记录与审计流",
+            disabled: busy,
+            onClick: function () { load(offset); loadOrgStream(); }
+          }, busy ? "刷新中…" : "刷新"),
           h("span", { className: "dshi_hint" }, "每次记忆改动一行：时间、动作、来源与涉及对象，最新的在最上面。")),
         ErrorBox(error),
         orgEntries.length > 0
           ? h("div", { className: "dshi_card", "data-role": "timeline-org-stream" },
               h("div", { className: "dshi_row" },
-                h("span", { className: "dshi_cardTitle" }, "整理执行与设置审计（" + orgEntries.length + " 条）"),
-                h("button", { className: "dshi_btn", disabled: Boolean(orgUndoBusy), onClick: function () { loadOrgStream(); } }, "刷新流")),
+                h("span", { className: "dshi_cardTitle" }, "整理执行与设置审计（" + orgEntries.length + " 条）")),
               h("div", { className: "dshi_hint" }, "整理执行记录与热度参数审计按时间倒序合并展示；只有整理执行（auto run）有既有撤销能力，审计只展示。"),
               orgStream.error
                 ? h("div", { className: "dshi_hint", "data-role": "temperature-audit-error" },
@@ -7949,6 +8031,11 @@ window.__ModuleLoader__.load({
           ? h("div", { className: "dshi_empty" },
               "这个作用域还没有任何变更记录。写一条人设 / 记忆核心、存一张闪回卡，或整理一次候选之后，这里就会按时间列出每一次改动；点上方「刷新」查看最新。")
           : null,
+        // 0.5.0 转正：审计流卡片与下面这份主列表原本首尾相接，读者会把主列表
+        // 行误当成审计卡的内容。加一行分隔标题，明确这是本页的主变更列表。
+        items.length > 0 ? h("div", { className: "dshi_row", style: { marginTop: 16, marginBottom: 6 }, "data-role": "timeline-main-list-head" },
+          h("span", { className: "dshi_cardTitle" }, "记忆改动（" + items.length + " 条）"),
+          h("span", { className: "dshi_hint" }, "本页主列表：人设 / 记忆 / 闪回卡的每次改动一行，最新的在最上面。")) : null,
         items.length > 0 ? h("div", { className: "dshi_items" }, visibleItems.map(function (item, index) {
           var action = String((item && item.action) ?? "");
           var target = item && item.target && typeof item.target === "object" ? item.target : null;

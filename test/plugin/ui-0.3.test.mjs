@@ -365,7 +365,7 @@ async function mountCandidatesWithStates(data) {
 const forgettingPlan = { planId: "fp-1", kind: "forgetting", executed: false, superseded: false };
 const organizePlan = { planId: "op-1", kind: "organize", executed: false, superseded: false };
 
-test("0.3-4 遗忘页：tab 名「遗忘」；整理入口（分析整理候选 / 预览整理计划 / 合并进主题）与整理计划卡全部消失，分析遗忘候选保留", async () => {
+test("0.3-4 专题整理页：tab 名「专题整理」；旧整理入口与候选/计划卡全部消失，只留索引归档与分组管理", async () => {
   // tab 名经真实 section 渲染读取
   const host = makeStatefulReact();
   const mod = registrations[0].factory((n) => (n === "react" ? host.react : zod));
@@ -392,79 +392,17 @@ test("0.3-4 遗忘页：tab 名「遗忘」；整理入口（分析整理候选 
   const { render } = await mountCandidatesWithStates(data);
   const tree = render({ call: async () => data });
   const text = collectText(tree);
-  assert.ok(findButton(tree, "分析遗忘候选"), "分析遗忘候选保留");
-  assert.equal(findButton(tree, "分析整理候选"), undefined, "分析整理候选移除");
-  assert.equal(findButton(tree, "预览整理计划"), undefined, "预览整理计划移除");
-  assert.equal(findButton(tree, "合并进主题"), undefined, "合并进主题移除");
-  assert.equal(findButton(tree, "高级：手动编辑 proposal"), undefined, "整理 proposal 高级调试区移除");
+  // 0.5.0 转正：候选审阅与计划整块下线（含分析遗忘候选），只留两块互斥手风琴。
+  for (const label of ["分析整理候选", "预览整理计划", "合并进主题", "高级：手动编辑 proposal", "分析遗忘候选"]) {
+    assert.equal(findButton(tree, label), undefined, label + " 已下线");
+  }
   assert.ok(!text.includes("集群（"), "整理候选三组（集群）组头移除");
-  assert.ok(!text.includes("可建链接（"), "整理候选三组（可链接）组头移除");
   assert.ok(!text.includes("孤立卡（"), "整理候选三组（孤立）组头移除");
-  assert.ok(!text.includes("op-1"), "整理类计划卡不再展示（kind=organize 被过滤）");
-  assert.ok(text.includes("fp-1"), "遗忘计划照常展示");
-  assert.ok(findButton(tree, "稍后再说") && findButton(tree, "忽略"), "候选审阅动作保留");
-  assert.ok(findButton(tree, "预览遗忘计划"), "遗忘计划预览入口保留");
+  assert.ok(!text.includes("op-1") && !text.includes("fp-1"), "计划卡不再展示");
+  // 索引归档默认展开；分组管理在收起的另一块里。
+  assert.ok(flattenVNode(tree).some((n) => n.props && n.props["data-role"] === "organize-acc-head-archive"), "索引归档手风琴头在");
+  assert.ok(flattenVNode(tree).some((n) => n.props && n.props["data-role"] === "organize-acc-head-groups"), "分组管理手风琴头在");
   assert.ok(findButton(tree, "载入 / 刷新专题"), "手动归档入口保留");
-});
-
-test("0.3-4 遗忘页：候选审阅「稍后再说」仍发 decision=reviewed（协议不变）", async () => {
-  const data = {
-    queueRevision: 5,
-    items: [{ candidate: { id: "cluster-A", kind: "cluster", scopeId: "default", sources: [{ id: "s1" }, { id: "s2" }], evidence: {} }, status: "pending" }],
-    plans: [],
-  };
-  const calls = [];
-  const { render } = await mountCandidatesWithStates(data);
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, payload });
-      if (method === "listCandidates") return data;
-      return {};
-    },
-  };
-  let tree = render(dsh);
-  findButton(tree, "稍后再说").props.onClick();
-  await flush();
-  const reviewed = calls.find((c) => c.method === "reviewCandidate");
-  assert.ok(reviewed, "reviewCandidate issued");
-  assert.equal(reviewed.payload.decision, "reviewed", "协议 decision 不变");
-  assert.equal(reviewed.payload.candidateId, "cluster-A", "candidate.id 仍取业务 id");
-});
-
-test("0.3-4 遗忘页：遗忘计划「预览遗忘计划」→ 确认卡 →「确认执行」发出 executePlan（confirmed:true）", async () => {
-  const data = { queueRevision: 5, items: [], plans: [forgettingPlan] };
-  const calls = [];
-  const { render } = await mountCandidatesWithStates(data);
-  const dsh = {
-    call: async (method, session, payload) => {
-      calls.push({ method, payload });
-      if (method === "listCandidates") return data;
-      if (method === "previewPlan") {
-        return { kind: "forgetting", planId: "fp-1", planDigest: "digest-1", summary: "archive 2 ephemeral card(s)", diff: [] };
-      }
-      if (method === "executePlan") return { executed: true };
-      return {};
-    },
-  };
-  let tree = render(dsh);
-  findButton(tree, "预览遗忘计划").props.onClick();
-  await flush();
-  const previewCall = calls.find((c) => c.method === "previewPlan");
-  assert.ok(previewCall, "previewPlan issued");
-  assert.equal(previewCall.payload.kind, "forgetting", "预览走 forgetting 计划");
-  assert.equal(previewCall.payload.planId, "fp-1");
-
-  tree = render(dsh);
-  assert.ok(collectText(tree).includes("按衰减分数把旧卡归档"), "遗忘预览卡有人话正文");
-  const confirm = findButton(tree, "确认执行");
-  assert.ok(confirm, "确认卡出现");
-  confirm.props.onClick();
-  await flush();
-  const exec = calls.find((c) => c.method === "executePlan");
-  assert.ok(exec, "executePlan issued");
-  assert.equal(exec.payload.planId, "fp-1");
-  assert.equal(exec.payload.planDigest, "digest-1");
-  assert.equal(exec.payload.confirmed, true);
 });
 
 test("0.3-4 遗忘页：手动归档入口——「载入 / 刷新专题」后「移出索引」发 previewPlan {kind:'archive-topic',topicKey,archive:true} 恰三键", async () => {
